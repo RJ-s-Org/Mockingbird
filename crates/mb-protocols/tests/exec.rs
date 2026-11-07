@@ -3175,12 +3175,44 @@ paths:
       operationId: getAccount
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Account"}}}}}
+  /notes:
+    get:
+      operationId: listNotes
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/NoteSummary"}}}}}}
+    post:
+      operationId: createNote
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}, body: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}}
+  /notes/{id}:
+    get:
+      operationId: getNote
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}}
+  /receipts:
+    post:
+      operationId: createReceipt
+      requestBody: {content: {application/json: {schema: {type: object, properties: {total: {type: integer}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {type: object, required: [id], properties: {id: {type: string}}, not: {}}}}}}
+  /receipts/{id}:
+    get:
+      operationId: getReceipt
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, required: [id, total], properties: {id: {type: string}, total: {type: integer}}}}}}}
 components:
   schemas:
     Ack:
       type: object
       required: [id]
       properties: {id: {type: string}}
+    Note:
+      type: object
+      required: [id, title, body]
+      properties: {id: {type: string}, title: {type: string}, body: {type: string}}
+    NoteSummary:
+      type: object
+      additionalProperties: false
+      required: [id, title]
+      properties: {id: {type: string}, title: {type: string}}
     Pipeline:
       type: object
       required: [id, name, owner]
@@ -3229,14 +3261,16 @@ async fn a_create_sending_a_reference_where_its_read_holds_an_object_generates()
     let (status, headers, body) = h.send("POST", "/pipelines", Some(sent), &[]).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(source(&headers), "llm", "{body}");
-    assert_eq!(
-        body["id"],
-        json!("p-gen"),
-        "the executor minted and stored nothing"
-    );
+    assert_eq!(body["id"], json!("p-gen"));
     assert_eq!(
         capture.of("createPipeline"),
         vec![invalid_line("createPipeline", "/owner type")]
+    );
+    let t = type_of(&h, "getPipeline");
+    assert_eq!(
+        h.stored_ids(&t).await,
+        vec!["p-gen".to_owned()],
+        "the type holds the generated record alone: the executor stored nothing"
     );
 }
 
@@ -3258,6 +3292,8 @@ async fn a_create_whose_read_requires_an_id_on_each_array_item_generates() {
         capture.of("createOrder"),
         vec![invalid_line("createOrder", "/lines/0/id required")]
     );
+    let t = type_of(&h, "getOrder");
+    assert_eq!(h.stored_ids(&t).await, vec!["o-gen".to_owned()]);
 }
 
 #[tokio::test]
@@ -3317,4 +3353,48 @@ async fn a_create_whose_record_its_reads_render_still_executes() {
     let (_, headers, read) = h.send("GET", &format!("/pipelines/{id}"), None, &[]).await;
     assert_eq!(source(&headers), "state", "{read}");
     assert_eq!(read["owner"], json!({"id": "u1", "name": "Ann"}));
+}
+
+#[tokio::test]
+async fn a_create_its_slimmer_closed_list_item_renders_once_projected_executes() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(GATED, vec![], &HarnessOptions::default(), |rt| rt);
+    let sent = json!({"title": "t", "body": "b"});
+    let (status, headers, body) = h.send("POST", "/notes", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    // The list's items hold no `body`: the list projects the record before it checks it.
+    assert_eq!(
+        capture.of("createNote"),
+        vec![create_line("createNote", None)]
+    );
+    let id = body["id"].as_str().unwrap().to_owned();
+    let t = type_of(&h, "getNote");
+    assert_eq!(h.stored_ids(&t).await, vec![id]);
+}
+
+#[tokio::test]
+async fn a_create_whose_answer_does_not_render_falls_back_as_render_failed() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(
+        GATED,
+        vec![json!({"id": "r-gen"})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let (_, _, body) = h
+        .send("POST", "/receipts", Some(json!({"total": 3})), &[])
+        .await;
+    // The record would render into its read; the answer never does.
+    assert_eq!(
+        capture.of("createReceipt"),
+        vec![create_line("createReceipt", Some("render_failed"))],
+        "{body}"
+    );
+    let t = type_of(&h, "getReceipt");
+    let stored = h.stored_ids(&t).await;
+    assert!(
+        stored.len() <= 1 && stored.iter().all(|id| body["id"] == json!(id)),
+        "the executor stored nothing: {stored:?} {body}"
+    );
 }

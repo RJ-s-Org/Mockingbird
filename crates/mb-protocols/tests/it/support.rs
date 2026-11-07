@@ -415,6 +415,28 @@ impl DescribedHarness {
         send_to(&self.router, req).await
     }
 
+    /// The ids of the records of type `t` stored in the default session. Only
+    /// `tests/exec.rs` uses it; `tests/it` includes this module too.
+    #[allow(dead_code)]
+    pub async fn stored_ids(&self, t: &str) -> Vec<String> {
+        let session = mb_state::SessionKey {
+            workspace: self.rt.workspace.clone(),
+            mock: self.rt.name.clone(),
+            session: "default".into(),
+        };
+        let mut ids: Vec<String> = self
+            .rt
+            .state
+            .list(&session, t, 1000)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
     /// The record of type `t` stored under `id` in the default session.
     pub async fn stored(&self, t: &str, id: &str) -> Option<serde_json::Value> {
         let session = mb_state::SessionKey {

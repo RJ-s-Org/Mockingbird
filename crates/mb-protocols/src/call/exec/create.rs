@@ -22,7 +22,8 @@
 //!   ([`read_schemas`]), as those reads render it: one a read would not render (a
 //!   reference where the read holds an object, an array item lacking a required id)
 //!   is never stored, and the create generates (`record_invalid`, with `render_error`
-//!   naming the first violation). So does one whose answer does not render.
+//!   naming the first violation). So does one whose answer does not render
+//!   (`render_failed`).
 //! - The answer is [`super::render`]'s (no body, the record, or an acknowledgement
 //!   drawn from its own schema with the record's members laid over it); a described
 //!   long-running answer holds the record as its result, and is done: the record is
@@ -172,8 +173,9 @@ pub(super) async fn run(
     let owned = server_owned(rt, t, field, request);
     // A member the request did not send whose schema decides its value (a `const`, a
     // one-value `enum`: GraphQL's `__typename`; a `default`) takes it, at any depth.
+    let fits = |schema: &Value, value: &Value| fits(rt, schema, value);
     for schema in &shape.schemas {
-        preset(rt.bundle(), schema, &mut data, &owned, GAP_DEPTH);
+        preset(rt.bundle(), (schema, &fits), &mut data, &owned, GAP_DEPTH);
     }
     // So does one whose request schema gives the value the server assumes when it is
     // left out (harvest's `is_active: {default: true}`), where the record holds it.
@@ -222,8 +224,7 @@ pub(super) async fn run(
         .or_else(|| written(rt, plan, call, (&key, &data), response_schema))
         .or_else(|| enveloped(rt, op, (&key, t, &data), response_schema));
     let Some(mut answer) = answer else {
-        invalid(rt, plan, "answer does not render");
-        return Ran::Generate(None);
+        return fall(Fallback::RenderFailed.as_str());
     };
     answer.usage = usage;
     if minted_headers.is_empty() {
@@ -489,9 +490,16 @@ fn typed_as(bundle: &mb_mcm::Bundle, schema: &Value, value: &Value) -> Value {
 /// The schemas records of type `t` are read by: the record its read by id (else its
 /// list or singleton read) answers, and the item of each list of the type.
 pub(super) fn read_schemas(rt: &crate::MockRuntime, t: &str) -> Vec<Value> {
-    let mut schemas: Vec<Value> = type_check(rt, t)
+    read_shapes(rt, t).into_iter().map(|(s, _)| s).collect()
+}
+
+/// [`read_schemas`], each with whether it is a list's item, which a list renders a
+/// record into as it projects it ([`crate::call::lists::projected`]).
+fn read_shapes(rt: &crate::MockRuntime, t: &str) -> Vec<(Value, bool)> {
+    let mut schemas: Vec<(Value, bool)> = type_check(rt, t)
         .and_then(|(read, shape)| shape.or_else(|| read.success_output()?.schema.as_ref()))
         .cloned()
+        .map(|s| (s, false))
         .into_iter()
         .collect();
     for op in &rt.bundle().operations {
@@ -503,9 +511,9 @@ pub(super) fn read_schemas(rt: &crate::MockRuntime, t: &str) -> Vec<Value> {
         if kind == Some(OpKind::List)
             && super::list::item_type(rt, op) == Some(t)
             && let Some(shape) = state_lists::Shape::of(rt, op)
-            && !schemas.contains(&shape.items)
+            && !schemas.iter().any(|(s, _)| *s == shape.items)
         {
-            schemas.push(shape.items);
+            schemas.push((shape.items, true));
         }
     }
     schemas
@@ -666,9 +674,10 @@ fn non_null(bundle: &mb_mcm::Bundle, schema: &Value) -> Value {
 }
 
 /// Why `record` (with its derived members, `derived`, when there are any) would not
-/// render into a read of type `t` ([`read_schemas`]): the first violation
-/// (`<pointer> <keyword>`) of the first read schema neither validates against, as a
-/// read's `render_error` gives it. `None` when every read renders it.
+/// render into a read of type `t` ([`read_shapes`]), checked as that read checks it: a
+/// list's item projected to its schema first, as the list projects it. The first
+/// violation (`<pointer> <keyword>`) of the first read schema neither validates
+/// against, as a read's `render_error` gives it. `None` when every read renders it.
 fn unreadable(
     rt: &crate::MockRuntime,
     t: &str,
@@ -676,14 +685,19 @@ fn unreadable(
     derived: Option<&Value>,
 ) -> Option<String> {
     let engine = &rt.engine;
-    for schema in read_schemas(rt, t) {
-        let Some(found) = engine.schema_violations(rt.bundle(), &schema, record) else {
+    let bundle = rt.bundle();
+    for (schema, item) in read_shapes(rt, t) {
+        let as_read = |value: &Value| match item {
+            true => crate::call::lists::projected(bundle, Some(&schema), value, 0),
+            false => value.clone(),
+        };
+        let Some(found) = engine.schema_violations(bundle, &schema, &as_read(record)) else {
             continue;
         };
         if found.is_empty()
             || derived.is_some_and(|d| {
                 engine
-                    .schema_violations(rt.bundle(), &schema, d)
+                    .schema_violations(bundle, &schema, &as_read(d))
                     .is_some_and(|v| v.is_empty())
             })
         {
@@ -717,7 +731,7 @@ fn invalid(rt: &crate::MockRuntime, plan: &CallPlan<'_>, why: &str) {
 /// top, never a member in `owned` (the server's own).
 fn preset(
     bundle: &mb_mcm::Bundle,
-    schema: &Value,
+    (schema, fits): (&Value, &Fits<'_>),
     value: &mut Value,
     owned: &[String],
     depth: usize,
@@ -738,11 +752,13 @@ fn preset(
                     }
                     match held.get_mut(name) {
                         None => {
-                            if let Some(decided) = decided(bundle, member) {
+                            if let Some(decided) = decided(bundle, member)
+                                && fits(member, &decided)
+                            {
                                 held.insert(name.clone(), decided);
                             }
                         }
-                        Some(inner) => preset(bundle, member, inner, &[], depth - 1),
+                        Some(inner) => preset(bundle, (member, fits), inner, &[], depth - 1),
                     }
                 }
             }
@@ -750,7 +766,7 @@ fn preset(
         Value::Array(items) => {
             for item in parts.iter().filter_map(|p| p.get("items")) {
                 for held in items.iter_mut() {
-                    preset(bundle, item, held, &[], depth - 1);
+                    preset(bundle, (item, fits), held, &[], depth - 1);
                 }
             }
         }
@@ -789,7 +805,8 @@ fn preset_from_request(
         }
     };
     let mut preset_copy = record.clone();
-    preset(bundle, &schema, &mut preset_copy, owned, GAP_DEPTH);
+    let fits = |schema: &Value, value: &Value| fits(rt, schema, value);
+    preset(bundle, (&schema, &fits), &mut preset_copy, owned, GAP_DEPTH);
     let (Value::Object(set), Value::Object(held)) = (preset_copy, record) else {
         return;
     };
@@ -797,16 +814,21 @@ fn preset_from_request(
         if held.get(&name) == Some(&value) {
             continue;
         }
-        let fits = shape
-            .members
-            .iter()
-            .find(|(m, _)| *m == name)
-            .and_then(|(_, member)| rt.engine.schema_violations(bundle, member, &value))
-            .is_some_and(|v| v.is_empty());
-        if fits {
+        let declared = shape.members.iter().find(|(m, _)| *m == name);
+        if declared.is_some_and(|(_, member)| fits(member, &value)) {
             held.insert(name, value);
         }
     }
+}
+
+/// Whether a value (the second) validates against a member schema (the first).
+type Fits<'a> = dyn Fn(&Value, &Value) -> bool + 'a;
+
+/// Whether `value` validates against member schema `schema`.
+fn fits(rt: &crate::MockRuntime, schema: &Value, value: &Value) -> bool {
+    rt.engine
+        .schema_violations(rt.bundle(), schema, value)
+        .is_some_and(|v| v.is_empty())
 }
 
 /// The value member schema `schema` decides: its `const`, else its one `enum` value,
