@@ -16,9 +16,9 @@ use serde_json::Value;
 
 use super::{
     AnswerDesc, ChangeDesc, ConcurrencyDesc, DerivedDesc, Extra, FilterDesc, HeaderRef,
-    IdentityDesc, IdentityHeader, LifecycleDesc, LongRunning, MAX_BYTES, MAX_DEPTH, OpDesc, OpKind,
-    OrderDesc, PagingDesc, ParamValue, ParentDesc, Pointer, RecordsAt, ScopeDesc, SoftDelete,
-    TargetDesc, TypeDesc, UniqueDesc, VERSION, World,
+    IdentityDesc, IdentityHeader, InstructionDesc, InstructionsDesc, LifecycleDesc, LongRunning,
+    MAX_BYTES, MAX_DEPTH, OpDesc, OpKind, OrderDesc, PagingDesc, ParamValue, ParentDesc, Pointer,
+    RecordsAt, ScopeDesc, SoftDelete, TargetDesc, TypeDesc, UniqueDesc, VERSION, World,
 };
 use crate::{Binding, Bundle, Operation, RecordAt, StatusSelector};
 
@@ -667,6 +667,188 @@ impl<'a> Ctx<'a> {
         true
     }
 
+    /// An update's `request.instructions`: its array is in a request body the
+    /// operation declares (any of its media types), its kind member is named, and
+    /// each kind's changes name members of the record (a braced step, a value of
+    /// the instruction, stands for any key of a map) and pointers that parse. An
+    /// operation of another kind is refused it whole.
+    fn check_instructions(
+        &mut self,
+        op: &'a Operation,
+        (record, ty): (Option<&'a Value>, Option<&str>),
+        i: &InstructionsDesc,
+        path: &Path,
+    ) -> Option<InstructionsDesc> {
+        self.unknown(path, &i.extra);
+        if self.op_kind(op) != Some(OpKind::Update) {
+            self.refuse(
+                path,
+                RefusalCode::NotApplicable,
+                format!(
+                    "operation `{}` is not an update, so it applies no instructions",
+                    op.id
+                ),
+            );
+            return None;
+        }
+        let bodies: Vec<&'a Value> = op
+            .input
+            .body
+            .iter()
+            .chain(op.input.bodies.iter().map(|v| &v.schema))
+            .collect();
+        let holding = bodies.iter().copied().find(|schema| {
+            at_pointer(self.bundle, schema, &i.at.tokens())
+                .is_some_and(|s| is_array(self.bundle, s))
+        });
+        let at = self.check_pointer(
+            holding.or(bodies.first().copied()),
+            &i.at,
+            (true, false),
+            "request body",
+            &path.join("at"),
+        );
+        if i.kind.is_empty() {
+            self.refuse(
+                &path.join("kind"),
+                RefusalCode::Invalid,
+                "`kind` names the member of an instruction that says its kind",
+            );
+        }
+        if !at || i.kind.is_empty() {
+            return None;
+        }
+        let kinds_path = path.join("kinds");
+        let mut kinds = BTreeMap::new();
+        for (kind, d) in &i.kinds {
+            let kp = kinds_path.join(kind);
+            self.unknown(&kp, &d.extra);
+            let mut changes = BTreeMap::new();
+            for (member, change) in &d.changes {
+                let mp = kp.join("changes").join(member);
+                if !self.check_templated_member(record, ty, member, &mp) {
+                    continue;
+                }
+                if let Some((ptr, request)) = change.pointer() {
+                    let key = match (change, request) {
+                        (_, true) => "from_request",
+                        (super::InstructionChange::FromInstruction(_), _) => "from_instruction",
+                        (super::InstructionChange::Append(_), _) => "append",
+                        _ => "remove",
+                    };
+                    let ok = match request {
+                        true => {
+                            let schema = bodies.iter().copied().find(|schema| {
+                                at_pointer(self.bundle, schema, &ptr.tokens()).is_some()
+                            });
+                            self.check_pointer(
+                                schema.or(bodies.first().copied()),
+                                ptr,
+                                (false, false),
+                                "request body",
+                                &mp.join(key),
+                            )
+                        }
+                        // An instruction's schema is often free-form: only the
+                        // syntax is checked.
+                        false => match Pointer::check(ptr.as_str()) {
+                            Ok(()) => true,
+                            Err(e) => {
+                                self.refuse(
+                                    &mp.join(key),
+                                    RefusalCode::Invalid,
+                                    format!("`{ptr}`: {e}"),
+                                );
+                                false
+                            }
+                        },
+                    };
+                    if !ok {
+                        continue;
+                    }
+                }
+                changes.insert(member.clone(), change.clone());
+            }
+            if !changes.is_empty() || d.changes.is_empty() {
+                kinds.insert(
+                    kind.clone(),
+                    InstructionDesc {
+                        changes,
+                        extra: Extra::new(),
+                    },
+                );
+            }
+        }
+        Some(InstructionsDesc {
+            at: i.at.clone(),
+            kind: i.kind.clone(),
+            kinds,
+            extra: Extra::new(),
+        })
+    }
+
+    /// [`Self::check_member`] for a member whose steps may be braced (`{key}`):
+    /// such a step is any key of the map it is in, so it walks into the map's
+    /// `additionalProperties`, and a map that does not say what it holds ends the
+    /// check there.
+    fn check_templated_member(
+        &mut self,
+        record: Option<&'a Value>,
+        t: Option<&str>,
+        member: &str,
+        path: &Path,
+    ) -> bool {
+        if !member.contains(['{', '}']) {
+            return self.check_member(record, t, member, path);
+        }
+        let braced = |step: &str| {
+            step.strip_prefix('{')
+                .and_then(|s| s.strip_suffix('}'))
+                .filter(|inner| !inner.is_empty() && !inner.contains(['{', '}']))
+                .is_some()
+        };
+        let steps: Vec<&str> = member.split('.').collect();
+        if steps
+            .iter()
+            .any(|step| step.contains(['{', '}']) && !braced(step))
+        {
+            self.refuse(
+                path,
+                RefusalCode::Invalid,
+                format!("`{member}`: a braced step is a whole step, `{{name}}`"),
+            );
+            return false;
+        }
+        let (Some(t), Some(record)) = (t, record) else {
+            return self.check_member(record, t, member, path);
+        };
+        let mut at = Some(record);
+        for step in steps {
+            let Some(schema) = at else {
+                break;
+            };
+            at = match braced(step) {
+                true => match self.bundle.resolve(schema).get("additionalProperties") {
+                    Some(inner) if inner.is_object() => Some(inner),
+                    // A map that does not say what it holds.
+                    _ => return true,
+                },
+                false => match property(self.bundle, schema, step) {
+                    Some(found) => Some(found),
+                    None => {
+                        self.refuse(
+                            path,
+                            RefusalCode::Unresolved,
+                            format!("`{member}` is not a member of a `{t}` record"),
+                        );
+                        return false;
+                    }
+                },
+            };
+        }
+        true
+    }
+
     fn check_type_path_param(&mut self, t: &str, param: &str, path: &Path) -> bool {
         let http: Vec<_> = self.ops_of(t).into_iter().filter(|o| is_http(o)).collect();
         if http.is_empty() {
@@ -1099,6 +1281,9 @@ impl<'a> Ctx<'a> {
                             "request body",
                             &p.join("records"),
                         )
+                    }),
+                    instructions: r.instructions.as_ref().and_then(|i| {
+                        self.check_instructions(op, (record, ty), i, &p.join("instructions"))
                     }),
                     extra: Extra::new(),
                 },
@@ -1705,6 +1890,119 @@ mod tests {
         }}));
         op(&mut b, "CreateFolder").input.body = Some(json!({"$ref": "#/$defs/Folder"}));
         b
+    }
+
+    /// Folders with a `PATCH` taking a JSON patch, or (as another media type) a
+    /// semantic patch of instructions; a folder holds labels and a map of
+    /// environments.
+    fn patched_folders() -> Bundle {
+        let mut b = folders();
+        b.operations.extend(
+            bundle(&[(
+                "UpdateFolder",
+                "PATCH",
+                "/v3/folders/{name}",
+                json!({"$ref": "#/$defs/Folder"}),
+            )])
+            .operations,
+        );
+        typed(&mut b, "UpdateFolder", "folder", Some("name"), "name");
+        let update = op(&mut b, "UpdateFolder");
+        update.input.body = Some(json!({"type": "array", "items": {"type": "object"}}));
+        update.input.bodies = vec![crate::BodyVariant {
+            media_type: "application/json; domain-model=semanticpatch".into(),
+            schema: json!({"type": "object", "properties": {
+                "comment": {"type": "string"},
+                "instructions": {"type": "array", "items": {"type": "object"}}
+            }}),
+        }];
+        if let Some(Value::Object(folder)) = b.defs.get_mut("Folder")
+            && let Some(Value::Object(props)) = folder.get_mut("properties")
+        {
+            props.insert(
+                "labels".into(),
+                json!({"type": "array", "items": {"type": "string"}}),
+            );
+            props.insert(
+                "envs".into(),
+                json!({"type": "object", "additionalProperties": {
+                    "type": "object", "properties": {"on": {"type": "boolean"}}
+                }}),
+            );
+        }
+        b
+    }
+
+    #[test]
+    fn instructions_keep_the_changes_that_resolve() {
+        let b = patched_folders();
+        let w = world(json!({"operations": {
+            "UpdateFolder": {"request": {"instructions": {
+                "at": "/instructions",
+                "kind": "kind",
+                "kinds": {
+                    "addLabels": {"changes": {"labels": {"append": "/values"}}},
+                    "turnOn": {"changes": {"envs.{env}.on": {"value": true}}},
+                    "rename": {"changes": {
+                        "displayName": {"from_request": "/comment"},
+                        "parent": {"from_request": "/nothere"}
+                    }},
+                    "bad": {"changes": {"nope": {"value": 1}, "envs.{env.on": {"value": 1}}}
+                }
+            }}},
+            "GetFolder": {"request": {"instructions": {"at": "/instructions", "kind": "kind"}}}
+        }}));
+        let v = validate(&w, &b);
+        let base = "/operations/UpdateFolder/request/instructions/kinds";
+        assert_eq!(
+            paths(&v),
+            vec![
+                (
+                    "/operations/GetFolder/request/instructions",
+                    RefusalCode::NotApplicable
+                ),
+                (
+                    &*format!("{base}/bad/changes/envs.{{env.on"),
+                    RefusalCode::Invalid
+                ),
+                (
+                    &*format!("{base}/bad/changes/nope"),
+                    RefusalCode::Unresolved
+                ),
+                (
+                    &*format!("{base}/rename/changes/parent/from_request"),
+                    RefusalCode::Unresolved
+                ),
+            ]
+        );
+        let applied = v.applied.operations["UpdateFolder"]
+            .request
+            .as_ref()
+            .and_then(|r| r.instructions.as_ref())
+            .unwrap();
+        assert_eq!(
+            applied.kinds.keys().collect::<Vec<_>>(),
+            vec!["addLabels", "rename", "turnOn"]
+        );
+        assert_eq!(
+            applied.kinds["rename"].changes.keys().collect::<Vec<_>>(),
+            vec!["displayName"]
+        );
+        // An array the request body does not hold is refused whole.
+        let w = world(
+            json!({"operations": {"UpdateFolder": {"request": {"instructions": {
+                "at": "/steps", "kind": "kind"
+            }}}}}),
+        );
+        let v = validate(&w, &b);
+        assert_eq!(
+            paths(&v),
+            vec![(
+                "/operations/UpdateFolder/request/instructions/at",
+                RefusalCode::Unresolved
+            )]
+        );
+        assert!(v.applied.operations["UpdateFolder"].request.is_none());
     }
 
     #[test]

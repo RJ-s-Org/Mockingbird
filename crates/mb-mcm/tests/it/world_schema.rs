@@ -36,6 +36,9 @@ fn schema_rejects_unknown_keys_and_bad_pointers() {
         json!({"operations": {"o": {"answer": {"record": "/a~2"}}}}),
         json!({"operations": {"o": {"changes": {"m": {"from_request": "/a", "value": 1}}}}}),
         json!({"operations": {"o": {"not_found": 99}}}),
+        json!({"operations": {"o": {"request": {"instructions": {"kind": "kind"}}}}}),
+        json!({"operations": {"o": {"request": {"instructions": {"at": "/i", "kind": "kind",
+            "kinds": {"k": {"changes": {"m": {"append": "/v", "value": 1}}}}}}}}}),
         json!({"operations": {"o": {"paging": {"request": "p"}}}}),
     ] {
         assert!(!v.is_valid(&bad), "should be refused: {bad}");
@@ -71,7 +74,16 @@ fn schema_accepts_every_serialized_field() {
                 "kind": "update",
                 "type": "account",
                 "target": {"path_param": "id", "member": "id"},
-                "request": {"record": "/account", "records": "/accounts"},
+                "request": {"record": "/account", "records": "/accounts", "instructions": {
+                    "at": "/instructions", "kind": "kind",
+                    "kinds": {"rename": {"changes": {
+                        "name": {"from_instruction": "/value"},
+                        "note": {"from_request": "/comment"},
+                        "flags.{env}.on": {"value": true},
+                        "tags": {"append": "/values"},
+                        "labels": {"remove": "/values"}
+                    }}}
+                }},
                 "answer": {"record": "/result", "records": "/results", "long_running": {"done": "done", "result": "response"}, "identity_header": "Location"},
                 "transition": {"status": "closed"},
                 "changes": {"name": {"from_request": "/name"}, "flag": {"value": false}},

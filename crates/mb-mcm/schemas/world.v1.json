@@ -50,6 +50,102 @@
       "pattern": "^(/([^~]|~[01])*)+$",
       "description": "An RFC 6901 JSON pointer, e.g. `/result/0`."
     },
+    "instructions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "at",
+        "kind"
+      ],
+      "description": "An update whose request sends instructions instead of a record (a semantic patch): `at`, the request body's array of instructions; `kind`, the member of an instruction naming its kind; `kinds`, the members of the target each kind changes. A braced step of a member (`environments.{environmentKey}.on`) is the value of that member of the instruction, else of the request body.",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/pointer"
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kinds": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "changes": {
+                "type": "object",
+                "additionalProperties": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "from_instruction": {
+                          "$ref": "#/$defs/pointer",
+                          "description": "The instruction's value at this pointer."
+                        }
+                      },
+                      "required": [
+                        "from_instruction"
+                      ]
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "from_request": {
+                          "$ref": "#/$defs/pointer",
+                          "description": "The request body's value at this pointer."
+                        }
+                      },
+                      "required": [
+                        "from_request"
+                      ]
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "value": true
+                      },
+                      "required": [
+                        "value"
+                      ]
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "append": {
+                          "$ref": "#/$defs/pointer",
+                          "description": "Adds the instruction's value at this pointer (each item of an array) to the array member, once."
+                        }
+                      },
+                      "required": [
+                        "append"
+                      ]
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "remove": {
+                          "$ref": "#/$defs/pointer",
+                          "description": "Removes the instruction's value at this pointer (each item of an array) from the array member."
+                        }
+                      },
+                      "required": [
+                        "remove"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "recordPointer": {
       "type": "string",
       "pattern": "^$|^(/([^~]|~[01])*)+$",
@@ -310,6 +406,9 @@
             },
             "records": {
               "$ref": "#/$defs/pointer"
+            },
+            "instructions": {
+              "$ref": "#/$defs/instructions"
             }
           }
         },

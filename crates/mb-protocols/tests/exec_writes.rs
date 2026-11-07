@@ -463,17 +463,538 @@ async fn an_update_whose_body_is_no_record_falls_back() {
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, _, body) = h
-        .send(
-            "PATCH",
-            "/boxes/b1",
-            Some(json!([{"op": "replace", "path": "/name", "value": "b"}])),
-            &[],
-        )
+        .send("PATCH", "/boxes/b1", Some(json!([{"name": "b"}])), &[])
         .await;
     assert!(status.is_success(), "{body}");
     assert_eq!(
         capture.of("updateBox"),
         vec![line("updateBox", "update", Some("unmerged_body"))]
+    );
+}
+
+/// Flags take a patch document (a JSON Patch, a merge patch, or instructions) as their
+/// update; groups a SCIM PatchOp.
+const PATCHED: &str = r##"
+openapi: 3.0.0
+info: {title: Patched, version: "1"}
+paths:
+  /flags:
+    post:
+      operationId: createFlag
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Flag"}}}}}
+  /flags/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getFlag
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Flag"}}}}, "404": {description: missing}}
+    patch:
+      operationId: patchFlag
+      requestBody:
+        content:
+          application/json:
+            schema: {type: array, items: {type: object, required: [op, path], properties: {op: {type: string}, path: {type: string}, value: {}}}}
+          application/merge-patch+json:
+            schema: {type: object, properties: {description: {type: string, nullable: true}, settings: {type: object}}}
+          application/json; domain-model=semanticpatch:
+            schema:
+              type: object
+              properties:
+                environmentKey: {type: string}
+                instructions: {type: array, items: {type: object, properties: {kind: {type: string}, values: {type: array, items: {type: string}}, value: {type: string}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Flag"}}}}}
+  /groups:
+    post:
+      operationId: createGroup
+      requestBody: {content: {application/json: {schema: {type: object, properties: {displayName: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Group"}}}}}
+  /groups/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getGroup
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Group"}}}}, "404": {description: missing}}
+    patch:
+      operationId: patchGroup
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {displayName: {type: string}, name: {type: object, properties: {givenName: {type: string}, familyName: {type: string}}}}}
+          application/scim+json:
+            schema: {type: object, properties: {schemas: {type: array, items: {type: string}}, Operations: {type: array, items: {type: object}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Group"}}}}}
+components:
+  schemas:
+    Flag:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        description: {type: string}
+        tags: {type: array, items: {type: string}}
+        archived: {type: boolean}
+        created: {type: string, readOnly: true}
+        settings: {type: object, properties: {a: {type: string}, b: {type: string}}}
+        environments: {type: object, additionalProperties: {type: object, properties: {"on": {type: boolean}}}}
+    Group:
+      type: object
+      required: [id, displayName]
+      properties:
+        id: {type: string}
+        displayName: {type: string}
+        members: {type: array, items: {type: object, properties: {value: {type: string}, display: {type: string}}}}
+        name: {type: object, properties: {givenName: {type: string}, familyName: {type: string}}}
+        roles: {type: array, items: {type: string}}
+"##;
+
+/// The flag every patch test starts from.
+fn flag() -> Value {
+    json!({
+        "id": "f1", "name": "Checkout", "description": "old", "tags": ["a"], "archived": false,
+        "created": "2026-01-01", "settings": {"a": "x", "b": "y"},
+        "environments": {"production": {"on": false}, "test": {"on": false}}
+    })
+}
+
+/// The group every SCIM test starts from.
+fn group() -> Value {
+    json!({"id": "g1", "displayName": "Eng", "members": [{"value": "u1"}], "name": {"givenName": "E", "familyName": "N"}})
+}
+
+/// A harness over [`PATCHED`] serving `world`, its flag `f1` and group `g1` created.
+async fn with_flag(world: Value, script: Vec<Value>) -> DescribedHarness {
+    let mut all = vec![flag(), group()];
+    all.extend(script);
+    let h = support::harness(PATCHED, all, &HarnessOptions::default(), |rt| {
+        support::with_effective(rt, world, false)
+    });
+    for (path, body) in [
+        ("/flags", json!({"name": "Checkout"})),
+        ("/groups", json!({"displayName": "Eng"})),
+    ] {
+        let (status, _, body) = h.send("POST", path, Some(body), SEEDED).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    h
+}
+
+/// An answer for the model that only a generating path would take.
+fn made_up_flag() -> Value {
+    json!({"id": "f1", "name": "made up", "created": "1999-01-01"})
+}
+
+#[tokio::test]
+async fn a_json_patch_applies_its_operations_to_the_held_record() {
+    let (capture, _guard) = Capture::install();
+    let h = with_flag(json!({}), vec![made_up_flag()]).await;
+    // Detected by its shape, sent as plain JSON; the path's id wins over a patch of it.
+    let ops = json!([
+        {"op": "replace", "path": "/description", "value": "new"},
+        {"op": "add", "path": "/tags/-", "value": "b"},
+        {"op": "remove", "path": "/settings/a"},
+        {"op": "copy", "from": "/name", "path": "/settings/b"},
+        {"op": "test", "path": "/archived", "value": false},
+        {"op": "replace", "path": "/id", "value": "other"}
+    ]);
+    let (status, headers, body) = h.send("PATCH", "/flags/f1", Some(ops), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let mut patched = flag();
+    patched["description"] = json!("new");
+    patched["tags"] = json!(["a", "b"]);
+    patched["settings"] = json!({"b": "Checkout"});
+    assert_eq!(body, patched);
+    // Detected by its media type.
+    let ops = json!([{"op": "move", "from": "/settings/b", "path": "/settings/a"}]);
+    let (status, _, body) = h
+        .send_as("PATCH", "/flags/f1", ops, "application/json-patch+json")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    patched["settings"] = json!({"a": "Checkout"});
+    assert_eq!(body, patched);
+    let t = type_of(&h, "getFlag");
+    assert_eq!(h.stored(&t, "f1").await, Some(patched));
+    assert_eq!(
+        h.provider.requests().len(),
+        2,
+        "the patches made no LLM call"
+    );
+    assert_eq!(
+        capture.of("patchFlag"),
+        vec![
+            line("patchFlag", "update", None),
+            line("patchFlag", "update", None)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_json_patch_that_does_not_apply_falls_back() {
+    let (capture, _guard) = Capture::install();
+    let h = with_flag(
+        json!({}),
+        vec![made_up_flag(), made_up_flag(), made_up_flag()],
+    )
+    .await;
+    for ops in [
+        // A failed test: none of it applies.
+        json!([
+            {"op": "replace", "path": "/description", "value": "new"},
+            {"op": "test", "path": "/name", "value": "not the name"}
+        ]),
+        // A path the record does not reach.
+        json!([{"op": "replace", "path": "/settings/c/d", "value": "new"}]),
+        // A read-only member's new value.
+        json!([{"op": "replace", "path": "/created", "value": "never"}]),
+    ] {
+        let (status, _, body) = h.send("PATCH", "/flags/f1", Some(ops), &[]).await;
+        assert!(status.is_success(), "{body}");
+    }
+    assert_eq!(
+        capture.of("patchFlag"),
+        vec![
+            line("patchFlag", "update", Some("unapplied_patch")),
+            line("patchFlag", "update", Some("unapplied_patch")),
+            line("patchFlag", "update", Some("read_only_member")),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_merge_patch_removes_its_nulls_and_merges_its_objects() {
+    let (capture, _guard) = Capture::install();
+    let h = with_flag(json!({}), vec![made_up_flag()]).await;
+    let (status, _, body) = h
+        .send_as(
+            "PATCH",
+            "/flags/f1",
+            json!({"description": null, "settings": {"a": null, "b": "z"}}),
+            "application/merge-patch+json",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut patched = flag();
+    patched.as_object_mut().unwrap().remove("description");
+    patched["settings"] = json!({"b": "z"});
+    assert_eq!(body, patched);
+    assert_eq!(h.provider.requests().len(), 2);
+    assert_eq!(
+        capture.of("patchFlag"),
+        vec![line("patchFlag", "update", None)]
+    );
+}
+
+#[tokio::test]
+async fn a_plain_update_of_a_nested_member_keeps_its_other_members() {
+    let (capture, _guard) = Capture::install();
+    let h = with_flag(json!({}), vec![group()]).await;
+    let (status, _, body) = h
+        .send(
+            "PATCH",
+            "/groups/g1",
+            Some(json!({"name": {"givenName": "Z"}})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], json!({"givenName": "Z", "familyName": "N"}));
+    assert_eq!(
+        capture.of("patchGroup"),
+        vec![line("patchGroup", "update", None)]
+    );
+}
+
+#[tokio::test]
+async fn a_scim_patch_adds_replaces_and_removes_attributes() {
+    let (capture, _guard) = Capture::install();
+    let h = with_flag(json!({}), vec![]).await;
+    let patch = |ops: Value| json!({"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": ops});
+    let scim = "application/scim+json";
+    // An add to a multi-valued attribute keeps its values; names match without case.
+    let (status, headers, body) = h
+        .send_as(
+            "PATCH",
+            "/groups/g1",
+            patch(json!([
+                {"op": "add", "path": "members", "value": [{"value": "u2"}, {"value": "u1"}]},
+                {"op": "Replace", "path": "displayname", "value": "Platform"},
+                {"op": "replace", "path": "name.givenName", "value": "P"}
+            ])),
+            scim,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(
+        body,
+        json!({"id": "g1", "displayName": "Platform", "members": [{"value": "u1"}, {"value": "u2"}],
+               "name": {"givenName": "P", "familyName": "N"}})
+    );
+    // A remove naming values takes those out; a replace with no path sets the members
+    // its value sends, a complex one's sub-attributes merged.
+    let (status, _, body) = h
+        .send_as(
+            "PATCH",
+            "/groups/g1",
+            patch(json!([
+                {"op": "remove", "path": "members", "value": [{"value": "u1"}]},
+                {"op": "replace", "value": {"displayName": "Ops", "name": {"familyName": "M"}}}
+            ])),
+            scim,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let patched = json!({"id": "g1", "displayName": "Ops", "members": [{"value": "u2"}],
+                         "name": {"givenName": "P", "familyName": "M"}});
+    assert_eq!(body, patched);
+    assert_eq!(
+        h.stored(&type_of(&h, "getGroup"), "g1").await,
+        Some(patched)
+    );
+    assert_eq!(
+        h.provider.requests().len(),
+        2,
+        "the patches made no LLM call"
+    );
+    assert_eq!(
+        capture.of("patchGroup"),
+        vec![
+            line("patchGroup", "update", None),
+            line("patchGroup", "update", None)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_scim_patch_filtering_a_multi_valued_attribute_falls_back() {
+    let (capture, _guard) = Capture::install();
+    let h = with_flag(json!({}), vec![group()]).await;
+    let (status, _, body) = h
+        .send_as(
+            "PATCH",
+            "/groups/g1",
+            json!({"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                   "Operations": [{"op": "remove", "path": "members[value eq \"u1\"]"}]}),
+            "application/scim+json",
+        )
+        .await;
+    assert!(status.is_success(), "{body}");
+    assert_eq!(
+        capture.of("patchGroup"),
+        vec![line("patchGroup", "update", Some("patch_filter"))]
+    );
+}
+
+#[tokio::test]
+async fn a_json_patch_adding_a_member_the_record_does_not_declare_falls_back() {
+    let (capture, _guard) = Capture::install();
+    let h = with_flag(json!({}), vec![made_up_flag()]).await;
+    let (status, _, body) = h
+        .send(
+            "PATCH",
+            "/flags/f1",
+            Some(json!([{"op": "add", "path": "/bogus", "value": 1}])),
+            &[],
+        )
+        .await;
+    assert!(status.is_success(), "{body}");
+    assert_eq!(
+        capture.of("patchFlag"),
+        vec![line("patchFlag", "update", Some("undeclared_member"))]
+    );
+}
+
+#[tokio::test]
+async fn a_scim_add_of_one_value_to_an_unheld_multi_valued_attribute_stores_a_list() {
+    let (capture, _guard) = Capture::install();
+    let h = with_flag(json!({}), vec![]).await;
+    // `Operations` is an attribute name, matched without case.
+    let (status, _, body) = h
+        .send_as(
+            "PATCH",
+            "/groups/g1",
+            json!({"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                   "operations": [{"op": "add", "path": "roles", "value": "admin"}]}),
+            "application/scim+json",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["roles"], json!(["admin"]));
+    assert_eq!(
+        capture.of("patchGroup"),
+        vec![line("patchGroup", "update", None)]
+    );
+}
+
+/// Teams are named by their slug under the organization their path names.
+const OWNED: &str = r##"
+openapi: 3.0.0
+info: {title: Owned, version: "1"}
+paths:
+  /orgs/{org}/teams:
+    parameters: [{name: org, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: createTeam
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}}
+  /orgs/{org}/teams/{slug}:
+    parameters:
+      - {name: org, in: path, required: true, schema: {type: string}}
+      - {name: slug, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getTeam
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}, "404": {description: missing}}
+    patch:
+      operationId: patchTeam
+      requestBody: {content: {application/json-patch+json: {schema: {type: array, items: {type: object}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}}
+components:
+  schemas:
+    Team:
+      type: object
+      required: [slug, name]
+      properties: {slug: {type: string}, name: {type: string}, organization: {type: string}}
+"##;
+
+#[tokio::test]
+async fn a_patch_keeps_the_owner_the_path_names() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(
+        OWNED,
+        vec![
+            json!({"slug": "core", "name": "Core"}),
+            json!({"slug": "web", "name": "Web", "organization": "octo"}),
+        ],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    for name in ["Core", "Web"] {
+        let (status, _, body) = h
+            .send(
+                "POST",
+                "/orgs/octo/teams",
+                Some(json!({"name": name})),
+                SEEDED,
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let patch = "application/json-patch+json";
+    // An owner member the record does not hold, naming another owner, is not added.
+    let (status, _, body) = h
+        .send_as(
+            "PATCH",
+            "/orgs/octo/teams/core",
+            json!([
+                {"op": "add", "path": "/organization", "value": "acme"},
+                {"op": "replace", "path": "/name", "value": "Renamed"}
+            ]),
+            patch,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"slug": "core", "name": "Renamed"}));
+    // The owner member the record holds is not removed.
+    let (status, _, body) = h
+        .send_as(
+            "PATCH",
+            "/orgs/octo/teams/web",
+            json!([
+                {"op": "remove", "path": "/organization"},
+                {"op": "replace", "path": "/name", "value": "Site"}
+            ]),
+            patch,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({"slug": "web", "name": "Site", "organization": "octo"})
+    );
+    assert_eq!(
+        h.provider.requests().len(),
+        2,
+        "the patches made no LLM call"
+    );
+    assert_eq!(
+        capture.of("patchTeam"),
+        vec![
+            line("patchTeam", "update", None),
+            line("patchTeam", "update", None)
+        ]
+    );
+}
+
+/// The world of the instruction tests: `patchFlag` takes a semantic patch.
+fn instructed() -> Value {
+    json!({"operations": {"patchFlag": {"request": {"instructions": {
+        "at": "/instructions",
+        "kind": "kind",
+        "kinds": {
+            "addTags": {"changes": {"tags": {"append": "/values"}}},
+            "removeTags": {"changes": {"tags": {"remove": "/values"}}},
+            "archiveFlag": {"changes": {"archived": {"value": true}}},
+            "turnFlagOn": {"changes": {"environments.{environmentKey}.on": {"value": true}}},
+            "updateName": {"changes": {"name": {"from_instruction": "/value"}}}
+        }
+    }}}}})
+}
+
+#[tokio::test]
+async fn described_instructions_change_the_held_record_in_order() {
+    let (capture, _guard) = Capture::install();
+    let h = with_flag(instructed(), vec![made_up_flag(), made_up_flag()]).await;
+    let semantic = "application/json; domain-model=semanticpatch";
+    let (status, headers, body) = h
+        .send_as(
+            "PATCH",
+            "/flags/f1",
+            json!({"environmentKey": "production", "instructions": [
+                {"kind": "addTags", "values": ["b", "c"]},
+                {"kind": "removeTags", "values": ["a"]},
+                {"kind": "turnFlagOn"},
+                {"kind": "updateName", "value": "Checkout v3"},
+                {"kind": "archiveFlag"}
+            ]}),
+            semantic,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let mut patched = flag();
+    patched["tags"] = json!(["b", "c"]);
+    patched["environments"]["production"]["on"] = json!(true);
+    patched["name"] = json!("Checkout v3");
+    patched["archived"] = json!(true);
+    assert_eq!(body, patched);
+    assert_eq!(h.stored(&type_of(&h, "getFlag"), "f1").await, Some(patched));
+    assert_eq!(
+        h.provider.requests().len(),
+        2,
+        "the instructions made no LLM call"
+    );
+    // A kind the description does not give, or a step no value fills, is not guessed.
+    for instructions in [
+        json!([{"kind": "deprecateFlag"}]),
+        json!([{"kind": "turnFlagOn"}]),
+    ] {
+        let (status, _, body) = h
+            .send_as(
+                "PATCH",
+                "/flags/f1",
+                json!({"instructions": instructions}),
+                semantic,
+            )
+            .await;
+        assert!(status.is_success(), "{body}");
+    }
+    assert_eq!(
+        capture.of("patchFlag"),
+        vec![
+            line("patchFlag", "update", None),
+            line("patchFlag", "update", Some("undescribed_instruction")),
+            line("patchFlag", "update", Some("unapplied_instruction")),
+        ]
     );
 }
 

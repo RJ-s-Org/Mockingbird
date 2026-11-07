@@ -55,6 +55,7 @@ hmac.workspace = true
 http.workspace = true
 http-body = { workspace = true, optional = true }
 humantime.workspace = true
+json-patch.workspace = true
 lapin = { workspace = true, optional = true }
 metrics.workspace = true
 multer = { workspace = true, optional = true }

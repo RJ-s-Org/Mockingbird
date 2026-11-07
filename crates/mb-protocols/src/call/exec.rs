@@ -70,6 +70,7 @@ impl Fallback {
 mod action;
 mod create;
 mod list;
+mod patches;
 mod writes;
 
 /// What [`run`] did with a call.

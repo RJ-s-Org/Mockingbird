@@ -53,6 +53,7 @@ Operations (`operations.<operation id>`):
 - `answer.identity_header`: the declared 2xx response header a create names its new id in (`Location`, `Resource-ID`), or `false` when it names it in none. HTTP only.
 - `transition: {<member>: <value>}`: members an action sets (the type needs a `lifecycle`).
 - `changes: {<member>: {from_request: <pointer>} | {value}}`: members of the target an action changes.
+- `request.instructions: {at, kind, kinds: {<kind>: {changes}}}`: an update whose request sends instructions instead of a record (a semantic patch, `{instructions: [{kind: addTags, values: [...]}]}`). `at` points to the array, `kind` names the member saying each instruction's kind, and each kind's `changes` take `{value}`, `{from_instruction: <pointer>}`, `{from_request: <pointer>}`, or `{append | remove: <pointer>}` for an array member; a braced step (`environments.{environmentKey}.on`) is that member's value in the instruction, else in the body. Describe every kind the documentation gives: an undescribed kind is generated. JSON Patch, SCIM PatchOp and merge-patch bodies need no entry.
 - Lists: `scope: {param, member}`, `filters: [{param, member?, kind}]` (`eq`, `contains`, `gte`, `lte`, `flag`, `text`), `order: {member, descending?}`, `paging: {style, request?, response?, response_header?, size?}` (`cursor`, `page`, `offset`, `next_url`, `header_cursor`).
 - `idempotency: {header}`: the header that makes a replay answer as the first call did; `not_found`: the declared status of a missing record.
 

@@ -393,6 +393,28 @@ impl DescribedHarness {
         }
     }
 
+    /// [`Self::send`] with a JSON body sent as `content_type`.
+    #[allow(dead_code, reason = "used by the exec test binaries, not by `it`")]
+    pub async fn send_as(
+        &self,
+        method: &str,
+        uri: &str,
+        body: serde_json::Value,
+        content_type: &str,
+    ) -> (
+        axum::http::StatusCode,
+        axum::http::HeaderMap,
+        serde_json::Value,
+    ) {
+        let req = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", content_type)
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        send_to(&self.router, req).await
+    }
+
     /// The record of type `t` stored under `id` in the default session.
     pub async fn stored(&self, t: &str, id: &str) -> Option<serde_json::Value> {
         let session = mb_state::SessionKey {
