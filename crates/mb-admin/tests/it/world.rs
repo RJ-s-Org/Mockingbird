@@ -1724,8 +1724,9 @@ async fn put_over_256k_is_413() {
             "/operations/listWidgets/kind",
         ),
         (
+            // `kind` is optional beside `grammar`: the 422 names the key itself.
             json!({"operations": {"listWidgets": {"filters": [{"param": "q", "kind": "fuzzy"}]}}}),
-            "/operations/listWidgets/filters/0",
+            "/operations/listWidgets/filters/0/kind",
         ),
         (
             json!({"types": {"widget": {"derived": {"total": {"kind": "avg", "of": "widget"}}}}}),
@@ -2030,7 +2031,7 @@ async fn near_limit_hostile_document_is_422_quickly() {
     assert_eq!(problem["code"], "invalid");
     assert_eq!(
         problem["path"],
-        format!("/operations/listWidgets/filters/{last}"),
+        format!("/operations/listWidgets/filters/{last}/kind"),
         "{problem}"
     );
     assert!(took < Duration::from_secs(10), "took {took:?}");
