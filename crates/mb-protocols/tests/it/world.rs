@@ -2437,7 +2437,8 @@ async fn a_create_under_a_shown_parent_can_be_refused_as_declared() {
         "{prompt}"
     );
     assert!(prompt.contains("contradict"), "{prompt}");
-    assert!(!prompt.contains("401"), "{prompt}");
+    // The status as the prompt lists one, not a digit run its clock may hold.
+    assert!(!prompt.contains("401:"), "{prompt}");
     assert_eq!(
         format_schema(&h, 0)["properties"]["refusal"],
         json!({"type": "integer", "enum": [409, 422]})
