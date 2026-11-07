@@ -2826,3 +2826,64 @@ async fn an_acknowledgement_keeps_the_record_s_false_and_affirms_its_own_boolean
         vec![create_line("createFlag", None)]
     );
 }
+
+/// GitLab's issue notes: their list is scoped by the issue's `issue_iid` path value,
+/// which a note holds as `noteable_iid`.
+const NOTES: &str = r##"
+openapi: 3.0.0
+info: {title: Notes, version: "1"}
+paths:
+  /issues/{issue_iid}/notes:
+    parameters: [{name: issue_iid, in: path, required: true, schema: {type: integer}}]
+    get:
+      operationId: listIssueNotes
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Note"}}}}}}
+    post:
+      operationId: createIssueNote
+      requestBody: {content: {application/json: {schema: {type: object, required: [body], properties: {body: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}}
+  /issues/{issue_iid}/notes/{note_id}:
+    get:
+      operationId: getIssueNote
+      parameters:
+        - {name: issue_iid, in: path, required: true, schema: {type: integer}}
+        - {name: note_id, in: path, required: true, schema: {type: integer}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}}
+components:
+  schemas:
+    Note:
+      type: object
+      required: [id, body, noteable_iid]
+      properties: {id: {type: integer}, body: {type: string}, noteable_iid: {type: integer}}
+"##;
+
+#[tokio::test]
+async fn a_nested_create_holds_the_path_value_its_list_s_scope_matches() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"listIssueNotes": {
+        "scope": {"param": "issue_iid", "member": "noteable_iid"}
+    }}});
+    let h = support::described(NOTES, world, Vec::new());
+    let (status, headers, note) = h
+        .send("POST", "/issues/7/notes", Some(json!({"body": "hi"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{note}");
+    assert_eq!(source(&headers), "state", "{note}");
+    assert_eq!(
+        note["noteable_iid"],
+        json!(7),
+        "the issue's iid, typed: {note}"
+    );
+    let listed = read_from_state(&h, "/issues/7/notes").await;
+    assert_eq!(listed, json!([note]));
+    assert_eq!(read_from_state(&h, "/issues/8/notes").await, json!([]));
+    assert_eq!(
+        capture.of("createIssueNote"),
+        vec![create_line("createIssueNote", None)]
+    );
+    assert_eq!(
+        capture.of("listIssueNotes"),
+        vec![line("listIssueNotes", "list", None); 2]
+    );
+    assert!(h.provider.requests().is_empty(), "no LLM call");
+}

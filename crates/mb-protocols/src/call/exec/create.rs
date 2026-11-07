@@ -386,9 +386,10 @@ impl Shape {
     }
 
     /// Sets on `record` what the call's path says of it: the described parent member,
-    /// from the parent's path parameter (in the parent's pattern), and a member the
-    /// type declares under a path parameter's own name. A member the record holds
-    /// already keeps its value.
+    /// from the parent's path parameter (in the parent's pattern), a member the type
+    /// declares under a path parameter's own name, and the member a described list
+    /// scope of the type matches to a path parameter of the create's route (typed as
+    /// the member is). A member the record holds already keeps its value.
     fn path_members(
         &self,
         rt: &crate::MockRuntime,
@@ -415,7 +416,70 @@ impl Shape {
                 record.insert(name.clone(), value.clone());
             }
         }
+        // A list of the type scoped by a parameter the create's path names (a note's
+        // `noteable_iid` by `issue_iid`): the created record is in that scope.
+        let mut held = Value::Object(std::mem::take(record));
+        for scope in list_scopes(rt, t) {
+            let Some(value) = call.path_params.get(&scope.param) else {
+                continue;
+            };
+            if mb_mcm::member_at(&held, &scope.member).is_some() {
+                continue;
+            }
+            let declared = self
+                .schemas
+                .iter()
+                .find_map(|s| property_schema(rt.bundle(), s, &scope.member));
+            let value = match declared {
+                Some(schema) => typed_as(rt.bundle(), &schema, value),
+                None => value.clone(),
+            };
+            mb_mcm::set_member_at(&mut held, &scope.member, value);
+        }
+        if let Value::Object(members) = held {
+            *record = members;
+        }
     }
+}
+
+/// The described scopes of the lists of type `t`.
+fn list_scopes<'r>(rt: &'r crate::MockRuntime, t: &str) -> Vec<&'r mb_mcm::world::ScopeDesc> {
+    rt.bundle()
+        .operations
+        .iter()
+        .filter(|op| super::list::item_type(rt, op) == Some(t))
+        .filter_map(|op| {
+            let desc = rt.described().op(&op.id)?;
+            let kind = desc.kind.or_else(|| OpKind::of(op));
+            (kind == Some(OpKind::List)).then_some(desc.scope.as_ref()?)
+        })
+        .collect()
+}
+
+/// `value` (a path value) as member schema `schema` types it: a number for a number
+/// or an integer member it parses as, text for a text member; else as it is.
+fn typed_as(bundle: &mb_mcm::Bundle, schema: &Value, value: &Value) -> Value {
+    let types: Vec<&str> = crate::call::schema_parts(bundle, Some(schema))
+        .0
+        .iter()
+        .filter_map(|part| part.get("type").and_then(Value::as_str))
+        .collect();
+    let text = id_string(value);
+    if types.contains(&"string") {
+        return text.map_or_else(|| value.clone(), Value::String);
+    }
+    if types.contains(&"integer")
+        && let Some(n) = text.as_deref().and_then(|t| t.parse::<i64>().ok())
+    {
+        return Value::from(n);
+    }
+    if types.contains(&"number")
+        && let Some(n) = text.as_deref().and_then(|t| t.parse::<f64>().ok())
+        && let Some(n) = serde_json::Number::from_f64(n)
+    {
+        return Value::Number(n);
+    }
+    value.clone()
 }
 
 /// The schemas records of type `t` are read by: the record its read by id (else its
