@@ -1431,23 +1431,31 @@ async fn an_action_on_an_unheld_target_falls_back() {
     );
 }
 
+/// An action answering its record in an envelope that also requires a member nothing
+/// the mock holds gives (Cal.com's `{status, data}`) fills it as a read of the record
+/// does, from the faker, and is answered from state.
 #[tokio::test]
-async fn an_action_whose_record_does_not_render_falls_back() {
+async fn an_action_s_envelope_is_filled_as_a_read_s_is() {
     let (capture, _guard) = Capture::install();
-    // `boostItem` answers the item in an envelope that also requires a `receipt`,
-    // which nothing the mock holds gives.
-    let h = actions(vec![
-        item_i1(),
-        json!({"item": {"id": "i1", "name": "a", "status": "ACTIVE", "pinned": true}, "receipt": "r1"}),
-    ]);
+    // `boostItem` answers the item in an envelope that also requires a `receipt`.
+    let h = actions(vec![item_i1()]);
     create_i1(&h).await;
     let (status, headers, body) = h.send("POST", "/items/i1/boost", None, &[]).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(source(&headers), "llm", "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let boosted = json!({"id": "i1", "name": "a", "status": "ACTIVE", "pinned": true});
+    assert_eq!(body["item"], boosted, "{body}");
+    assert!(body["receipt"].is_string(), "{body}");
     assert_eq!(
         capture.of("boostItem"),
-        vec![action_line("boostItem", Some("render_failed"))]
+        vec![action_line("boostItem", None)]
     );
+    assert_eq!(
+        h.provider.requests().len(),
+        1,
+        "the action made no LLM call"
+    );
+    assert_eq!(h.stored("items", "i1").await, Some(boosted));
 }
 
 #[tokio::test]
