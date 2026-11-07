@@ -3155,6 +3155,11 @@ paths:
       operationId: getPipeline
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Pipeline"}}}}}
+  /users/{id}:
+    get:
+      operationId: getUser
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}}
   /orders:
     post:
       operationId: createOrder
@@ -3219,7 +3224,11 @@ components:
       properties:
         id: {type: string}
         name: {type: string}
-        owner: {type: object, required: [id, name], properties: {id: {type: string}, name: {type: string}}}
+        owner: {$ref: "#/components/schemas/User"}
+    User:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
     Order:
       type: object
       required: [id, lines]
@@ -3248,30 +3257,58 @@ fn invalid_line(op: &str, why: &str) -> ExecLine {
 }
 
 #[tokio::test]
-async fn a_create_sending_a_reference_where_its_read_holds_an_object_generates() {
+async fn a_reference_to_a_held_record_is_stored_as_that_record() {
     let (capture, _guard) = Capture::install();
-    // The generated create's answer, under the model's id.
-    let h = support::harness(
-        GATED,
-        vec![json!({"id": "p-gen"})],
-        &HarnessOptions::default(),
-        |rt| rt,
-    );
+    let h = support::harness(GATED, vec![], &HarnessOptions::default(), |rt| rt);
+    let users = type_of(&h, "getUser");
+    h.hold(
+        &users,
+        &[json!({"id": "u1", "name": "Ann", "email": "ann@example.com"})],
+    )
+    .await;
     let sent = json!({"name": "deploy", "owner": "u1"});
     let (status, headers, body) = h.send("POST", "/pipelines", Some(sent), &[]).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    assert_eq!(source(&headers), "llm", "{body}");
-    assert_eq!(body["id"], json!("p-gen"));
+    assert_eq!(source(&headers), "state", "{body}");
     assert_eq!(
         capture.of("createPipeline"),
-        vec![invalid_line("createPipeline", "/owner type")]
+        vec![create_line("createPipeline", None)]
     );
+    let id = body["id"].as_str().unwrap().to_owned();
     let t = type_of(&h, "getPipeline");
+    let stored = h.stored(&t, &id).await.unwrap();
     assert_eq!(
-        h.stored_ids(&t).await,
-        vec!["p-gen".to_owned()],
-        "the type holds the generated record alone: the executor stored nothing"
+        stored["owner"],
+        json!({"id": "u1", "name": "Ann"}),
+        "the held user, as the member declares it"
     );
+    assert!(h.provider.requests().is_empty(), "nothing to fill");
+}
+
+#[tokio::test]
+async fn a_reference_to_no_held_record_is_filled_never_stored_raw() {
+    let (capture, _guard) = Capture::install();
+    // The fill's answer for the owner the request named no held record by.
+    let h = support::harness(
+        GATED,
+        vec![json!({"owner": {"id": "u9", "name": "Zed"}})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let sent = json!({"name": "deploy", "owner": "u9"});
+    let (status, headers, body) = h.send("POST", "/pipelines", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(
+        capture.of("createPipeline"),
+        vec![create_line("createPipeline", None)]
+    );
+    let id = body["id"].as_str().unwrap().to_owned();
+    let t = type_of(&h, "getPipeline");
+    let stored = h.stored(&t, &id).await.unwrap();
+    assert_eq!(stored["owner"], json!({"id": "u9", "name": "Zed"}));
+    let (_, headers, read) = h.send("GET", &format!("/pipelines/{id}"), None, &[]).await;
+    assert_eq!(source(&headers), "state", "{read}");
 }
 
 #[tokio::test]

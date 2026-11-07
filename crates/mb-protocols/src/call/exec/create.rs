@@ -171,6 +171,13 @@ pub(super) async fn run(
 
     // The members nobody else decides, then the initial state.
     let owned = server_owned(rt, t, field, request);
+    // A request member that does not fit the record's is never stored as sent: the
+    // record it names, when the session holds it, else left for fill.
+    if let Value::Object(known) = &mut data {
+        reshape(state, &plan.session, t, known, &owned)
+            .instrument(state_span())
+            .await;
+    }
     // A member the request did not send whose schema decides its value (a `const`, a
     // one-value `enum`: GraphQL's `__typename`; a `default`) takes it, at any depth.
     let fits = |schema: &Value, value: &Value| fits(rt, schema, value);
@@ -820,6 +827,140 @@ fn preset_from_request(
         }
     }
 }
+
+/// Reshapes the members of `record` (the request's) that do not fit what the reads of
+/// type `t` declare of them ([`shaped`]), but those in `owned`: a value naming a record the
+/// session holds (a reference where the record holds the object: Buildkite's
+/// `pipeline` slug, Lob's `to` address id) becomes that record, projected to the
+/// member's schema, and so does each item of an array of them; any other is removed,
+/// for fill to write. A member whose every schema it fits is kept as sent.
+async fn reshape(
+    state: &mut StateAccess<'_>,
+    session: &mb_state::SessionKey,
+    t: &str,
+    record: &mut Map<String, Value>,
+    owned: &[String],
+) {
+    let rt = state.rt;
+    let bundle = rt.bundle();
+    let reads = read_shapes(rt, t);
+    let names: Vec<String> = record.keys().cloned().collect();
+    for name in names {
+        if owned.contains(&name) {
+            continue;
+        }
+        let schemas: Vec<(Value, bool)> = reads
+            .iter()
+            .filter_map(|(s, item)| Some((property_schema(bundle, s, &name)?, *item)))
+            .collect();
+        let fits_all = |value: &Value| {
+            schemas
+                .iter()
+                .all(|(s, item)| shaped(rt, (s, *item), value))
+        };
+        let Some(sent) = record.get(&name).cloned() else {
+            continue;
+        };
+        if schemas.is_empty() || fits_all(&sent) {
+            continue;
+        }
+        let Some((member, _)) = schemas.first() else {
+            continue;
+        };
+        let embedded = match &sent {
+            Value::Array(items) => {
+                let item = whole_parts(bundle, member)
+                    .iter()
+                    .find_map(|p| p.get("items").cloned());
+                let mut out = Vec::new();
+                for value in items {
+                    let one = match &item {
+                        Some(item) => embed(state, session, (&name, item), value).await,
+                        None => None,
+                    };
+                    match one {
+                        Some(one) => out.push(one),
+                        None => {
+                            out.clear();
+                            break;
+                        }
+                    }
+                }
+                (!out.is_empty() || items.is_empty()).then_some(Value::Array(out))
+            }
+            value => embed(state, session, (&name, member), value).await,
+        };
+        match embedded.filter(|e| fits_all(e)) {
+            Some(value) => {
+                record.insert(name, value);
+            }
+            None => {
+                record.remove(&name);
+            }
+        }
+    }
+}
+
+/// The record a request value under `name` names, as `schema` (an object's) holds it:
+/// a text or number that is the id of a record the session holds, of the type the
+/// member's schema is the record of, else of a type named for the member, projected to
+/// `schema`. `None` for a value that names none, or a schema of no object.
+async fn embed(
+    state: &mut StateAccess<'_>,
+    session: &mb_state::SessionKey,
+    (name, schema): (&str, &Value),
+    value: &Value,
+) -> Option<Value> {
+    let rt = state.rt;
+    let bundle = rt.bundle();
+    let id = match value {
+        Value::String(_) | Value::Number(_) => id_string(value)?,
+        _ => return None,
+    };
+    let object = whole_parts(bundle, schema).iter().any(|p| {
+        p.get("properties").is_some() || p.get("type").and_then(Value::as_str) == Some("object")
+    });
+    if !object {
+        return None;
+    }
+    let index = rt.index();
+    let def = crate::call::bundle_index::def_name(schema);
+    let mut types: Vec<String> = crate::call::entity_type(index, def, name)
+        .into_iter()
+        .collect();
+    for t in crate::call::relations::reference_types(Some(index), name) {
+        if !types.contains(&t) {
+            types.push(t);
+        }
+    }
+    for t in types.iter().take(MAX_EMBED_TYPES) {
+        if let Some(held) = records::held_by_key(state, session, t, &id).await {
+            return Some(crate::call::lists::projected(
+                bundle,
+                Some(schema),
+                &held.data,
+                0,
+            ));
+        }
+    }
+    None
+}
+
+/// Whether `value`, a member's, is of the shape `schema` (a read's member schema; a
+/// list item's, `item`, projected first, as the list projects it) declares: it breaks
+/// nothing but what it lacks (`required`), which fill writes.
+fn shaped(rt: &crate::MockRuntime, (schema, item): (&Value, bool), value: &Value) -> bool {
+    let value = match item {
+        true => crate::call::lists::projected(rt.bundle(), Some(schema), value, 0),
+        false => value.clone(),
+    };
+    rt.engine
+        .schema_violations(rt.bundle(), schema, &value)
+        .is_some_and(|found| found.iter().all(|(_, keyword)| keyword == "required"))
+}
+
+/// The types [`embed`] looks a reference up in, at most.
+const MAX_EMBED_TYPES: usize = 8;
 
 /// Whether a value (the second) validates against a member schema (the first).
 type Fits<'a> = dyn Fn(&Value, &Value) -> bool + 'a;
