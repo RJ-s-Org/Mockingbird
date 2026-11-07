@@ -385,14 +385,15 @@ fn initial(rt: &crate::MockRuntime, t: &str, request: Option<&Value>) -> Option<
     if request.is_some_and(|r| mb_mcm::member_at(r, &lifecycle.member).is_some()) {
         return None;
     }
-    let value = described.state_value(t, state)?;
+    // `None` for a state not of the member's enum as spelled: matched below.
+    let value = described.state_value(t, state);
     let bundle = rt.bundle();
     let schemas: Vec<Value> = read_schemas(rt, t)
         .iter()
         .filter_map(|s| property_schema(bundle, s, &lifecycle.member))
         .collect();
     let fits_all = |v: &Value| schemas.iter().all(|s| fits(rt, s, v));
-    if fits_all(&value) {
+    if let Some(value) = value.filter(|v| fits_all(v)) {
         return Some((lifecycle.member.clone(), value));
     }
     // The state as the member's enum spells it (`LIVE` for `live`, `in-progress` for
