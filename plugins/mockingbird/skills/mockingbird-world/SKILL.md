@@ -55,6 +55,14 @@ Operations (`operations.<operation id>`):
 - `changes: {<member>: {from_request: <pointer>} | {value}}`: members of the target an action changes.
 - `request.instructions: {at, kind, kinds: {<kind>: {changes}}}`: an update whose request sends instructions instead of a record (a semantic patch, `{instructions: [{kind: addTags, values: [...]}]}`). `at` points to the array, `kind` names the member saying each instruction's kind, and each kind's `changes` take `{value}`, `{from_instruction: <pointer>}`, `{from_request: <pointer>}`, or `{append | remove: <pointer>}` for an array member; a braced step (`environments.{environmentKey}.on`) is that member's value in the instruction, else in the body. Describe every kind the documentation gives: an undescribed kind is generated. JSON Patch, SCIM PatchOp and merge-patch bodies need no entry.
 - Lists: `scope: {param, member}`, `filters: [{param, member?, kind}]` (`eq`, `contains`, `gte`, `lte`, `flag`, `text`), `order: {member, descending?}`, `paging: {style, request?, response?, response_header?, size?}` (`cursor`, `page`, `offset`, `next_url`, `header_cursor`).
+- A filter parameter whose value is an expression: `filters: [{param, grammar, member_prefix?}]` in place of `kind` and `member`. Its attribute paths are member paths, below `member_prefix` when set. A value that does not parse is generated, never guessed.
+
+  | `grammar` | When the docs say | Entry |
+  | --- | --- | --- |
+  | `scim` | SCIM filters: `filter=userName eq "ann" and active eq true` | `{param: filter, grammar: scim}` |
+  | `odata` | OData `$filter=status eq 'open' and contains(name,'x')` | `{param: $filter, grammar: odata}` |
+  | `field_value` | comma-joined `field:value` pairs: `filter=status:open,priority:high` | `{param: filter, grammar: field_value}` |
+  | `deep_object` | bracketed keys with optional operators: `filter[price][_gte]=10`, or a map member's keys: `metadata[run]=r1` | `{param: filter, grammar: deep_object}`; `{param: metadata, grammar: deep_object, member_prefix: metadata}` |
 - `idempotency: {header}`: the header that makes a replay answer as the first call did; `not_found`: the declared status of a missing record.
 
 GraphQL, gRPC, SOAP and AsyncAPI operations use the same keys, keyed by operation id; HTTP-only keys (headers, statuses) are refused there as `not_applicable`.

@@ -489,7 +489,7 @@ impl Parser {
                         // OData writes a date, a date-time or a GUID unquoted.
                         (self.dialect == Dialect::Odata
                             && w.starts_with(|c: char| c.is_ascii_digit()))
-                        .then(|| Value::String(w))
+                        .then_some(Value::String(w))
                     }
                 }
             }
@@ -848,7 +848,7 @@ mod tests {
             leaf(&["status", "_between"], json!("x")),
             leaf(&["_eq"], json!("x")),
         ] {
-            assert_eq!(deep(&[bad.clone()]), None, "{bad:?}");
+            assert_eq!(deep(std::slice::from_ref(&bad)), None, "{bad:?}");
         }
     }
 
