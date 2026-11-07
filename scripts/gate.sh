@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The fast local gate: checks only what the branch changed, so it runs in minutes.
-# CI runs the full suite on every pull request (a few minutes); this gate exists to
+# CI runs the full suite on main after every merge (a few minutes); this gate exists to
 # catch the obvious failures before a review, not to repeat CI.
 #
 #   scripts/gate.sh            # changes since the merge base with origin/main, plus uncommitted ones
@@ -22,7 +22,7 @@
 #     same release binary, on both world tiers (none and agent)
 # A change to the root Cargo.toml, Cargo.lock, rust-toolchain.toml, clippy.toml,
 # deny.toml, .cargo/ or .config/ runs the full workspace. Transitive dependents are left
-# to CI, which runs everything (cargo-deny, docs and the slim build included).
+# to main's CI, which runs everything (cargo-deny, docs and the slim build included).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 

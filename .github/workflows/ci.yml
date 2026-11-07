@@ -11,7 +11,8 @@ on:
 # request runs only the jobs its files can affect, and `check` covers the crates it
 # changed plus their direct dependents (`scripts/gate.sh --packages`); main catches the
 # rest after merge. A draft pull request runs nothing: review it as a draft, then mark it
-# ready for one CI run. A skipped job counts as passed for the required checks.
+# ready for one CI run. A skipped job counts as passed for the required checks, so
+# `changes` is itself required and fails closed.
 
 # A newer push to the same PR cancels the run it supersedes. Runs on main
 # are never cancelled, so every main commit reports a result and saves its
@@ -25,8 +26,9 @@ env:
 
 jobs:
   # What the change touches. Every other job reads these outputs.
+  # Required check. It fails on a draft (so a draft never shows green required checks) and
+  # whenever it cannot tell what changed, so nothing merges untested.
   changes:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     outputs:
       packages: ${{ steps.c.outputs.packages }}
@@ -52,18 +54,25 @@ jobs:
             for k in protocols console deps helm ext toolchain image; do out "$k" true; done
           }
           if [ "$GITHUB_EVENT_NAME" != pull_request ]; then all; exit 0; fi
+          if [ "${{ github.event.pull_request.draft }}" = true ]; then
+            echo "::error::Draft pull request: no CI. Mark it ready (gh pr ready) for one run."
+            exit 1
+          fi
           files=$(git diff --name-only "origin/$GITHUB_BASE_REF...HEAD")
           # A change to CI itself runs everything.
-          if grep -qx '.github/workflows/ci.yml' <<<"$files"; then all; exit 0; fi
+          if grep -qxE '\.github/workflows/ci\.yml|scripts/gate\.sh' <<<"$files"; then all; exit 0; fi
           has() { grep -qE "$1" <<<"$files" && echo true || echo false; }
-          out packages "$(BASE="origin/$GITHUB_BASE_REF" scripts/gate.sh --packages)"
-          out protocols "$(has '^(crates/mb-protocols/|Cargo\.(toml|lock)$)')"
-          out console "$(has '^crates/(mb-console|mb-admin)/')"
+          # Assigned first: a failing command substitution inside `out` would not stop the step.
+          pkgs=$(BASE="origin/$GITHUB_BASE_REF" scripts/gate.sh --packages)
+          out packages "$pkgs"
+          out protocols "$(has '^(crates/(mb-protocols|mockingbird)/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)')"
+          out console "$(has '^(crates/(mb-console|mb-admin|mockingbird)/|fixtures/)')"
           out deps "$(has '^(Cargo\.(toml|lock)|deny\.toml)$')"
-          out helm "$(has '^(deploy/helm/|scripts/check-helm\.sh$)')"
-          out ext "$(has '^crates/mb-ext/')"
+          out helm "$(has '^(deploy/(helm|kustomize)/|examples/gitops/|scripts/check-helm\.sh$)')"
+          out ext "$(has '^(crates/mb-ext/|scripts/semver-check\.sh$)')"
           out toolchain "$(has '^(Cargo\.toml|rust-toolchain\.toml)$')"
-          out image "$(has '^(Dockerfile|\.dockerignore$|deploy/|crates/mb-auth/|crates/mb-state/|crates/mb-store/)')"
+          # The image, auth, the stores and the CLI; engine and protocol changes reach e2e on main.
+          out image "$(has '^(Dockerfile|\.dockerignore$|deploy/|fixtures/|Cargo\.lock$|crates/(mb-auth|mb-admin|mb-state|mb-store|mockingbird)/|crates/mb-console/web/e2e-)')"
 
   check:
     needs: changes
