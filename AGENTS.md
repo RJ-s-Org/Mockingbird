@@ -9,7 +9,7 @@ Read [`plugins/mockingbird/skills/mockingbird/SKILL.md`](plugins/mockingbird/ski
 ## Working on this repository
 
 - Rust workspace (`crates/*`), toolchain pinned in `rust-toolchain.toml`; the console is `crates/mb-console/web` (Node 22).
-- Before opening a pull request, run `scripts/gate.sh`: fmt, plus clippy, nextest and doctests for the crates you changed and their direct dependents, the console checks if you touched it, and the bench tests if you touched `scripts/llm-bench`. Don't run the full workspace locally; CI runs all of it on every pull request in a few minutes and is the full gate ([CONTRIBUTING.md](CONTRIBUTING.md#local-gates) lists everything CI runs).
+- Before opening a pull request, run `scripts/gate.sh`: fmt, plus clippy, nextest and doctests for the crates you changed and their direct dependents, the console checks if you touched it, and the bench tests if you touched `scripts/llm-bench`. Don't run the full workspace locally. A pull request's CI runs the same scope plus the jobs its files affect, and main runs the full list after merge ([CONTRIBUTING.md](CONTRIBUTING.md#local-gates)).
 - No `unwrap()`/`expect()` outside tests; Admin API errors are `application/problem+json`; secrets are references only.
 - After changing the Admin API, regenerate the console client: `npm run gen:api` in `crates/mb-console/web`.
 - New config keys go in `docs/configuration.md` and `docs/examples/mockingbird.full.yaml` (a test checks both).
@@ -17,13 +17,13 @@ Read [`plugins/mockingbird/skills/mockingbird/SKILL.md`](plugins/mockingbird/ski
 
 ## Shipping a change (agents)
 
-A single fix should go from opened pull request to merged in under 30 minutes. CI takes a few; the rest is review, so keep review bounded:
+A change should go from opened pull request to merged in under 30 minutes, with **one CI run**. CI is right-sized: a pull request runs only the jobs its files can affect, and main runs everything after merge. Keep both review and CI bounded:
 
-1. **One change per pull request.** Don't bundle fixes: every review round re-reads everything in the PR.
-2. **Gate, then open.** Run `scripts/gate.sh`, self-review the diff against the project rules in CONTRIBUTING.md, then open the PR.
+1. **One coherent change per pull request.** Small fixes in the same area that one reviewer can read together go in one PR. Unrelated changes don't.
+2. **Gate, then open as a draft.** Run `scripts/gate.sh`, self-review the diff against CONTRIBUTING.md, then `gh pr create --draft`. A draft runs no CI.
 3. **Review round 1 is exhaustive.** An independent reviewer (given the diff, not the author's reasoning) returns every finding in one pass, each marked *blocking* (wrong behaviour, broken rule, missing test for the change) or *non-blocking* (style, naming, follow-up ideas).
 4. **Review round 2 only verifies** the blocking fixes. It raises nothing new unless a fix introduced a bug. Non-blocking findings go on a follow-up list (an issue or the next PR), never into another round.
 5. **No round 3.** If blockers remain after round 2, stop and escalate to whoever is coordinating (the orchestrator session or the user) instead of looping.
-6. **Arm auto-merge on approval:** `gh pr merge --squash --auto`. Don't wait for a later turn to merge.
-7. **Don't merge `main` into the branch** unless there's a real conflict; `main` doesn't require up-to-date branches, and each merge costs a CI run.
-8. **Run independent changes in parallel**, each in its own worktree. Change files in series only when they really overlap.
+6. **On approval, run CI once:** rebase onto `origin/main` only if the PR conflicts, then `gh pr ready` and `gh pr merge --squash --auto`. Fix pushes made during review cost no CI because the PR is still a draft.
+7. **Don't rebase or merge `main` in otherwise.** `main` doesn't require up-to-date branches, and every push to a ready PR is a CI run.
+8. **Build independent changes in parallel** in their own worktrees. Merge PRs that touch the same files one at a time.

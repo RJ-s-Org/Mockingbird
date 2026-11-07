@@ -7,6 +7,7 @@ name: Docs
 # job is skipped. See docs/launch/checklist.md.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'docs/**'
       - '*.md'
@@ -37,6 +38,7 @@ env:
 
 jobs:
   build:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
     permissions:
       contents: read

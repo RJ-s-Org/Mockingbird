@@ -28,12 +28,17 @@ cd "$(git rev-parse --show-toplevel)"
 
 BASE="${BASE:-origin/main}"
 FULL=0
+PACKAGES=0
 [[ "${1:-}" == "--full" ]] && FULL=1
+# --packages: print what the Rust step would cover ("all", the package names, or
+# nothing) and exit. CI's `check` job uses it on pull requests.
+[[ "${1:-}" == "--packages" ]] && PACKAGES=1
 
 git fetch -q origin main 2>/dev/null || true
 base=$(git merge-base HEAD "$BASE") || { echo "gate: cannot find the merge base with $BASE" >&2; exit 2; }
 changed=$( { git diff --name-only "$base" HEAD; git diff --name-only HEAD; git ls-files --others --exclude-standard; } | sort -u )
 if [[ -z "$changed" && $FULL -eq 0 ]]; then
+  [[ $PACKAGES -eq 1 ]] && exit 0
   echo "gate: nothing changed against $BASE"
   exit 0
 fi
@@ -60,6 +65,11 @@ deps = {p["name"]: {d["name"] for d in p["dependencies"]} & names for p in m["pa
 hit |= {n for n, ds in deps.items() if ds & hit}
 print(" ".join(sorted(hit)))
 ')
+
+if [[ $PACKAGES -eq 1 ]]; then
+  if [[ $FULL -eq 1 ]]; then echo all; else echo "$pkgs"; fi
+  exit 0
+fi
 
 if [[ $FULL -eq 1 ]]; then
   step "full workspace"

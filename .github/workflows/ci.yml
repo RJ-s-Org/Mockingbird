@@ -4,7 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+
+# Right-sized: main (and a manual run) runs every job on the whole workspace. A pull
+# request runs only the jobs its files can affect, and `check` covers the crates it
+# changed plus their direct dependents (`scripts/gate.sh --packages`); main catches the
+# rest after merge. A draft pull request runs nothing: review it as a draft, then mark it
+# ready for one CI run. A skipped job counts as passed for the required checks.
 
 # A newer push to the same PR cancels the run it supersedes. Runs on main
 # are never cancelled, so every main commit reports a result and saves its
@@ -17,7 +24,50 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # What the change touches. Every other job reads these outputs.
+  changes:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.c.outputs.packages }}
+      protocols: ${{ steps.c.outputs.protocols }}
+      console: ${{ steps.c.outputs.console }}
+      deps: ${{ steps.c.outputs.deps }}
+      helm: ${{ steps.c.outputs.helm }}
+      ext: ${{ steps.c.outputs.ext }}
+      toolchain: ${{ steps.c.outputs.toolchain }}
+      image: ${{ steps.c.outputs.image }}
+    env:
+      # `cargo metadata` only; the runner's stable toolchain is enough.
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: c
+        run: |
+          out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
+          all() {
+            out packages all
+            for k in protocols console deps helm ext toolchain image; do out "$k" true; done
+          }
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then all; exit 0; fi
+          files=$(git diff --name-only "origin/$GITHUB_BASE_REF...HEAD")
+          # A change to CI itself runs everything.
+          if grep -qx '.github/workflows/ci.yml' <<<"$files"; then all; exit 0; fi
+          has() { grep -qE "$1" <<<"$files" && echo true || echo false; }
+          out packages "$(BASE="origin/$GITHUB_BASE_REF" scripts/gate.sh --packages)"
+          out protocols "$(has '^(crates/mb-protocols/|Cargo\.(toml|lock)$)')"
+          out console "$(has '^crates/(mb-console|mb-admin)/')"
+          out deps "$(has '^(Cargo\.(toml|lock)|deny\.toml)$')"
+          out helm "$(has '^(deploy/helm/|scripts/check-helm\.sh$)')"
+          out ext "$(has '^crates/mb-ext/')"
+          out toolchain "$(has '^(Cargo\.toml|rust-toolchain\.toml)$')"
+          out image "$(has '^(Dockerfile|\.dockerignore$|deploy/|crates/mb-auth/|crates/mb-state/|crates/mb-store/)')"
+
   check:
+    needs: changes
+    if: needs.changes.outputs.packages != ''
     runs-on: ${{ vars.CI_RUNNER_LARGE || 'ubuntu-latest' }}
     env:
       MB_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
@@ -73,7 +123,15 @@ jobs:
       # librdkafka 2.12 includes <curl/curl.h> even when built without curl.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Which packages
+        id: pkgs
+        env:
+          PACKAGES: ${{ needs.changes.outputs.packages }}
+        run: |
+          if [ "$PACKAGES" = all ]; then echo "args=--workspace" >> "$GITHUB_OUTPUT"; exit 0; fi
+          args=""; for p in $PACKAGES; do args="$args -p $p"; done
+          echo "args=$args" >> "$GITHUB_OUTPUT"
+      - run: cargo clippy ${{ steps.pkgs.outputs.args }} --all-targets --all-features -- -D warnings
       - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-nextest
@@ -101,8 +159,8 @@ jobs:
           ready kafka /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092
       # Profile and test groups: .config/nextest.toml. nextest skips
       # doctests, so they run on their own.
-      - run: cargo nextest run --workspace --all-features --profile ci
-      - run: cargo test --doc --workspace --all-features
+      - run: cargo nextest run ${{ steps.pkgs.outputs.args }} --all-features --profile ci --no-tests=pass
+      - run: cargo test --doc ${{ steps.pkgs.outputs.args }} --all-features
 
   # Each mb-protocols feature (and none) must build on its own, warnings
   # included (P4 Global Constraints; P5 adds the event features). One job
@@ -111,6 +169,8 @@ jobs:
   # `check`; RUSTFLAGS denies warnings in every step. No Node: mb-console's
   # build.rs writes a placeholder console page when dist/ is missing.
   protocol-features:
+    needs: changes
+    if: needs.changes.outputs.protocols == 'true'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     env:
       RUSTFLAGS: -D warnings
@@ -141,6 +201,8 @@ jobs:
         run: cargo doc --workspace --no-deps --all-features
 
   console:
+    needs: changes
+    if: needs.changes.outputs.console == 'true'
     # Stays on the 2 vCPU runner: console (116-199 s on PRs) finishes before
     # e2e and check, so the large runner would cost more for no shorter run
     # (audit CI-5, measured 2026-10-30).
@@ -181,6 +243,8 @@ jobs:
           if-no-files-found: ignore
 
   deny:
+    needs: changes
+    if: needs.changes.outputs.deps == 'true'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
@@ -188,6 +252,8 @@ jobs:
 
   # Lints and renders the Helm chart and validates it with kubeconform.
   helm:
+    needs: changes
+    if: needs.changes.outputs.helm == 'true'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
@@ -195,6 +261,8 @@ jobs:
 
   # The mb-ext public API against the last release tag.
   semver:
+    needs: changes
+    if: needs.changes.outputs.ext == 'true'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     env:
       # Pinned: a new release can change which lints fail. Bump it here; the
@@ -244,6 +312,8 @@ jobs:
   # it equals the pinned toolchain, `check` already builds with it and this
   # job stops after the comparison.
   msrv:
+    needs: changes
+    if: needs.changes.outputs.toolchain == 'true'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
@@ -270,6 +340,8 @@ jobs:
         run: cargo +1.97 check --workspace --all-features --locked
 
   e2e:
+    needs: changes
+    if: needs.changes.outputs.image == 'true'
     runs-on: ${{ vars.CI_RUNNER_LARGE || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
