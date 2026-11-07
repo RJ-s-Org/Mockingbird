@@ -979,6 +979,42 @@ pub(super) async fn after_update(
         .await;
 }
 
+impl Tokens {
+    /// Whether every token the update advances is one minted anew when an answer leaves
+    /// it as it was: only a model moves any other, as its answer shows.
+    pub(super) fn all_mintable(&self) -> bool {
+        self.advancing.iter().all(|m| self.mintable.contains(m))
+    }
+}
+
+/// An executed update's tokens (see [`check`]): each it advances that is minted anew
+/// when an answer leaves it as it was (an `If-Match` or a described token), and that
+/// `after`, its new record of type `t` (`id`), leaves as it was, minted there as
+/// [`after_update`] mints one the model left, when the new value fits its member's
+/// schema. Any other token stays as it was, as when the model leaves it.
+pub(super) fn advance(
+    rt: &MockRuntime,
+    (t, id): (&str, &str),
+    tokens: &Tokens,
+    before: &Value,
+    after: &mut Value,
+) {
+    for member in &tokens.mintable {
+        let (Some(was), Some(now)) = (before.get(member), after.get(member)) else {
+            continue;
+        };
+        if compared(was) != compared(now) {
+            continue;
+        }
+        if let Some(new) =
+            mint(was, &format!("{t}\0{id}")).filter(|new| mint_fits(rt, t, member, new))
+            && let Value::Object(record) = after
+        {
+            record.insert(member.clone(), new);
+        }
+    }
+}
+
 /// After any 2xx delete of `t` `id`, whatever answered it: its tokens go with it. The
 /// index keeps the entry, which the bound takes out.
 pub(super) async fn forget(state: &mut StateAccess<'_>, session: &SessionKey, t: &str, id: &str) {

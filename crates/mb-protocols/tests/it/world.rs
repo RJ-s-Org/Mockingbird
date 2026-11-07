@@ -2439,6 +2439,8 @@ async fn a_create_under_a_shown_parent_can_be_refused_as_declared() {
     assert!(prompt.contains("contradict"), "{prompt}");
     // The status as the prompt lists one, not a digit run its clock may hold.
     assert!(!prompt.contains("401:"), "{prompt}");
+    // A refusal status listed, not any "401" (the prompt's Unix time may hold one).
+    assert!(!prompt.contains("- 401"), "{prompt}");
     assert_eq!(
         format_schema(&h, 0)["properties"]["refusal"],
         json!({"type": "integer", "enum": [409, 422]})
@@ -2544,7 +2546,11 @@ async fn a_declared_header_reaches_the_prompt_and_its_token_does_not() {
         .header("content-type", "application/json")
         .header("authorization", "Bearer tok-very-secret")
         .header("x-entry-version", "2")
-        .body(Body::from(json!({"title": "b"}).to_string()))
+        // A member no entry declares leaves the write to the model, whose prompt this
+        // is about.
+        .body(Body::from(
+            json!({"title": "b", "comment": "x"}).to_string(),
+        ))
         .unwrap();
     let resp = h.router.clone().oneshot(req).await.unwrap();
     let prompt = h.prompt(0);

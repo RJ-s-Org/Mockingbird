@@ -293,7 +293,10 @@ async fn a_constant_api_version_header_never_pairs_with_the_version() {
         StatusCode::OK,
         "same constant API version refused as stale: {b}"
     );
-    assert_eq!(h.calls(), 3);
+    // The first write's header makes `version` a candidate, a token only the model
+    // moves, so the model answers it; the second, the candidate dropped, is the
+    // state-first executor's.
+    assert_eq!(h.calls(), 2);
 }
 
 /// An entity tag holding a comma (a legal `etagc`, RFC 9110) is one tag: the client's
@@ -308,11 +311,13 @@ async fn a_quoted_etag_holding_a_comma_is_one_tag() {
     ]);
     h.send("POST", "/notes", Some(json!({"title": "a"})), &[])
         .await;
+    // The etag is the model's: each write sends a member no note declares, which the
+    // state-first executor leaves to the model.
     let (s, _, b) = h
         .send(
             "PATCH",
             "/notes/n1",
-            Some(json!({"title": "b"})),
+            Some(json!({"title": "b", "comment": "x"})),
             &[("If-Match", "\"e1\"")],
         )
         .await;
@@ -322,7 +327,7 @@ async fn a_quoted_etag_holding_a_comma_is_one_tag() {
         .send(
             "PATCH",
             "/notes/n1",
-            Some(json!({"title": "c"})),
+            Some(json!({"title": "c", "comment": "x"})),
             &[("If-Match", "\"x,y\"")],
         )
         .await;

@@ -754,7 +754,7 @@ impl<'a> Level<'a> {
 }
 
 /// Whether the contract says a client does not set this member.
-fn read_only(bundle: &mb_mcm::Bundle, schema: Option<&Value>) -> bool {
+pub(super) fn read_only(bundle: &mb_mcm::Bundle, schema: Option<&Value>) -> bool {
     schema_parts(bundle, schema)
         .0
         .iter()
@@ -1421,6 +1421,20 @@ fn same_request(one: &Value, other: &Value) -> bool {
         v
     };
     timeless(one) == timeless(other)
+}
+
+/// Whether any request is remembered for stored record `t` `id`: writes it does not
+/// show yet, or that only referred to it, for its next read to catch up on.
+pub(super) async fn remembers(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    t: &str,
+    id: &str,
+) -> bool {
+    !read_memory(state, session, &memory_key(t, id, true))
+        .await
+        .requests
+        .is_empty()
 }
 
 /// Forgets every request remembered for stored record `t` `id`: a write the executor
@@ -2309,7 +2323,7 @@ fn says_foreign(rt: &MockRuntime, r: &StoredResource, owner: &Owner) -> bool {
 
 /// `body` without the members that would make `held` say it is another owner's than
 /// the path names (see [`guarded`]).
-fn without_contradictions(
+pub(super) fn without_contradictions(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,

@@ -451,7 +451,8 @@ async fn writes_with_nothing_to_refuse_reach_the_llm() {
         StatusCode::OK,
         "no 409 or 412 declared"
     );
-    assert_eq!(h.calls(), 3);
+    // With no token to move, the state-first executor answers both drafts' writes.
+    assert_eq!(h.calls(), 1);
 }
 
 /// A problem's `title` is no record's: a `409` declaring one ties nothing, so the
@@ -481,7 +482,8 @@ async fn a_problem_409_ties_no_member() {
         StatusCode::OK
     );
     assert_eq!(h.held("items", "i1").await["title"], "c");
-    assert_eq!(h.calls(), 4);
+    // With no token to move, the state-first executor answers each update itself.
+    assert_eq!(h.calls(), 1);
 }
 
 /// "A project with this `name` already exists" names a member the write sets: no
@@ -514,7 +516,9 @@ async fn a_member_the_write_sets_is_no_token() {
         h.put("/projects/p1", json!({"name": "c"})).await,
         StatusCode::OK
     );
-    assert_eq!(h.calls(), 4);
+    assert_eq!(h.held("projects", "p1").await["name"], "c");
+    // With no token to move, the state-first executor answers each rename itself.
+    assert_eq!(h.calls(), 1);
 }
 
 /// A member another write of the type sets is no token, whichever write's `409` names
@@ -550,7 +554,8 @@ async fn a_member_any_write_sets_is_no_token() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(h.calls(), 3);
+    // With no token to move, the state-first executor answers both itself.
+    assert_eq!(h.calls(), 1);
 }
 
 /// A `readOnly` state with an `enum` is no version, though a `409` names it: the
@@ -580,7 +585,8 @@ async fn a_read_only_enum_state_is_no_token() {
 }
 
 /// A token a query parameter sets to a new value is the client's: it is not advanced,
-/// and the query's value stands.
+/// and the query's value stands. (The state-first executor leaves a write setting a
+/// `readOnly` member anew to the model.)
 #[tokio::test]
 async fn a_token_the_query_sets_is_the_clients() {
     let h = harness(vec![doc("a", 1), answer(doc("b", 2))]);

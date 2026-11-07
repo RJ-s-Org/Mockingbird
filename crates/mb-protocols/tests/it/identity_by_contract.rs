@@ -170,7 +170,8 @@ async fn one_auth0_user_on_every_route() {
     };
     let h = harness(
         &contract,
-        vec![user("ann"), user("annie"), json!([user("annie")])],
+        // The patch is the state-first executor's: no answer of the model's.
+        vec![user("ann"), json!([user("annie")])],
     );
 
     let create = json!({"connection": "Username-Password-Authentication", "email": "ann@example.com", "name": "Ann"});
@@ -195,7 +196,7 @@ async fn one_auth0_user_on_every_route() {
     let (_, source, read) = h.call("GET", path, None).await;
     assert_eq!(source, "state", "{read}");
     assert_eq!(read["nickname"], "annie");
-    assert_eq!(h.calls(), 2);
+    assert_eq!(h.calls(), 1);
 
     // The lookup is shown the stored user, of the type it reads.
     let (status, _, found) = h
@@ -207,8 +208,8 @@ async fn one_auth0_user_on_every_route() {
         .await;
     assert_eq!(status, StatusCode::OK, "{found}");
     assert_eq!(found[0]["user_id"], id);
-    assert_eq!(h.calls(), 3);
-    let lookup = format!("{:?}", h.provider.requests()[2]);
+    assert_eq!(h.calls(), 2);
+    let lookup = format!("{:?}", h.provider.requests()[1]);
     assert!(lookup.contains("annie"), "{lookup}");
     assert_eq!(h.exported().await, [("users".to_owned(), id.to_owned())]);
 
@@ -326,9 +327,10 @@ async fn a_contract_with_an_id_is_as_it_was() {
     let (_, source, read) = h.call("GET", "/things/w-1", None).await;
     assert_eq!(source, "state", "{read}");
     assert_eq!(read["name"], "two");
-    assert_eq!(h.calls(), 2);
+    // The patch is the state-first executor's.
+    assert_eq!(h.calls(), 1);
     h.call("DELETE", "/things/w-1", None).await;
     let (status, _, _) = h.call("GET", "/things/w-1", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(h.calls(), 2);
+    assert_eq!(h.calls(), 1);
 }

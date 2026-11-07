@@ -600,7 +600,9 @@ pub(super) fn render(
                 .collect()
         })
         .unwrap_or_default();
+    // A nested identity (`info.label`) is in the member that holds it.
     if let Some(field) = op.identity.as_ref().map(|i| i.field.as_str())
+        && !field.contains('.')
         && declares(field)
         && !shown.contains_key(field)
     {

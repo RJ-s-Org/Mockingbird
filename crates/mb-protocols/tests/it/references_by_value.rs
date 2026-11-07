@@ -853,9 +853,9 @@ async fn a_deleted_record_no_longer_counts() {
 /// one names it.
 #[tokio::test]
 async fn an_updated_record_matches_its_new_value_only() {
+    // The update is the state-first executor's: no answer of the model's.
     let h = harness(vec![
         contact("ct-000101", "old.mail@example.com"),
-        contact("ct-000101", "new.mail@example.com"),
         json!({"id": "tk-000001", "subject": "Help"}),
         ticket("tk-000002", json!({})),
     ]);

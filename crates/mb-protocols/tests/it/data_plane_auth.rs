@@ -288,8 +288,10 @@ async fn passthrough_declared_api_keys_never_reach_prompt_or_record() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
+    // The search's prompt; the `PUT` of the record it stored is the state-first
+    // executor's, which writes none.
     let requests = provider.requests();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 1);
     let leaks = ["qsecret", "csecret", "hsecret"];
     for (i, request) in requests.iter().enumerate() {
         let prompt: String = request
