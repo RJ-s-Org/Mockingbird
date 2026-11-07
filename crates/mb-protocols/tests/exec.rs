@@ -3818,6 +3818,16 @@ paths:
       operationId: getTask
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}}
+  /docs:
+    post:
+      operationId: createDoc
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}, owner: {}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /docs/{id}:
+    get:
+      operationId: getDoc
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Doc"}}}}}
   /members/{id}:
     get:
       operationId: getMember
@@ -3826,7 +3836,7 @@ paths:
   /issues:
     post:
       operationId: createIssue
-      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}, labels: {type: string}, notes: {type: string}}}}}}
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}, labels: {type: string}, notes: {type: string}, zip: {type: integer}, count: {type: string}, open: {type: string}}}}}}
       responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
   /issues/{id}:
     get:
@@ -3919,6 +3929,13 @@ components:
       type: object
       required: [id, name]
       properties: {id: {type: string}, name: {type: string}}
+    Doc:
+      type: object
+      required: [id, title, owner]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        owner: {anyOf: [{$ref: "#/components/schemas/Member"}, {type: "null"}]}
     Task:
       type: object
       required: [id, name, assignee]
@@ -3934,6 +3951,9 @@ components:
         title: {type: string}
         labels: {type: array, items: {type: string}}
         notes: {type: array, items: {type: object, required: [body], properties: {body: {type: string}}}}
+        zip: {type: string}
+        count: {type: integer}
+        open: {type: boolean}
     Conversation:
       type: object
       required: [id, type, body]
@@ -4023,21 +4043,23 @@ async fn a_nullable_reference_through_an_all_of_is_embedded_or_settled() {
     );
     let id = body["id"].as_str().unwrap().to_owned();
     let stored = h.stored(&t, &id).await.unwrap();
-    assert_ne!(stored["assignee"], json!("u404"), "never the raw reference");
-    assert!(stored.get("assignee").is_some(), "{stored}");
+    assert_eq!(
+        stored["assignee"],
+        json!(null),
+        "a reference to no held record names none: never the raw id, never invented"
+    );
+    assert!(
+        stored.as_object().unwrap().contains_key("assignee"),
+        "{stored}"
+    );
 }
 
 #[tokio::test]
-async fn a_member_sent_as_another_json_type_is_converted_or_filled() {
+async fn a_member_sent_as_another_json_type_is_converted_losing_nothing() {
     let (capture, _guard) = Capture::install();
-    // The fill's answer for the notes the text could not become.
-    let h = support::harness(
-        SERVER_SET,
-        vec![json!({"notes": [{"body": "n"}]})],
-        &HarnessOptions::default(),
-        |rt| rt,
-    );
-    let sent = json!({"title": "t", "labels": "bug, ui", "notes": "hello"});
+    let h = support::harness(SERVER_SET, vec![], &HarnessOptions::default(), |rt| rt);
+    let sent =
+        json!({"title": "t", "labels": "bug,ui", "zip": 94107, "count": "3", "open": "true"});
     let (status, _, body) = h.send("POST", "/issues", Some(sent), &[]).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(
@@ -4046,8 +4068,41 @@ async fn a_member_sent_as_another_json_type_is_converted_or_filled() {
     );
     let id = body["id"].as_str().unwrap().to_owned();
     let stored = h.stored(&type_of(&h, "getIssue"), &id).await.unwrap();
-    assert_eq!(stored["labels"], json!(["bug", "ui"]), "nothing lost");
-    assert_eq!(stored["notes"], json!([{"body": "n"}]), "filled");
+    assert_eq!(stored["labels"], json!(["bug", "ui"]));
+    assert_eq!(stored["zip"], json!("94107"));
+    assert_eq!(stored["count"], json!(3));
+    assert_eq!(stored["open"], json!(true));
+}
+
+#[tokio::test]
+async fn a_member_of_another_json_type_with_no_lossless_form_is_refused_never_filled() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(
+        SERVER_SET,
+        vec![json!({"id": "i-gen"})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    // Neither text becomes what the reads hold without losing or inventing something.
+    for (sent, why) in [
+        (
+            json!({"title": "t", "labels": "a", "notes": "hello"}),
+            "/notes type",
+        ),
+        (
+            json!({"title": "t", "labels": "a", "count": "0.50"}),
+            "/count type",
+        ),
+    ] {
+        let (status, _, body) = h.send("POST", "/issues", Some(sent), &[]).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let lines = capture.of("createIssue");
+        assert_eq!(
+            lines.last(),
+            Some(&invalid_line("createIssue", why)),
+            "{lines:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -4091,7 +4146,7 @@ async fn a_version_a_write_carries_starts_at_one() {
 }
 
 #[tokio::test]
-async fn a_server_set_boolean_is_never_null() {
+async fn a_nullable_boolean_fill_leaves_null_stays_null() {
     let (_capture, _guard) = Capture::install();
     let h = support::harness(
         SERVER_SET,
@@ -4103,7 +4158,7 @@ async fn a_server_set_boolean_is_never_null() {
         .send("POST", "/workspaces", Some(json!({"name": "w"})), &[])
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    assert_eq!(body["locked"], json!(false), "{body}");
+    assert_eq!(body["locked"], json!(null), "{body}");
 }
 
 #[tokio::test]
@@ -4137,18 +4192,40 @@ async fn a_member_whose_pattern_embeds_the_id_starts_with_the_record_s_id() {
 }
 
 #[tokio::test]
-async fn a_token_named_with_a_dot_is_a_member_of_its_own() {
+async fn an_embedded_record_s_id_is_never_invented_through_a_nullable_wrapper() {
     let (capture, _guard) = Capture::install();
-    let world = json!({"types": {"workspaces": {"concurrency": {"member": "@odata.etag"}}}});
+    let h = support::harness(
+        SERVER_SET,
+        vec![json!({"owner": {"id": "invented", "name": "Ann"}})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    // The owner is a member (`anyOf: [$ref, null]`) sent without its id.
+    let sent = json!({"title": "a", "owner": {"name": "Ann"}});
+    let (status, _, body) = h.send("POST", "/docs", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let lines = capture.of("createDoc");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(
+        lines[0].exec_fallback.as_deref(),
+        Some("record_invalid"),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_lifecycle_state_is_matched_to_its_member_s_enum_spelling() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"types": {"folders": {"lifecycle": {"member": "item_status", "initial": "ACTIVE"}}}});
     let h = support::described(SERVER_SET, world, Vec::new());
-    let (status, _, body) = h
-        .send("POST", "/workspaces", Some(json!({"name": "w"})), &[])
-        .await;
+    let sent = json!({"name": "docs", "parent": {"id": "0", "name": "root"}});
+    let (status, _, body) = h.send("POST", "/folders", Some(sent), &[]).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(
-        capture.of("createWorkspace"),
-        vec![create_line("createWorkspace", None)]
+        capture.of("createFolder"),
+        vec![create_line("createFolder", None)]
     );
-    assert!(body["@odata.etag"].is_string(), "{body}");
-    assert!(body.get("@odata").is_none(), "{body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+    let stored = h.stored("folders", &id).await.unwrap();
+    assert_eq!(stored["item_status"], json!("active"), "{stored}");
 }
