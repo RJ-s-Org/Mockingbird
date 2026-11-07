@@ -65,13 +65,13 @@ pub(super) async fn mint(
     if location && !of_own_collection(rt, t, path) {
         return None;
     }
-    let declared = record_id_schema(rt, t, field);
+    let (declared, held) = record_id_schema(rt, t, field);
     let string_identity = declared
         .as_ref()
         .and_then(|d| d.get("type"))
         .and_then(Value::as_str)
         == Some("string");
-    let checks = IdChecks::new(rt, declared.as_ref(), &header.schema, !location)?;
+    let checks = IdChecks::new(rt, held.as_ref(), &header.schema, !location)?;
     let carried = request_values(op, call);
     for _ in 0..ATTEMPTS {
         let Some(id) = draw(
@@ -218,18 +218,35 @@ fn is_item_of(item: &str, collection: &str) -> bool {
         })
 }
 
-/// The schema type `t`'s records declare their identity `field` with.
-fn record_id_schema(rt: &MockRuntime, t: &str, field: &str) -> Option<Value> {
+/// The schema type `t`'s records declare their identity `field` with, and the one
+/// every read of them holds it by: the record schema's or its read by id's, else the
+/// first read's ([`super::exec::read_schemas`]: a type read only by its lists); every
+/// read's member schema, together (an `allOf`), when they are more than one.
+fn record_id_schema(rt: &MockRuntime, t: &str, field: &str) -> (Option<Value>, Option<Value>) {
     let index = rt.index();
     let bundle = rt.bundle();
     let read = index
         .detail_reads
         .get(t)
         .and_then(|i| bundle.operations.get(*i)?.success_output()?.schema.as_ref());
-    [index.record_schemas.get(t), read]
+    let declared = [index.record_schemas.get(t), read]
         .into_iter()
         .flatten()
-        .find_map(|schema| property_schema(bundle, schema, field))
+        .find_map(|schema| property_schema(bundle, schema, field));
+    let mut all: Vec<Value> = declared.iter().cloned().collect();
+    for schema in super::exec::read_schemas(rt, t) {
+        if let Some(member) = property_schema(bundle, &schema, field)
+            && !all.contains(&member)
+        {
+            all.push(member);
+        }
+    }
+    let declared = declared.or_else(|| all.first().cloned());
+    let held = match all.len() {
+        0 | 1 => declared.clone(),
+        _ => Some(json!({"allOf": all})),
+    };
+    (declared, held)
 }
 
 /// The checks a minted id passes: as the header serves it, and as the record holds it.
@@ -324,14 +341,14 @@ fn draw(
 /// `None` when the draw is not one the records hold (a pattern past the member's
 /// `maxLength`). Whether the session holds it already is the caller's to check.
 pub(super) fn draw_record_id(rt: &MockRuntime, t: &str, field: &str) -> Option<Value> {
-    let declared = record_id_schema(rt, t, field);
+    let (declared, held) = record_id_schema(rt, t, field);
     let string = json!({"type": "string"});
     let string_identity = declared
         .as_ref()
         .and_then(|d| d.get("type"))
         .and_then(Value::as_str)
         == Some("string");
-    let checks = IdChecks::new(rt, declared.as_ref(), &string, false)?;
+    let checks = IdChecks::new(rt, held.as_ref(), &string, false)?;
     let id = draw(rt, declared.as_ref(), &string, string_identity, &checks)?;
     match id_string(&id).and_then(|text| records::in_pattern(rt, t, &text)) {
         Some(formed) => {

@@ -3398,3 +3398,66 @@ async fn a_create_whose_answer_does_not_render_falls_back_as_render_failed() {
         "the executor stored nothing: {stored:?} {body}"
     );
 }
+
+/// Columns and tags are read only in their lists, which hold their ids as an integer
+/// and as a 24-digit hex string.
+const LISTED_IDS: &str = r##"
+openapi: 3.0.0
+info: {title: Listed, version: "1"}
+paths:
+  /columns:
+    get:
+      operationId: listColumns
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Column"}}}}}}
+    post:
+      operationId: createColumn
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Column"}}}}}
+  /tags:
+    get:
+      operationId: listTags
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Tag"}}}}}}
+    post:
+      operationId: createTag
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Tag"}}}}}
+components:
+  schemas:
+    Column:
+      type: object
+      required: [id, name]
+      properties: {id: {type: integer}, name: {type: string}}
+    Tag:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string, pattern: "^[0-9a-f]{24}$"}, name: {type: string}}
+"##;
+
+#[tokio::test]
+async fn a_minted_id_fits_the_lists_that_read_its_record() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(LISTED_IDS, vec![], &HarnessOptions::default(), |rt| rt);
+    let (status, headers, body) = h
+        .send("POST", "/columns", Some(json!({"name": "todo"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert!(body["id"].is_i64(), "an integer id: {body}");
+    assert_eq!(
+        capture.of("createColumn"),
+        vec![create_line("createColumn", None)]
+    );
+    let (status, _, body) = h
+        .send("POST", "/tags", Some(json!({"name": "red"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        capture.of("createTag"),
+        vec![create_line("createTag", None)]
+    );
+    let id = body["id"].as_str().unwrap_or_default();
+    assert!(
+        id.len() == 24 && id.chars().all(|c| c.is_ascii_hexdigit()),
+        "{body}"
+    );
+}

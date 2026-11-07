@@ -152,6 +152,12 @@ fn identified(rt: &crate::MockRuntime, op: &mb_mcm::Operation, t: &str) -> bool 
             .is_some_and(|read| read.identity.is_some())
 }
 
+/// The schemas records of type `t` are read by: its read by id's record and each of
+/// its lists' items ([`create::read_schemas`]).
+pub(super) fn read_schemas(rt: &crate::MockRuntime, t: &str) -> Vec<Value> {
+    create::read_schemas(rt, t)
+}
+
 /// Whether the executor answers some list of records of type `t`: a list whose items
 /// have an identity ([`list::identified`]).
 pub(super) fn lists(rt: &crate::MockRuntime, t: &str) -> bool {
