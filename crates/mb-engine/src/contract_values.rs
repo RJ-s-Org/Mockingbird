@@ -34,7 +34,8 @@
 //!    `Error` says nothing of this status.
 //!
 //! A body an LLM wrote, valid already, keeps what it chose: only its members left
-//! empty (`null` or `""`) take a value. A member no source names keeps the faker's
+//! empty (`null` or `""`) take a value. A refusal decided from state is the mock's
+//! own, whoever wrote its body for the cause: every member takes the contract's value. A member no source names keeps the faker's
 //! value, and a number that is the response's own HTTP status, as the engine reflects
 //! it into a problem's `status`, is never changed. Each change is kept only while the whole body still validates, so a value
 //! that does not fit the branch the faker took changes nothing. Members are told apart by

@@ -2926,3 +2926,87 @@ async fn a_nested_create_holds_the_path_value_its_list_s_scope_matches() {
     );
     assert!(h.provider.requests().is_empty(), "no LLM call");
 }
+
+/// Chargebee's customers: an id the client may give, unique, and the code the API's
+/// description says a taken one is refused with.
+const CUSTOMERS: &str = r##"
+openapi: 3.0.0
+info:
+  title: Customers
+  version: "1"
+  description: |
+    A customer's `id` can be given on create; it is unique, and a create with an id
+    in use is refused with 400 and `api_error_code` `duplicate_entry`.
+paths:
+  /customers:
+    post:
+      operationId: createCustomer
+      requestBody: {content: {application/json: {schema: {type: object, properties: {id: {type: string}, name: {type: string}}}}}}
+      responses:
+        "200": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Customer"}}}}
+        "400": {description: invalid, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+  /customers/{id}:
+    get:
+      operationId: getCustomer
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Customer"}}}}
+        "404": {description: missing, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+components:
+  schemas:
+    Customer:
+      type: object
+      required: [id]
+      properties: {id: {type: string}, name: {type: string}}
+    Error:
+      type: object
+      required: [message, api_error_code]
+      properties:
+        message: {type: string}
+        api_error_code: {type: string, description: "What went wrong: `duplicate_entry`, `resource_not_found` and so on."}
+"##;
+
+/// A unique set refused from state takes what the contract says of that refusal, over
+/// the body the model wrote once for the cause, as a generated create's refusal does.
+#[tokio::test]
+async fn a_unique_refusal_from_state_takes_the_contract_s_code() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({"types": {"customers": {
+        "identity": {"member": "id"},
+        "unique": [{"members": ["id"], "conflict": 400}]
+    }}});
+    let h = support::harness(
+        CUSTOMERS,
+        vec![
+            json!({"id": "c1", "name": "Ana"}),
+            json!({"message": "taken", "api_error_code": "val2"}),
+        ],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/customers",
+            Some(json!({"id": "c1", "name": "Ana"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, headers, body) = h
+        .send(
+            "POST",
+            "/customers",
+            Some(json!({"id": "c1", "name": "Rui"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body["api_error_code"], json!("duplicate_entry"), "{body}");
+    assert_eq!(
+        body["message"],
+        json!("id 'c1' is already in use"),
+        "{body}"
+    );
+}
