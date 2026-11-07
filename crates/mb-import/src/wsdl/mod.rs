@@ -14,7 +14,7 @@ use crate::openapi3::{invalid, slug};
 use crate::proto::hex_digest;
 use crate::{Ctx, ImportError, SourceFile, SourceFormat};
 use mb_mcm::{
-    Binding, Bundle, EMBEDDED_SCHEMAS_NS, Effect, Identity, InputSchemas, Operation, OperationKind,
+    Binding, Bundle, EMBEDDED_SCHEMAS_NS, Identity, InputSchemas, Operation, OperationKind,
     OutputVariant, Protocol, ProtocolPayload, RecordAt, SoapVersion, StatusSelector,
 };
 use serde_json::{Map, Value, json};
@@ -778,10 +778,14 @@ fn type_key(
 /// The identity of an answer with no `id` of its own that holds a record of
 /// `resource_type` keyed for the type: the one member named for the type
 /// ([`name_stem`]) holding an object with an `id`, `@id` or [`type_key`] (eBay's
-/// `GetItemResponse` holding `Item` keyed by `ItemID`), else a [`type_key`] of the
-/// answer itself (`AddItemResponse` answering the new `ItemID`). The request names
-/// the record by the member of the key's name at its top, when it has one.
+/// `GetItemResponse` holding `Item` keyed by `ItemID`), else, for a read, a
+/// [`type_key`] of the answer itself (`GetItemStatusResponse` answering `ItemID` and
+/// its status). A write's answer with only the key at its top (`AddItemResponse`
+/// answering `{Ack, ItemID}`) is an acknowledgement, not the record, so it gives no
+/// identity: storing it would put `Ack` in the record. The request names the record by
+/// the member of the key's name at its top, when it has one.
 fn type_keyed_identity(
+    kind: &OperationKind,
     input: Option<&Value>,
     output: Option<&Value>,
     resource_type: &str,
@@ -803,7 +807,7 @@ fn type_keyed_identity(
         });
     let (record, field) = match (held.next(), held.next()) {
         (Some((member, key)), None) => (Some(RecordAt::Member(member)), key),
-        (None, _) => (None, type_key(props, resource_type, defs)?),
+        (None, _) if *kind == OperationKind::Query => (None, type_key(props, resource_type, defs)?),
         _ => return None,
     };
     let input_field = input
@@ -817,66 +821,6 @@ fn type_keyed_identity(
         path_field: None,
         record,
     })
-}
-
-/// Types a create that names no record type with a key (`AddFixedPriceItem`) by the
-/// record it sends: the one member of its request that refers to a schema is the
-/// record another operation answers under its identity's member (`GetItem`'s `Item`),
-/// of one type only. The create is of that type, keyed as it is, when its answer
-/// holds that key at its top (`ItemID`).
-fn type_creates_by_record(ops: &mut [Operation], defs: &Map<String, Value>) {
-    fn answered<'a>(
-        op: &'a Operation,
-        defs: &'a Map<String, Value>,
-    ) -> Option<&'a Map<String, Value>> {
-        op.success_output()
-            .and_then(|o| o.schema.as_ref())
-            .and_then(|s| top_properties(s, defs))
-    }
-    let mut records: Vec<(Value, String, String)> = Vec::new();
-    for op in ops.iter() {
-        let (Some(t), Some(identity)) = (&op.resource_type, &op.identity) else {
-            continue;
-        };
-        let Some(RecordAt::Member(member)) = &identity.record else {
-            continue;
-        };
-        let Some(schema) = answered(op, defs).and_then(|p| p.get(member)) else {
-            continue;
-        };
-        let record = (schema.clone(), t.clone(), identity.field.clone());
-        if schema.get("$ref").is_some() && !records.contains(&record) {
-            records.push(record);
-        }
-    }
-    for op in ops.iter_mut() {
-        if op.kind != OperationKind::Command(Effect::Create) || op.identity.is_some() {
-            continue;
-        }
-        let Some(sent) = op.input.body.as_ref().and_then(|b| top_properties(b, defs)) else {
-            continue;
-        };
-        let refs: Vec<&Value> = sent.values().filter(|s| s.get("$ref").is_some()).collect();
-        let [one] = refs.as_slice() else {
-            continue;
-        };
-        let mut of = records.iter().filter(|(schema, _, _)| schema == *one);
-        let (Some((_, t, key)), None) = (of.next(), of.next()) else {
-            continue;
-        };
-        if !answered(op, defs).is_some_and(|p| p.contains_key(key)) {
-            continue;
-        }
-        let (t, key) = (t.clone(), key.clone());
-        op.resource_type = Some(t);
-        op.identity = Some(Identity {
-            path_param: None,
-            field: key,
-            input_field: None,
-            path_field: None,
-            record: None,
-        });
-    }
 }
 
 /// Which side of an operation a message is on.
@@ -1133,6 +1077,7 @@ impl<'a> Wsdl<'a> {
         let input = self.body(&ctx, Side::Input, input_msg)?;
         let output = self.body(&ctx, Side::Output, output_msg)?;
         let resource_type = resource_from_name(name);
+        let kind = kind_from_name(name, OperationKind::Query);
         let identity = id_field(output.as_ref(), defs)
             .map(|field| Identity {
                 path_param: None,
@@ -1143,6 +1088,7 @@ impl<'a> Wsdl<'a> {
             })
             .or_else(|| {
                 type_keyed_identity(
+                    &kind,
                     input.as_ref(),
                     output.as_ref(),
                     resource_type.as_deref()?,
@@ -1176,7 +1122,7 @@ impl<'a> Wsdl<'a> {
                 version: service.version,
                 address_path: service.address_path.clone(),
             },
-            kind: kind_from_name(name, OperationKind::Query),
+            kind,
             summary: joined([documentation(op), binding_op.and_then(documentation)], " "),
             input: InputSchemas {
                 path: None,
@@ -1230,7 +1176,6 @@ impl<'a> Wsdl<'a> {
                 op.id = format!("{service}.{}", op.id);
             }
         }
-        type_creates_by_record(&mut ops, defs);
         Ok(ops)
     }
 }

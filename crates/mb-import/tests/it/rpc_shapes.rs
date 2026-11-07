@@ -410,11 +410,13 @@ fn a_soap_record_named_for_its_type_is_read_by_its_type_key() {
             Some(RecordAt::Member("Item".into()))
         )
     );
-    // The create sends the record the read answers, so it creates one of its type.
+    // The create answers an acknowledgement (`{Ack, ItemID}`), not the record it sends,
+    // and nothing names the sent `Item` as the record: it keeps its name's type and no
+    // identity, so the acknowledgement is never stored as an item.
     let add = op(&b, "AddFixedPriceItem");
     assert_eq!(add.kind, OperationKind::Command(Effect::Create));
-    assert_eq!(add.resource_type.as_deref(), Some("item"));
-    assert_eq!(add.identity, identity("ItemID", None, None));
+    assert_eq!(add.resource_type.as_deref(), Some("fixedpriceitem"));
+    assert_eq!(add.identity, None);
     // A name with no verb stays what it was: no write is guessed.
     let revise = op(&b, "ReviseFixedPriceItem");
     assert_eq!(revise.kind, OperationKind::Query);
@@ -433,4 +435,17 @@ fn a_soap_record_named_for_its_type_is_read_by_its_type_key() {
             .and_then(|i| i.member.as_deref()),
         Some("ItemID")
     );
+}
+
+/// A create named for its type (`AddItem`) that answers an acknowledgement and the new
+/// key (`{Ack, ItemID}`) is not keyed by that answer: the answer is not the record, so
+/// it must never be stored as one.
+#[test]
+fn a_soap_create_answering_an_acknowledgement_keeps_no_identity() {
+    let wsdl = TRADING.replace("AddFixedPriceItem", "AddItem");
+    let b = compile(wsdl.as_bytes()).unwrap();
+    let add = op(&b, "AddItem");
+    assert_eq!(add.kind, OperationKind::Command(Effect::Create));
+    assert_eq!(add.resource_type.as_deref(), Some("item"));
+    assert_eq!(add.identity, None);
 }
