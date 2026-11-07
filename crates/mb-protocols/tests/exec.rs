@@ -1827,8 +1827,8 @@ async fn a_path_less_rpc_read_names_its_target_by_a_body_member() {
 #[tokio::test]
 async fn a_create_stores_and_answers_the_request_s_record_with_a_minted_id() {
     let (capture, _guard) = Capture::install();
-    // The fill's answer: a value for what the request left out that a read requires
-    // (`size`); an optional member (`color`), an id and a name it never takes.
+    // The fill's answer: a value for what the request left out, required (`size`) or
+    // not (`color`); an id and a name it never takes.
     let h = support::harness(
         CREATES,
         vec![json!({"id": "w-model", "size": 3, "color": "teal", "name": "not sent"})],
@@ -1844,7 +1844,7 @@ async fn a_create_stores_and_answers_the_request_s_record_with_a_minted_id() {
     assert_ne!(id, "w-model", "the id is minted, never filled");
     assert_eq!(
         body,
-        json!({"id": id, "name": "a", "size": 3}),
+        json!({"id": id, "name": "a", "size": 3, "color": "teal"}),
         "the request's values stand; fill writes only what it left out"
     );
     assert_eq!(
@@ -3155,6 +3155,16 @@ paths:
       operationId: getPipeline
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Pipeline"}}}}}
+  /deals:
+    post:
+      operationId: createDeal
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}, org_id: {type: integer}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Deal"}}}}}
+  /deals/{id}:
+    get:
+      operationId: getDeal
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Deal"}}}}}
   /users/{id}:
     get:
       operationId: getUser
@@ -3225,6 +3235,10 @@ components:
         id: {type: string}
         name: {type: string}
         owner: {$ref: "#/components/schemas/User"}
+    Deal:
+      type: object
+      required: [id, title]
+      properties: {id: {type: string}, title: {type: string}, org_id: {type: integer}, stage: {type: string}, probability: {type: integer}}
     User:
       type: object
       required: [id, name]
@@ -3497,4 +3511,32 @@ async fn a_minted_id_fits_the_lists_that_read_its_record() {
         id.len() == 24 && id.chars().all(|c| c.is_ascii_hexdigit()),
         "{body}"
     );
+}
+
+#[tokio::test]
+async fn unsent_optional_members_are_filled_but_a_reference_the_request_could_send() {
+    let (capture, _guard) = Capture::install();
+    // The fill's answer: the optional members, and an `org_id` it never takes.
+    let h = support::harness(
+        GATED,
+        vec![json!({"stage": "open", "probability": 50, "org_id": 7})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let (status, headers, body) = h
+        .send("POST", "/deals", Some(json!({"title": "big"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+    let record = json!({"id": id, "title": "big", "stage": "open", "probability": 50});
+    assert_eq!(body, record, "no organization the request did not name");
+    let t = type_of(&h, "getDeal");
+    assert_eq!(h.stored(&t, &id).await, Some(record));
+    assert_eq!(
+        capture.of("createDeal"),
+        vec![create_line("createDeal", None)]
+    );
+    let prompt = &h.provider.requests()[0].messages[1].content;
+    assert!(!prompt.contains("org_id"), "{prompt}");
 }

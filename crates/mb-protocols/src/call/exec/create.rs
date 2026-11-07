@@ -17,7 +17,9 @@
 //!   lifecycle's `initial` is then set. Before fill, a member the request did not send
 //!   whose schema decides its value (a `const`, a one-value `enum`: GraphQL's
 //!   `__typename`; a `default`) takes that value, at any depth the record holds
-//!   ([`preset`]), optional members included.
+//!   ([`preset`]), optional members included. Fill then writes every other member
+//!   the record declares that nothing set, optional ones too, but a reference to
+//!   another record the request could have sent ([`unsent_reference`]).
 //! - Before it is stored, the record is checked against every read of its type
 //!   ([`read_schemas`]), as those reads render it: one a read would not render (a
 //!   reference where the read holds an object, an array item lacking a required id)
@@ -187,7 +189,20 @@ pub(super) async fn run(
     // So does one whose request schema gives the value the server assumes when it is
     // left out (harvest's `is_active: {default: true}`), where the record holds it.
     preset_from_request(rt, op, &shape, &mut data, &owned);
-    let missing = gaps(rt, &shape.schemas, &data, &owned);
+    let mut missing = gaps(rt, &shape.schemas, &data, &owned);
+    // And every other member nobody set, but a reference the request could have sent.
+    if let Value::Object(known) = &data {
+        let request_schema = request_schema(rt, op);
+        for (name, member) in &shape.members {
+            if !known.contains_key(name)
+                && !owned.contains(name)
+                && !missing.iter().any(|(m, _)| m == name)
+                && !unsent_reference(rt, request_schema.as_ref(), name, member)
+            {
+                missing.push((name.clone(), member.clone()));
+            }
+        }
+    }
     let mut usage = mb_llm::Usage::default();
     if !missing.is_empty()
         && let Value::Object(known) = &mut data
@@ -792,24 +807,8 @@ fn preset_from_request(
     owned: &[String],
 ) {
     let bundle = rt.bundle();
-    let Some(body) = op.input.body.as_ref() else {
+    let Some(schema) = request_schema(rt, op) else {
         return;
-    };
-    let pointer = rt
-        .described()
-        .op(&op.id)
-        .and_then(|d| d.request.as_ref())
-        .and_then(|r| r.record.as_ref())
-        .map(|p| p.as_str().to_owned());
-    let schema = match pointer.as_deref() {
-        None | Some("") => body.clone(),
-        Some(at) => {
-            let steps = at.trim_start_matches('/').replace('/', ".");
-            match property_schema(bundle, body, &steps) {
-                Some(schema) => schema,
-                None => return,
-            }
-        }
     };
     let mut preset_copy = record.clone();
     let fits = |schema: &Value, value: &Value| fits(rt, schema, value);
@@ -970,6 +969,48 @@ fn fits(rt: &crate::MockRuntime, schema: &Value, value: &Value) -> bool {
     rt.engine
         .schema_violations(rt.bundle(), schema, value)
         .is_some_and(|v| v.is_empty())
+}
+
+/// The schema of the record `op`'s request holds: its body's, at the described
+/// `request.record`.
+fn request_schema(rt: &crate::MockRuntime, op: &Operation) -> Option<Value> {
+    let body = op.input.body.as_ref()?;
+    let pointer = rt
+        .described()
+        .op(&op.id)
+        .and_then(|d| d.request.as_ref())
+        .and_then(|r| r.record.as_ref())
+        .map(|p| p.as_str().to_owned());
+    match pointer.as_deref() {
+        None | Some("") => Some(body.clone()),
+        Some(at) => {
+            let steps = at.trim_start_matches('/').replace('/', ".");
+            property_schema(rt.bundle(), body, &steps)
+        }
+    }
+}
+
+/// Whether member `name` (of schema `member`) is a reference to another record the
+/// request could have sent and did not, which fill leaves absent (a deal's
+/// `org_id`): a text or integer member the request's schema declares, named as a
+/// reference (`<x>_id`, `<x>Id`) or for a type of the contract.
+fn unsent_reference(
+    rt: &crate::MockRuntime,
+    request: Option<&Value>,
+    name: &str,
+    member: &Value,
+) -> bool {
+    let bundle = rt.bundle();
+    let scalar = whole_parts(bundle, member).iter().any(|p| {
+        matches!(
+            p.get("type").and_then(Value::as_str),
+            Some("string" | "integer")
+        )
+    });
+    scalar
+        && request.is_some_and(|r| property_schema(bundle, r, name).is_some())
+        && (crate::call::reference_prefix(name).is_some()
+            || crate::call::entity_type(rt.index(), None, name).is_some())
 }
 
 /// The value member schema `schema` decides: its `const`, else its one `enum` value,
