@@ -213,7 +213,7 @@ fn changed(
         .and_then(|d| d.request.as_ref())
         .and_then(|r| r.instructions.as_ref());
     if let Some(patched) = patches::patched(call, instructions, &stored.data) {
-        return guarded(rt, op, stored, patched?);
+        return guarded(rt, (plan, call), stored, patched?);
     }
     let empty = Value::Object(Map::new());
     let sent = call
@@ -307,19 +307,34 @@ fn keep_nested_identity(identity: &[String], stored: &StoredResource, out: &mut 
 }
 
 /// `patched`, the record a patch document or instructions leave of `stored`, as an
-/// update stores it: the identity kept as held (the path wins); `Err` for a member it
+/// update stores it: the identity, and a member saying the record is another owner's
+/// than the path names, kept as held (the path wins); `Err` for a member it
 /// changes that is read-only (`read_only_member`) or that it adds and the record does
 /// not declare (`undeclared_member`).
 fn guarded(
     rt: &crate::MockRuntime,
-    op: &mb_mcm::Operation,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
     stored: &StoredResource,
     patched: Value,
 ) -> Result<Value, &'static str> {
+    let op = plan.op;
     let t = stored.resource_type.as_str();
     let (Value::Object(mut out), Value::Object(held)) = (patched, &stored.data) else {
         return Err("unmerged_body");
     };
+    let changed: Map<String, Value> = out
+        .iter()
+        .filter(|(name, value)| held.get(*name) != Some(*value))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    let allowed = without_contradictions(rt, plan, call, stored, &Value::Object(changed.clone()));
+    for name in changed.keys() {
+        if allowed.get(name).is_none()
+            && let Some(value) = held.get(name)
+        {
+            out.insert(name.clone(), value.clone());
+        }
+    }
     let bundle = rt.bundle();
     let schema = read_schema(rt, t);
     let identity = identity_members(rt, op, t);
