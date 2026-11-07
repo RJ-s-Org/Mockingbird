@@ -520,11 +520,43 @@
                   "flag",
                   "text"
                 ]
+              },
+              "grammar": {
+                "enum": [
+                  "scim",
+                  "odata",
+                  "field_value",
+                  "deep_object"
+                ]
+              },
+              "member_prefix": {
+                "$ref": "#/$defs/member"
               }
             },
             "required": [
-              "param",
-              "kind"
+              "param"
+            ],
+            "oneOf": [
+              {
+                "required": [
+                  "kind"
+                ],
+                "not": {
+                  "required": [
+                    "member_prefix"
+                  ]
+                }
+              },
+              {
+                "required": [
+                  "grammar"
+                ],
+                "not": {
+                  "required": [
+                    "member"
+                  ]
+                }
+              }
             ]
           }
         },

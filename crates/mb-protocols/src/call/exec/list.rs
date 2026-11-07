@@ -26,7 +26,9 @@
 //! marks the collection listed
 //! ([`state_lists::mark_listed`]), so it survives a rebuild of the runtime.
 //!
-//! The query then narrows them as [`list_query`] says: the described scope and filters,
+//! The query then narrows them as [`list_query`] says: the described scope and filters
+//! (a `grammar` filter's expression among them; every key bracketed below a
+//! `deep_object` one is its own),
 //! the soft delete unless its `listed_with` parameter is sent, the name-matched filters
 //! of [`lists::filters_of`] for parameters the description does not name. Then the page
 //! is cut and rendered by [`state_lists::page`]: derived members filled, the described
@@ -47,6 +49,8 @@
 //!   nothing (blank, its declared `default`, or the first page of a page position); or
 //!   any member of a request body (a list asked by a POST, which reads none of it, a
 //!   filter or a cursor alike), unless it is `null`, blank or empty;
+//! - `unparsed_filter`: a described `grammar` filter's value that does not parse
+//!   ([`list_query`]), which the executor never guesses at;
 //! - `never_written`, `scope_unresolved`: see above;
 //! - `unknown_token`: a described cursor no kept cut of this session minted;
 //! - `unscoped_list`: see above;
@@ -178,6 +182,10 @@ async fn answer(
         .and_then(|members| members.iter().find(|(_, value)| asks(value)));
     if let Some((on, _)) = undescribed.or(body_asks) {
         return Err(Stop::on("undescribed_param", on));
+    }
+    // A described filter expression that does not parse: never a guess.
+    if let Some(on) = q.as_ref().and_then(|q| q.unparsed.as_deref()) {
+        return Err(Stop::on("unparsed_filter", on));
     }
     let unscoped = call.path_params.is_empty()
         && !only_unscoped(rt, path, t)

@@ -40,6 +40,11 @@ fn schema_rejects_unknown_keys_and_bad_pointers() {
         json!({"operations": {"o": {"request": {"instructions": {"at": "/i", "kind": "kind",
             "kinds": {"k": {"changes": {"m": {"append": "/v", "value": 1}}}}}}}}}),
         json!({"operations": {"o": {"paging": {"request": "p"}}}}),
+        json!({"operations": {"o": {"filters": [{"param": "f"}]}}}),
+        json!({"operations": {"o": {"filters": [{"param": "f", "kind": "eq", "grammar": "scim"}]}}}),
+        json!({"operations": {"o": {"filters": [{"param": "f", "grammar": "wiql"}]}}}),
+        json!({"operations": {"o": {"filters": [{"param": "f", "grammar": "odata", "member": "m"}]}}}),
+        json!({"operations": {"o": {"filters": [{"param": "f", "kind": "eq", "member_prefix": "m"}]}}}),
     ] {
         assert!(!v.is_valid(&bad), "should be refused: {bad}");
     }
@@ -88,7 +93,10 @@ fn schema_accepts_every_serialized_field() {
                 "transition": {"status": "closed"},
                 "changes": {"name": {"from_request": "/name"}, "flag": {"value": false}},
                 "scope": {"param": "org", "member": "org_id"},
-                "filters": [{"param": "q", "member": "name", "kind": "text"}],
+                "filters": [
+                    {"param": "q", "member": "name", "kind": "text"},
+                    {"param": "filter", "grammar": "deep_object", "member_prefix": "meta"}
+                ],
                 "order": {"member": "created", "descending": true},
                 "paging": {"style": "header_cursor", "request": "cursor", "response": "next", "response_header": "Link", "size": "limit"},
                 "idempotency": {"header": "Idempotency-Key"},
