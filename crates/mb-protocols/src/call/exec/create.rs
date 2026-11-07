@@ -14,16 +14,23 @@
 //!   record, that nothing above gives is filled ([`gaps`]: a member, or what an object
 //!   member the request sent lacks), but the server's own members: the id,
 //!   the lifecycle member a described `initial` sets, the derived members. The
-//!   lifecycle's `initial` is then set. A required member whose schema fixes its value
-//!   (a `const`, a one-value `enum`: GraphQL's `__typename`) takes that value.
+//!   lifecycle's `initial` is then set. Before fill, a member the request did not send
+//!   whose schema decides its value (a `const`, a one-value `enum`: GraphQL's
+//!   `__typename`; a `default`) takes that value, at any depth the record holds
+//!   ([`preset`]), optional members included.
+//! - Before it is stored, the record is checked against every read of its type
+//!   ([`read_schemas`]), as those reads render it: one a read would not render (a
+//!   reference where the read holds an object, an array item lacking a required id)
+//!   is never stored, and the create generates (`record_invalid`, with `render_error`
+//!   naming the first violation). So does one whose answer does not render.
 //! - The answer is [`super::render`]'s (no body, the record, or an acknowledgement
 //!   drawn from its own schema with the record's members laid over it); a described
 //!   long-running answer holds the record as its result, and is done: the record is
 //!   stored when the create is accepted.
 //!
-//! Bulk creates, a create naming a record the session holds, one repeating a value the
-//! contract says is unique that the generated path refuses (`repeated_value`), and one
-//! whose answer does not render, go on to generation.
+//! Bulk creates, a create naming a record the session holds, and one repeating a value
+//! the contract says is unique that the generated path refuses (`repeated_value`), go on
+//! to generation too.
 
 use mb_engine::consistency::{property_schema, required_members};
 use mb_engine::{FillContext, GeneratedResponse};
@@ -163,22 +170,10 @@ pub(super) async fn run(
 
     // The members nobody else decides, then the initial state.
     let owned = server_owned(rt, t, field, request);
-    // A required member whose schema fixes its value (a GraphQL `__typename`) takes it.
-    if let Value::Object(known) = &mut data {
-        let required: Vec<String> = shape
-            .schemas
-            .iter()
-            .flat_map(|s| required_members(rt.bundle(), s))
-            .collect();
-        for (name, schema) in &shape.members {
-            if !known.contains_key(name)
-                && required.contains(name)
-                && !owned.contains(name)
-                && let Some(value) = fixed(schema)
-            {
-                known.insert(name.clone(), value);
-            }
-        }
+    // A member the request did not send whose schema decides its value (a `const`, a
+    // one-value `enum`: GraphQL's `__typename`; a `default`) takes it, at any depth.
+    for schema in &shape.schemas {
+        preset(rt.bundle(), schema, &mut data, &owned, GAP_DEPTH);
     }
     let missing = gaps(rt, &shape.schemas, &data, &owned);
     let mut usage = mb_llm::Usage::default();
@@ -214,12 +209,18 @@ pub(super) async fn run(
     )
     .instrument(state_span())
     .await;
+    // A record a later read would not render is never stored: the create generates.
+    if let Some(why) = unreadable(rt, t, &data, filled.as_ref().map(|f| &f.data)) {
+        invalid(rt, plan, &why);
+        return Ran::Generate(None);
+    }
     let answer = filled
         .and_then(|f| written(rt, plan, call, (&key, &f.data), response_schema))
         .or_else(|| written(rt, plan, call, (&key, &data), response_schema))
         .or_else(|| enveloped(rt, op, (&key, t, &data), response_schema));
     let Some(mut answer) = answer else {
-        return fall(Fallback::RenderFailed.as_str());
+        invalid(rt, plan, "answer does not render");
+        return Ran::Generate(None);
     };
     answer.usage = usage;
     if minted_headers.is_empty() {
@@ -661,15 +662,158 @@ fn non_null(bundle: &mb_mcm::Bundle, schema: &Value) -> Value {
     schema.clone()
 }
 
-/// The value member schema `schema` fixes: its `const`, else its one `enum` value.
-fn fixed(schema: &Value) -> Option<Value> {
-    schema
-        .get("const")
-        .cloned()
-        .or_else(|| match schema.get("enum") {
-            Some(Value::Array(values)) if values.len() == 1 => values.first().cloned(),
-            _ => None,
+/// Why `record` (with its derived members, `derived`, when there are any) would not
+/// render into a read of type `t` ([`read_schemas`]): the first violation
+/// (`<pointer> <keyword>`) of the first read schema neither validates against, as a
+/// read's `render_error` gives it. `None` when every read renders it.
+fn unreadable(
+    rt: &crate::MockRuntime,
+    t: &str,
+    record: &Value,
+    derived: Option<&Value>,
+) -> Option<String> {
+    let engine = &rt.engine;
+    for schema in read_schemas(rt, t) {
+        let Some(found) = engine.schema_violations(rt.bundle(), &schema, record) else {
+            continue;
+        };
+        if found.is_empty()
+            || derived.is_some_and(|d| {
+                engine
+                    .schema_violations(rt.bundle(), &schema, d)
+                    .is_some_and(|v| v.is_empty())
+            })
+        {
+            continue;
+        }
+        return found
+            .into_iter()
+            .next()
+            .map(|(pointer, keyword)| match pointer.as_str() {
+                "" => format!("<root> {keyword}"),
+                at => format!("{at} {keyword}"),
+            });
+    }
+    None
+}
+
+/// Logs that a create's record is not stored ([`Fallback::RecordInvalid`]), and why.
+fn invalid(rt: &crate::MockRuntime, plan: &CallPlan<'_>, why: &str) {
+    tracing::info!(
+        mock = %rt.name,
+        operation = %plan.op.id,
+        exec = "create",
+        exec_fallback = Fallback::RecordInvalid.as_str(),
+        render_error = %why,
+        "not answered by the executor"
+    );
+}
+
+/// Sets in `value` what `schema` decides of the members it lacks ([`decided`]), and
+/// so in the objects it holds, and the items of its arrays, to `depth` levels; at its
+/// top, never a member in `owned` (the server's own).
+fn preset(
+    bundle: &mb_mcm::Bundle,
+    schema: &Value,
+    value: &mut Value,
+    owned: &[String],
+    depth: usize,
+) {
+    if depth == 0 {
+        return;
+    }
+    let parts = whole_parts(bundle, schema);
+    match value {
+        Value::Object(held) => {
+            for part in &parts {
+                let Some(Value::Object(properties)) = part.get("properties") else {
+                    continue;
+                };
+                for (name, member) in properties {
+                    if owned.contains(name) {
+                        continue;
+                    }
+                    match held.get_mut(name) {
+                        None => {
+                            if let Some(decided) = decided(bundle, member) {
+                                held.insert(name.clone(), decided);
+                            }
+                        }
+                        Some(inner) => preset(bundle, member, inner, &[], depth - 1),
+                    }
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in parts.iter().filter_map(|p| p.get("items")) {
+                for held in items.iter_mut() {
+                    preset(bundle, item, held, &[], depth - 1);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The value member schema `schema` decides: its `const`, else its one `enum` value,
+/// else its `default` (never `null`).
+fn decided(bundle: &mb_mcm::Bundle, schema: &Value) -> Option<Value> {
+    let parts = whole_parts(bundle, schema);
+    let one = |key: &str| parts.iter().find_map(|p| p.get(key).cloned());
+    one("const")
+        .or_else(|| {
+            parts.iter().find_map(|p| match p.get("enum") {
+                Some(Value::Array(values)) if values.len() == 1 => values.first().cloned(),
+                _ => None,
+            })
         })
+        .or_else(|| one("default"))
+        .filter(|v| !v.is_null())
+}
+
+/// The parts every value of `schema` meets: itself, what its `$ref`s and `allOf`s name,
+/// and the one branch of an `anyOf` or `oneOf` whose others are `null`; never one of
+/// several branches a value may take.
+fn whole_parts<'a>(bundle: &'a mb_mcm::Bundle, schema: &'a Value) -> Vec<&'a Value> {
+    fn visit<'a>(
+        bundle: &'a mb_mcm::Bundle,
+        schema: &'a Value,
+        depth: usize,
+        out: &mut Vec<&'a Value>,
+    ) {
+        if depth > 8 {
+            return;
+        }
+        if let Some(target) =
+            crate::call::bundle_index::def_name(schema).and_then(|def| bundle.defs.get(def))
+        {
+            visit(bundle, target, depth + 1, out);
+            return;
+        }
+        out.push(schema);
+        for branch in schema
+            .get("allOf")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            visit(bundle, branch, depth + 1, out);
+        }
+        for key in ["anyOf", "oneOf"] {
+            if let Some(Value::Array(branches)) = schema.get(key) {
+                let others: Vec<&Value> = branches
+                    .iter()
+                    .filter(|b| b.get("type").and_then(Value::as_str) != Some("null"))
+                    .collect();
+                if let [only] = others.as_slice() {
+                    visit(bundle, only, depth + 1, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    visit(bundle, schema, 0, &mut out);
+    out
 }
 
 /// A success answer with no body, for [`header_ids::mint`] to mint an id into.

@@ -2787,7 +2787,7 @@ async fn a_record_answered_in_an_envelope_is_stored_and_read_there() {
 }
 
 #[tokio::test]
-async fn a_required_member_its_schema_fixes_takes_that_value() {
+async fn a_member_its_schema_fixes_takes_that_value() {
     let (capture, _guard) = Capture::install();
     let h = support::described(IDS, json!({}), Vec::new());
     let (status, headers, body) = h
@@ -2796,8 +2796,12 @@ async fn a_required_member_its_schema_fixes_takes_that_value() {
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(source(&headers), "state", "{body}");
     let id = body["id"].as_str().unwrap().to_owned();
-    // `kind` is required and fixed; the optional one-value `unit` is never invented.
-    assert_eq!(body, json!({"id": id, "name": "g", "kind": "gauge"}));
+    // `kind` is required and fixed, and so is the optional one-value `unit`: neither is
+    // a guess.
+    assert_eq!(
+        body,
+        json!({"id": id, "name": "g", "kind": "gauge", "unit": "ms"})
+    );
     assert!(h.provider.requests().is_empty(), "nothing to fill");
     assert_eq!(
         capture.of("createGauge"),
@@ -3130,4 +3134,184 @@ async fn a_not_found_refusal_from_state_keeps_the_model_s_code() {
     let (status, _, body) = h.send("GET", "/customers/c1", None, &[]).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(body["api_error_code"], json!("customer_gone"), "{body}");
+}
+
+/// Pipelines are read with their owner as an object, but created naming it by id;
+/// orders are read with an id on every line, created without; accounts default some
+/// members their create may leave out. Each create answers an acknowledgement (`{id}`),
+/// which renders whatever the record holds.
+const GATED: &str = r##"
+openapi: 3.0.0
+info: {title: Gated, version: "1"}
+paths:
+  /pipelines:
+    post:
+      operationId: createPipeline
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}, owner: {}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /pipelines/{id}:
+    get:
+      operationId: getPipeline
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Pipeline"}}}}}
+  /orders:
+    post:
+      operationId: createOrder
+      requestBody: {content: {application/json: {schema: {type: object, properties: {lines: {type: array, items: {type: object, properties: {sku: {type: string}}}}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+  /accounts:
+    post:
+      operationId: createAccount
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}, settings: {type: object, properties: {theme: {type: string}}}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Account"}}}}}
+  /accounts/{id}:
+    get:
+      operationId: getAccount
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Account"}}}}}
+components:
+  schemas:
+    Ack:
+      type: object
+      required: [id]
+      properties: {id: {type: string}}
+    Pipeline:
+      type: object
+      required: [id, name, owner]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        owner: {type: object, required: [id, name], properties: {id: {type: string}, name: {type: string}}}
+    Order:
+      type: object
+      required: [id, lines]
+      properties:
+        id: {type: string}
+        lines: {type: array, items: {type: object, required: [id, sku], properties: {id: {type: string}, sku: {type: string}}}}
+    Account:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        is_active: {type: boolean, default: true}
+        object: {type: string, enum: [account]}
+        settings:
+          type: object
+          properties: {theme: {type: string}, notify: {type: boolean, default: false}}
+"##;
+
+fn invalid_line(op: &str, why: &str) -> ExecLine {
+    ExecLine {
+        render_error: Some(why.into()),
+        ..create_line(op, Some("record_invalid"))
+    }
+}
+
+#[tokio::test]
+async fn a_create_sending_a_reference_where_its_read_holds_an_object_generates() {
+    let (capture, _guard) = Capture::install();
+    // The generated create's answer, under the model's id.
+    let h = support::harness(
+        GATED,
+        vec![json!({"id": "p-gen"})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let sent = json!({"name": "deploy", "owner": "u1"});
+    let (status, headers, body) = h.send("POST", "/pipelines", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "llm", "{body}");
+    assert_eq!(
+        body["id"],
+        json!("p-gen"),
+        "the executor minted and stored nothing"
+    );
+    assert_eq!(
+        capture.of("createPipeline"),
+        vec![invalid_line("createPipeline", "/owner type")]
+    );
+}
+
+#[tokio::test]
+async fn a_create_whose_read_requires_an_id_on_each_array_item_generates() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(
+        GATED,
+        vec![json!({"id": "o-gen"})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let sent = json!({"lines": [{"sku": "a"}]});
+    let (status, headers, body) = h.send("POST", "/orders", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "llm", "{body}");
+    assert_eq!(body["id"], json!("o-gen"));
+    assert_eq!(
+        capture.of("createOrder"),
+        vec![invalid_line("createOrder", "/lines/0/id required")]
+    );
+}
+
+#[tokio::test]
+async fn an_unsent_member_takes_its_schema_s_default_at_any_depth() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(GATED, vec![], &HarnessOptions::default(), |rt| rt);
+    let sent = json!({"name": "acme", "settings": {"theme": "dark"}});
+    let (status, headers, body) = h.send("POST", "/accounts", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+    let record = json!({
+        "id": id,
+        "name": "acme",
+        "is_active": true,
+        "object": "account",
+        "settings": {"theme": "dark", "notify": false}
+    });
+    assert_eq!(body, record, "the answer holds the defaults");
+    let t = type_of(&h, "getAccount");
+    assert_eq!(
+        h.stored(&t, &id).await,
+        Some(record),
+        "and so does the record"
+    );
+    assert_eq!(
+        capture.of("createAccount"),
+        vec![create_line("createAccount", None)]
+    );
+    assert!(h.provider.requests().is_empty(), "nothing is filled");
+}
+
+#[tokio::test]
+async fn a_sent_member_keeps_its_value_over_its_default() {
+    let (_capture, _guard) = Capture::install();
+    let h = support::harness(GATED, vec![], &HarnessOptions::default(), |rt| rt);
+    let sent = json!({"name": "acme", "is_active": false});
+    let (status, _, body) = h.send("POST", "/accounts", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["is_active"], json!(false));
+}
+
+#[tokio::test]
+async fn a_create_whose_record_its_reads_render_still_executes() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(GATED, vec![], &HarnessOptions::default(), |rt| rt);
+    let sent = json!({"name": "deploy", "owner": {"id": "u1", "name": "Ann"}});
+    let (status, headers, body) = h.send("POST", "/pipelines", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        capture.of("createPipeline"),
+        vec![create_line("createPipeline", None)]
+    );
+    let (_, headers, read) = h.send("GET", &format!("/pipelines/{id}"), None, &[]).await;
+    assert_eq!(source(&headers), "state", "{read}");
+    assert_eq!(read["owner"], json!({"id": "u1", "name": "Ann"}));
 }

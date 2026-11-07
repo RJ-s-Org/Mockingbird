@@ -1373,6 +1373,24 @@ impl Engine {
         Some(validator.violations(stored))
     }
 
+    /// The violations (see [`SchemaValidator::violations`]) of `value` against `schema`,
+    /// checked as [`Engine::serve_stored`] checks an answer: what a read whose answer
+    /// is `schema` would make of `value`. Empty when it validates; `None` when `schema`
+    /// does not compile.
+    #[must_use]
+    pub fn schema_violations(
+        &self,
+        bundle: &Bundle,
+        schema: &Value,
+        value: &Value,
+    ) -> Option<Vec<(String, String)>> {
+        Some(
+            self.schema_validator(bundle, schema)
+                .ok()?
+                .violations(value),
+        )
+    }
+
     /// Stored `record` as `op` answers it: in the envelope or the one-item array its
     /// identity says the answer holds it in, else as it is. An envelope also gets the
     /// other members its schema (the narrowed `response_schema` when given) requires,
