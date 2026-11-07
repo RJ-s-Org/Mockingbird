@@ -26,8 +26,8 @@ use super::write_memory::Earlier;
 use super::writes::store_one;
 use super::{
     CallPlan, OperationCall, StateAccess, collection_of, deleted, derived, envelopes,
-    graphql_marks, minted, plain, replays, serve_held, state_lists, state_span, target_id, tokens,
-    world, write_memory,
+    graphql_marks, minted, plain, records, replays, serve_held, state_lists, state_span, target_id,
+    tokens, world, write_memory,
 };
 
 /// Why a classified call goes on to generation.
@@ -539,11 +539,15 @@ pub(super) fn bodiless(op: &mb_mcm::Operation) -> Option<GeneratedResponse> {
 /// (spec §4): no body when its success response declares none; the record in the
 /// envelope the operation holds it in; the record itself when the schema declares every
 /// member it holds; else an acknowledgement (`{ok, id, rev}`, `{deleted: true}`,
-/// `{success, data: {id}}`): the faker's answer, deterministic per seed and call, with
-/// each member the record holds under the same name (at the top, or in an envelope
-/// member one level down) and the operation's identity member taking the record's
-/// value, and its boolean members `true`, as the write succeeded. `None` only when
-/// nothing rendered validates. Tagged `state`.
+/// `{success, data: {id}}`). An acknowledgement is the faker's answer for the call,
+/// seeded by the mock's or the request's seed, else by the default one, so a call
+/// answers alike in every run. Its boolean members (at the top and one member down) are
+/// `true`, as the write succeeded; the record's members it declares at its top, and the
+/// operation's identity member, take the record's values; and an answer holding none of
+/// them at its top holds the record's members and id in the one envelope member whose
+/// schema declares the record's identity. Failing validation, it tries every boolean
+/// `true`, then the faker's answer with the identity alone, then as drawn. `None` only
+/// when none of these validates. Tagged `state`.
 pub(super) fn render(
     rt: &crate::MockRuntime,
     plan: &CallPlan<'_>,
@@ -594,9 +598,8 @@ pub(super) fn render(
     {
         return Some(answer);
     }
-    // An acknowledgement: the faker's answer, deterministic per seed and call, with the
-    // record's members laid over it, at the top or one envelope member down
-    // (`{success, data: {id}}`).
+    // An acknowledgement: the faker's answer, the same for the same call whether or not
+    // the mock sets a seed, with the record's members laid over it.
     let status = match variant.status {
         mb_mcm::StatusSelector::Code(code) => code,
         _ => 200,
@@ -605,37 +608,92 @@ pub(super) fn render(
         response_schema,
         ..mb_engine::GenerationContext::default()
     };
-    let faked = rt.engine.fallback(bundle, op, variant, status, call, &ctx);
-    let serve = |answer: Value| rt.engine.serve_stored(bundle, op, &answer, response_schema);
-    let mut answer = match faked.body? {
-        // A successful write's acknowledgement says so: a boolean answer is `true`.
-        Value::Bool(_) => return serve(Value::Bool(true)),
-        Value::Object(answer) => answer,
-        other => return serve(other),
-    };
-    for (name, value) in answer.iter_mut() {
-        if shown.contains_key(name) {
-            continue;
+    let seeded;
+    let call = match (mb_engine::seed::request_seed(call), rt.engine.faker_seed()) {
+        (None, None) => {
+            let mut with_seed = call.clone();
+            with_seed.headers.insert(
+                mb_engine::SEED_HEADER.to_owned(),
+                Value::String(mb_engine::DEFAULT_FAKER_SEED.to_string()),
+            );
+            seeded = with_seed;
+            &seeded
         }
-        if let (Value::Object(inner), Some(inner_schema), Some(members)) = (
-            value,
-            property_schema(bundle, schema, name),
-            record.as_object(),
-        ) {
-            for (member, held) in members {
-                if property_schema(bundle, &inner_schema, member).is_some() {
-                    inner.insert(member.clone(), held.clone());
+        _ => call,
+    };
+    let faked = rt.engine.fallback(bundle, op, variant, status, call, &ctx);
+    let serve = |answer: &Map<String, Value>| {
+        rt.engine
+            .serve_stored(bundle, op, &Value::Object(answer.clone()), response_schema)
+    };
+    let drawn = match faked.body? {
+        // A successful write's acknowledgement says so: a boolean answer is `true`.
+        Value::Bool(_) => {
+            return rt
+                .engine
+                .serve_stored(bundle, op, &Value::Bool(true), response_schema);
+        }
+        Value::Object(drawn) => drawn,
+        other => return rt.engine.serve_stored(bundle, op, &other, response_schema),
+    };
+    // The faker's booleans say the write succeeded, at the top and in its envelope.
+    let mut affirmed = drawn.clone();
+    affirm(&mut affirmed, 2);
+    let mut held = affirmed.clone();
+    // An answer holding nothing of the record at its top holds it in the one envelope
+    // member that declares the record's identity (`{success, data: {id}}`).
+    let at_top = !shown.is_empty();
+    let identity =
+        records::identity_member(rt, op, op.resource_type.as_deref().unwrap_or_default());
+    let envelope: Vec<String> = held
+        .iter()
+        .filter(|(_, value)| value.is_object())
+        .filter_map(|(name, _)| {
+            let member = property_schema(bundle, schema, name)?;
+            property_schema(bundle, &member, identity).map(|_| name.clone())
+        })
+        .collect();
+    if !at_top
+        && let [name] = envelope.as_slice()
+        && let Some(member) = property_schema(bundle, schema, name)
+        && let Some(Value::Object(inner)) = held.get_mut(name)
+    {
+        if let Some(members) = record.as_object() {
+            for (key, value) in members {
+                if property_schema(bundle, &member, key).is_some() {
+                    inner.insert(key.clone(), value.clone());
                 }
             }
         }
+        inner.insert(identity.to_owned(), Value::String(id.to_owned()));
     }
-    answer.extend(shown);
-    // Its boolean members say the write succeeded; failing that, as drawn and held.
-    let mut affirmed = answer.clone();
-    for value in affirmed.values_mut() {
-        if value.is_boolean() {
-            *value = Value::Bool(true);
+    held.extend(shown.clone());
+    // Failing that: every boolean `true`; as drawn and held; the faker's answer with the
+    // record's identity alone; the faker's answer as drawn.
+    let mut all_true = held.clone();
+    affirm(&mut all_true, 1);
+    let mut identified = affirmed.clone();
+    if let Some(field) = op.identity.as_ref().map(|i| i.field.as_str())
+        && let Some(value) = shown.get(field)
+    {
+        identified.insert(field.to_owned(), value.clone());
+    }
+    [&held, &all_true, &identified, &drawn]
+        .into_iter()
+        .find_map(serve)
+}
+
+/// Sets the boolean members of `answer`, and of its object members down to `depth`
+/// levels in all, to `true`.
+fn affirm(answer: &mut Map<String, Value>, depth: usize) {
+    if depth == 0 {
+        return;
+    }
+    for value in answer.values_mut() {
+        match value {
+            Value::Bool(_) => *value = Value::Bool(true),
+            Value::Object(inner) => affirm(inner, depth - 1),
+            _ => {}
         }
     }
-    serve(Value::Object(affirmed)).or_else(|| serve(Value::Object(answer)))
 }

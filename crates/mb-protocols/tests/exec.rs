@@ -721,6 +721,22 @@ paths:
         "200":
           description: trashed
           content: {application/json: {schema: {type: object, required: [success, data], properties: {success: {type: boolean}, data: {type: object, required: [id], properties: {id: {type: string}}}}}}}
+  /boxes/{id}/owned:
+    delete:
+      operationId: shedBox
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: shed
+          content: {application/json: {schema: {type: object, required: [id, owner], properties: {id: {type: string}, owner: {type: object, required: [id, label], properties: {id: {type: string}, label: {type: string}}}}}}}
+  /boxes/{id}/status:
+    delete:
+      operationId: closeBox
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: closed
+          content: {application/json: {schema: {type: object, required: [id, label], properties: {id: {type: string}, label: {type: string, enum: [closed]}}}}}
 components:
   schemas:
     Box:
@@ -820,6 +836,54 @@ async fn an_acknowledgement_holds_the_record_s_members_one_envelope_member_down(
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(source(&headers), "state", "{body}");
     assert_eq!(body, json!({"success": true, "data": {"id": "b1"}}));
+    assert_eq!(h.stored("boxes", "b1").await, None, "the delete stands");
+}
+
+#[tokio::test]
+async fn another_resource_in_an_acknowledgement_keeps_the_faker_s_values() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({"operations": {"shedBox": {"kind": "delete", "type": "boxes"}}});
+    let h = a_box(world).await;
+    let (status, headers, body) = h.send("DELETE", "/boxes/b1/owned", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body["id"], json!("b1"), "{body}");
+    // The owner is another record: none of the deleted box's members go in it.
+    assert_ne!(body["owner"]["id"], json!("b1"), "{body}");
+    assert_ne!(body["owner"]["label"], json!("red"), "{body}");
+}
+
+#[tokio::test]
+async fn a_record_member_the_acknowledgement_refuses_leaves_the_faker_s_value() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"closeBox": {"kind": "delete", "type": "boxes"}}});
+    let h = a_box(world).await;
+    let (status, headers, body) = h.send("DELETE", "/boxes/b1/status", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body, json!({"id": "b1", "label": "closed"}));
+    assert!(
+        capture
+            .of("closeBox")
+            .iter()
+            .all(|l| l.exec_fallback.is_none()),
+        "{:?}",
+        capture.of("closeBox")
+    );
+}
+
+#[tokio::test]
+async fn an_acknowledgement_is_the_same_in_every_run() {
+    let (_capture, _guard) = Capture::install();
+    let mut bodies = Vec::new();
+    for _ in 0..2 {
+        let world = json!({"operations": {"binBox": {"kind": "delete", "type": "boxes"}}});
+        let h = a_box(world).await;
+        let (status, _, body) = h.send("DELETE", "/boxes/b1/said", None, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        bodies.push(body);
+    }
+    assert_eq!(bodies[0], bodies[1]);
 }
 
 #[tokio::test]
