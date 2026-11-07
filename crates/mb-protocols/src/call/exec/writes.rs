@@ -21,8 +21,10 @@
 //! that a read is still to catch up on (`behind`); or for a token only a model moves
 //! (`model_token`).
 //!
-//! The answer is [`render`]'s; a described long-running answer holds the record as its
-//! result, and is done: the write landed when it was accepted.
+//! The answer is [`render`]'s, with the record's derived members filled from its
+//! children as state has them (never stored) when that still renders; a described
+//! long-running answer holds the record as its result, and is done: the write landed
+//! when it was accepted.
 
 use mb_engine::GeneratedResponse;
 use mb_engine::consistency::{declared_members, property_schema, required_members};
@@ -36,8 +38,8 @@ use crate::call::bundle_index::schema_parts;
 use crate::call::entities::added_violation;
 use crate::call::write_memory::{self, read_only, read_schema, without_contradictions};
 use crate::call::{
-    CallPlan, OperationCall, StateAccess, id_string, lifecycle, records, state_span, tokens,
-    transitions,
+    CallPlan, OperationCall, StateAccess, derived, id_string, lifecycle, records, state_span,
+    tokens, transitions,
 };
 
 /// Whether the executor takes updates and replaces.
@@ -119,7 +121,22 @@ async fn update(
         }
         tokens::advance(rt, (t, id), advancing, &stored.data, &mut data);
     }
-    let Some(answer) = written(rt, plan, call, (id, &data), response_schema) else {
+    // Its derived members are answered from its children as state has them, never
+    // stored; the record as stored is answered when the filled one does not render.
+    let filled = derived::filled(
+        state,
+        &plan.session,
+        &StoredResource {
+            data: data.clone(),
+            ..stored.clone()
+        },
+    )
+    .instrument(state_span())
+    .await;
+    let answer = filled
+        .and_then(|f| written(rt, plan, call, (id, &f.data), response_schema))
+        .or_else(|| written(rt, plan, call, (id, &data), response_schema));
+    let Some(answer) = answer else {
         fell_back(rt, plan, kind, Fallback::RenderFailed.as_str());
         return Ran::Generate(None);
     };

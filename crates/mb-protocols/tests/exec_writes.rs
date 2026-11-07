@@ -749,6 +749,98 @@ async fn an_accepted_long_running_update_lands_at_once_and_reads_as_done() {
     );
 }
 
+/// Orders, updated and replaced, that count their lines.
+const ORDERS: &str = r##"
+openapi: 3.0.0
+info: {title: Orders, version: "1"}
+paths:
+  /orders:
+    post:
+      operationId: createOrder
+      requestBody: {content: {application/json: {schema: {type: object, properties: {note: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+  /orders/{orderId}:
+    parameters: [{name: orderId, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getOrder
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+    patch:
+      operationId: updateOrder
+      requestBody: {content: {application/json: {schema: {type: object, properties: {note: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+    put:
+      operationId: replaceOrder
+      requestBody: {content: {application/json: {schema: {type: object, properties: {note: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+  /orders/{orderId}/lines:
+    parameters: [{name: orderId, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: createLine
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Line"}}}}}
+components:
+  schemas:
+    Order:
+      type: object
+      required: [id]
+      properties: {id: {type: string}, note: {type: string}, line_count: {type: integer}}
+    Line:
+      type: object
+      required: [id]
+      properties: {id: {type: string}, orderId: {type: string}}
+"##;
+
+#[tokio::test]
+async fn an_update_answers_the_derived_members_from_the_children_held() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"types": {
+        "lines": {"parent": {"type": "orders", "member": "orderId"}},
+        "orders": {"derived": {"line_count": {"kind": "count", "of": "lines"}}}
+    }});
+    let h = support::described(
+        ORDERS,
+        world,
+        vec![json!({"id": "o1", "note": "a", "line_count": 0})],
+    );
+    let (status, _, body) = h
+        .send("POST", "/orders", Some(json!({"note": "a"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    // Lines held under the order that no write of the session remembers (seeded).
+    let session = mb_state::SessionKey {
+        workspace: h.rt.workspace.clone(),
+        mock: h.rt.name.clone(),
+        session: "default".into(),
+    };
+    let lines = type_of(&h, "createLine");
+    for id in ["l1", "l2", "l3"] {
+        let line = mb_state::StoredResource {
+            resource_type: lines.clone(),
+            id: id.into(),
+            data: json!({"id": id, "orderId": "o1"}),
+        };
+        h.rt.state.upsert(&session, line).await.unwrap();
+    }
+    let calls = h.provider.requests().len();
+    for (method, op, note) in [("PATCH", "updateOrder", "b"), ("PUT", "replaceOrder", "c")] {
+        let (status, headers, body) = h
+            .send(method, "/orders/o1", Some(json!({"note": note})), &[])
+            .await;
+        assert_eq!(status, StatusCode::OK, "{method}: {body}");
+        assert_eq!(capture.of(op), vec![line(op, "update", None)], "{method}");
+        assert_eq!(source(&headers), "state", "{method}: {body}");
+        assert_eq!(
+            body,
+            json!({"id": "o1", "note": note, "line_count": 3}),
+            "{method}"
+        );
+    }
+    assert_eq!(h.provider.requests().len(), calls, "no LLM call");
+    // Computed on the answer, never stored.
+    let stored = h.stored(&type_of(&h, "getOrder"), "o1").await.unwrap();
+    assert_eq!(stored["line_count"], json!(0), "{stored}");
+}
+
 #[cfg(feature = "graphql")]
 mod graphql {
     use std::sync::Arc;
