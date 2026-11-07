@@ -2935,8 +2935,8 @@ async fn a_nested_create_holds_the_path_value_its_list_s_scope_matches() {
     assert!(h.provider.requests().is_empty(), "no LLM call");
 }
 
-/// Chargebee's customers: an id the client may give, unique, and the code the API's
-/// description says a taken one is refused with.
+/// Chargebee's customers: an id the client may give, unique, and the codes the API's
+/// description says a taken one and a deleted one answer.
 const CUSTOMERS: &str = r##"
 openapi: 3.0.0
 info:
@@ -2944,7 +2944,8 @@ info:
   version: "1"
   description: |
     A customer's `id` can be given on create; it is unique, and a create with an id
-    in use is refused with 400 and `api_error_code` `duplicate_entry`.
+    in use is refused with 400 and `api_error_code` `duplicate_entry`. A deleted
+    customer answers 404 with `api_error_code` `resource_not_found`.
 paths:
   /customers:
     post:
@@ -2954,12 +2955,15 @@ paths:
         "200": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Customer"}}}}
         "400": {description: invalid, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
   /customers/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
     get:
       operationId: getCustomer
-      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Customer"}}}}
         "404": {description: missing, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+    delete:
+      operationId: deleteCustomer
+      responses: {"204": {description: deleted}}
 components:
   schemas:
     Customer:
@@ -2974,24 +2978,28 @@ components:
         api_error_code: {type: string, description: "What went wrong: `duplicate_entry`, `resource_not_found` and so on."}
 "##;
 
-/// A unique set refused from state takes what the contract says of that refusal, over
-/// the body the model wrote once for the cause, as a generated create's refusal does.
+fn customers(script: Vec<serde_json::Value>) -> support::DescribedHarness {
+    let world = json!({
+        "types": {"customers": {
+            "identity": {"member": "id"},
+            "unique": [{"members": ["id"], "conflict": 400}]
+        }},
+        "operations": {"getCustomer": {"kind": "read", "type": "customers", "not_found": 404}}
+    });
+    support::harness(CUSTOMERS, script, &HarnessOptions::default(), |rt| {
+        support::with_effective(rt, world, false)
+    })
+}
+
+/// A unique set refused from state fills what the model's body left empty with the
+/// code the contract gives a taken value, and lays the call's message over it.
 #[tokio::test]
-async fn a_unique_refusal_from_state_takes_the_contract_s_code() {
+async fn a_unique_refusal_from_state_fills_the_contract_s_code_where_left_empty() {
     let (_capture, _guard) = Capture::install();
-    let world = json!({"types": {"customers": {
-        "identity": {"member": "id"},
-        "unique": [{"members": ["id"], "conflict": 400}]
-    }}});
-    let h = support::harness(
-        CUSTOMERS,
-        vec![
-            json!({"id": "c1", "name": "Ana"}),
-            json!({"message": "taken", "api_error_code": "val2"}),
-        ],
-        &HarnessOptions::default(),
-        |rt| support::with_effective(rt, world, false),
-    );
+    let h = customers(vec![
+        json!({"id": "c1", "name": "Ana"}),
+        json!({"message": "taken", "api_error_code": ""}),
+    ]);
     let (status, _, body) = h
         .send(
             "POST",
@@ -3017,4 +3025,29 @@ async fn a_unique_refusal_from_state_takes_the_contract_s_code() {
         json!("id 'c1' is already in use"),
         "{body}"
     );
+}
+
+/// A not-found refusal from state keeps the code the model wrote for it, whatever the
+/// contract's prose names: only the members it left empty take a value.
+#[tokio::test]
+async fn a_not_found_refusal_from_state_keeps_the_model_s_code() {
+    let (_capture, _guard) = Capture::install();
+    let h = customers(vec![
+        json!({"id": "c1", "name": "Ana"}),
+        json!({"message": "gone", "api_error_code": "customer_gone"}),
+    ]);
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/customers",
+            Some(json!({"id": "c1", "name": "Ana"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, body) = h.send("DELETE", "/customers/c1", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, _, body) = h.send("GET", "/customers/c1", None, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["api_error_code"], json!("customer_gone"), "{body}");
 }

@@ -1621,8 +1621,7 @@ impl Engine {
     /// is gone): `op`'s response declared for `code` by that very status, its body
     /// [`Engine::error_answer`]'s for `cause` (written once per operation, status and
     /// cause by the model, else the faker's), refusing the repeated value of `facts`'
-    /// members, each member the contract names a value for holding it (see
-    /// [`contract_values`]), with `facts` laid over it while it still validates: their message in
+    /// members, with `facts` laid over it while it still validates: their message in
     /// its message-like member, and their members in its path-like ones (see
     /// [`error_body::with_reasons`]). Tagged `State` (`Fallback` when the faker could
     /// not make its body valid), with the usage of a body written now. `None` when `op`
@@ -1640,15 +1639,9 @@ impl Engine {
         if !guards::declares_code(op, code) {
             return None;
         }
-        let mut response = self
+        let response = self
             .error_answer_repeating(bundle, op, call, (code, cause), facts.members())
             .await?;
-        // The refusal is the mock's own, of the repeated members the facts name: the
-        // contract's values for it go over the body written once for the cause, as
-        // over a generated create's refusal ([`contract_values`]).
-        if let Some(variant) = op.output_for_status(code) {
-            self.fill_contract_values(bundle, op, variant, &mut response, (facts.members(), false));
-        }
         let response = self.with_facts(bundle, op, response, facts);
         let mut response = self.with_own_status(bundle, op, response);
         tracing::info!(operation = %op.id, status = code, cause = ?cause, "the call was refused from state with a declared error");
