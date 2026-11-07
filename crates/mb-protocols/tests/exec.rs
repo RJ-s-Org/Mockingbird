@@ -648,6 +648,45 @@ async fn a_delete_of_a_soft_deleted_record_removes_it() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
 
+/// The generated path agrees: a seeded delete (`seeded`, which the executor leaves to
+/// generation) of a record already soft-deleted removes it too.
+#[tokio::test]
+async fn a_generated_delete_of_a_soft_deleted_record_removes_it() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"types": {"folders": {"lifecycle": {
+        "member": "state", "states": ["ACTIVE", "DELETED"], "initial": "ACTIVE",
+        "soft_delete": {"state": "DELETED"}
+    }}}});
+    let h = support::harness(
+        DELETES,
+        vec![json!({"id": "f1", "name": "docs", "state": "ACTIVE"})],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    let t = type_of(&h, "getFolder");
+    let (status, _, body) = h
+        .send("POST", "/folders", Some(json!({"name": "docs"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, _, body) = h.send("DELETE", "/folders/f1", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(
+        h.stored(&t, "f1").await,
+        Some(json!({"id": "f1", "name": "docs", "state": "DELETED"}))
+    );
+    let seeded = [("x-mockingbird-seed", "7")];
+    let (status, _, body) = h.send("DELETE", "/folders/f1", None, &seeded).await;
+    assert!(status.is_success(), "{body}");
+    assert_eq!(
+        capture
+            .of("deleteFolder")
+            .last()
+            .and_then(|l| l.exec_fallback.clone()),
+        Some("seeded".to_owned())
+    );
+    assert_eq!(h.stored(&t, "f1").await, None);
+}
+
 #[tokio::test]
 async fn a_delete_of_an_unheld_record_falls_back() {
     let (capture, _guard) = Capture::install();
@@ -1013,8 +1052,10 @@ async fn an_envelope_member_holds_the_record_s_id_as_the_record_holds_it() {
 
 /// Items with a lifecycle, acted on by actions answering the item (`archiveItem`),
 /// nothing (`starItem`), an acknowledgement (`renameItem`), the item in an envelope
-/// (`pinItem`, and `boostItem` whose envelope requires what the mock does not hold),
-/// and two the description sets nothing for (`pingItem`, and `nudgeItem` answering nothing).
+/// (`pinItem`; `boostItem`, whose envelope also requires a `receipt` the faker draws;
+/// and `auditItem`, whose envelope also requires an `audit` object, another resource
+/// the model writes), and two the description sets nothing for (`pingItem`, and
+/// `nudgeItem` answering nothing).
 const ACTIONS: &str = r##"
 openapi: 3.0.0
 info: {title: Actions, version: "1"}
@@ -1080,6 +1121,21 @@ paths:
                 type: object
                 required: [item, receipt]
                 properties: {item: {$ref: "#/components/schemas/Item"}, receipt: {type: string}}
+  /items/{id}/audit:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: auditItem
+      responses:
+        "200":
+          description: audited
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [item, audit]
+                properties:
+                  item: {$ref: "#/components/schemas/Item"}
+                  audit: {type: object, required: [id], properties: {id: {type: string}}}
   /items/{id}/ping:
     parameters: [{name: id, in: path, required: true, schema: {type: string}}]
     post:
@@ -1121,6 +1177,10 @@ fn actions_world() -> serde_json::Value {
                 "changes": {"pinned": {"value": true}, "rank": {"from_request": "/rank"}}
             },
             "boostItem": {
+                "kind": "action", "target": target, "answer": {"record": "/item"},
+                "changes": {"pinned": {"value": true}}
+            },
+            "auditItem": {
                 "kind": "action", "target": target, "answer": {"record": "/item"},
                 "changes": {"pinned": {"value": true}}
             },
@@ -1456,6 +1516,26 @@ async fn an_action_s_envelope_is_filled_as_a_read_s_is() {
         "the action made no LLM call"
     );
     assert_eq!(h.stored("items", "i1").await, Some(boosted));
+}
+
+/// An envelope member beside the record that is an object (Zendesk's `audit`) is
+/// another resource the write made, not metadata the faker draws: the action falls
+/// back and the model answers it.
+#[tokio::test]
+async fn an_action_whose_envelope_requires_an_object_falls_back() {
+    let (capture, _guard) = Capture::install();
+    let h = actions(vec![
+        item_i1(),
+        json!({"item": {"id": "i1", "name": "a", "status": "ACTIVE", "pinned": true}, "audit": {"id": "a1"}}),
+    ]);
+    create_i1(&h).await;
+    let (status, headers, body) = h.send("POST", "/items/i1/audit", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "llm", "{body}");
+    assert_eq!(
+        capture.of("auditItem"),
+        vec![action_line("auditItem", Some("render_failed"))]
+    );
 }
 
 #[tokio::test]
