@@ -573,6 +573,13 @@ pub(in crate::call) fn eval(e: &Expr, item: &Value, answered: bool, fold: bool) 
 fn eval_cmp(c: &Cmp, item: &Value, answered: bool, fold: bool) -> Option<bool> {
     let mut held = Vec::new();
     resolve(item, &c.path, fold, &mut held);
+    // `eq null` asks that the member is not held, `ne null` that it is.
+    if c.value.is_null() && matches!(c.op, Op::Eq | Op::Ne) {
+        if held.is_empty() && answered {
+            return None;
+        }
+        return Some(held.is_empty() == (c.op == Op::Eq));
+    }
     if held.is_empty() {
         return if answered { None } else { Some(false) };
     }
@@ -882,6 +889,16 @@ mod tests {
             ),
             None
         );
+        // `eq null` holds of a record without the member, `ne null` of one with it.
+        let null = odata("closed eq null").unwrap();
+        assert_eq!(eval(&null, &json!({}), false, false), Some(true));
+        assert_eq!(
+            eval(&null, &json!({"closed": 1}), false, false),
+            Some(false)
+        );
+        let held = odata("closed ne null").unwrap();
+        assert_eq!(eval(&held, &json!({"closed": 1}), false, false), Some(true));
+        assert_eq!(eval(&held, &json!({}), true, false), None);
     }
 
     #[test]
