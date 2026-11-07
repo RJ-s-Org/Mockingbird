@@ -1099,6 +1099,7 @@ fn action_line(operation: &str, fallback: Option<&str>) -> ExecLine {
         operation: operation.into(),
         exec: "action".into(),
         exec_fallback: fallback.map(str::to_owned),
+        render_error: None,
     }
 }
 
@@ -1407,6 +1408,7 @@ type Mutation {
                 operation: "Mutation.starWidget".into(),
                 exec: "action".into(),
                 exec_fallback: None,
+                render_error: None,
             }),
             "{:?}",
             capture.of("Mutation.starWidget")
