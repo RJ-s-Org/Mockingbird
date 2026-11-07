@@ -7,13 +7,11 @@ name: Integrations
 # report and verify path changes.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    # Engine and CLI changes reach it on main; a pull request runs it only when the
+    # integration or this workflow changes.
     paths:
       - integrations/**
-      - crates/mb-admin/**
-      - crates/mb-engine/**
-      - crates/mb-protocols/**
-      - crates/mockingbird/**
-      - Cargo.lock
       - .github/workflows/integrations.yml
   push:
     branches: [main]
@@ -36,6 +34,7 @@ permissions:
 
 jobs:
   github-action:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     env:

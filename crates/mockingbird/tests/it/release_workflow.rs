@@ -293,11 +293,15 @@ fn ci_gates_present() {
     );
     // nextest runs the tests (the custom-ext example is a workspace member),
     // cargo test the doctests nextest skips.
+    // On main the package args are `--workspace`; a pull request gets its changed crates.
     assert!(runs(
         "check",
-        "cargo nextest run --workspace --all-features --profile ci"
+        "cargo nextest run ${{ steps.pkgs.outputs.args }} --all-features --profile ci"
     ));
-    assert!(runs("check", "cargo test --doc --workspace --all-features"));
+    assert!(runs(
+        "check",
+        "cargo test --doc ${{ steps.pkgs.outputs.args }} --all-features"
+    ));
     assert!(
         all.iter().any(|(id, step)| id == "check"
             && uses(step).starts_with("taiki-e/install-action@")

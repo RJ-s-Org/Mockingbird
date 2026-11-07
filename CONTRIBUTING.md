@@ -18,12 +18,12 @@ and report security issues privately as described in [SECURITY.md](SECURITY.md).
 
 ## Local gates
 
-These are the commands CI runs. Run them before opening a pull request; a pull request
-is merged only when all of them pass.
+These are the commands CI runs on main.
 
 For day-to-day work, `scripts/gate.sh` runs the subset your branch needs (fmt, plus clippy,
 nextest and doctests for the changed crates and their direct dependents, and the console or bench
-tests when those changed); CI runs the full list below on every pull request.
+tests when those changed). A pull request's CI runs the same Rust scope plus only the jobs its files
+affect (none while it is a draft); main runs the full list below after every merge.
 
 ```sh
 # Rust
