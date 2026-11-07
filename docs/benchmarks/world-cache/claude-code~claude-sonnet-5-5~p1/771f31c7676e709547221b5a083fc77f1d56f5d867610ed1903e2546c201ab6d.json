@@ -1,0 +1,403 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:17:29Z",
+  "authors": {
+    "/operations/discover-movie/answer": "agent",
+    "/operations/discover-movie/filters": "agent",
+    "/operations/discover-movie/paging": "agent",
+    "/operations/genre-movie-list/answer": "agent",
+    "/operations/genre-movie-list/type": "agent",
+    "/operations/movie-credits/not_found": "agent",
+    "/operations/movie-credits/target": "agent",
+    "/operations/movie-details/not_found": "agent",
+    "/operations/movie-popular-list/answer": "agent",
+    "/operations/movie-popular-list/order": "agent",
+    "/operations/movie-popular-list/paging": "agent",
+    "/operations/movie-popular-list/type": "agent",
+    "/operations/person-details/not_found": "agent",
+    "/operations/search-movie/answer": "agent",
+    "/operations/search-movie/filters": "agent",
+    "/operations/search-movie/paging": "agent",
+    "/operations/tv-series-details/not_found": "agent",
+    "/types/genre/identity": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "examples/apis/tmdb/tmdb.openapi.yaml",
+  "contract_sha256": "771f31c7676e709547221b5a083fc77f1d56f5d867610ed1903e2546c201ab6d",
+  "cost_usd": 0.103593,
+  "document": {
+    "operations": {
+      "discover-movie": {
+        "answer": {
+          "records": "/results"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "original_language",
+            "param": "with_original_language"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "style": "page"
+        }
+      },
+      "genre-movie-list": {
+        "answer": {
+          "records": "/genres"
+        },
+        "type": "genre"
+      },
+      "movie-credits": {
+        "not_found": 404,
+        "target": {
+          "path_param": "movie_id"
+        }
+      },
+      "movie-details": {
+        "not_found": 404
+      },
+      "movie-popular-list": {
+        "answer": {
+          "records": "/results"
+        },
+        "order": {
+          "descending": true,
+          "member": "popularity"
+        },
+        "paging": {
+          "request": "page",
+          "style": "page"
+        },
+        "type": "movie"
+      },
+      "person-details": {
+        "not_found": 404
+      },
+      "search-movie": {
+        "answer": {
+          "records": "/results"
+        },
+        "filters": [
+          {
+            "kind": "text",
+            "member": "title",
+            "param": "query"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "style": "page"
+        }
+      },
+      "tv-series-details": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "genre": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 23597,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `movie-credits` (Read) acts on one `credits` record but no target says where the request names it",
+      "operation": "movie-credits",
+      "type": "credits"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "tmdb",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 17237,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 17237,
+      "cacheReadInputTokens": 100610,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.103593,
+      "inputTokens": 12,
+      "maxOutputTokens": 128000,
+      "outputTokens": 2456,
+      "provider": "firstParty",
+      "thinkingTokens": 336,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 9,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:17:21.091457Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 17237,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 17237,
+    "cache_read_input_tokens": 100610,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 12,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 898,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 898,
+        "cache_read_input_tokens": 23925,
+        "input_tokens": 2,
+        "output_tokens": 715,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 2456,
+    "output_tokens_details": {
+      "thinking_tokens": 336
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 24118,
+  "world": {
+    "operations": {
+      "configuration-details": {
+        "kind": "list",
+        "type": "configuration"
+      },
+      "discover-movie": {
+        "answer": {
+          "records": "/results"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "original_language",
+            "param": "with_original_language"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "style": "page"
+        },
+        "type": "movie"
+      },
+      "genre-movie-list": {
+        "answer": {
+          "records": "/genres"
+        },
+        "kind": "list",
+        "type": "genre"
+      },
+      "movie-credits": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "movie_id"
+        },
+        "type": "credits"
+      },
+      "movie-details": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "movie_id"
+        },
+        "type": "movie"
+      },
+      "movie-popular-list": {
+        "answer": {
+          "records": "/results"
+        },
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "popularity"
+        },
+        "paging": {
+          "request": "page",
+          "style": "page"
+        },
+        "type": "movie"
+      },
+      "person-details": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "person_id"
+        },
+        "type": "person"
+      },
+      "search-movie": {
+        "answer": {
+          "records": "/results"
+        },
+        "filters": [
+          {
+            "kind": "text",
+            "member": "title",
+            "param": "query"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "style": "page"
+        },
+        "type": "movie"
+      },
+      "tv-series-details": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "series_id"
+        },
+        "type": "tv"
+      }
+    },
+    "types": {
+      "credits": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "genre": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "movie": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "person": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "tv": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

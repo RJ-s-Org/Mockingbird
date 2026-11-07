@@ -1,0 +1,609 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:08:57Z",
+  "authors": {
+    "/operations/addNoteToTicket/answer": "agent",
+    "/operations/createCompany/answer": "agent",
+    "/operations/createContact/answer": "agent",
+    "/operations/createTicket/answer": "agent",
+    "/operations/deleteTicket/not_found": "agent",
+    "/operations/deleteTicket/target": "agent",
+    "/operations/filterTickets/answer": "agent",
+    "/operations/filterTickets/filters": "agent",
+    "/operations/filterTickets/paging": "agent",
+    "/operations/listContacts/filters": "agent",
+    "/operations/listContacts/paging": "agent",
+    "/operations/listTicketConversations/order": "agent",
+    "/operations/listTicketConversations/paging": "agent",
+    "/operations/listTicketConversations/scope": "agent",
+    "/operations/listTickets/filters": "agent",
+    "/operations/listTickets/order": "agent",
+    "/operations/listTickets/paging": "agent",
+    "/operations/replyToTicket/answer": "agent",
+    "/operations/updateContact/not_found": "agent",
+    "/operations/updateTicket/not_found": "agent",
+    "/operations/viewContact/not_found": "agent",
+    "/operations/viewTicket/not_found": "agent",
+    "/types/contacts/unique": "agent",
+    "/types/conversations/parent": "agent",
+    "/types/tickets/lifecycle": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind3/freshdesk.openapi.yaml",
+  "contract_sha256": "7521f79cc88adf80888d2c14679f562550c1b532e387ff4f7d0336007e50cdfc",
+  "cost_usd": 0.1506572,
+  "document": {
+    "operations": {
+      "addNoteToTicket": {
+        "answer": {
+          "record": ""
+        }
+      },
+      "createCompany": {
+        "answer": {
+          "record": ""
+        }
+      },
+      "createContact": {
+        "answer": {
+          "record": ""
+        }
+      },
+      "createTicket": {
+        "answer": {
+          "record": ""
+        }
+      },
+      "deleteTicket": {
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        }
+      },
+      "filterTickets": {
+        "answer": {
+          "records": "/results"
+        },
+        "filters": [
+          {
+            "kind": "text",
+            "param": "query"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "style": "page"
+        }
+      },
+      "listContacts": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "email",
+            "param": "email"
+          },
+          {
+            "kind": "eq",
+            "member": "mobile",
+            "param": "mobile"
+          },
+          {
+            "kind": "eq",
+            "member": "phone",
+            "param": "phone"
+          },
+          {
+            "kind": "eq",
+            "member": "company_id",
+            "param": "company_id"
+          },
+          {
+            "kind": "gte",
+            "member": "updated_at",
+            "param": "updated_since"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "listTicketConversations": {
+        "order": {
+          "member": "created_at"
+        },
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "scope": {
+          "member": "ticket_id",
+          "param": "id"
+        }
+      },
+      "listTickets": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "requester_id",
+            "param": "requester_id"
+          },
+          {
+            "kind": "eq",
+            "member": "company_id",
+            "param": "company_id"
+          },
+          {
+            "kind": "gte",
+            "member": "updated_at",
+            "param": "updated_since"
+          }
+        ],
+        "order": {
+          "descending": true,
+          "member": "created_at"
+        },
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "replyToTicket": {
+        "answer": {
+          "record": ""
+        }
+      },
+      "updateContact": {
+        "not_found": 404
+      },
+      "updateTicket": {
+        "not_found": 404
+      },
+      "viewContact": {
+        "not_found": 404
+      },
+      "viewTicket": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "contacts": {
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "email"
+            ]
+          }
+        ]
+      },
+      "conversations": {
+        "parent": {
+          "member": "ticket_id",
+          "path_param": "id",
+          "type": "tickets"
+        }
+      },
+      "tickets": {
+        "lifecycle": {
+          "initial": "false",
+          "member": "deleted",
+          "soft_delete": {
+            "state": "true"
+          }
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 29433,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `deleteTicket` (Delete) acts on one `tickets` record but no target says where the request names it",
+      "operation": "deleteTicket",
+      "type": "tickets"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "freshdesk",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 24802,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 24802,
+      "cacheReadInputTokens": 183272,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1506572,
+      "inputTokens": 16,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3309,
+      "provider": "firstParty",
+      "thinkingTokens": 687,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 11,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:08:41.524322Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 24802,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 24802,
+    "cache_read_input_tokens": 183272,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 16,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1070,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1070,
+        "cache_read_input_tokens": 31318,
+        "input_tokens": 2,
+        "output_tokens": 894,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3309,
+    "output_tokens_details": {
+      "thinking_tokens": 687
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 30075,
+  "world": {
+    "operations": {
+      "addNoteToTicket": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "conversations"
+      },
+      "createCompany": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "companies"
+      },
+      "createContact": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "contacts"
+      },
+      "createTicket": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "tickets"
+      },
+      "deleteTicket": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "tickets"
+      },
+      "filterTickets": {
+        "answer": {
+          "records": "/results"
+        },
+        "filters": [
+          {
+            "kind": "text",
+            "param": "query"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "style": "page"
+        },
+        "type": "tickets"
+      },
+      "listContacts": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "email",
+            "param": "email"
+          },
+          {
+            "kind": "eq",
+            "member": "mobile",
+            "param": "mobile"
+          },
+          {
+            "kind": "eq",
+            "member": "phone",
+            "param": "phone"
+          },
+          {
+            "kind": "eq",
+            "member": "company_id",
+            "param": "company_id"
+          },
+          {
+            "kind": "gte",
+            "member": "updated_at",
+            "param": "updated_since"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "contacts"
+      },
+      "listTicketConversations": {
+        "kind": "list",
+        "order": {
+          "member": "created_at"
+        },
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "scope": {
+          "member": "ticket_id",
+          "param": "id"
+        },
+        "type": "conversations"
+      },
+      "listTickets": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "requester_id",
+            "param": "requester_id"
+          },
+          {
+            "kind": "eq",
+            "member": "company_id",
+            "param": "company_id"
+          },
+          {
+            "kind": "gte",
+            "member": "updated_at",
+            "param": "updated_since"
+          }
+        ],
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "created_at"
+        },
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "tickets"
+      },
+      "replyToTicket": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "conversations"
+      },
+      "updateContact": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "contacts"
+      },
+      "updateTicket": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "tickets"
+      },
+      "viewContact": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "contacts"
+      },
+      "viewTicket": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "tickets"
+      }
+    },
+    "types": {
+      "companies": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "contacts": {
+        "identity": {
+          "member": "id"
+        },
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "email"
+            ]
+          }
+        ]
+      },
+      "conversations": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "member": "ticket_id",
+          "path_param": "id",
+          "type": "tickets"
+        }
+      },
+      "tickets": {
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "initial": "false",
+          "member": "deleted",
+          "soft_delete": {
+            "state": "true"
+          }
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "operation `listContacts` declares no header `link`",
+          "path": "/operations/listContacts/paging/response_header"
+        },
+        {
+          "code": "unresolved",
+          "message": "operation `listTicketConversations` declares no header `link`",
+          "path": "/operations/listTicketConversations/paging/response_header"
+        },
+        {
+          "code": "unresolved",
+          "message": "operation `listTickets` declares no header `link`",
+          "path": "/operations/listTickets/paging/response_header"
+        }
+      ],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

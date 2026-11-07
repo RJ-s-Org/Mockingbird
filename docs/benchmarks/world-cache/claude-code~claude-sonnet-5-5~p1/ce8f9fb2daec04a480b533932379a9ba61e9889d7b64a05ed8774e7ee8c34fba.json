@@ -1,0 +1,537 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:07:08Z",
+  "authors": {
+    "/operations/chat_postMessage/answer": "agent",
+    "/operations/chat_postMessage/request": "agent",
+    "/operations/conversations_history/answer": "agent",
+    "/operations/conversations_history/order": "agent",
+    "/operations/conversations_history/paging": "agent",
+    "/operations/conversations_history/type": "agent",
+    "/operations/conversations_history_post/answer": "agent",
+    "/operations/conversations_history_post/order": "agent",
+    "/operations/conversations_history_post/paging": "agent",
+    "/operations/conversations_history_post/type": "agent",
+    "/operations/conversations_list/answer": "agent",
+    "/operations/conversations_list/paging": "agent",
+    "/operations/conversations_list_post/answer": "agent",
+    "/operations/conversations_list_post/paging": "agent",
+    "/operations/users_info/answer": "agent",
+    "/operations/users_info/kind": "agent",
+    "/operations/users_info/type": "agent",
+    "/operations/users_info_post/answer": "agent",
+    "/operations/users_info_post/kind": "agent",
+    "/operations/users_info_post/target": "agent",
+    "/operations/users_info_post/type": "agent",
+    "/operations/users_list/answer": "agent",
+    "/operations/users_list/paging": "agent",
+    "/operations/users_list_post/answer": "agent",
+    "/operations/users_list_post/paging": "agent",
+    "/types/chat.postMessage/identity": "agent",
+    "/types/conversations/identity": "agent",
+    "/types/users/identity": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "examples/apis/slack/slack.openapi.yaml",
+  "contract_sha256": "ce8f9fb2daec04a480b533932379a9ba61e9889d7b64a05ed8774e7ee8c34fba",
+  "cost_usd": 0.1561125,
+  "document": {
+    "operations": {
+      "chat_postMessage": {
+        "answer": {
+          "record": "/message"
+        },
+        "request": {
+          "record": ""
+        }
+      },
+      "conversations_history": {
+        "answer": {
+          "records": "/messages"
+        },
+        "order": {
+          "descending": true,
+          "member": "ts"
+        },
+        "paging": {
+          "request": "cursor",
+          "response": "response_metadata.next_cursor",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "type": "chat.postMessage"
+      },
+      "conversations_history_post": {
+        "answer": {
+          "records": "/messages"
+        },
+        "order": {
+          "descending": true,
+          "member": "ts"
+        },
+        "paging": {
+          "request": "cursor",
+          "response": "response_metadata.next_cursor",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "type": "chat.postMessage"
+      },
+      "conversations_list": {
+        "answer": {
+          "records": "/channels"
+        },
+        "paging": {
+          "request": "cursor",
+          "response": "response_metadata.next_cursor",
+          "size": "limit",
+          "style": "cursor"
+        }
+      },
+      "conversations_list_post": {
+        "answer": {
+          "records": "/channels"
+        },
+        "paging": {
+          "request": "cursor",
+          "response": "response_metadata.next_cursor",
+          "size": "limit",
+          "style": "cursor"
+        }
+      },
+      "users_info": {
+        "answer": {
+          "record": "/user"
+        },
+        "kind": "read",
+        "type": "users"
+      },
+      "users_info_post": {
+        "answer": {
+          "record": "/user"
+        },
+        "kind": "read",
+        "target": {
+          "member": "user"
+        },
+        "type": "users"
+      },
+      "users_list": {
+        "answer": {
+          "records": "/members"
+        },
+        "paging": {
+          "request": "cursor",
+          "response": "response_metadata.next_cursor",
+          "size": "limit",
+          "style": "cursor"
+        }
+      },
+      "users_list_post": {
+        "answer": {
+          "records": "/members"
+        },
+        "paging": {
+          "request": "cursor",
+          "response": "response_metadata.next_cursor",
+          "size": "limit",
+          "style": "cursor"
+        }
+      }
+    },
+    "types": {
+      "chat.postMessage": {
+        "identity": {
+          "member": "ts"
+        }
+      },
+      "conversations": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "users": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 28555,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `auth.test` is written by `auth_test_post` but has no identity: no member is known to name a record",
+      "type": "auth.test"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `reactions.add` is written by `reactions_add` but has no identity: no member is known to name a record",
+      "type": "reactions.add"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `users_info` (Read) acts on one `users` record but no target says where the request names it",
+      "operation": "users_info",
+      "type": "users"
+    }
+  ],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `auth.test` is written by `auth_test_post` but has no identity: no member is known to name a record",
+      "type": "auth.test"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `chat.postMessage` is written by `chat_postMessage` but has no identity: no member is known to name a record",
+      "type": "chat.postMessage"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `reactions.add` is written by `reactions_add` but has no identity: no member is known to name a record",
+      "type": "reactions.add"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "slack",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 26960,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 26960,
+      "cacheReadInputTokens": 176205,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1561125,
+      "inputTokens": 16,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3062,
+      "provider": "firstParty",
+      "thinkingTokens": 674,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 11,
+  "refused": [],
+  "revision": 2,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:06:53.366503Z",
+      "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:06:56.719098Z",
+      "revision": 2
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 26960,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 26960,
+    "cache_read_input_tokens": 176205,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 16,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1889,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1889,
+        "cache_read_input_tokens": 32657,
+        "input_tokens": 2,
+        "output_tokens": 796,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3062,
+    "output_tokens_details": {
+      "thinking_tokens": 674
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 29161,
+  "world": {
+    "operations": {
+      "auth_test": {
+        "kind": "list",
+        "type": "auth.test"
+      },
+      "auth_test_post": {
+        "kind": "create",
+        "type": "auth.test"
+      },
+      "chat_postMessage": {
+        "answer": {
+          "record": "/message"
+        },
+        "kind": "create",
+        "request": {
+          "record": ""
+        },
+        "type": "chat.postMessage"
+      },
+      "conversations_history": {
+        "answer": {
+          "records": "/messages"
+        },
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "ts"
+        },
+        "paging": {
+          "request": "cursor",
+          "response": "response_metadata.next_cursor",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "type": "chat.postMessage"
+      },
+      "conversations_history_post": {
+        "answer": {
+          "records": "/messages"
+        },
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "ts"
+        },
+        "paging": {
+          "request": "cursor",
+          "response": "response_metadata.next_cursor",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "type": "chat.postMessage"
+      },
+      "conversations_list": {
+        "answer": {
+          "records": "/channels"
+        },
+        "kind": "list",
+        "paging": {
+          "request": "cursor",
+          "response": "response_metadata.next_cursor",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "type": "conversations"
+      },
+      "conversations_list_post": {
+        "answer": {
+          "records": "/channels"
+        },
+        "kind": "list",
+        "paging": {
+          "request": "cursor",
+          "response": "response_metadata.next_cursor",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "type": "conversations"
+      },
+      "reactions_add": {
+        "kind": "create",
+        "type": "reactions.add"
+      },
+      "users_info": {
+        "answer": {
+          "record": "/user"
+        },
+        "kind": "read",
+        "type": "users"
+      },
+      "users_info_post": {
+        "answer": {
+          "record": "/user"
+        },
+        "kind": "read",
+        "target": {
+          "member": "user"
+        },
+        "type": "users"
+      },
+      "users_list": {
+        "answer": {
+          "records": "/members"
+        },
+        "kind": "list",
+        "paging": {
+          "request": "cursor",
+          "response": "response_metadata.next_cursor",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "type": "users"
+      },
+      "users_list_post": {
+        "answer": {
+          "records": "/members"
+        },
+        "kind": "list",
+        "paging": {
+          "request": "cursor",
+          "response": "response_metadata.next_cursor",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "type": "users"
+      }
+    },
+    "types": {
+      "chat.postMessage": {
+        "identity": {
+          "member": "ts"
+        }
+      },
+      "conversations": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "users": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "`id` is not a member of a `users` record",
+          "path": "/types/users/identity/member"
+        },
+        {
+          "code": "unresolved",
+          "message": "operation `users_info` declares no path parameter `user`",
+          "path": "/operations/users_info/target/path_param"
+        },
+        {
+          "code": "unresolved",
+          "message": "operation `users_info_post` declares no path parameter `user`",
+          "path": "/operations/users_info_post/target/path_param"
+        }
+      ],
+      "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "`user` is not a member of operation `users_info`'s request body",
+          "path": "/operations/users_info/target/member"
+        }
+      ],
+      "revision": 2,
+      "tool": "patch_world"
+    }
+  ]
+}

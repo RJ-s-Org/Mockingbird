@@ -91,6 +91,10 @@ done
 
 Then run `server_suites.py ... --binary <out>/bin/mb-<sha>` for each build, with the scripts from one checkout, so only the binary differs. Use `--repeat 4` or more: at repeat 2, a check that passes half the time moves by a whole rep.
 
+### The free gate (`fakegate.py`)
+
+`python3 scripts/llm-bench/fakegate.py <branch|sha|binary> [--base origin/main]` runs every journeys suite and `consistency` (not the undiagnosed blind sets) on `fake_llm.py` for a candidate and a base. It runs them at the `agent` tier, with the committed world-cache's descriptions and cache only, and at tier 0. It costs no spend. Before an engine pull request is marked ready, run it on the branch. It lists every check that went from pass to fail (LOST) or the other way (gained), tier by tier, and exits 1 when a tier lost more than `--noise` checks net. The default noise is 1, because the engine is not entirely deterministic. A check that passes on the fake LLM is one the engine decides, so a loss here is a regression whatever model runs later. Checks that need a real model's answers are not judged. Worktrees, binaries and the base's results stay under `--work` (default `$TMPDIR/mb-fakegate`) and are reused, so gating several branches against one main builds and runs main once. `test_fakegate.py` tests the comparison and the choice of descriptions, and checks that the committed cache covers every suite the gate runs: Sonnet-authored descriptions (`claude-code~claude-sonnet-5-5~p1`) for blind1-10, held-out, journeys and consistency, and Opus ones for blind11-13.
+
 ## Budget
 
 The proxy stops spending. Before each call it reserves an estimate of the call's cost and holds it while the call is in flight. It refuses the call with 402 (`bench budget exhausted`) when the following would reach `--budget-usd` (default 9.0):

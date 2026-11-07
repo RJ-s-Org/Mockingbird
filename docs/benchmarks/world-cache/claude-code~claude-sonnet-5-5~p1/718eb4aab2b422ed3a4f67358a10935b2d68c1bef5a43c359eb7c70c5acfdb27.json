@@ -1,0 +1,545 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:09:55Z",
+  "authors": {
+    "/operations/actions_get/not_found": "agent",
+    "/operations/dropletActions_list/order": "agent",
+    "/operations/dropletActions_list/paging": "agent",
+    "/operations/dropletActions_list/scope": "agent",
+    "/operations/dropletActions_post/answer": "agent",
+    "/operations/droplets_destroy/not_found": "agent",
+    "/operations/droplets_destroy/target": "agent",
+    "/operations/droplets_get/not_found": "agent",
+    "/operations/droplets_list/filters": "agent",
+    "/operations/droplets_list/paging": "agent",
+    "/operations/tags_assign_resources/not_found": "agent",
+    "/operations/tags_create/answer": "agent",
+    "/operations/tags_delete/not_found": "agent",
+    "/operations/tags_delete/target": "agent",
+    "/operations/tags_get/answer": "agent",
+    "/operations/tags_get/kind": "agent",
+    "/operations/tags_get/not_found": "agent",
+    "/operations/tags_get/target": "agent",
+    "/operations/tags_list/paging": "agent",
+    "/operations/tags_unassign_resources/kind": "agent",
+    "/operations/tags_unassign_resources/not_found": "agent",
+    "/operations/tags_unassign_resources/target": "agent",
+    "/operations/tags_unassign_resources/type": "agent",
+    "/types/actions/lifecycle": "agent",
+    "/types/actions/parent": "agent",
+    "/types/droplets/lifecycle": "agent",
+    "/types/tags/identity": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind4/digitalocean.openapi.yaml",
+  "contract_sha256": "718eb4aab2b422ed3a4f67358a10935b2d68c1bef5a43c359eb7c70c5acfdb27",
+  "cost_usd": 0.1467423,
+  "document": {
+    "operations": {
+      "actions_get": {
+        "not_found": 404
+      },
+      "dropletActions_list": {
+        "order": {
+          "descending": true,
+          "member": "started_at"
+        },
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "scope": {
+          "member": "resource_id",
+          "param": "droplet_id"
+        }
+      },
+      "dropletActions_post": {
+        "answer": {
+          "record": "/action"
+        }
+      },
+      "droplets_destroy": {
+        "not_found": 404,
+        "target": {
+          "path_param": "droplet_id"
+        }
+      },
+      "droplets_get": {
+        "not_found": 404
+      },
+      "droplets_list": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "name",
+            "param": "name"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "tags_assign_resources": {
+        "not_found": 404
+      },
+      "tags_create": {
+        "answer": {
+          "record": "/tag"
+        }
+      },
+      "tags_delete": {
+        "not_found": 404,
+        "target": {
+          "path_param": "tag_id"
+        }
+      },
+      "tags_get": {
+        "answer": {
+          "record": "/tag"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "tag_id"
+        }
+      },
+      "tags_list": {
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "tags_unassign_resources": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "tag_id"
+        },
+        "type": "tags"
+      }
+    },
+    "types": {
+      "actions": {
+        "lifecycle": {
+          "initial": "in-progress",
+          "member": "status",
+          "states": [
+            "in-progress",
+            "completed",
+            "errored"
+          ]
+        },
+        "parent": {
+          "member": "resource_id",
+          "path_param": "droplet_id",
+          "type": "droplets"
+        }
+      },
+      "droplets": {
+        "lifecycle": {
+          "initial": "new",
+          "member": "status",
+          "states": [
+            "new",
+            "active",
+            "off",
+            "archive"
+          ]
+        }
+      },
+      "tags": {
+        "identity": {
+          "member": "name"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 26403,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `droplets_destroy_byTag` (Delete) acts on one `droplets` record but no target says where the request names it",
+      "operation": "droplets_destroy_byTag",
+      "type": "droplets"
+    }
+  ],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `resources` is written by `tags_unassign_resources` but has no identity: no member is known to name a record",
+      "type": "resources"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `tags` is written by `tags_create`, `tags_delete`, `tags_assign_resources` but has no identity: no member is known to name a record",
+      "type": "tags"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `droplets_destroy_byTag` (Delete) acts on one `droplets` record but no target says where the request names it",
+      "operation": "droplets_destroy_byTag",
+      "type": "droplets"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `droplets_destroy` (Delete) acts on one `droplets` record but no target says where the request names it",
+      "operation": "droplets_destroy",
+      "type": "droplets"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `tags_delete` (Delete) acts on one `tags` record but no target says where the request names it",
+      "operation": "tags_delete",
+      "type": "tags"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `tags_unassign_resources` (Delete) acts on one `resources` record but no target says where the request names it",
+      "operation": "tags_unassign_resources",
+      "type": "resources"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "digitalocean",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 24446,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 24446,
+      "cacheReadInputTokens": 175163,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1467423,
+      "inputTokens": 16,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3141,
+      "provider": "firstParty",
+      "thinkingTokens": 574,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 12,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:09:42.583561Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 24446,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 24446,
+    "cache_read_input_tokens": 175163,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 16,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 895,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 895,
+        "cache_read_input_tokens": 31137,
+        "input_tokens": 2,
+        "output_tokens": 869,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3141,
+    "output_tokens_details": {
+      "thinking_tokens": 574
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 26958,
+  "world": {
+    "operations": {
+      "actions_get": {
+        "answer": {
+          "record": "/action"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "action_id"
+        },
+        "type": "actions"
+      },
+      "dropletActions_list": {
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "started_at"
+        },
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "scope": {
+          "member": "resource_id",
+          "param": "droplet_id"
+        },
+        "type": "actions"
+      },
+      "dropletActions_post": {
+        "answer": {
+          "record": "/action"
+        },
+        "kind": "create",
+        "type": "actions"
+      },
+      "droplets_create": {
+        "answer": {
+          "record": "/droplet"
+        },
+        "kind": "create",
+        "type": "droplets"
+      },
+      "droplets_destroy": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "droplet_id"
+        },
+        "type": "droplets"
+      },
+      "droplets_destroy_byTag": {
+        "kind": "delete",
+        "type": "droplets"
+      },
+      "droplets_get": {
+        "answer": {
+          "record": "/droplet"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "droplet_id"
+        },
+        "type": "droplets"
+      },
+      "droplets_list": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "name",
+            "param": "name"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "droplets"
+      },
+      "tags_assign_resources": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "tag_id"
+        },
+        "type": "tags"
+      },
+      "tags_create": {
+        "answer": {
+          "record": "/tag"
+        },
+        "kind": "create",
+        "type": "tags"
+      },
+      "tags_delete": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "tag_id"
+        },
+        "type": "tags"
+      },
+      "tags_get": {
+        "answer": {
+          "record": "/tag"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "tag_id"
+        },
+        "type": "tags"
+      },
+      "tags_list": {
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "tags"
+      },
+      "tags_unassign_resources": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "tag_id"
+        },
+        "type": "tags"
+      }
+    },
+    "types": {
+      "actions": {
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "initial": "in-progress",
+          "member": "status",
+          "states": [
+            "in-progress",
+            "completed",
+            "errored"
+          ]
+        },
+        "parent": {
+          "member": "resource_id",
+          "path_param": "droplet_id",
+          "type": "droplets"
+        }
+      },
+      "droplets": {
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "initial": "new",
+          "member": "status",
+          "states": [
+            "new",
+            "active",
+            "off",
+            "archive"
+          ]
+        }
+      },
+      "tags": {
+        "identity": {
+          "member": "name"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

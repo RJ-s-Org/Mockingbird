@@ -1,0 +1,528 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:10:33Z",
+  "authors": {
+    "/operations/activateUser/kind": "agent",
+    "/operations/activateUser/not_found": "agent",
+    "/operations/activateUser/target": "agent",
+    "/operations/activateUser/type": "agent",
+    "/operations/assignUserToGroup/not_found": "agent",
+    "/operations/assignUserToGroup/target": "agent",
+    "/operations/deactivateUser/kind": "agent",
+    "/operations/deactivateUser/not_found": "agent",
+    "/operations/deactivateUser/target": "agent",
+    "/operations/deactivateUser/transition": "agent",
+    "/operations/deactivateUser/type": "agent",
+    "/operations/deleteUser/not_found": "agent",
+    "/operations/deleteUser/target": "agent",
+    "/operations/getGroup/not_found": "agent",
+    "/operations/getUser/not_found": "agent",
+    "/operations/listUsers/filters": "agent",
+    "/operations/listUsers/paging": "agent",
+    "/operations/suspendUser/kind": "agent",
+    "/operations/suspendUser/not_found": "agent",
+    "/operations/suspendUser/target": "agent",
+    "/operations/suspendUser/transition": "agent",
+    "/operations/suspendUser/type": "agent",
+    "/operations/unsuspendUser/kind": "agent",
+    "/operations/unsuspendUser/not_found": "agent",
+    "/operations/unsuspendUser/target": "agent",
+    "/operations/unsuspendUser/transition": "agent",
+    "/operations/unsuspendUser/type": "agent",
+    "/operations/updateUser/kind": "agent",
+    "/operations/updateUser/not_found": "agent",
+    "/types/users/identity": "agent",
+    "/types/users/lifecycle": "agent",
+    "/types/users/unique": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind5/okta.openapi.yaml",
+  "contract_sha256": "3e2ff9de2e5a994ca4ee20ade5ff624d82e328b3d510aea6c76565df2c5688db",
+  "cost_usd": 0.1316062,
+  "document": {
+    "operations": {
+      "activateUser": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "users"
+      },
+      "assignUserToGroup": {
+        "not_found": 404,
+        "target": {
+          "path_param": "userId"
+        }
+      },
+      "deactivateUser": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "transition": {
+          "status": "DEPROVISIONED"
+        },
+        "type": "users"
+      },
+      "deleteUser": {
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        }
+      },
+      "getGroup": {
+        "not_found": 404
+      },
+      "getUser": {
+        "not_found": 404
+      },
+      "listUsers": {
+        "filters": [
+          {
+            "kind": "text",
+            "param": "search"
+          }
+        ],
+        "paging": {
+          "request": "after",
+          "response_header": "Link",
+          "size": "limit",
+          "style": "header_cursor"
+        }
+      },
+      "suspendUser": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "transition": {
+          "status": "SUSPENDED"
+        },
+        "type": "users"
+      },
+      "unsuspendUser": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "transition": {
+          "status": "ACTIVE"
+        },
+        "type": "users"
+      },
+      "updateUser": {
+        "kind": "update",
+        "not_found": 404
+      }
+    },
+    "types": {
+      "users": {
+        "identity": {
+          "alternates": [
+            "profile.login"
+          ],
+          "member": "id"
+        },
+        "lifecycle": {
+          "member": "status",
+          "soft_delete": {
+            "state": "DEPROVISIONED"
+          },
+          "states": [
+            "STAGED",
+            "PROVISIONED",
+            "ACTIVE",
+            "RECOVERY",
+            "PASSWORD_EXPIRED",
+            "LOCKED_OUT",
+            "SUSPENDED",
+            "DEPROVISIONED"
+          ]
+        },
+        "unique": [
+          {
+            "conflict": 400,
+            "members": [
+              "profile.login"
+            ]
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 34581,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `activate` is written by `activateUser` but has no identity: no member is known to name a record",
+      "type": "activate"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `deactivate` is written by `deactivateUser` but has no identity: no member is known to name a record",
+      "type": "deactivate"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `suspend` is written by `suspendUser` but has no identity: no member is known to name a record",
+      "type": "suspend"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `unsuspend` is written by `unsuspendUser` but has no identity: no member is known to name a record",
+      "type": "unsuspend"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `assignUserToGroup` (Update) acts on one `users` record but no target says where the request names it",
+      "operation": "assignUserToGroup",
+      "type": "users"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteUser` (Delete) acts on one `users` record but no target says where the request names it",
+      "operation": "deleteUser",
+      "type": "users"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "okta",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 21638,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 21638,
+      "cacheReadInputTokens": 133162,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1316062,
+      "inputTokens": 14,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3171,
+      "provider": "firstParty",
+      "thinkingTokens": 842,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 9,
+  "refused": [],
+  "revision": 2,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:10:16.490368Z",
+      "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:10:18.369845Z",
+      "revision": 2
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 21638,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 21638,
+    "cache_read_input_tokens": 133162,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 14,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1459,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1459,
+        "cache_read_input_tokens": 27765,
+        "input_tokens": 2,
+        "output_tokens": 834,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3171,
+    "output_tokens_details": {
+      "thinking_tokens": 842
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 35117,
+  "world": {
+    "operations": {
+      "activateUser": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "users"
+      },
+      "addGroup": {
+        "kind": "create",
+        "type": "groups"
+      },
+      "assignUserToGroup": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "userId"
+        },
+        "type": "users"
+      },
+      "createUser": {
+        "kind": "create",
+        "type": "users"
+      },
+      "deactivateUser": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "transition": {
+          "status": "DEPROVISIONED"
+        },
+        "type": "users"
+      },
+      "deleteUser": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "users"
+      },
+      "getGroup": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "groupId"
+        },
+        "type": "groups"
+      },
+      "getUser": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "users"
+      },
+      "listGroupUsers": {
+        "kind": "list",
+        "type": "users"
+      },
+      "listUserGroups": {
+        "kind": "list",
+        "type": "groups"
+      },
+      "listUsers": {
+        "filters": [
+          {
+            "kind": "text",
+            "param": "search"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "after",
+          "response_header": "Link",
+          "size": "limit",
+          "style": "header_cursor"
+        },
+        "type": "users"
+      },
+      "suspendUser": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "transition": {
+          "status": "SUSPENDED"
+        },
+        "type": "users"
+      },
+      "unsuspendUser": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "transition": {
+          "status": "ACTIVE"
+        },
+        "type": "users"
+      },
+      "updateUser": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "users"
+      }
+    },
+    "types": {
+      "groups": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "users": {
+        "identity": {
+          "alternates": [
+            "profile.login"
+          ],
+          "member": "id"
+        },
+        "lifecycle": {
+          "member": "status",
+          "soft_delete": {
+            "state": "DEPROVISIONED"
+          },
+          "states": [
+            "STAGED",
+            "PROVISIONED",
+            "ACTIVE",
+            "RECOVERY",
+            "PASSWORD_EXPIRED",
+            "LOCKED_OUT",
+            "SUSPENDED",
+            "DEPROVISIONED"
+          ]
+        },
+        "unique": [
+          {
+            "conflict": 400,
+            "members": [
+              "profile.login"
+            ]
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "operation `listGroupUsers` declares no header `Link`",
+          "path": "/operations/listGroupUsers/paging/response_header"
+        }
+      ],
+      "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 2,
+      "tool": "patch_world"
+    }
+  ]
+}

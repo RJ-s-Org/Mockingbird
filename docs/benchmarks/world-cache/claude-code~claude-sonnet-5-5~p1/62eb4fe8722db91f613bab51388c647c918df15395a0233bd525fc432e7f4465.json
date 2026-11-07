@@ -1,0 +1,704 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:16:57Z",
+  "authors": {
+    "/operations/apps~1create-installation-access-token/answer": "agent",
+    "/operations/apps~1create-installation-access-token/target": "agent",
+    "/operations/apps~1get-installation/not_found": "agent",
+    "/operations/apps~1get-repo-installation/not_found": "agent",
+    "/operations/apps~1list-installations/paging": "agent",
+    "/operations/apps~1list-repos-accessible-to-installation/answer": "agent",
+    "/operations/apps~1list-repos-accessible-to-installation/paging": "agent",
+    "/operations/issues~1create-comment/answer": "agent",
+    "/operations/issues~1create/answer": "agent",
+    "/operations/issues~1get/not_found": "agent",
+    "/operations/issues~1list-for-repo/filters": "agent",
+    "/operations/issues~1list-for-repo/paging": "agent",
+    "/operations/pulls~1create/answer": "agent",
+    "/operations/pulls~1get/not_found": "agent",
+    "/operations/pulls~1list/filters": "agent",
+    "/operations/pulls~1list/paging": "agent",
+    "/operations/repos~1get/not_found": "agent",
+    "/operations/repos~1list-for-authenticated-user/filters": "agent",
+    "/operations/repos~1list-for-authenticated-user/paging": "agent",
+    "/operations/search~1repos/answer": "agent",
+    "/operations/search~1repos/filters": "agent",
+    "/operations/search~1repos/paging": "agent",
+    "/operations/users~1get-by-username/not_found": "agent",
+    "/types/access_tokens/identity": "agent",
+    "/types/issues/identity": "agent",
+    "/types/issues/lifecycle": "agent",
+    "/types/issues/parent": "agent",
+    "/types/pulls/identity": "agent",
+    "/types/pulls/lifecycle": "agent",
+    "/types/pulls/parent": "agent",
+    "/types/repos/identity": "agent",
+    "/types/users/identity": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "examples/apis/github-rest/github-rest.openapi.yaml",
+  "contract_sha256": "62eb4fe8722db91f613bab51388c647c918df15395a0233bd525fc432e7f4465",
+  "cost_usd": 0.17588800000000002,
+  "document": {
+    "operations": {
+      "apps/create-installation-access-token": {
+        "answer": {
+          "record": ""
+        },
+        "target": {
+          "path_param": "installation_id"
+        }
+      },
+      "apps/get-installation": {
+        "not_found": 404
+      },
+      "apps/get-repo-installation": {
+        "not_found": 404
+      },
+      "apps/list-installations": {
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "apps/list-repos-accessible-to-installation": {
+        "answer": {
+          "records": "/repositories"
+        },
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "issues/create": {
+        "answer": {
+          "record": ""
+        }
+      },
+      "issues/create-comment": {
+        "answer": {
+          "record": ""
+        }
+      },
+      "issues/get": {
+        "not_found": 404
+      },
+      "issues/list-for-repo": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "state",
+            "param": "state"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "pulls/create": {
+        "answer": {
+          "record": ""
+        }
+      },
+      "pulls/get": {
+        "not_found": 404
+      },
+      "pulls/list": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "state",
+            "param": "state"
+          },
+          {
+            "kind": "eq",
+            "member": "base.ref",
+            "param": "base"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "repos/get": {
+        "not_found": 404
+      },
+      "repos/list-for-authenticated-user": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "visibility",
+            "param": "visibility"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "search/repos": {
+        "answer": {
+          "records": "/items"
+        },
+        "filters": [
+          {
+            "kind": "text",
+            "param": "q"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "users/get-by-username": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "access_tokens": {
+        "identity": {
+          "member": "token"
+        }
+      },
+      "issues": {
+        "identity": {
+          "alternates": [
+            "number"
+          ],
+          "member": "id"
+        },
+        "lifecycle": {
+          "member": "state",
+          "states": [
+            "open",
+            "closed"
+          ]
+        },
+        "parent": {
+          "path_param": "repo",
+          "type": "repos"
+        }
+      },
+      "pulls": {
+        "identity": {
+          "alternates": [
+            "number"
+          ],
+          "member": "id"
+        },
+        "lifecycle": {
+          "member": "state",
+          "states": [
+            "open",
+            "closed"
+          ]
+        },
+        "parent": {
+          "path_param": "repo",
+          "type": "repos"
+        }
+      },
+      "repos": {
+        "identity": {
+          "alternates": [
+            "name",
+            "full_name"
+          ],
+          "member": "id"
+        }
+      },
+      "users": {
+        "identity": {
+          "alternates": [
+            "login"
+          ],
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 30554,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `apps/get-authenticated` (Read) acts on one `app` record but no target says where the request names it",
+      "operation": "apps/get-authenticated",
+      "type": "app"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `apps/get-repo-installation` (Read) acts on one `installation` record but no target says where the request names it",
+      "operation": "apps/get-repo-installation",
+      "type": "installation"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `users/get-authenticated` (Read) acts on one `user` record but no target says where the request names it",
+      "operation": "users/get-authenticated",
+      "type": "user"
+    }
+  ],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `access_tokens` is written by `apps/create-installation-access-token` but has no identity: no member is known to name a record",
+      "type": "access_tokens"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `apps/get-authenticated` (Read) acts on one `app` record but no target says where the request names it",
+      "operation": "apps/get-authenticated",
+      "type": "app"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `apps/get-repo-installation` (Read) acts on one `installation` record but no target says where the request names it",
+      "operation": "apps/get-repo-installation",
+      "type": "installation"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `users/get-authenticated` (Read) acts on one `user` record but no target says where the request names it",
+      "operation": "users/get-authenticated",
+      "type": "user"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "github-rest",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 32227,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 32227,
+      "cacheReadInputTokens": 124360,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.17588800000000002,
+      "inputTokens": 12,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3452,
+      "provider": "firstParty",
+      "thinkingTokens": 997,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 9,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:16:46.613077Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 32227,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 32227,
+    "cache_read_input_tokens": 124360,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 12,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 3249,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 3249,
+        "cache_read_input_tokens": 36564,
+        "input_tokens": 2,
+        "output_tokens": 800,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3452,
+    "output_tokens_details": {
+      "thinking_tokens": 997
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 31161,
+  "world": {
+    "operations": {
+      "apps/create-installation-access-token": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "target": {
+          "path_param": "installation_id"
+        },
+        "type": "access_tokens"
+      },
+      "apps/get-authenticated": {
+        "kind": "read",
+        "type": "app"
+      },
+      "apps/get-installation": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "installation_id"
+        },
+        "type": "installations"
+      },
+      "apps/get-repo-installation": {
+        "kind": "read",
+        "not_found": 404,
+        "type": "installation"
+      },
+      "apps/list-installations": {
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "installations"
+      },
+      "apps/list-repos-accessible-to-installation": {
+        "answer": {
+          "records": "/repositories"
+        },
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "repos"
+      },
+      "issues/create": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "issues"
+      },
+      "issues/create-comment": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "comments"
+      },
+      "issues/get": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "issue_number"
+        },
+        "type": "issues"
+      },
+      "issues/list-for-repo": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "state",
+            "param": "state"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "issues"
+      },
+      "pulls/create": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "pulls"
+      },
+      "pulls/get": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "pull_number"
+        },
+        "type": "pulls"
+      },
+      "pulls/list": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "state",
+            "param": "state"
+          },
+          {
+            "kind": "eq",
+            "member": "base.ref",
+            "param": "base"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "pulls"
+      },
+      "repos/get": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "repo"
+        },
+        "type": "repos"
+      },
+      "repos/list-for-authenticated-user": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "visibility",
+            "param": "visibility"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "repos"
+      },
+      "search/repos": {
+        "answer": {
+          "records": "/items"
+        },
+        "filters": [
+          {
+            "kind": "text",
+            "param": "q"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "repos"
+      },
+      "users/get-authenticated": {
+        "kind": "read",
+        "type": "user"
+      },
+      "users/get-by-username": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "username"
+        },
+        "type": "users"
+      }
+    },
+    "types": {
+      "access_tokens": {
+        "identity": {
+          "member": "token"
+        }
+      },
+      "app": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "comments": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "installation": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "installations": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "issues": {
+        "identity": {
+          "alternates": [
+            "number"
+          ],
+          "member": "id"
+        },
+        "lifecycle": {
+          "member": "state",
+          "states": [
+            "open",
+            "closed"
+          ]
+        },
+        "parent": {
+          "path_param": "repo",
+          "type": "repos"
+        }
+      },
+      "pulls": {
+        "identity": {
+          "alternates": [
+            "number"
+          ],
+          "member": "id"
+        },
+        "lifecycle": {
+          "member": "state",
+          "states": [
+            "open",
+            "closed"
+          ]
+        },
+        "parent": {
+          "path_param": "repo",
+          "type": "repos"
+        }
+      },
+      "repos": {
+        "identity": {
+          "alternates": [
+            "name",
+            "full_name"
+          ],
+          "member": "id"
+        }
+      },
+      "user": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "users": {
+        "identity": {
+          "alternates": [
+            "login"
+          ],
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

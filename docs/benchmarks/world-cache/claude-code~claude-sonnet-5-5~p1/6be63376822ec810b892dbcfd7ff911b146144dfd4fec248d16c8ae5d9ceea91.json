@@ -1,0 +1,424 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:15:11Z",
+  "authors": {
+    "/operations/calendar.calendars.get/not_found": "agent",
+    "/operations/calendar.events.delete/not_found": "agent",
+    "/operations/calendar.events.delete/target": "agent",
+    "/operations/calendar.events.get/not_found": "agent",
+    "/operations/calendar.events.list/filters": "agent",
+    "/operations/calendar.events.list/paging": "agent",
+    "/operations/calendar.events.patch/not_found": "agent",
+    "/operations/calendar.events.update/not_found": "agent",
+    "/types/events/concurrency": "agent",
+    "/types/events/lifecycle": "agent",
+    "/types/events/parent": "agent",
+    "/types/events/unique": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind10/googlecalendar.openapi.yaml",
+  "contract_sha256": "6be63376822ec810b892dbcfd7ff911b146144dfd4fec248d16c8ae5d9ceea91",
+  "cost_usd": 0.1286016,
+  "document": {
+    "operations": {
+      "calendar.calendars.get": {
+        "not_found": 404
+      },
+      "calendar.events.delete": {
+        "not_found": 404,
+        "target": {
+          "path_param": "eventId"
+        }
+      },
+      "calendar.events.get": {
+        "not_found": 404
+      },
+      "calendar.events.list": {
+        "filters": [
+          {
+            "kind": "flag",
+            "param": "showDeleted"
+          },
+          {
+            "kind": "text",
+            "param": "q"
+          },
+          {
+            "kind": "gte",
+            "member": "end.dateTime",
+            "param": "timeMin"
+          },
+          {
+            "kind": "lte",
+            "member": "start.dateTime",
+            "param": "timeMax"
+          },
+          {
+            "kind": "gte",
+            "member": "updated",
+            "param": "updatedMin"
+          }
+        ],
+        "paging": {
+          "request": "pageToken",
+          "response": "nextPageToken",
+          "size": "maxResults",
+          "style": "cursor"
+        }
+      },
+      "calendar.events.patch": {
+        "not_found": 404
+      },
+      "calendar.events.update": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "events": {
+        "concurrency": {
+          "conflict": 412,
+          "header": "If-Match",
+          "member": "etag"
+        },
+        "lifecycle": {
+          "initial": "confirmed",
+          "member": "status",
+          "soft_delete": {
+            "listed_with": {
+              "param": "showDeleted",
+              "value": true
+            },
+            "state": "cancelled"
+          },
+          "states": [
+            "confirmed",
+            "tentative",
+            "cancelled"
+          ]
+        },
+        "parent": {
+          "path_param": "calendarId",
+          "type": "calendars"
+        },
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "id"
+            ]
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 27216,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `calendar.events.delete` (Delete) acts on one `events` record but no target says where the request names it",
+      "operation": "calendar.events.delete",
+      "type": "events"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "googlecalendar",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 20268,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 20268,
+      "cacheReadInputTokens": 158276,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1286016,
+      "inputTokens": 16,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3167,
+      "provider": "firstParty",
+      "thinkingTokens": 438,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 12,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:14:58.086148Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 20268,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 20268,
+    "cache_read_input_tokens": 158276,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 16,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 825,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 825,
+        "cache_read_input_tokens": 27029,
+        "input_tokens": 2,
+        "output_tokens": 876,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3167,
+    "output_tokens_details": {
+      "thinking_tokens": 438
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 27797,
+  "world": {
+    "operations": {
+      "calendar.calendars.get": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "calendarId"
+        },
+        "type": "calendars"
+      },
+      "calendar.calendars.insert": {
+        "kind": "create",
+        "type": "calendars"
+      },
+      "calendar.events.delete": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "eventId"
+        },
+        "type": "events"
+      },
+      "calendar.events.get": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "eventId"
+        },
+        "type": "events"
+      },
+      "calendar.events.insert": {
+        "kind": "create",
+        "type": "events"
+      },
+      "calendar.events.list": {
+        "filters": [
+          {
+            "kind": "flag",
+            "param": "showDeleted"
+          },
+          {
+            "kind": "text",
+            "param": "q"
+          },
+          {
+            "kind": "gte",
+            "member": "end.dateTime",
+            "param": "timeMin"
+          },
+          {
+            "kind": "lte",
+            "member": "start.dateTime",
+            "param": "timeMax"
+          },
+          {
+            "kind": "gte",
+            "member": "updated",
+            "param": "updatedMin"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "pageToken",
+          "response": "nextPageToken",
+          "size": "maxResults",
+          "style": "cursor"
+        },
+        "type": "events"
+      },
+      "calendar.events.patch": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "eventId"
+        },
+        "type": "events"
+      },
+      "calendar.events.update": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "eventId"
+        },
+        "type": "events"
+      }
+    },
+    "types": {
+      "calendars": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "events": {
+        "concurrency": {
+          "conflict": 412,
+          "header": "If-Match",
+          "member": "etag"
+        },
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "initial": "confirmed",
+          "member": "status",
+          "soft_delete": {
+            "listed_with": {
+              "param": "showDeleted",
+              "value": true
+            },
+            "state": "cancelled"
+          },
+          "states": [
+            "confirmed",
+            "tentative",
+            "cancelled"
+          ]
+        },
+        "parent": {
+          "path_param": "calendarId",
+          "type": "calendars"
+        },
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "id"
+            ]
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "`calendarId` is not a member of a `events` record",
+          "path": "/operations/calendar.events.list/scope/member"
+        }
+      ],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

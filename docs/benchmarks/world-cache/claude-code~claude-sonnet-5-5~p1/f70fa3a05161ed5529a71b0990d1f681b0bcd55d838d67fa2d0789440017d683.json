@@ -1,0 +1,389 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:07:06Z",
+  "authors": {
+    "/operations/delete-~1crm~1v3~1objects~1contacts~1{contactId}_archive/target": "agent",
+    "/operations/get-~1crm~1v3~1objects~1companies_getPage/paging": "agent",
+    "/operations/get-~1crm~1v3~1objects~1contacts_getPage/paging": "agent",
+    "/operations/get-~1crm~1v3~1objects~1deals_getPage/paging": "agent",
+    "/operations/post-~1crm~1v3~1objects~1contacts~1search_doSearch/paging": "agent",
+    "/types/contacts/lifecycle": "agent",
+    "/types/contacts/unique": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "examples/apis/hubspot/hubspot.openapi.yaml",
+  "contract_sha256": "f70fa3a05161ed5529a71b0990d1f681b0bcd55d838d67fa2d0789440017d683",
+  "cost_usd": 0.1404146,
+  "document": {
+    "operations": {
+      "delete-/crm/v3/objects/contacts/{contactId}_archive": {
+        "target": {
+          "path_param": "contactId"
+        }
+      },
+      "get-/crm/v3/objects/companies_getPage": {
+        "paging": {
+          "request": "after",
+          "response": "paging.next.after",
+          "size": "limit",
+          "style": "cursor"
+        }
+      },
+      "get-/crm/v3/objects/contacts_getPage": {
+        "paging": {
+          "request": "after",
+          "response": "paging.next.after",
+          "size": "limit",
+          "style": "cursor"
+        }
+      },
+      "get-/crm/v3/objects/deals_getPage": {
+        "paging": {
+          "request": "after",
+          "response": "paging.next.after",
+          "size": "limit",
+          "style": "cursor"
+        }
+      },
+      "post-/crm/v3/objects/contacts/search_doSearch": {
+        "paging": {
+          "request": "after",
+          "response": "paging.next.after",
+          "size": "limit",
+          "style": "cursor"
+        }
+      }
+    },
+    "types": {
+      "contacts": {
+        "lifecycle": {
+          "member": "archived",
+          "soft_delete": {
+            "listed_with": {
+              "param": "archived",
+              "value": true
+            },
+            "state": "true"
+          }
+        },
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "properties.email"
+            ]
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 26743,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `delete-/crm/v3/objects/contacts/{contactId}_archive` (Delete) acts on one `contacts` record but no target says where the request names it",
+      "operation": "delete-/crm/v3/objects/contacts/{contactId}_archive",
+      "type": "contacts"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "hubspot",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 22484,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 22484,
+      "cacheReadInputTokens": 192926,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1404146,
+      "inputTokens": 18,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3115,
+      "provider": "firstParty",
+      "thinkingTokens": 427,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 13,
+  "refused": [],
+  "revision": 2,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:06:53.245609Z",
+      "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:06:55.486954Z",
+      "revision": 2
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 22484,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 22484,
+    "cache_read_input_tokens": 192926,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 18,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 420,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 420,
+        "cache_read_input_tokens": 29650,
+        "input_tokens": 2,
+        "output_tokens": 672,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3115,
+    "output_tokens_details": {
+      "thinking_tokens": 427
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 27470,
+  "world": {
+    "operations": {
+      "delete-/crm/v3/objects/contacts/{contactId}_archive": {
+        "kind": "delete",
+        "target": {
+          "path_param": "contactId"
+        },
+        "type": "contacts"
+      },
+      "get-/crm/v3/objects/companies/{companyId}_getById": {
+        "kind": "read",
+        "target": {
+          "path_param": "companyId"
+        },
+        "type": "companies"
+      },
+      "get-/crm/v3/objects/companies_getPage": {
+        "kind": "list",
+        "paging": {
+          "request": "after",
+          "response": "paging.next.after",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "type": "companies"
+      },
+      "get-/crm/v3/objects/contacts/{contactId}_getById": {
+        "kind": "read",
+        "target": {
+          "path_param": "contactId"
+        },
+        "type": "contacts"
+      },
+      "get-/crm/v3/objects/contacts_getPage": {
+        "kind": "list",
+        "paging": {
+          "request": "after",
+          "response": "paging.next.after",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "type": "contacts"
+      },
+      "get-/crm/v3/objects/deals/{dealId}_getById": {
+        "kind": "read",
+        "target": {
+          "path_param": "dealId"
+        },
+        "type": "deals"
+      },
+      "get-/crm/v3/objects/deals_getPage": {
+        "kind": "list",
+        "paging": {
+          "request": "after",
+          "response": "paging.next.after",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "type": "deals"
+      },
+      "patch-/crm/v3/objects/contacts/{contactId}_update": {
+        "kind": "update",
+        "target": {
+          "path_param": "contactId"
+        },
+        "type": "contacts"
+      },
+      "post-/crm/v3/objects/companies_create": {
+        "kind": "create",
+        "type": "companies"
+      },
+      "post-/crm/v3/objects/contacts/search_doSearch": {
+        "kind": "list",
+        "paging": {
+          "request": "after",
+          "response": "paging.next.after",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "type": "contacts"
+      },
+      "post-/crm/v3/objects/contacts_create": {
+        "kind": "create",
+        "type": "contacts"
+      },
+      "post-/crm/v3/objects/deals_create": {
+        "kind": "create",
+        "type": "deals"
+      }
+    },
+    "types": {
+      "companies": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "contacts": {
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "member": "archived",
+          "soft_delete": {
+            "listed_with": {
+              "param": "archived",
+              "value": true
+            },
+            "state": "true"
+          }
+        },
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "properties.email"
+            ]
+          }
+        ]
+      },
+      "deals": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 2,
+      "tool": "patch_world"
+    }
+  ]
+}

@@ -1,0 +1,401 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:13:12Z",
+  "authors": {
+    "/operations/deleteCartById/not_found": "agent",
+    "/operations/deleteCartByKey/not_found": "agent",
+    "/operations/getCartById/not_found": "agent",
+    "/operations/getCartByKey/not_found": "agent",
+    "/operations/getOrderById/not_found": "agent",
+    "/operations/queryCarts/paging": "agent",
+    "/operations/queryOrders/paging": "agent",
+    "/operations/updateCartById/not_found": "agent",
+    "/operations/updateCartByKey/not_found": "agent",
+    "/types/carts/concurrency": "agent",
+    "/types/carts/identity": "agent",
+    "/types/carts/lifecycle": "agent",
+    "/types/orders/concurrency": "agent",
+    "/types/orders/identity": "agent",
+    "/types/orders/lifecycle": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind8/commercetools.openapi.yaml",
+  "contract_sha256": "d19299f549b367380038f2de2955c7a487413255259a73ced0ce5ed260f9df63",
+  "cost_usd": 0.1203166,
+  "document": {
+    "operations": {
+      "deleteCartById": {
+        "not_found": 404
+      },
+      "deleteCartByKey": {
+        "not_found": 404
+      },
+      "getCartById": {
+        "not_found": 404
+      },
+      "getCartByKey": {
+        "not_found": 404
+      },
+      "getOrderById": {
+        "not_found": 404
+      },
+      "queryCarts": {
+        "paging": {
+          "request": "offset",
+          "size": "limit",
+          "style": "offset"
+        }
+      },
+      "queryOrders": {
+        "paging": {
+          "request": "offset",
+          "size": "limit",
+          "style": "offset"
+        }
+      },
+      "updateCartById": {
+        "not_found": 404
+      },
+      "updateCartByKey": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "carts": {
+        "concurrency": {
+          "conflict": 409,
+          "member": "version"
+        },
+        "identity": {
+          "alternates": [
+            "key"
+          ],
+          "member": "id"
+        },
+        "lifecycle": {
+          "initial": "Active",
+          "member": "cartState",
+          "states": [
+            "Active",
+            "Merged",
+            "Ordered",
+            "Frozen"
+          ]
+        }
+      },
+      "orders": {
+        "concurrency": {
+          "conflict": 409,
+          "member": "version"
+        },
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "initial": "Open",
+          "member": "orderState",
+          "states": [
+            "Open",
+            "Confirmed",
+            "Complete",
+            "Cancelled"
+          ]
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 21639,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "commercetools",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 21882,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 21882,
+      "cacheReadInputTokens": 107846,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1203166,
+      "inputTokens": 12,
+      "maxOutputTokens": 128000,
+      "outputTokens": 2198,
+      "provider": "firstParty",
+      "thinkingTokens": 432,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 8,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:13:03.079087Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 21882,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 21882,
+    "cache_read_input_tokens": 107846,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 12,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 997,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 997,
+        "cache_read_input_tokens": 28471,
+        "input_tokens": 2,
+        "output_tokens": 618,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 2198,
+    "output_tokens_details": {
+      "thinking_tokens": 432
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 22189,
+  "world": {
+    "operations": {
+      "createCart": {
+        "kind": "create",
+        "type": "carts"
+      },
+      "createOrderFromCart": {
+        "kind": "create",
+        "type": "orders"
+      },
+      "deleteCartById": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "ID"
+        },
+        "type": "carts"
+      },
+      "deleteCartByKey": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "key"
+        },
+        "type": "carts"
+      },
+      "getCartById": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "ID"
+        },
+        "type": "carts"
+      },
+      "getCartByKey": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "key"
+        },
+        "type": "carts"
+      },
+      "getOrderById": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "ID"
+        },
+        "type": "orders"
+      },
+      "queryCarts": {
+        "kind": "list",
+        "paging": {
+          "request": "offset",
+          "size": "limit",
+          "style": "offset"
+        },
+        "type": "carts"
+      },
+      "queryOrders": {
+        "kind": "list",
+        "paging": {
+          "request": "offset",
+          "size": "limit",
+          "style": "offset"
+        },
+        "type": "orders"
+      },
+      "updateCartById": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "ID"
+        },
+        "type": "carts"
+      },
+      "updateCartByKey": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "key"
+        },
+        "type": "carts"
+      }
+    },
+    "types": {
+      "carts": {
+        "concurrency": {
+          "conflict": 409,
+          "member": "version"
+        },
+        "identity": {
+          "alternates": [
+            "key"
+          ],
+          "member": "id"
+        },
+        "lifecycle": {
+          "initial": "Active",
+          "member": "cartState",
+          "states": [
+            "Active",
+            "Merged",
+            "Ordered",
+            "Frozen"
+          ]
+        }
+      },
+      "orders": {
+        "concurrency": {
+          "conflict": 409,
+          "member": "version"
+        },
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "initial": "Open",
+          "member": "orderState",
+          "states": [
+            "Open",
+            "Confirmed",
+            "Complete",
+            "Cancelled"
+          ]
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

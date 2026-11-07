@@ -1,0 +1,463 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:14:43Z",
+  "authors": {
+    "/operations/createLedger/idempotency": "agent",
+    "/operations/createLedgerAccount/idempotency": "agent",
+    "/operations/createLedgerTransaction/idempotency": "agent",
+    "/operations/getLedger/not_found": "agent",
+    "/operations/getLedgerAccount/not_found": "agent",
+    "/operations/getLedgerTransaction/not_found": "agent",
+    "/operations/listLedgerAccounts/filters": "agent",
+    "/operations/listLedgerAccounts/order": "agent",
+    "/operations/listLedgerAccounts/paging": "agent",
+    "/operations/listLedgerTransactions/filters": "agent",
+    "/operations/listLedgerTransactions/order": "agent",
+    "/operations/listLedgerTransactions/paging": "agent",
+    "/operations/updateLedgerTransaction/not_found": "agent",
+    "/types/ledger_accounts/parent": "agent",
+    "/types/ledger_transactions/lifecycle": "agent",
+    "/types/ledger_transactions/parent": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind9/moderntreasury.openapi.yaml",
+  "contract_sha256": "119a3684239181dc85d47a71f1564df40fa7ad712ec6bda2e425b55959d1ac08",
+  "cost_usd": 0.14813630000000003,
+  "document": {
+    "operations": {
+      "createLedger": {
+        "idempotency": {
+          "header": "Idempotency-Key"
+        }
+      },
+      "createLedgerAccount": {
+        "idempotency": {
+          "header": "Idempotency-Key"
+        }
+      },
+      "createLedgerTransaction": {
+        "idempotency": {
+          "header": "Idempotency-Key"
+        }
+      },
+      "getLedger": {
+        "not_found": 404
+      },
+      "getLedgerAccount": {
+        "not_found": 404
+      },
+      "getLedgerTransaction": {
+        "not_found": 404
+      },
+      "listLedgerAccounts": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "ledger_id",
+            "param": "ledger_id"
+          },
+          {
+            "kind": "eq",
+            "member": "balances.posted_balance.currency",
+            "param": "currency"
+          }
+        ],
+        "order": {
+          "descending": true,
+          "member": "created_at"
+        },
+        "paging": {
+          "request": "after_cursor",
+          "response_header": "X-After-Cursor",
+          "size": "per_page",
+          "style": "header_cursor"
+        }
+      },
+      "listLedgerTransactions": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "ledger_id",
+            "param": "ledger_id"
+          },
+          {
+            "kind": "eq",
+            "member": "status",
+            "param": "status"
+          },
+          {
+            "kind": "eq",
+            "member": "external_id",
+            "param": "external_id"
+          }
+        ],
+        "order": {
+          "descending": true,
+          "member": "created_at"
+        },
+        "paging": {
+          "request": "after_cursor",
+          "response_header": "X-After-Cursor",
+          "size": "per_page",
+          "style": "header_cursor"
+        }
+      },
+      "updateLedgerTransaction": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "ledger_accounts": {
+        "parent": {
+          "member": "ledger_id",
+          "type": "ledgers"
+        }
+      },
+      "ledger_transactions": {
+        "lifecycle": {
+          "initial": "pending",
+          "member": "status",
+          "states": [
+            "pending",
+            "posted",
+            "archived"
+          ]
+        },
+        "parent": {
+          "member": "ledger_id",
+          "type": "ledgers"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 33840,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "moderntreasury",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 22141,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 22141,
+      "cacheReadInputTokens": 219523,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.14813630000000003,
+      "inputTokens": 20,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3758,
+      "provider": "firstParty",
+      "thinkingTokens": 675,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 12,
+  "refused": [],
+  "revision": 2,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:14:24.400854Z",
+      "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:14:27.820155Z",
+      "revision": 2
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 22141,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 22141,
+    "cache_read_input_tokens": 219523,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 20,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 385,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 385,
+        "cache_read_input_tokens": 29342,
+        "input_tokens": 2,
+        "output_tokens": 920,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3758,
+    "output_tokens_details": {
+      "thinking_tokens": 675
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 34417,
+  "world": {
+    "operations": {
+      "createLedger": {
+        "idempotency": {
+          "header": "Idempotency-Key"
+        },
+        "kind": "create",
+        "type": "ledgers"
+      },
+      "createLedgerAccount": {
+        "idempotency": {
+          "header": "Idempotency-Key"
+        },
+        "kind": "create",
+        "type": "ledger_accounts"
+      },
+      "createLedgerTransaction": {
+        "idempotency": {
+          "header": "Idempotency-Key"
+        },
+        "kind": "create",
+        "type": "ledger_transactions"
+      },
+      "getLedger": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "ledgers"
+      },
+      "getLedgerAccount": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "ledger_accounts"
+      },
+      "getLedgerTransaction": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "ledger_transactions"
+      },
+      "listLedgerAccounts": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "ledger_id",
+            "param": "ledger_id"
+          },
+          {
+            "kind": "eq",
+            "member": "balances.posted_balance.currency",
+            "param": "currency"
+          }
+        ],
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "created_at"
+        },
+        "paging": {
+          "request": "after_cursor",
+          "response_header": "X-After-Cursor",
+          "size": "per_page",
+          "style": "header_cursor"
+        },
+        "type": "ledger_accounts"
+      },
+      "listLedgerTransactions": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "ledger_id",
+            "param": "ledger_id"
+          },
+          {
+            "kind": "eq",
+            "member": "status",
+            "param": "status"
+          },
+          {
+            "kind": "eq",
+            "member": "external_id",
+            "param": "external_id"
+          }
+        ],
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "created_at"
+        },
+        "paging": {
+          "request": "after_cursor",
+          "response_header": "X-After-Cursor",
+          "size": "per_page",
+          "style": "header_cursor"
+        },
+        "type": "ledger_transactions"
+      },
+      "updateLedgerTransaction": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "ledger_transactions"
+      }
+    },
+    "types": {
+      "ledger_accounts": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "member": "ledger_id",
+          "type": "ledgers"
+        }
+      },
+      "ledger_transactions": {
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "initial": "pending",
+          "member": "status",
+          "states": [
+            "pending",
+            "posted",
+            "archived"
+          ]
+        },
+        "parent": {
+          "member": "ledger_id",
+          "type": "ledgers"
+        }
+      },
+      "ledgers": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "`ledger_entries.ledger_account_id` is not a member of a `ledger_transactions` record",
+          "path": "/operations/listLedgerTransactions/filters/1/member"
+        }
+      ],
+      "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 2,
+      "tool": "patch_world"
+    }
+  ]
+}

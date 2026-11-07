@@ -1,0 +1,694 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:16:03Z",
+  "authors": {
+    "/operations/CreateTicket/request": "agent",
+    "/operations/CreateTicketJson/request": "agent",
+    "/operations/CreateUser/request": "agent",
+    "/operations/CreateUserJson/request": "agent",
+    "/operations/ListSearchResults/answer": "agent",
+    "/operations/ListSearchResults/paging": "agent",
+    "/operations/ListSearchResultsJson/answer": "agent",
+    "/operations/ListSearchResultsJson/paging": "agent",
+    "/operations/ListTicketComments/answer": "agent",
+    "/operations/ListTicketComments/order": "agent",
+    "/operations/ListTicketCommentsJson/answer": "agent",
+    "/operations/ListTicketCommentsJson/order": "agent",
+    "/operations/ListTickets/answer": "agent",
+    "/operations/ListTickets/filters": "agent",
+    "/operations/ListTickets/paging": "agent",
+    "/operations/ListTicketsJson/answer": "agent",
+    "/operations/ListTicketsJson/filters": "agent",
+    "/operations/ListTicketsJson/paging": "agent",
+    "/operations/ListUsers/answer": "agent",
+    "/operations/ListUsers/filters": "agent",
+    "/operations/ListUsers/paging": "agent",
+    "/operations/ListUsersJson/answer": "agent",
+    "/operations/ListUsersJson/filters": "agent",
+    "/operations/ListUsersJson/paging": "agent",
+    "/operations/ShowTicket/not_found": "agent",
+    "/operations/ShowTicketJson/not_found": "agent",
+    "/operations/ShowUser/not_found": "agent",
+    "/operations/ShowUserJson/not_found": "agent",
+    "/operations/UpdateTicket/not_found": "agent",
+    "/operations/UpdateTicket/request": "agent",
+    "/operations/UpdateTicketJson/not_found": "agent",
+    "/operations/UpdateTicketJson/request": "agent",
+    "/types/comments/parent": "agent",
+    "/types/tickets/lifecycle": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "examples/apis/zendesk/zendesk.openapi.yaml",
+  "contract_sha256": "b8cc78a1323cec22e2c40e9054d151ff8dda5e81a2d9f32ddfa50d5bda16f380",
+  "cost_usd": 0.1654198,
+  "document": {
+    "operations": {
+      "CreateTicket": {
+        "request": {
+          "record": "/ticket"
+        }
+      },
+      "CreateTicketJson": {
+        "request": {
+          "record": "/ticket"
+        }
+      },
+      "CreateUser": {
+        "request": {
+          "record": "/user"
+        }
+      },
+      "CreateUserJson": {
+        "request": {
+          "record": "/user"
+        }
+      },
+      "ListSearchResults": {
+        "answer": {
+          "records": "/results"
+        },
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "ListSearchResultsJson": {
+        "answer": {
+          "records": "/results"
+        },
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "ListTicketComments": {
+        "answer": {
+          "records": "/comments"
+        },
+        "order": {
+          "member": "created_at"
+        }
+      },
+      "ListTicketCommentsJson": {
+        "answer": {
+          "records": "/comments"
+        },
+        "order": {
+          "member": "created_at"
+        }
+      },
+      "ListTickets": {
+        "answer": {
+          "records": "/tickets"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "external_id",
+            "param": "external_id"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "ListTicketsJson": {
+        "answer": {
+          "records": "/tickets"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "external_id",
+            "param": "external_id"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "ListUsers": {
+        "answer": {
+          "records": "/users"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "role",
+            "param": "role"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "ListUsersJson": {
+        "answer": {
+          "records": "/users"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "role",
+            "param": "role"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "ShowTicket": {
+        "not_found": 404
+      },
+      "ShowTicketJson": {
+        "not_found": 404
+      },
+      "ShowUser": {
+        "not_found": 404
+      },
+      "ShowUserJson": {
+        "not_found": 404
+      },
+      "UpdateTicket": {
+        "not_found": 404,
+        "request": {
+          "record": "/ticket"
+        }
+      },
+      "UpdateTicketJson": {
+        "not_found": 404,
+        "request": {
+          "record": "/ticket"
+        }
+      }
+    },
+    "types": {
+      "comments": {
+        "parent": {
+          "path_param": "ticket_id",
+          "type": "tickets"
+        }
+      },
+      "tickets": {
+        "lifecycle": {
+          "member": "status",
+          "states": [
+            "new",
+            "open",
+            "pending",
+            "hold",
+            "solved",
+            "closed"
+          ]
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 27008,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `ShowCurrentUser` (Read) acts on one `me` record but no target says where the request names it",
+      "operation": "ShowCurrentUser",
+      "type": "me"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `ShowCurrentUserJson` (Read) acts on one `me` record but no target says where the request names it",
+      "operation": "ShowCurrentUserJson",
+      "type": "me"
+    }
+  ],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `ShowCurrentUser` (Read) acts on one `me` record but no target says where the request names it",
+      "operation": "ShowCurrentUser",
+      "type": "me"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `ShowCurrentUserJson` (Read) acts on one `me` record but no target says where the request names it",
+      "operation": "ShowCurrentUserJson",
+      "type": "me"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "zendesk",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 29325,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 29325,
+      "cacheReadInputTokens": 174518,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1654198,
+      "inputTokens": 14,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3064,
+      "provider": "firstParty",
+      "thinkingTokens": 649,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 9,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:15:52.008264Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 29325,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 29325,
+    "cache_read_input_tokens": 174518,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 14,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 569,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 569,
+        "cache_read_input_tokens": 36342,
+        "input_tokens": 2,
+        "output_tokens": 785,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3064,
+    "output_tokens_details": {
+      "thinking_tokens": 649
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 27528,
+  "world": {
+    "operations": {
+      "CreateTicket": {
+        "answer": {
+          "identity_header": "Location",
+          "record": "/ticket"
+        },
+        "kind": "create",
+        "request": {
+          "record": "/ticket"
+        },
+        "type": "tickets"
+      },
+      "CreateTicketJson": {
+        "answer": {
+          "identity_header": "Location",
+          "record": "/ticket"
+        },
+        "kind": "create",
+        "request": {
+          "record": "/ticket"
+        },
+        "type": "tickets"
+      },
+      "CreateUser": {
+        "answer": {
+          "record": "/user"
+        },
+        "kind": "create",
+        "request": {
+          "record": "/user"
+        },
+        "type": "users"
+      },
+      "CreateUserJson": {
+        "answer": {
+          "record": "/user"
+        },
+        "kind": "create",
+        "request": {
+          "record": "/user"
+        },
+        "type": "users"
+      },
+      "ListSearchResults": {
+        "answer": {
+          "records": "/results"
+        },
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "tickets"
+      },
+      "ListSearchResultsJson": {
+        "answer": {
+          "records": "/results"
+        },
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "tickets"
+      },
+      "ListTicketComments": {
+        "answer": {
+          "records": "/comments"
+        },
+        "kind": "list",
+        "order": {
+          "member": "created_at"
+        },
+        "type": "comments"
+      },
+      "ListTicketCommentsJson": {
+        "answer": {
+          "records": "/comments"
+        },
+        "kind": "list",
+        "order": {
+          "member": "created_at"
+        },
+        "type": "comments"
+      },
+      "ListTickets": {
+        "answer": {
+          "records": "/tickets"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "external_id",
+            "param": "external_id"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "tickets"
+      },
+      "ListTicketsJson": {
+        "answer": {
+          "records": "/tickets"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "external_id",
+            "param": "external_id"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "tickets"
+      },
+      "ListUsers": {
+        "answer": {
+          "records": "/users"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "role",
+            "param": "role"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "users"
+      },
+      "ListUsersJson": {
+        "answer": {
+          "records": "/users"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "role",
+            "param": "role"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "users"
+      },
+      "ShowCurrentUser": {
+        "answer": {
+          "record": "/user"
+        },
+        "kind": "read",
+        "type": "me"
+      },
+      "ShowCurrentUserJson": {
+        "answer": {
+          "record": "/user"
+        },
+        "kind": "read",
+        "type": "me"
+      },
+      "ShowTicket": {
+        "answer": {
+          "record": "/ticket"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "ticket_id"
+        },
+        "type": "tickets"
+      },
+      "ShowTicketJson": {
+        "answer": {
+          "record": "/ticket"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "ticket_id"
+        },
+        "type": "tickets"
+      },
+      "ShowUser": {
+        "answer": {
+          "record": "/user"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "user_id"
+        },
+        "type": "users"
+      },
+      "ShowUserJson": {
+        "answer": {
+          "record": "/user"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "user_id"
+        },
+        "type": "users"
+      },
+      "UpdateTicket": {
+        "answer": {
+          "record": "/ticket"
+        },
+        "kind": "update",
+        "not_found": 404,
+        "request": {
+          "record": "/ticket"
+        },
+        "target": {
+          "path_param": "ticket_id"
+        },
+        "type": "tickets"
+      },
+      "UpdateTicketJson": {
+        "answer": {
+          "record": "/ticket"
+        },
+        "kind": "update",
+        "not_found": 404,
+        "request": {
+          "record": "/ticket"
+        },
+        "target": {
+          "path_param": "ticket_id"
+        },
+        "type": "tickets"
+      }
+    },
+    "types": {
+      "comments": {
+        "parent": {
+          "path_param": "ticket_id",
+          "type": "tickets"
+        }
+      },
+      "me": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "tickets": {
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "member": "status",
+          "states": [
+            "new",
+            "open",
+            "pending",
+            "hold",
+            "solved",
+            "closed"
+          ]
+        }
+      },
+      "users": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

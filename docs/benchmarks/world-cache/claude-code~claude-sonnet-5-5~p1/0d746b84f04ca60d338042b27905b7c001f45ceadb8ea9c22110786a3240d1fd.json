@@ -1,0 +1,416 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:15:55Z",
+  "authors": {
+    "/operations/doTransition/not_found": "agent",
+    "/operations/editIssue/not_found": "agent",
+    "/operations/editIssue/target": "agent",
+    "/operations/getComments/order": "agent",
+    "/operations/getComments/paging": "agent",
+    "/operations/getIssue/not_found": "agent",
+    "/operations/getProject/not_found": "agent",
+    "/operations/searchAndReconsileIssuesUsingJql/paging": "agent",
+    "/operations/searchAndReconsileIssuesUsingJqlPost/kind": "agent",
+    "/operations/searchAndReconsileIssuesUsingJqlPost/paging": "agent",
+    "/operations/searchAndReconsileIssuesUsingJqlPost/type": "agent",
+    "/operations/searchProjects/paging": "agent",
+    "/types/comment/identity": "agent",
+    "/types/comment/parent": "agent",
+    "/types/issue/identity": "agent",
+    "/types/project/identity": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "examples/apis/jira/jira.openapi.yaml",
+  "contract_sha256": "0d746b84f04ca60d338042b27905b7c001f45ceadb8ea9c22110786a3240d1fd",
+  "cost_usd": 0.1386456,
+  "document": {
+    "operations": {
+      "doTransition": {
+        "not_found": 404
+      },
+      "editIssue": {
+        "not_found": 404,
+        "target": {
+          "path_param": "issueIdOrKey"
+        }
+      },
+      "getComments": {
+        "order": {
+          "member": "created"
+        },
+        "paging": {
+          "request": "startAt",
+          "size": "maxResults",
+          "style": "offset"
+        }
+      },
+      "getIssue": {
+        "not_found": 404
+      },
+      "getProject": {
+        "not_found": 404
+      },
+      "searchAndReconsileIssuesUsingJql": {
+        "paging": {
+          "request": "nextPageToken",
+          "response": "nextPageToken",
+          "size": "maxResults",
+          "style": "cursor"
+        }
+      },
+      "searchAndReconsileIssuesUsingJqlPost": {
+        "kind": "list",
+        "paging": {
+          "request": "nextPageToken",
+          "response": "nextPageToken",
+          "size": "maxResults",
+          "style": "cursor"
+        },
+        "type": "issue"
+      },
+      "searchProjects": {
+        "paging": {
+          "request": "startAt",
+          "size": "maxResults",
+          "style": "offset"
+        }
+      }
+    },
+    "types": {
+      "comment": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "path_param": "issueIdOrKey",
+          "type": "issue"
+        }
+      },
+      "issue": {
+        "identity": {
+          "alternates": [
+            "key"
+          ],
+          "member": "id"
+        }
+      },
+      "project": {
+        "identity": {
+          "alternates": [
+            "key"
+          ],
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 19267,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `jql` is written by `searchAndReconsileIssuesUsingJqlPost` but has no identity: no member is known to name a record",
+      "type": "jql"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `editIssue` (Update) acts on one `issue` record but no target says where the request names it",
+      "operation": "editIssue",
+      "type": "issue"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "jira",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 26161,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 26161,
+      "cacheReadInputTokens": 116576,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1386456,
+      "inputTokens": 12,
+      "maxOutputTokens": 128000,
+      "outputTokens": 2232,
+      "provider": "firstParty",
+      "thinkingTokens": 467,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 8,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:15:48.305365Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 26161,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 26161,
+    "cache_read_input_tokens": 116576,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 12,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1156,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1156,
+        "cache_read_input_tokens": 32591,
+        "input_tokens": 2,
+        "output_tokens": 686,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 2232,
+    "output_tokens_details": {
+      "thinking_tokens": 467
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 19759,
+  "world": {
+    "operations": {
+      "addComment": {
+        "kind": "create",
+        "type": "comment"
+      },
+      "createIssue": {
+        "kind": "create",
+        "type": "issue"
+      },
+      "doTransition": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "issueIdOrKey"
+        },
+        "type": "issue"
+      },
+      "editIssue": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "issueIdOrKey"
+        },
+        "type": "issue"
+      },
+      "getAllProjects": {
+        "kind": "list",
+        "type": "project"
+      },
+      "getComments": {
+        "kind": "list",
+        "order": {
+          "member": "created"
+        },
+        "paging": {
+          "request": "startAt",
+          "size": "maxResults",
+          "style": "offset"
+        },
+        "type": "comment"
+      },
+      "getCurrentUser": {
+        "kind": "list",
+        "type": "myself"
+      },
+      "getFields": {
+        "kind": "list",
+        "type": "field"
+      },
+      "getIssue": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "issueIdOrKey"
+        },
+        "type": "issue"
+      },
+      "getProject": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "projectIdOrKey"
+        },
+        "type": "project"
+      },
+      "getServerInfo": {
+        "kind": "list",
+        "type": "serverInfo"
+      },
+      "getTransitions": {
+        "kind": "list",
+        "type": "transitions"
+      },
+      "searchAndReconsileIssuesUsingJql": {
+        "kind": "list",
+        "paging": {
+          "request": "nextPageToken",
+          "response": "nextPageToken",
+          "size": "maxResults",
+          "style": "cursor"
+        },
+        "type": "issue"
+      },
+      "searchAndReconsileIssuesUsingJqlPost": {
+        "kind": "list",
+        "paging": {
+          "request": "nextPageToken",
+          "response": "nextPageToken",
+          "size": "maxResults",
+          "style": "cursor"
+        },
+        "type": "issue"
+      },
+      "searchProjects": {
+        "kind": "list",
+        "paging": {
+          "request": "startAt",
+          "size": "maxResults",
+          "style": "offset"
+        },
+        "type": "project"
+      }
+    },
+    "types": {
+      "comment": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "path_param": "issueIdOrKey",
+          "type": "issue"
+        }
+      },
+      "issue": {
+        "identity": {
+          "alternates": [
+            "key"
+          ],
+          "member": "id"
+        }
+      },
+      "project": {
+        "identity": {
+          "alternates": [
+            "key"
+          ],
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

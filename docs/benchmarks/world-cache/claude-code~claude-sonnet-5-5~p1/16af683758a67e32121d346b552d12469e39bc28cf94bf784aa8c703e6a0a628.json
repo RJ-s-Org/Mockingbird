@@ -1,0 +1,585 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:14:14Z",
+  "authors": {
+    "/operations/folders.create/answer": "agent",
+    "/operations/folders.create/kind": "agent",
+    "/operations/folders.create/request": "agent",
+    "/operations/folders.create/type": "agent",
+    "/operations/folders.delete/answer": "agent",
+    "/operations/folders.delete/kind": "agent",
+    "/operations/folders.delete/not_found": "agent",
+    "/operations/folders.delete/target": "agent",
+    "/operations/folders.delete/type": "agent",
+    "/operations/folders.get/kind": "agent",
+    "/operations/folders.get/not_found": "agent",
+    "/operations/folders.get/target": "agent",
+    "/operations/folders.get/type": "agent",
+    "/operations/folders.list/filters": "agent",
+    "/operations/folders.list/kind": "agent",
+    "/operations/folders.list/order": "agent",
+    "/operations/folders.list/paging": "agent",
+    "/operations/folders.list/scope": "agent",
+    "/operations/folders.list/type": "agent",
+    "/operations/folders.move/answer": "agent",
+    "/operations/folders.move/changes": "agent",
+    "/operations/folders.move/kind": "agent",
+    "/operations/folders.move/not_found": "agent",
+    "/operations/folders.move/target": "agent",
+    "/operations/folders.move/type": "agent",
+    "/operations/folders.patch/answer": "agent",
+    "/operations/folders.patch/kind": "agent",
+    "/operations/folders.patch/not_found": "agent",
+    "/operations/folders.patch/request": "agent",
+    "/operations/folders.patch/target": "agent",
+    "/operations/folders.patch/type": "agent",
+    "/operations/folders.search/kind": "agent",
+    "/operations/folders.search/order": "agent",
+    "/operations/folders.search/paging": "agent",
+    "/operations/folders.search/type": "agent",
+    "/operations/folders.undelete/answer": "agent",
+    "/operations/folders.undelete/kind": "agent",
+    "/operations/folders.undelete/not_found": "agent",
+    "/operations/folders.undelete/target": "agent",
+    "/operations/folders.undelete/transition": "agent",
+    "/operations/folders.undelete/type": "agent",
+    "/operations/operations.get/not_found": "agent",
+    "/types/folders/identity": "agent",
+    "/types/folders/lifecycle": "agent",
+    "/types/folders/parent": "agent",
+    "/types/folders/unique": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind9/resourcemanager.openapi.yaml",
+  "contract_sha256": "16af683758a67e32121d346b552d12469e39bc28cf94bf784aa8c703e6a0a628",
+  "cost_usd": 0.1210435,
+  "document": {
+    "operations": {
+      "folders.create": {
+        "answer": {
+          "long_running": {
+            "done": "done",
+            "result": "response"
+          }
+        },
+        "kind": "create",
+        "request": {
+          "record": ""
+        },
+        "type": "folders"
+      },
+      "folders.delete": {
+        "answer": {
+          "long_running": {
+            "done": "done",
+            "result": "response"
+          }
+        },
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "folder"
+        },
+        "type": "folders"
+      },
+      "folders.get": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "folder"
+        },
+        "type": "folders"
+      },
+      "folders.list": {
+        "filters": [
+          {
+            "kind": "flag",
+            "param": "showDeleted"
+          }
+        ],
+        "kind": "list",
+        "order": {
+          "member": "displayName"
+        },
+        "paging": {
+          "request": "pageToken",
+          "response": "nextPageToken",
+          "size": "pageSize",
+          "style": "cursor"
+        },
+        "scope": {
+          "member": "parent",
+          "param": "parent"
+        },
+        "type": "folders"
+      },
+      "folders.move": {
+        "answer": {
+          "long_running": {
+            "done": "done",
+            "result": "response"
+          }
+        },
+        "changes": {
+          "parent": {
+            "from_request": "/destinationParent"
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "folder"
+        },
+        "type": "folders"
+      },
+      "folders.patch": {
+        "answer": {
+          "long_running": {
+            "done": "done",
+            "result": "response"
+          }
+        },
+        "kind": "update",
+        "not_found": 404,
+        "request": {
+          "record": ""
+        },
+        "target": {
+          "path_param": "folder"
+        },
+        "type": "folders"
+      },
+      "folders.search": {
+        "kind": "list",
+        "order": {
+          "member": "displayName"
+        },
+        "paging": {
+          "request": "pageToken",
+          "response": "nextPageToken",
+          "size": "pageSize",
+          "style": "cursor"
+        },
+        "type": "folders"
+      },
+      "folders.undelete": {
+        "answer": {
+          "long_running": {
+            "done": "done",
+            "result": "response"
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "folder"
+        },
+        "transition": {
+          "state": "ACTIVE"
+        },
+        "type": "folders"
+      },
+      "operations.get": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "folders": {
+        "identity": {
+          "member": "name",
+          "pattern": "folders/{id}"
+        },
+        "lifecycle": {
+          "initial": "ACTIVE",
+          "member": "state",
+          "soft_delete": {
+            "listed_with": {
+              "param": "showDeleted",
+              "value": true
+            },
+            "state": "DELETE_REQUESTED"
+          },
+          "states": [
+            "ACTIVE",
+            "DELETE_REQUESTED"
+          ]
+        },
+        "parent": {
+          "member": "parent",
+          "type": "folders"
+        },
+        "unique": [
+          {
+            "conflict": 400,
+            "members": [
+              "displayName"
+            ],
+            "scope": "parent"
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 25070,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `folders` is written by `folders.create`, `folders.delete`, `folders.patch` but has no identity: no member is known to name a record",
+      "type": "folders"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `{folder}:move` is written by `folders.move` but has no identity: no member is known to name a record",
+      "type": "{folder}:move"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `{folder}:undelete` is written by `folders.undelete` but has no identity: no member is known to name a record",
+      "type": "{folder}:undelete"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `folders.delete` (Delete) acts on one `folders` record but no target says where the request names it",
+      "operation": "folders.delete",
+      "type": "folders"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `folders.patch` (Update) acts on one `folders` record but no target says where the request names it",
+      "operation": "folders.patch",
+      "type": "folders"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "resourcemanager",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 21247,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 21247,
+      "cacheReadInputTokens": 85655,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1210435,
+      "inputTokens": 10,
+      "maxOutputTokens": 128000,
+      "outputTokens": 2747,
+      "provider": "firstParty",
+      "thinkingTokens": 437,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 8,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:14:01.537337Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 21247,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 21247,
+    "cache_read_input_tokens": 85655,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 10,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 2035,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 2035,
+        "cache_read_input_tokens": 26798,
+        "input_tokens": 2,
+        "output_tokens": 808,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 2747,
+    "output_tokens_details": {
+      "thinking_tokens": 437
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 25653,
+  "world": {
+    "operations": {
+      "folders.create": {
+        "answer": {
+          "long_running": {
+            "done": "done",
+            "result": "response"
+          }
+        },
+        "kind": "create",
+        "request": {
+          "record": ""
+        },
+        "type": "folders"
+      },
+      "folders.delete": {
+        "answer": {
+          "long_running": {
+            "done": "done",
+            "result": "response"
+          }
+        },
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "folder"
+        },
+        "type": "folders"
+      },
+      "folders.get": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "folder"
+        },
+        "type": "folders"
+      },
+      "folders.list": {
+        "filters": [
+          {
+            "kind": "flag",
+            "param": "showDeleted"
+          }
+        ],
+        "kind": "list",
+        "order": {
+          "member": "displayName"
+        },
+        "paging": {
+          "request": "pageToken",
+          "response": "nextPageToken",
+          "size": "pageSize",
+          "style": "cursor"
+        },
+        "scope": {
+          "member": "parent",
+          "param": "parent"
+        },
+        "type": "folders"
+      },
+      "folders.move": {
+        "answer": {
+          "long_running": {
+            "done": "done",
+            "result": "response"
+          }
+        },
+        "changes": {
+          "parent": {
+            "from_request": "/destinationParent"
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "folder"
+        },
+        "type": "folders"
+      },
+      "folders.patch": {
+        "answer": {
+          "long_running": {
+            "done": "done",
+            "result": "response"
+          }
+        },
+        "kind": "update",
+        "not_found": 404,
+        "request": {
+          "record": ""
+        },
+        "target": {
+          "path_param": "folder"
+        },
+        "type": "folders"
+      },
+      "folders.search": {
+        "kind": "list",
+        "order": {
+          "member": "displayName"
+        },
+        "paging": {
+          "request": "pageToken",
+          "response": "nextPageToken",
+          "size": "pageSize",
+          "style": "cursor"
+        },
+        "type": "folders"
+      },
+      "folders.undelete": {
+        "answer": {
+          "long_running": {
+            "done": "done",
+            "result": "response"
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "folder"
+        },
+        "transition": {
+          "state": "ACTIVE"
+        },
+        "type": "folders"
+      },
+      "operations.get": {
+        "kind": "list",
+        "not_found": 404,
+        "type": "operations"
+      }
+    },
+    "types": {
+      "folders": {
+        "identity": {
+          "member": "name",
+          "pattern": "folders/{id}"
+        },
+        "lifecycle": {
+          "initial": "ACTIVE",
+          "member": "state",
+          "soft_delete": {
+            "listed_with": {
+              "param": "showDeleted",
+              "value": true
+            },
+            "state": "DELETE_REQUESTED"
+          },
+          "states": [
+            "ACTIVE",
+            "DELETE_REQUESTED"
+          ]
+        },
+        "parent": {
+          "member": "parent",
+          "type": "folders"
+        },
+        "unique": [
+          {
+            "conflict": 400,
+            "members": [
+              "displayName"
+            ],
+            "scope": "parent"
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

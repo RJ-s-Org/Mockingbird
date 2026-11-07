@@ -1,0 +1,490 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:15:34Z",
+  "authors": {
+    "/operations/createCoreV1Namespace/answer": "agent",
+    "/operations/createCoreV1Namespace/request": "agent",
+    "/operations/createCoreV1NamespacedConfigMap/answer": "agent",
+    "/operations/createCoreV1NamespacedConfigMap/request": "agent",
+    "/operations/deleteCoreV1Namespace/not_found": "agent",
+    "/operations/deleteCoreV1Namespace/target": "agent",
+    "/operations/deleteCoreV1NamespacedConfigMap/not_found": "agent",
+    "/operations/listCoreV1ConfigMapForAllNamespaces/paging": "agent",
+    "/operations/listCoreV1Namespace/paging": "agent",
+    "/operations/listCoreV1NamespacedConfigMap/paging": "agent",
+    "/operations/listCoreV1NamespacedConfigMap/scope": "agent",
+    "/operations/patchCoreV1NamespacedConfigMap/not_found": "agent",
+    "/operations/readCoreV1Namespace/kind": "agent",
+    "/operations/readCoreV1Namespace/not_found": "agent",
+    "/operations/readCoreV1Namespace/target": "agent",
+    "/operations/readCoreV1NamespacedConfigMap/not_found": "agent",
+    "/operations/replaceCoreV1NamespacedConfigMap/kind": "agent",
+    "/operations/replaceCoreV1NamespacedConfigMap/not_found": "agent",
+    "/types/configmaps/concurrency": "agent",
+    "/types/configmaps/identity": "agent",
+    "/types/configmaps/parent": "agent",
+    "/types/configmaps/unique": "agent",
+    "/types/namespaces/identity": "agent",
+    "/types/namespaces/lifecycle": "agent",
+    "/types/namespaces/unique": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind10/kubernetes.openapi.yaml",
+  "contract_sha256": "f5a048972df26d30993a00026342250338b62f779cd23b95a4bfd535688600f5",
+  "cost_usd": 0.1251587,
+  "document": {
+    "operations": {
+      "createCoreV1Namespace": {
+        "answer": {
+          "record": ""
+        },
+        "request": {
+          "record": ""
+        }
+      },
+      "createCoreV1NamespacedConfigMap": {
+        "answer": {
+          "record": ""
+        },
+        "request": {
+          "record": ""
+        }
+      },
+      "deleteCoreV1Namespace": {
+        "not_found": 404,
+        "target": {
+          "path_param": "namespace"
+        }
+      },
+      "deleteCoreV1NamespacedConfigMap": {
+        "not_found": 404
+      },
+      "listCoreV1ConfigMapForAllNamespaces": {
+        "paging": {
+          "request": "continue",
+          "response": "metadata.continue",
+          "size": "limit",
+          "style": "cursor"
+        }
+      },
+      "listCoreV1Namespace": {
+        "paging": {
+          "request": "continue",
+          "response": "metadata.continue",
+          "size": "limit",
+          "style": "cursor"
+        }
+      },
+      "listCoreV1NamespacedConfigMap": {
+        "paging": {
+          "request": "continue",
+          "response": "metadata.continue",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "scope": {
+          "member": "metadata.namespace",
+          "param": "namespace"
+        }
+      },
+      "patchCoreV1NamespacedConfigMap": {
+        "not_found": 404
+      },
+      "readCoreV1Namespace": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "namespace"
+        }
+      },
+      "readCoreV1NamespacedConfigMap": {
+        "not_found": 404
+      },
+      "replaceCoreV1NamespacedConfigMap": {
+        "kind": "replace",
+        "not_found": 404
+      }
+    },
+    "types": {
+      "configmaps": {
+        "concurrency": {
+          "conflict": 409,
+          "member": "metadata.resourceVersion"
+        },
+        "identity": {
+          "member": "metadata.name"
+        },
+        "parent": {
+          "member": "metadata.namespace",
+          "path_param": "namespace",
+          "type": "namespaces"
+        },
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "metadata.name"
+            ],
+            "scope": "metadata.namespace"
+          }
+        ]
+      },
+      "namespaces": {
+        "identity": {
+          "member": "metadata.name"
+        },
+        "lifecycle": {
+          "initial": "Active",
+          "member": "status.phase",
+          "soft_delete": {
+            "state": "Terminating"
+          },
+          "states": [
+            "Active",
+            "Terminating"
+          ]
+        },
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "metadata.name"
+            ]
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 26673,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `namespaces` is written by `createCoreV1Namespace`, `deleteCoreV1Namespace` but has no identity: no member is known to name a record",
+      "type": "namespaces"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteCoreV1Namespace` (Delete) acts on one `namespaces` record but no target says where the request names it",
+      "operation": "deleteCoreV1Namespace",
+      "type": "namespaces"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "kubernetes",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 21882,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 21882,
+      "cacheReadInputTokens": 106067,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1251587,
+      "inputTokens": 12,
+      "maxOutputTokens": 128000,
+      "outputTokens": 2700,
+      "provider": "firstParty",
+      "thinkingTokens": 424,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 9,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:15:23.566100Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 21882,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 21882,
+    "cache_read_input_tokens": 106067,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 12,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1968,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1968,
+        "cache_read_input_tokens": 27500,
+        "input_tokens": 2,
+        "output_tokens": 758,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 2700,
+    "output_tokens_details": {
+      "thinking_tokens": 424
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 27279,
+  "world": {
+    "operations": {
+      "createCoreV1Namespace": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "request": {
+          "record": ""
+        },
+        "type": "namespaces"
+      },
+      "createCoreV1NamespacedConfigMap": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "request": {
+          "record": ""
+        },
+        "type": "configmaps"
+      },
+      "deleteCoreV1Namespace": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "namespace"
+        },
+        "type": "namespaces"
+      },
+      "deleteCoreV1NamespacedConfigMap": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "name"
+        },
+        "type": "configmaps"
+      },
+      "listCoreV1ConfigMapForAllNamespaces": {
+        "kind": "list",
+        "paging": {
+          "request": "continue",
+          "response": "metadata.continue",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "type": "configmaps"
+      },
+      "listCoreV1Namespace": {
+        "kind": "list",
+        "paging": {
+          "request": "continue",
+          "response": "metadata.continue",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "type": "namespaces"
+      },
+      "listCoreV1NamespacedConfigMap": {
+        "kind": "list",
+        "paging": {
+          "request": "continue",
+          "response": "metadata.continue",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "scope": {
+          "member": "metadata.namespace",
+          "param": "namespace"
+        },
+        "type": "configmaps"
+      },
+      "patchCoreV1NamespacedConfigMap": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "name"
+        },
+        "type": "configmaps"
+      },
+      "readCoreV1Namespace": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "namespace"
+        },
+        "type": "namespaces"
+      },
+      "readCoreV1NamespacedConfigMap": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "name"
+        },
+        "type": "configmaps"
+      },
+      "replaceCoreV1NamespacedConfigMap": {
+        "kind": "replace",
+        "not_found": 404,
+        "target": {
+          "path_param": "name"
+        },
+        "type": "configmaps"
+      }
+    },
+    "types": {
+      "configmaps": {
+        "concurrency": {
+          "conflict": 409,
+          "member": "metadata.resourceVersion"
+        },
+        "identity": {
+          "member": "metadata.name"
+        },
+        "parent": {
+          "member": "metadata.namespace",
+          "path_param": "namespace",
+          "type": "namespaces"
+        },
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "metadata.name"
+            ],
+            "scope": "metadata.namespace"
+          }
+        ]
+      },
+      "namespaces": {
+        "identity": {
+          "member": "metadata.name"
+        },
+        "lifecycle": {
+          "initial": "Active",
+          "member": "status.phase",
+          "soft_delete": {
+            "state": "Terminating"
+          },
+          "states": [
+            "Active",
+            "Terminating"
+          ]
+        },
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "metadata.name"
+            ]
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

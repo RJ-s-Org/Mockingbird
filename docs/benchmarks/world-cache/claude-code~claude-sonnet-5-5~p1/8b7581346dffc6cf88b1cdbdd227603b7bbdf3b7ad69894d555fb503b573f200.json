@@ -1,0 +1,454 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:08:26Z",
+  "authors": {
+    "/operations/addCardComment/not_found": "agent",
+    "/operations/addCardComment/target": "agent",
+    "/operations/deleteBoard/not_found": "agent",
+    "/operations/deleteBoard/target": "agent",
+    "/operations/deleteCard/not_found": "agent",
+    "/operations/deleteCard/target": "agent",
+    "/operations/getBoard/not_found": "agent",
+    "/operations/getBoardCardsFiltered/not_found": "agent",
+    "/operations/getBoardCardsFiltered/scope": "agent",
+    "/operations/getBoardLists/not_found": "agent",
+    "/operations/getBoardLists/order": "agent",
+    "/operations/getBoardLists/scope": "agent",
+    "/operations/getCard/not_found": "agent",
+    "/operations/getCardActions/not_found": "agent",
+    "/operations/getCardActions/order": "agent",
+    "/operations/getCardActions/paging": "agent",
+    "/operations/getCardActions/scope": "agent",
+    "/operations/getListCards/not_found": "agent",
+    "/operations/getListCards/order": "agent",
+    "/operations/getListCards/scope": "agent",
+    "/operations/updateBoard/not_found": "agent",
+    "/operations/updateCard/not_found": "agent",
+    "/types/cards/parent": "agent",
+    "/types/lists/parent": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind3/trello.openapi.yaml",
+  "contract_sha256": "8b7581346dffc6cf88b1cdbdd227603b7bbdf3b7ad69894d555fb503b573f200",
+  "cost_usd": 0.11593590000000001,
+  "document": {
+    "operations": {
+      "addCardComment": {
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        }
+      },
+      "deleteBoard": {
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        }
+      },
+      "deleteCard": {
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        }
+      },
+      "getBoard": {
+        "not_found": 404
+      },
+      "getBoardCardsFiltered": {
+        "not_found": 404,
+        "scope": {
+          "member": "idBoard",
+          "param": "id"
+        }
+      },
+      "getBoardLists": {
+        "not_found": 404,
+        "order": {
+          "member": "pos"
+        },
+        "scope": {
+          "member": "idBoard",
+          "param": "id"
+        }
+      },
+      "getCard": {
+        "not_found": 404
+      },
+      "getCardActions": {
+        "not_found": 404,
+        "order": {
+          "descending": true,
+          "member": "date"
+        },
+        "paging": {
+          "request": "page",
+          "style": "page"
+        },
+        "scope": {
+          "member": "data.card.id",
+          "param": "id"
+        }
+      },
+      "getListCards": {
+        "not_found": 404,
+        "order": {
+          "member": "pos"
+        },
+        "scope": {
+          "member": "idList",
+          "param": "id"
+        }
+      },
+      "updateBoard": {
+        "not_found": 404
+      },
+      "updateCard": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "cards": {
+        "parent": {
+          "member": "idList",
+          "type": "lists"
+        }
+      },
+      "lists": {
+        "parent": {
+          "member": "idBoard",
+          "type": "boards"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 22869,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `deleteBoard` (Delete) acts on one `boards` record but no target says where the request names it",
+      "operation": "deleteBoard",
+      "type": "boards"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteCard` (Delete) acts on one `cards` record but no target says where the request names it",
+      "operation": "deleteCard",
+      "type": "cards"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "trello",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 20161,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 20161,
+      "cacheReadInputTokens": 80719,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.11593590000000001,
+      "inputTokens": 10,
+      "maxOutputTokens": 128000,
+      "outputTokens": 2720,
+      "provider": "firstParty",
+      "thinkingTokens": 371,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 10,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:08:18.178848Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 20161,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 20161,
+    "cache_read_input_tokens": 80719,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 10,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1407,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1407,
+        "cache_read_input_tokens": 26340,
+        "input_tokens": 2,
+        "output_tokens": 789,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 2720,
+    "output_tokens_details": {
+      "thinking_tokens": 371
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 23482,
+  "world": {
+    "operations": {
+      "addCardComment": {
+        "kind": "create",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "actions"
+      },
+      "createBoard": {
+        "kind": "create",
+        "type": "boards"
+      },
+      "createCard": {
+        "kind": "create",
+        "type": "cards"
+      },
+      "createList": {
+        "kind": "create",
+        "type": "lists"
+      },
+      "deleteBoard": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "boards"
+      },
+      "deleteCard": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "cards"
+      },
+      "getBoard": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "boards"
+      },
+      "getBoardCardsFiltered": {
+        "kind": "list",
+        "not_found": 404,
+        "scope": {
+          "member": "idBoard",
+          "param": "id"
+        },
+        "type": "cards"
+      },
+      "getBoardLists": {
+        "kind": "list",
+        "not_found": 404,
+        "order": {
+          "member": "pos"
+        },
+        "scope": {
+          "member": "idBoard",
+          "param": "id"
+        },
+        "type": "lists"
+      },
+      "getCard": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "cards"
+      },
+      "getCardActions": {
+        "kind": "list",
+        "not_found": 404,
+        "order": {
+          "descending": true,
+          "member": "date"
+        },
+        "paging": {
+          "request": "page",
+          "style": "page"
+        },
+        "scope": {
+          "member": "data.card.id",
+          "param": "id"
+        },
+        "type": "actions"
+      },
+      "getListCards": {
+        "kind": "list",
+        "not_found": 404,
+        "order": {
+          "member": "pos"
+        },
+        "scope": {
+          "member": "idList",
+          "param": "id"
+        },
+        "type": "cards"
+      },
+      "updateBoard": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "boards"
+      },
+      "updateCard": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "cards"
+      }
+    },
+    "types": {
+      "actions": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "boards": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "cards": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "member": "idList",
+          "type": "lists"
+        }
+      },
+      "lists": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "member": "idBoard",
+          "type": "boards"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

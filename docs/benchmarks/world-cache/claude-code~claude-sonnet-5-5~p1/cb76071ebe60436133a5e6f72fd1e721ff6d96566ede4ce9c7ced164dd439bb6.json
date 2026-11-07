@@ -1,0 +1,549 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:15:35Z",
+  "authors": {
+    "/operations/createEscalationPolicy/request": "agent",
+    "/operations/createIncident/request": "agent",
+    "/operations/createIncidentNote/request": "agent",
+    "/operations/createService/request": "agent",
+    "/operations/createUser/request": "agent",
+    "/operations/getEscalationPolicy/not_found": "agent",
+    "/operations/getIncident/not_found": "agent",
+    "/operations/getService/not_found": "agent",
+    "/operations/getUser/not_found": "agent",
+    "/operations/listIncidentNotes/answer": "agent",
+    "/operations/listIncidentNotes/not_found": "agent",
+    "/operations/listIncidentNotes/order": "agent",
+    "/operations/listIncidents/answer": "agent",
+    "/operations/listIncidents/filters": "agent",
+    "/operations/listIncidents/paging": "agent",
+    "/operations/listServices/answer": "agent",
+    "/operations/listServices/filters": "agent",
+    "/operations/listServices/paging": "agent",
+    "/operations/updateIncident/request": "agent",
+    "/types/incidents/lifecycle": "agent",
+    "/types/notes/parent": "agent",
+    "/types/services/lifecycle": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind10/pagerduty.openapi.yaml",
+  "contract_sha256": "cb76071ebe60436133a5e6f72fd1e721ff6d96566ede4ce9c7ced164dd439bb6",
+  "cost_usd": 0.12594309999999997,
+  "document": {
+    "operations": {
+      "createEscalationPolicy": {
+        "request": {
+          "record": "/escalation_policy"
+        }
+      },
+      "createIncident": {
+        "request": {
+          "record": "/incident"
+        }
+      },
+      "createIncidentNote": {
+        "request": {
+          "record": "/note"
+        }
+      },
+      "createService": {
+        "request": {
+          "record": "/service"
+        }
+      },
+      "createUser": {
+        "request": {
+          "record": "/user"
+        }
+      },
+      "getEscalationPolicy": {
+        "not_found": 404
+      },
+      "getIncident": {
+        "not_found": 404
+      },
+      "getService": {
+        "not_found": 404
+      },
+      "getUser": {
+        "not_found": 404
+      },
+      "listIncidentNotes": {
+        "answer": {
+          "records": "/notes"
+        },
+        "not_found": 404,
+        "order": {
+          "member": "created_at"
+        }
+      },
+      "listIncidents": {
+        "answer": {
+          "records": "/incidents"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "status",
+            "param": "statuses[]"
+          },
+          {
+            "kind": "eq",
+            "member": "service.id",
+            "param": "service_ids[]"
+          },
+          {
+            "kind": "eq",
+            "member": "urgency",
+            "param": "urgencies[]"
+          },
+          {
+            "kind": "eq",
+            "member": "incident_key",
+            "param": "incident_key"
+          }
+        ],
+        "paging": {
+          "request": "offset",
+          "response": "more",
+          "size": "limit",
+          "style": "offset"
+        }
+      },
+      "listServices": {
+        "answer": {
+          "records": "/services"
+        },
+        "filters": [
+          {
+            "kind": "contains",
+            "member": "name",
+            "param": "query"
+          }
+        ],
+        "paging": {
+          "request": "offset",
+          "response": "more",
+          "size": "limit",
+          "style": "offset"
+        }
+      },
+      "updateIncident": {
+        "request": {
+          "record": "/incident"
+        }
+      }
+    },
+    "types": {
+      "incidents": {
+        "lifecycle": {
+          "initial": "triggered",
+          "member": "status",
+          "states": [
+            "triggered",
+            "acknowledged",
+            "resolved"
+          ]
+        }
+      },
+      "notes": {
+        "parent": {
+          "path_param": "id",
+          "type": "incidents"
+        }
+      },
+      "services": {
+        "lifecycle": {
+          "initial": "active",
+          "member": "status"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 22807,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "pagerduty",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 21699,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 21699,
+      "cacheReadInputTokens": 136991,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.12594309999999997,
+      "inputTokens": 14,
+      "maxOutputTokens": 128000,
+      "outputTokens": 2542,
+      "provider": "firstParty",
+      "thinkingTokens": 350,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 9,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:15:24.689789Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 21699,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 21699,
+    "cache_read_input_tokens": 136991,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 14,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 331,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 331,
+        "cache_read_input_tokens": 28954,
+        "input_tokens": 2,
+        "output_tokens": 755,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 2542,
+    "output_tokens_details": {
+      "thinking_tokens": 350
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 23383,
+  "world": {
+    "operations": {
+      "createEscalationPolicy": {
+        "answer": {
+          "record": "/escalation_policy"
+        },
+        "kind": "create",
+        "request": {
+          "record": "/escalation_policy"
+        },
+        "type": "escalation_policies"
+      },
+      "createIncident": {
+        "answer": {
+          "record": "/incident"
+        },
+        "kind": "create",
+        "request": {
+          "record": "/incident"
+        },
+        "type": "incidents"
+      },
+      "createIncidentNote": {
+        "answer": {
+          "record": "/note"
+        },
+        "kind": "create",
+        "request": {
+          "record": "/note"
+        },
+        "type": "notes"
+      },
+      "createService": {
+        "answer": {
+          "record": "/service"
+        },
+        "kind": "create",
+        "request": {
+          "record": "/service"
+        },
+        "type": "services"
+      },
+      "createUser": {
+        "answer": {
+          "record": "/user"
+        },
+        "kind": "create",
+        "request": {
+          "record": "/user"
+        },
+        "type": "users"
+      },
+      "getEscalationPolicy": {
+        "answer": {
+          "record": "/escalation_policy"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "escalation_policies"
+      },
+      "getIncident": {
+        "answer": {
+          "record": "/incident"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "incidents"
+      },
+      "getService": {
+        "answer": {
+          "record": "/service"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "services"
+      },
+      "getUser": {
+        "answer": {
+          "record": "/user"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "users"
+      },
+      "listIncidentNotes": {
+        "answer": {
+          "records": "/notes"
+        },
+        "kind": "list",
+        "not_found": 404,
+        "order": {
+          "member": "created_at"
+        },
+        "type": "notes"
+      },
+      "listIncidents": {
+        "answer": {
+          "records": "/incidents"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "status",
+            "param": "statuses[]"
+          },
+          {
+            "kind": "eq",
+            "member": "service.id",
+            "param": "service_ids[]"
+          },
+          {
+            "kind": "eq",
+            "member": "urgency",
+            "param": "urgencies[]"
+          },
+          {
+            "kind": "eq",
+            "member": "incident_key",
+            "param": "incident_key"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "offset",
+          "response": "more",
+          "size": "limit",
+          "style": "offset"
+        },
+        "type": "incidents"
+      },
+      "listServices": {
+        "answer": {
+          "records": "/services"
+        },
+        "filters": [
+          {
+            "kind": "contains",
+            "member": "name",
+            "param": "query"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "offset",
+          "response": "more",
+          "size": "limit",
+          "style": "offset"
+        },
+        "type": "services"
+      },
+      "updateIncident": {
+        "answer": {
+          "record": "/incident"
+        },
+        "kind": "update",
+        "request": {
+          "record": "/incident"
+        },
+        "target": {
+          "path_param": "id"
+        },
+        "type": "incidents"
+      }
+    },
+    "types": {
+      "escalation_policies": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "incidents": {
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "initial": "triggered",
+          "member": "status",
+          "states": [
+            "triggered",
+            "acknowledged",
+            "resolved"
+          ]
+        }
+      },
+      "notes": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "path_param": "id",
+          "type": "incidents"
+        }
+      },
+      "services": {
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "initial": "active",
+          "member": "status"
+        }
+      },
+      "users": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}
