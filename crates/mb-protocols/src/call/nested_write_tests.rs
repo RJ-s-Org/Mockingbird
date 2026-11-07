@@ -27,9 +27,37 @@ fn session() -> SessionKey {
 /// of `contract` whose one LLM answer is `answer`, and returns what the store then holds.
 async fn after_update(
     contract: &str,
+    held: (&str, &str, Value),
+    answer: Value,
+    request: (&str, &str, &str, Value),
+) -> Value {
+    after_update_in(contract, held, answer, request, &[]).await
+}
+
+/// [`after_update`] off the executor: the request names a seed, so the update is
+/// generated, its answer and effects reconciled with the store as before the executor.
+async fn after_generated_update(
+    contract: &str,
+    held: (&str, &str, Value),
+    answer: Value,
+    request: (&str, &str, &str, Value),
+) -> Value {
+    after_update_in(
+        contract,
+        held,
+        answer,
+        request,
+        &[("x-mockingbird-seed", "1")],
+    )
+    .await
+}
+
+async fn after_update_in(
+    contract: &str,
     (t, id, data): (&str, &str, Value),
     answer: Value,
     (method, path, content_type, body): (&str, &str, &str, Value),
+    headers: &[(&str, &str)],
 ) -> Value {
     let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     let held = StoredResource {
@@ -48,12 +76,14 @@ async fn after_update(
         )),
         Arc::clone(&state) as Arc<dyn StateStore>,
     );
-    let req = HttpRequest::builder()
+    let mut req = HttpRequest::builder()
         .method(method)
         .uri(path)
-        .header("content-type", content_type)
-        .body(Body::from(body.to_string()))
-        .unwrap();
+        .header("content-type", content_type);
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    let req = req.body(Body::from(body.to_string())).unwrap();
     let resp = crate::http_rest::router(Arc::new(rt))
         .oneshot(req)
         .await
@@ -477,7 +507,7 @@ async fn an_acknowledged_put_does_not_keep_what_it_left_out_by_an_effect() {
         {"type": "accounts", "id": "a1", "set": {"address": {"street": "Elm 2", "city": "Bergen", "zip": "0150"}}},
     ]});
     let edit = json!({"address": {"street": "Elm 2", "city": "Bergen"}});
-    let stored = after_update(
+    let stored = after_generated_update(
         ACCOUNTS,
         ("accounts", "a1", held),
         answer,
@@ -500,7 +530,7 @@ async fn an_acknowledged_put_with_an_agreeing_effect_replaces_the_object() {
         {"type": "accounts", "id": "a1", "set": {"address": {"street": "Elm 2", "city": "Bergen"}}},
     ]});
     let edit = json!({"address": {"street": "Elm 2", "city": "Bergen"}});
-    let stored = after_update(
+    let stored = after_generated_update(
         ACCOUNTS,
         ("accounts", "a1", held),
         answer,
@@ -523,7 +553,7 @@ async fn an_acknowledged_put_replaces_a_nested_declared_object_whole() {
         {"type": "accounts", "id": "a1", "set": {"address": {"city": "Bergen", "geo": {"lat": 5}}}},
     ]});
     let edit = json!({"address": {"city": "Bergen", "geo": {"lat": 5}}});
-    let stored = after_update(
+    let stored = after_generated_update(
         ACCOUNTS,
         ("accounts", "a1", held),
         answer,
@@ -546,7 +576,7 @@ async fn an_acknowledged_put_drops_a_nullable_member_it_leaves_out() {
         {"type": "accounts", "id": "a1", "set": {"address": {"city": "Bergen"}}},
     ]});
     let edit = json!({"address": {"city": "Bergen"}});
-    let stored = after_update(
+    let stored = after_generated_update(
         ACCOUNTS,
         ("accounts", "a1", held),
         answer,

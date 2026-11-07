@@ -253,9 +253,9 @@ impl Merge<'_> {
     /// `sent` onto `record`, member by member, the schemas each level of the record
     /// and of the request has given: an object merges into the one held, at any depth,
     /// but one of a union is set whole, as its members could mix with another
-    /// branch's. A `null` removes the member in a merge patch; elsewhere it is the
-    /// value where the record's schema takes `null`, removes the member where only the
-    /// request's does, and is no value at all otherwise (the member stays).
+    /// branch's. A `null` removes the member in a merge patch, and a map's key; elsewhere it is the value where the
+    /// record's schema takes `null`, removes the member where only the request's does,
+    /// and is no value at all otherwise (the member stays).
     fn onto(
         &self,
         record: &mut Map<String, Value>,
@@ -268,7 +268,9 @@ impl Merge<'_> {
             let sent_schema = request.and_then(|s| property_schema(bundle, s, name));
             let takes_null = |s: &Option<Value>| s.as_ref().is_some_and(|s| self.takes_null(s));
             if value.is_null() && !takes_null(&held_schema) {
-                if self.merge_patch || takes_null(&sent_schema) {
+                // A key of a map (a member no schema declares) goes, as no value can
+                // stand for it.
+                if self.merge_patch || takes_null(&sent_schema) || held_schema.is_none() {
                     record.remove(name);
                 }
                 continue;
