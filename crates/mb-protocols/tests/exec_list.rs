@@ -857,6 +857,79 @@ async fn a_next_url_walks_the_held_records() {
     assert!(h.provider.requests().is_empty());
 }
 
+/// Twilio's messages: a next-page URL beside the list, a page size and a page token
+/// that shares its first word.
+const MESSAGES: &str = r##"
+openapi: 3.0.0
+info: {title: Messages, version: "1"}
+paths:
+  /v2/messages:
+    get:
+      operationId: listMessages
+      parameters:
+        - {name: PageSize, in: query, schema: {type: integer, minimum: 1}}
+        - {name: Page, in: query, schema: {type: integer, minimum: 0}}
+        - {name: PageToken, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [messages, next_page_uri]
+                properties:
+                  messages: {type: array, items: {$ref: "#/components/schemas/Message"}}
+                  next_page_uri: {type: string, format: uri-reference, nullable: true}
+  /v2/messages/{id}:
+    get:
+      operationId: getMessage
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}}
+components:
+  schemas:
+    Message:
+      type: object
+      required: [id, body]
+      properties:
+        id: {type: string}
+        body: {type: string}
+"##;
+
+/// A next-page URL whose token parameter the description leaves out (the client only
+/// follows the URL): the page is cut to its size all the same, the parameter guessed
+/// as with no description.
+#[tokio::test]
+async fn a_next_url_with_no_described_parameter_cuts_the_page_to_its_size() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "operations": {"listMessages": {"paging": {
+            "style": "next_url", "response": "next_page_uri", "size": "PageSize"
+        }}}
+    });
+    let h = support::described(MESSAGES, world, Vec::new());
+    let held: Vec<Value> = (1..=2)
+        .map(|i| json!({"id": format!("SM{i}"), "body": format!("text {i}")}))
+        .collect();
+    h.hold("messages", &held).await;
+    let (source, first) = get(&h, "/v2/messages?PageSize=1").await;
+    assert_eq!(source, "state", "{first}");
+    let sids = |page: &Value| -> Vec<Value> {
+        page["messages"]
+            .as_array()
+            .map(|items| items.iter().map(|i| i["id"].clone()).collect())
+            .unwrap_or_default()
+    };
+    assert_eq!(sids(&first), [json!("SM1")], "{first}");
+    let next = first["next_page_uri"].as_str().expect("a next link");
+    let at = next.find("/v2/messages").expect("the route's URL");
+    let (source, last) = get(&h, &next[at..]).await;
+    assert_eq!(source, "state", "{last}");
+    assert_eq!(sids(&last), [json!("SM2")], "{last}");
+    assert_eq!(capture.of("listMessages"), [None, None]);
+    assert!(h.provider.requests().is_empty());
+}
+
 /// Heroku's apps: paged by the `Range` request header, a `206` with a `Next-Range`
 /// while more remain.
 const APPS: &str = r##"

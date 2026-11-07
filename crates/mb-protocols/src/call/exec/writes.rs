@@ -510,8 +510,9 @@ pub(super) fn written(
         .serve_stored(rt.bundle(), op, answer.body.as_ref()?, response_schema)
 }
 
-/// A delete of the held target: removed, or moved to its type's soft-deleted state,
-/// answered with the operation's declared delete answer.
+/// A delete of the held target: removed, or moved to its type's soft-deleted state
+/// (removed when it is in that state already), answered with the operation's declared
+/// delete answer.
 async fn delete(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
@@ -527,7 +528,7 @@ async fn delete(
     };
     let t = stored.resource_type.as_str();
     let mut data = stored.data.clone();
-    let soft = lifecycle::soft_delete(rt, t, &mut data);
+    let soft = lifecycle::delete_softly(rt, t, &mut data);
     let Some(answer) = delete_answer(rt, plan, call, (id, &data), response_schema) else {
         fell_back(rt, plan, kind, Fallback::RenderFailed.as_str());
         return Ran::Generate(None);

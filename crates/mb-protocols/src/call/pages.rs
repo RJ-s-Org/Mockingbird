@@ -940,17 +940,21 @@ fn token_slots(
 
 /// The place the world describes for the next page's token of list `op`: `Some(None)`
 /// when it describes the list's paging with no place (a page number, or no response
-/// member or header), `None` when it does not describe the paging. A described
-/// `response_header` carries the token in that header, a described `response` member
-/// carries it in the body (the next page's URL for a `next_url` paging).
+/// member or header), `None` when it does not describe the paging, or describes a token
+/// paging but not the parameter the token comes back in (a `next_url` paging whose
+/// client only follows the URL), which is then guessed as with no description. A
+/// described `response_header` carries the token in that header, a described
+/// `response` member carries it in the body (the next page's URL for a `next_url`
+/// paging).
 fn described_slot(
     rt: &MockRuntime,
     (op, call, page_url): (&Operation, &OperationCall, Option<&str>),
 ) -> Option<Option<Slot>> {
     let ask = list_query::of(rt, op, call)?.page?;
-    let Some(param) = ask.request.clone().filter(|_| !ask.counts()) else {
+    if ask.counts() {
         return Some(None);
-    };
+    }
+    let param = ask.request.clone()?;
     if let Some(header) = ask.response_header {
         return Some(Some(Slot {
             path: Vec::new(),

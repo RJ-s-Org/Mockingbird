@@ -609,6 +609,45 @@ async fn a_soft_delete_keeps_the_record_in_its_deleted_state() {
     );
 }
 
+/// A record already in its soft-deleted state has nowhere further to move: a second
+/// delete (Okta's deactivate, then delete) removes it, and its read is not found.
+#[tokio::test]
+async fn a_delete_of_a_soft_deleted_record_removes_it() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"types": {"folders": {"lifecycle": {
+        "member": "state", "states": ["ACTIVE", "DELETED"], "initial": "ACTIVE",
+        "soft_delete": {"state": "DELETED"}
+    }}}, "operations": {"getFolder": {"kind": "read", "type": "folders", "not_found": 404}}});
+    let h = support::harness(
+        DELETES,
+        vec![json!({"id": "f1", "name": "docs", "state": "ACTIVE"})],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    let t = type_of(&h, "getFolder");
+    let (status, _, body) = h
+        .send("POST", "/folders", Some(json!({"name": "docs"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    for _ in 0..2 {
+        let (status, headers, body) = h.send("DELETE", "/folders/f1", None, &[]).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        assert_eq!(source(&headers), "state");
+    }
+    assert_eq!(h.stored(&t, "f1").await, None);
+    assert_eq!(h.provider.requests().len(), 1, "no delete asked the model");
+    assert!(
+        capture
+            .of("deleteFolder")
+            .iter()
+            .all(|l| l.exec_fallback.is_none()),
+        "{:?}",
+        capture.of("deleteFolder")
+    );
+    let (status, _, body) = h.send("GET", "/folders/f1", None, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
 #[tokio::test]
 async fn a_delete_of_an_unheld_record_falls_back() {
     let (capture, _guard) = Capture::install();
