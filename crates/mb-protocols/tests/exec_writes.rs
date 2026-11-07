@@ -572,7 +572,7 @@ async fn with_flag(world: Value, script: Vec<Value>) -> DescribedHarness {
         ("/flags", json!({"name": "Checkout"})),
         ("/groups", json!({"displayName": "Eng"})),
     ] {
-        let (status, _, body) = h.send("POST", path, Some(body), &[]).await;
+        let (status, _, body) = h.send("POST", path, Some(body), SEEDED).await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
     }
     h
@@ -870,7 +870,12 @@ async fn a_patch_keeps_the_owner_the_path_names() {
     );
     for name in ["Core", "Web"] {
         let (status, _, body) = h
-            .send("POST", "/orgs/octo/teams", Some(json!({"name": name})), &[])
+            .send(
+                "POST",
+                "/orgs/octo/teams",
+                Some(json!({"name": name})),
+                SEEDED,
+            )
             .await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
     }
