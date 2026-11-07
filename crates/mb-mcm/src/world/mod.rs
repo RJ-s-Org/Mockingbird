@@ -371,9 +371,74 @@ pub struct RecordsAt {
     /// An array of records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub records: Option<Pointer>,
+    /// The array of instructions an update's request sends instead of a record
+    /// (a semantic patch), and what each kind of instruction changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<InstructionsDesc>,
     /// Unknown keys.
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// The instructions an update's request body sends, each naming its kind, and the
+/// members of the target each kind changes, e.g. `{at: /instructions, kind: kind,
+/// kinds: {addTags: {changes: {tags: {append: /values}}}}}`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct InstructionsDesc {
+    /// The request body's array of instructions.
+    pub at: Pointer,
+    /// The member of an instruction that names its kind.
+    pub kind: String,
+    /// What each kind of instruction does, keyed by kind.
+    #[serde(default)]
+    pub kinds: BTreeMap<String, InstructionDesc>,
+    /// Unknown keys.
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// What one kind of instruction does to the target.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct InstructionDesc {
+    /// The members it changes, keyed by member. A member's steps may name a
+    /// member of the instruction (else of the request body) in braces, whose
+    /// value is the step: `environments.{environmentKey}.on`.
+    #[serde(default)]
+    pub changes: BTreeMap<String, InstructionChange>,
+    /// Unknown keys.
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// How an instruction changes one member of the target.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum InstructionChange {
+    /// Set to the instruction's value at this pointer.
+    FromInstruction(Pointer),
+    /// Set to the request body's value at this pointer.
+    FromRequest(Pointer),
+    /// Set to this fixed value.
+    Value(Value),
+    /// Add the instruction's value at this pointer (each item of an array) to the
+    /// array member, once.
+    Append(Pointer),
+    /// Remove the instruction's value at this pointer (each item of an array) from
+    /// the array member.
+    Remove(Pointer),
+}
+
+impl InstructionChange {
+    /// The pointer it reads, and whether into the request body (else the
+    /// instruction); `None` for a fixed value.
+    #[must_use]
+    pub fn pointer(&self) -> Option<(&Pointer, bool)> {
+        match self {
+            Self::FromRequest(p) => Some((p, true)),
+            Self::FromInstruction(p) | Self::Append(p) | Self::Remove(p) => Some((p, false)),
+            Self::Value(_) => None,
+        }
+    }
 }
 
 /// Where an answer holds the record or records.

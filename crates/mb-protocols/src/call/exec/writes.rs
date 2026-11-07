@@ -6,6 +6,9 @@
 //!   names) into the held one, at any depth, as a JSON merge patch does (see
 //!   [`Merge::onto`] for `null`s and unions). Then come the described transition and
 //!   changes ([`transitions::apply`]).
+//! - An update whose request is a patch document (JSON Patch, SCIM PatchOp) or the
+//!   instructions its description names applies it to the held one instead
+//!   ([`patches`]), all or nothing.
 //! - A replace stores the record its request holds, keeping the held identity and
 //!   read-only members, and the lifecycle state and derived members it does not send.
 //!   The members a read of the record requires that it leaves out are filled
@@ -17,7 +20,9 @@
 //! Either generates instead, as today, when it cannot tell what the write does: on an
 //! action's route (`action_route`); for a request holding no object (`unmerged_body`),
 //! a member the record does not declare (`undeclared_member`) or a new value of a
-//! read-only one (`read_only_member`); for a result with a schema violation the held
+//! read-only one (`read_only_member`); for a patch or instruction that does not apply
+//! (`unapplied_patch`, `patch_filter`, `undescribed_instruction`,
+//! `unapplied_instruction`); for a result with a schema violation the held
 //! record did not have (`adds_violation`); for a record with writes remembered for it
 //! that a read is still to catch up on (`behind`); or for a token only a model moves
 //! (`model_token`).
@@ -34,7 +39,7 @@ use mb_state::StoredResource;
 use serde_json::{Map, Value, json};
 use tracing::Instrument;
 
-use super::{Fallback, Held, Ran, Write, answered, commit, create, fell_back, render};
+use super::{Fallback, Held, Ran, Write, answered, commit, create, fell_back, patches, render};
 use crate::call::bundle_index::schema_parts;
 use crate::call::entities::added_violation;
 use crate::call::write_memory::{self, read_only, read_schema, without_contradictions};
@@ -200,6 +205,16 @@ fn changed(
 ) -> Result<Value, &'static str> {
     let op = plan.op;
     let t = stored.resource_type.as_str();
+    // A patch document, or the instructions the description names, says how the held
+    // record changes rather than sending one.
+    let instructions = rt
+        .described()
+        .op(&op.id)
+        .and_then(|d| d.request.as_ref())
+        .and_then(|r| r.instructions.as_ref());
+    if let Some(patched) = patches::patched(call, instructions, &stored.data) {
+        return guarded(rt, op, stored, patched?);
+    }
     let empty = Value::Object(Map::new());
     let sent = call
         .body
@@ -260,13 +275,8 @@ fn changed(
         merge_patch: is_merge_patch(call),
     };
     merge.onto(&mut out, &sent, (schema, request));
-    // An identity held inside an object member (`info.label`) stays where it sits.
     let mut out = Value::Object(out);
-    for field in identity.iter().filter(|f| f.contains('.')) {
-        if let Some(value) = mb_mcm::member_at(&stored.data, field) {
-            mb_mcm::set_member_at(&mut out, field, value.clone());
-        }
-    }
+    keep_nested_identity(&identity, stored, &mut out);
     let Value::Object(mut out) = out else {
         return Err("unmerged_body");
     };
@@ -285,6 +295,59 @@ fn changed(
         }
     }
     Ok(Value::Object(out))
+}
+
+/// An identity held inside an object member (`info.label`) stays where it sits.
+fn keep_nested_identity(identity: &[String], stored: &StoredResource, out: &mut Value) {
+    for field in identity.iter().filter(|f| f.contains('.')) {
+        if let Some(value) = mb_mcm::member_at(&stored.data, field) {
+            mb_mcm::set_member_at(out, field, value.clone());
+        }
+    }
+}
+
+/// `patched`, the record a patch document or instructions leave of `stored`, as an
+/// update stores it: the identity kept as held (the path wins); `Err` for a member it
+/// changes that is read-only (`read_only_member`) or that it adds and the record does
+/// not declare (`undeclared_member`).
+fn guarded(
+    rt: &crate::MockRuntime,
+    op: &mb_mcm::Operation,
+    stored: &StoredResource,
+    patched: Value,
+) -> Result<Value, &'static str> {
+    let t = stored.resource_type.as_str();
+    let (Value::Object(mut out), Value::Object(held)) = (patched, &stored.data) else {
+        return Err("unmerged_body");
+    };
+    let bundle = rt.bundle();
+    let schema = read_schema(rt, t);
+    let identity = identity_members(rt, op, t);
+    let declared = schema.and_then(|s| declared_members(bundle, s));
+    let names: std::collections::BTreeSet<String> =
+        out.keys().chain(held.keys()).cloned().collect();
+    for name in names {
+        if out.get(&name) == held.get(&name) {
+            continue;
+        }
+        if identity.contains(&name) {
+            match held.get(&name) {
+                Some(value) => out.insert(name, value.clone()),
+                None => out.remove(&name),
+            };
+            continue;
+        }
+        let member = schema.and_then(|s| property_schema(bundle, s, &name));
+        if read_only(bundle, member.as_ref()) {
+            return Err("read_only_member");
+        }
+        if !held.contains_key(&name) && declared.as_ref().is_some_and(|d| !d.contains(&name)) {
+            return Err("undeclared_member");
+        }
+    }
+    let mut out = Value::Object(out);
+    keep_nested_identity(&identity, stored, &mut out);
+    Ok(out)
 }
 
 /// How a request's members go onto a record.
@@ -379,15 +442,7 @@ fn sent_record<'a>(rt: &crate::MockRuntime, op: &mb_mcm::Operation, body: &'a Va
 
 /// Whether `call` says its body is a JSON merge patch (RFC 7396).
 fn is_merge_patch(call: &OperationCall) -> bool {
-    call.headers.iter().any(|(name, value)| {
-        name.eq_ignore_ascii_case("content-type")
-            && value.as_str().is_some_and(|v| {
-                v.split(';').next().is_some_and(|t| {
-                    t.trim()
-                        .eq_ignore_ascii_case("application/merge-patch+json")
-                })
-            })
-    })
+    patches::media_type(call).as_deref() == Some("application/merge-patch+json")
 }
 
 /// What a write leaving `record` answers: [`render`]'s answer, but where the
