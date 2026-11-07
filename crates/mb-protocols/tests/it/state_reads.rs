@@ -450,7 +450,7 @@ async fn an_envelope_with_no_record_is_not_remembered() {
         ],
     );
     let (status, _, created) = h
-        .call("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
+        .seeded("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let (status, _, missed) = h.read("/v1/deals/7").await;

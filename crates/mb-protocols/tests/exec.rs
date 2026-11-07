@@ -1483,6 +1483,69 @@ type Mutation {
         super::support::send_to(router, req).await.2
     }
 
+    /// Linear's noun-first create (#353's tier 0): its payload holds the comment.
+    const COMMENTS: &str = r#"
+type Comment { id: ID! body: String! }
+type CommentPayload { success: Boolean! comment: Comment }
+input CommentCreateInput { body: String! }
+type Query { comment(id: ID!): Comment }
+type Mutation { commentCreate(input: CommentCreateInput!): CommentPayload! }
+"#;
+
+    #[tokio::test]
+    async fn a_noun_first_create_mutation_is_executed_and_read_from_state() {
+        let (capture, _guard) = Capture::install();
+        let bundle = mb_import::compile(COMMENTS.as_bytes()).unwrap();
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let rt = MockRuntime::new(
+            "described",
+            Arc::new(bundle),
+            Arc::new(Engine::new(
+                Some(Arc::clone(&provider) as Arc<dyn Provider>),
+                EngineConfig::default(),
+            )),
+            Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+        );
+        let base = mb_mcm::world::tier0(rt.bundle());
+        let rt = rt.with_world(&base, &base, 0);
+        let router = mb_protocols::graphql::try_router(Arc::new(rt)).unwrap();
+        let made = post(
+            &router,
+            "mutation { commentCreate(input: {body: \"hi\"}) { success comment { id body } } }",
+        )
+        .await;
+        assert!(made.get("errors").is_none(), "{made}");
+        let payload = &made["data"]["commentCreate"];
+        assert_eq!(payload["success"], json!(true), "{made}");
+        assert_eq!(payload["comment"]["body"], json!("hi"), "{made}");
+        let id = payload["comment"]["id"].as_str().unwrap().to_owned();
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/graphql")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                json!({"query": format!("{{ comment(id: \"{id}\") {{ id body }} }}")}).to_string(),
+            ))
+            .unwrap();
+        let (_, headers, read) = super::support::send_to(&router, req).await;
+        assert_eq!(
+            read["data"]["comment"],
+            json!({"id": id, "body": "hi"}),
+            "{read}"
+        );
+        assert_eq!(super::source(&headers), "state", "{read}");
+        assert!(provider.requests().is_empty(), "no LLM call");
+        assert_eq!(
+            capture.of("Mutation.commentCreate"),
+            vec![ExecLine {
+                operation: "Mutation.commentCreate".into(),
+                exec: "create".into(),
+                exec_fallback: None,
+                render_error: None,
+            }]
+        );
+    }
+
     #[tokio::test]
     async fn a_graphql_action_mutation_is_executed() {
         let (capture, _guard) = Capture::install();
@@ -1627,6 +1690,10 @@ async fn a_path_less_rpc_read_names_its_target_by_a_body_member() {
     assert!(
         h.provider.requests().is_empty(),
         "neither the executed create nor the read made an LLM call"
+    );
+    assert_eq!(
+        capture.of("widgetsCreate"),
+        vec![create_line("widgetsCreate", None)]
     );
 }
 
@@ -2240,4 +2307,522 @@ async fn a_create_fills_what_an_object_member_it_sent_lacks() {
         vec![line("getTicket", "read", None)]
     );
     assert_eq!(h.provider.requests().len(), 1, "the fill's one call");
+}
+
+/// Orders count their lines, a member their read requires; lines are created under
+/// their order.
+const DERIVED: &str = r##"
+openapi: 3.0.0
+info: {title: Derived, version: "1"}
+paths:
+  /orders:
+    post:
+      operationId: createOrder
+      requestBody: {content: {application/json: {schema: {type: object, properties: {note: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+  /orders/{orderId}:
+    get:
+      operationId: getOrder
+      parameters: [{name: orderId, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+  /orders/{orderId}/lines:
+    parameters: [{name: orderId, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: createLine
+      requestBody: {content: {application/json: {schema: {type: object, properties: {sku: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Line"}}}}}
+  /orders/{orderId}/lines/{lineId}:
+    get:
+      operationId: getLine
+      parameters:
+        - {name: orderId, in: path, required: true, schema: {type: string}}
+        - {name: lineId, in: path, required: true, schema: {type: string}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Line"}}}}}
+components:
+  schemas:
+    Order:
+      type: object
+      required: [id, note, line_count]
+      properties: {id: {type: string}, note: {type: string}, line_count: {type: integer}}
+    Line:
+      type: object
+      required: [id, sku]
+      properties: {id: {type: string}, sku: {type: string}}
+"##;
+
+#[tokio::test]
+async fn a_created_record_answers_its_derived_members_from_state() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"types": {
+        "lines": {"parent": {"type": "orders", "path_param": "orderId"}},
+        "orders": {"derived": {"line_count": {"kind": "count", "of": "lines"}}}
+    }});
+    let h = support::described(DERIVED, world, Vec::new());
+    let (status, headers, order) = h
+        .send("POST", "/orders", Some(json!({"note": "n"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{order}");
+    assert_eq!(source(&headers), "state", "{order}");
+    let id = order["id"].as_str().unwrap().to_owned();
+    assert_eq!(order, json!({"id": id, "note": "n", "line_count": 0}));
+    assert_eq!(
+        capture.of("createOrder"),
+        vec![create_line("createOrder", None)]
+    );
+    for sku in ["a", "b"] {
+        let (status, _, line) = h
+            .send(
+                "POST",
+                &format!("/orders/{id}/lines"),
+                Some(json!({"sku": sku})),
+                &[],
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{line}");
+    }
+    let (status, headers, read) = h.send("GET", &format!("/orders/{id}"), None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(source(&headers), "state", "{read}");
+    assert_eq!(read["line_count"], json!(2), "{read}");
+    // Computed on serve, never stored.
+    let stored = h.stored("orders", &id).await.unwrap();
+    assert!(stored.get("line_count").is_none(), "{stored}");
+    assert!(h.provider.requests().is_empty(), "no LLM call");
+}
+
+/// Creates that name their id elsewhere than a body member: keys `PUT` under the name
+/// in their path; folders take a patterned id; counters an integer one; conversations
+/// answer only a `Resource-ID` header and tickets a uuid `Ticket-Id`; zones answer
+/// their record one item deep in an envelope; gauges carry a fixed `kind`; payments
+/// take an idempotency key.
+const IDS: &str = r##"
+openapi: 3.0.0
+info: {title: Ids, version: "1"}
+paths:
+  /keys/{name}:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    put:
+      operationId: putKey
+      requestBody: {content: {application/json: {schema: {type: object, properties: {value: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Key"}}}}}
+    get:
+      operationId: getKey
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Key"}}}}}
+  /folders:
+    post:
+      operationId: createFolder
+      requestBody: {content: {application/json: {schema: {type: object, properties: {displayName: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Folder"}}}}}
+  /folders/{folderId}:
+    get:
+      operationId: getFolder
+      parameters: [{name: folderId, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Folder"}}}}}
+  /counters:
+    post:
+      operationId: createCounter
+      requestBody: {content: {application/json: {schema: {type: object, properties: {label: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Counter"}}}}}
+  /counters/{counterId}:
+    get:
+      operationId: getCounter
+      parameters: [{name: counterId, in: path, required: true, schema: {type: integer}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Counter"}}}}}
+  /conversations:
+    post:
+      operationId: createConversation
+      requestBody: {content: {application/json: {schema: {type: object, properties: {subject: {type: string}}}}}}
+      responses:
+        "201":
+          description: created
+          headers: {Resource-ID: {schema: {type: string}}}
+  /conversations/{conversationId}:
+    get:
+      operationId: getConversation
+      parameters: [{name: conversationId, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Conversation"}}}}}
+  /tickets:
+    post:
+      operationId: createTicket
+      requestBody: {content: {application/json: {schema: {type: object, properties: {subject: {type: string}}}}}}
+      responses:
+        "201":
+          description: created
+          headers: {Ticket-Id: {schema: {type: string, format: uuid}}}
+  /tickets/{ticketId}:
+    get:
+      operationId: getTicket
+      parameters: [{name: ticketId, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Conversation"}}}}}
+  /zones:
+    post:
+      operationId: createZone
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/ZoneEnvelope"}}}}}
+  /zones/{zoneId}:
+    get:
+      operationId: getZone
+      parameters: [{name: zoneId, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/ZoneEnvelope"}}}}}
+  /gauges:
+    post:
+      operationId: createGauge
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Gauge"}}}}}
+  /gauges/{gaugeId}:
+    get:
+      operationId: getGauge
+      parameters: [{name: gaugeId, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Gauge"}}}}}
+  /payments:
+    post:
+      operationId: createPayment
+      parameters: [{name: Idempotency-Key, in: header, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {amount: {type: integer}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Payment"}}}}}
+  /payments/{paymentId}:
+    get:
+      operationId: getPayment
+      parameters: [{name: paymentId, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Payment"}}}}}
+components:
+  schemas:
+    Key:
+      type: object
+      required: [name, value]
+      properties: {name: {type: string}, value: {type: string}}
+    Folder:
+      type: object
+      required: [id, displayName]
+      properties: {id: {type: string}, displayName: {type: string}}
+    Counter:
+      type: object
+      required: [id, label]
+      properties: {id: {type: integer}, label: {type: string}}
+    Conversation:
+      type: object
+      required: [id, subject]
+      properties: {id: {type: string}, subject: {type: string}}
+    Zone:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
+    ZoneEnvelope:
+      type: object
+      required: [success, result]
+      properties:
+        success: {type: boolean}
+        result: {type: array, items: {$ref: "#/components/schemas/Zone"}}
+    Gauge:
+      type: object
+      required: [id, name, kind]
+      properties: {id: {type: string}, name: {type: string}, kind: {type: string, const: gauge}, unit: {type: string, enum: [ms]}}
+    Payment:
+      type: object
+      required: [id, amount]
+      properties: {id: {type: string}, amount: {type: integer}}
+"##;
+
+/// `uri`'s read, answered from state.
+async fn read_from_state(h: &support::DescribedHarness, uri: &str) -> serde_json::Value {
+    let (status, headers, body) = h.send("GET", uri, None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+    assert_eq!(source(&headers), "state", "{uri}: {body}");
+    body
+}
+
+#[tokio::test]
+async fn a_put_create_takes_the_id_its_uri_names() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"putKey": {"kind": "create"}}});
+    let h = support::described(IDS, world, Vec::new());
+    let (status, headers, body) = h
+        .send("PUT", "/keys/alpha", Some(json!({"value": "1"})), &[])
+        .await;
+    assert!(status.is_success(), "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body, json!({"name": "alpha", "value": "1"}));
+    assert_eq!(capture.of("putKey"), vec![line("putKey", "create", None)]);
+    assert_eq!(read_from_state(&h, "/keys/alpha").await, body);
+}
+
+#[tokio::test]
+async fn a_patterned_id_is_minted_in_its_pattern() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"types": {"folders": {"identity": {"pattern": "fld_{id}"}}}});
+    let h = support::described(IDS, world, Vec::new());
+    let (status, headers, body) = h
+        .send("POST", "/folders", Some(json!({"displayName": "a"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let full = body["id"].as_str().unwrap().to_owned();
+    let bare = full
+        .strip_prefix("fld_")
+        .unwrap_or_else(|| panic!("{body}"));
+    assert_eq!(h.stored("folders", &full).await, Some(body.clone()));
+    assert_eq!(read_from_state(&h, &format!("/folders/{bare}")).await, body);
+    assert_eq!(
+        capture.of("createFolder"),
+        vec![create_line("createFolder", None)]
+    );
+}
+
+#[tokio::test]
+async fn an_integer_identity_is_minted_as_an_integer() {
+    let (capture, _guard) = Capture::install();
+    let h = support::described(IDS, json!({}), Vec::new());
+    let (status, headers, body) = h
+        .send("POST", "/counters", Some(json!({"label": "a"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let id = body["id"].as_i64().unwrap_or_else(|| panic!("{body}"));
+    assert_eq!(read_from_state(&h, &format!("/counters/{id}")).await, body);
+    assert_eq!(
+        capture.of("createCounter"),
+        vec![create_line("createCounter", None)]
+    );
+}
+
+#[tokio::test]
+async fn an_identity_header_names_the_minted_id() {
+    let (capture, _guard) = Capture::install();
+    let h = support::described(IDS, json!({}), Vec::new());
+    let (status, headers, body) = h
+        .send(
+            "POST",
+            "/conversations",
+            Some(json!({"subject": "hi"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let id = headers
+        .get("resource-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_else(|| panic!("{headers:?}"))
+        .to_owned();
+    assert_eq!(
+        read_from_state(&h, &format!("/conversations/{id}")).await,
+        json!({"id": id, "subject": "hi"})
+    );
+    assert_eq!(
+        capture.of("createConversation"),
+        vec![create_line("createConversation", None)]
+    );
+}
+
+#[tokio::test]
+async fn an_identity_header_whose_schema_refuses_the_pattern_is_not_placed() {
+    let (_capture, _guard) = Capture::install();
+    // `Ticket-Id` is a uuid: an id in the `tickets/{id}` pattern is none.
+    let world = json!({"types": {"tickets": {"identity": {"pattern": "tickets/{id}"}}}});
+    let h = support::described(IDS, world, Vec::new());
+    let (status, headers, _) = h
+        .send("POST", "/tickets", Some(json!({"subject": "a"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let placed = headers
+        .get("ticket-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(!placed.starts_with("tickets/"), "{placed}");
+}
+
+#[tokio::test]
+async fn a_record_answered_in_an_envelope_is_stored_and_read_there() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"zones": {"identity": {"member": "id"}}},
+        "operations": {
+            "createZone": {"answer": {"record": "/result/0"}},
+            "getZone": {"kind": "read", "target": {"path_param": "zoneId"}, "answer": {"record": "/result/0"}}
+        }
+    });
+    let h = support::described(IDS, world, Vec::new());
+    let (status, headers, body) = h
+        .send("POST", "/zones", Some(json!({"name": "z"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let zone = body["result"][0].clone();
+    let id = zone["id"].as_str().unwrap_or_else(|| panic!("{body}"));
+    assert_eq!(zone, json!({"id": id, "name": "z"}));
+    assert_eq!(h.stored("zones", id).await, Some(zone.clone()));
+    let read = read_from_state(&h, &format!("/zones/{id}")).await;
+    assert_eq!(read["result"][0], zone, "{read}");
+    assert_eq!(
+        capture.of("createZone"),
+        vec![create_line("createZone", None)]
+    );
+}
+
+#[tokio::test]
+async fn a_required_member_its_schema_fixes_takes_that_value() {
+    let (capture, _guard) = Capture::install();
+    let h = support::described(IDS, json!({}), Vec::new());
+    let (status, headers, body) = h
+        .send("POST", "/gauges", Some(json!({"name": "g"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+    // `kind` is required and fixed; the optional one-value `unit` is never invented.
+    assert_eq!(body, json!({"id": id, "name": "g", "kind": "gauge"}));
+    assert!(h.provider.requests().is_empty(), "nothing to fill");
+    assert_eq!(
+        capture.of("createGauge"),
+        vec![create_line("createGauge", None)]
+    );
+}
+
+#[tokio::test]
+async fn an_executed_create_is_replayed_for_its_idempotency_key() {
+    let (capture, _guard) = Capture::install();
+    let world =
+        json!({"operations": {"createPayment": {"idempotency": {"header": "Idempotency-Key"}}}});
+    let h = support::described(IDS, world, Vec::new());
+    let key = [("Idempotency-Key", "k-1")];
+    let (status, _, first) = h
+        .send("POST", "/payments", Some(json!({"amount": 5})), &key)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    let (status, _, again) = h
+        .send("POST", "/payments", Some(json!({"amount": 5})), &key)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{again}");
+    assert_eq!(again, first, "the repeat is the first answer");
+    let id = first["id"].as_str().unwrap();
+    assert_eq!(h.stored("payments", id).await, Some(first.clone()));
+    assert_eq!(
+        capture.of("createPayment"),
+        vec![create_line("createPayment", None)],
+        "the repeat is replayed before the executor"
+    );
+}
+
+#[tokio::test]
+async fn an_executed_create_sends_its_webhook() {
+    use mb_protocols::webhooks::deliver::{DispatchSettings, ResolvedTarget, WebhookDispatcher};
+    use mb_protocols::webhooks::log::SharedDeliveryLog;
+    use mb_protocols::webhooks::sign::Signing;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let (capture, _guard) = Capture::install();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let log: SharedDeliveryLog = std::sync::Arc::default();
+    let dispatcher = WebhookDispatcher::new(
+        "default".into(),
+        "described".into(),
+        vec![ResolvedTarget {
+            url: server.uri(),
+            events: vec!["*".into()],
+            signing: Signing::None,
+            secret: Ok(None),
+            delay: std::time::Duration::ZERO,
+        }],
+        reqwest::Client::new(),
+        log,
+        DispatchSettings::default(),
+    );
+    let h = support::harness(IDS, Vec::new(), &HarnessOptions::default(), |mut rt| {
+        rt.webhooks = Some(std::sync::Arc::new(dispatcher));
+        rt
+    });
+    let (status, headers, body) = h
+        .send("POST", "/gauges", Some(json!({"name": "g"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(
+        capture.of("createGauge"),
+        vec![create_line("createGauge", None)]
+    );
+    let mut sent = Vec::new();
+    for _ in 0..200 {
+        sent = server.received_requests().await.unwrap_or_default();
+        if !sent.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(sent.len(), 1);
+    let event: serde_json::Value = serde_json::from_slice(&sent[0].body).unwrap();
+    assert!(
+        event["type"]
+            .as_str()
+            .is_some_and(|t| t.ends_with(".created")),
+        "{event}"
+    );
+    assert_eq!(event["data"]["object"], body);
+}
+
+/// Flags acknowledge their create with `{ok, data}`, `data` holding the record.
+const FLAGS: &str = r##"
+openapi: 3.0.0
+info: {title: Flags, version: "1"}
+paths:
+  /flags:
+    post:
+      operationId: createFlag
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}, enabled: {type: boolean}}}}}}
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, data]
+                properties:
+                  ok: {type: boolean}
+                  data: {type: object, required: [id], properties: {id: {type: string}, name: {type: string}, enabled: {type: boolean}, archived: {type: boolean}}}
+  /flags/{id}:
+    get:
+      operationId: getFlag
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Flag"}}}}}
+components:
+  schemas:
+    Flag:
+      type: object
+      required: [id, name, enabled]
+      properties: {id: {type: string}, name: {type: string}, enabled: {type: boolean}}
+"##;
+
+#[tokio::test]
+async fn an_acknowledgement_keeps_the_record_s_false_and_affirms_its_own_booleans() {
+    let (capture, _guard) = Capture::install();
+    let h = support::described(FLAGS, json!({}), Vec::new());
+    let (status, headers, body) = h
+        .send(
+            "POST",
+            "/flags",
+            Some(json!({"name": "beta", "enabled": false})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    // The acknowledgement's own booleans say the write succeeded; the record's `false`
+    // stays false.
+    assert_eq!(body["ok"], json!(true), "{body}");
+    assert_eq!(body["data"]["enabled"], json!(false), "{body}");
+    assert_eq!(body["data"]["name"], json!("beta"), "{body}");
+    let id = body["data"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        h.stored("flags", &id).await,
+        Some(json!({"id": id, "name": "beta", "enabled": false}))
+    );
+    assert_eq!(
+        capture.of("createFlag"),
+        vec![create_line("createFlag", None)]
+    );
 }

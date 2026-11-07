@@ -1605,7 +1605,7 @@ async fn a_graphql_cart_holds_together() {
     .await;
     assert!(product.body.get("errors").is_none(), "{}", product.body);
 
-    let created = post(
+    let created = seeded(
         &base,
         json!({"query": format!("mutation {{ cartCreate(input: {{lines: []}}) {{ cart {{ {CART_FIELDS} }} userErrors {{ message }} }} }}")}),
         &session,
@@ -1712,7 +1712,7 @@ async fn a_create_mutation_generates_only_its_selection() {
     );
     let base = serve(rt).await;
     let session = [("x-mockingbird-session", "s1")];
-    let created = post(
+    let created = seeded(
         &base,
         json!({
             "query": "mutation($in: CreateIssueInput!) { createIssue(input: $in) { issue { id url } } }",
@@ -2254,7 +2254,7 @@ const ISSUE_READ: &str = "query($id: ID!) { issue(id: $id) { id title priority }
 /// Creates issue `i-1` ("Crash", priority 3) with `issueCreate`; the first
 /// scripted answer is its payload.
 async fn create_issue(base: &str, session: &[(&str, &str)]) {
-    let created = post(
+    let created = seeded(
         base,
         json!({"query": "mutation { issueCreate(input: {title: \"Crash\", priority: 3}) { success issue { id title priority } } }"}),
         session,
@@ -2462,7 +2462,7 @@ async fn a_noun_first_delete_removes_the_stored_record() {
     let base = serve(rt).await;
     let session = [("x-mockingbird-session", "s1")];
     let read_comment = json!({"query": "query($id: ID!) { comment(id: $id) { id body } }", "variables": {"id": "c-1"}});
-    let created = post(
+    let created = seeded(
         &base,
         json!({"query": "mutation { commentCreate(input: {body: \"Hi\"}) { success comment { id body } } }"}),
         &session,
@@ -2515,7 +2515,7 @@ async fn a_delete_whose_payload_contradicts_it_leaves_no_marker() {
     ]));
     let base = serve(rt).await;
     let session = [("x-mockingbird-session", "s1")];
-    post(
+    seeded(
         &base,
         json!({"query": "mutation { commentCreate(input: {body: \"Hi\"}) { success comment { id body } } }"}),
         &session,

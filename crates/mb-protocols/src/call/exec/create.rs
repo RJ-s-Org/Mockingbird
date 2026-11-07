@@ -14,15 +14,16 @@
 //!   record, that nothing above gives is filled ([`gaps`]: a member, or what an object
 //!   member the request sent lacks), but the server's own members: the id,
 //!   the lifecycle member a described `initial` sets, the derived members. The
-//!   lifecycle's `initial` is then set. A member whose schema fixes its value (a
-//!   `const`, a one-value `enum`: GraphQL's `__typename`) takes that value.
+//!   lifecycle's `initial` is then set. A required member whose schema fixes its value
+//!   (a `const`, a one-value `enum`: GraphQL's `__typename`) takes that value.
 //! - The answer is [`super::render`]'s (no body, the record, or an acknowledgement
 //!   drawn from its own schema with the record's members laid over it); a described
 //!   long-running answer holds the record as its result, and is done: the record is
 //!   stored when the create is accepted.
 //!
-//! Bulk creates, a create naming a record the session holds, and one whose answer does
-//! not render, go on to generation.
+//! Bulk creates, a create naming a record the session holds, one repeating a value the
+//! contract says is unique that the generated path refuses (`repeated_value`), and one
+//! whose answer does not render, go on to generation.
 
 use mb_engine::consistency::{property_schema, required_members};
 use mb_engine::{FillContext, GeneratedResponse};
@@ -38,8 +39,8 @@ use crate::call::entities::type_check;
 use crate::call::owners::schema_members;
 use crate::call::writes::type_members;
 use crate::call::{
-    CallPlan, OperationCall, StateAccess, header_ids, id_string, lifecycle, records,
-    request_values, state_lists, state_span, target_id,
+    CallPlan, OperationCall, StateAccess, derived, header_ids, id_string, lifecycle, records,
+    repeats, request_values, serve_held, state_lists, state_span, target_id, value_index,
 };
 
 /// Whether the executor takes these calls.
@@ -90,7 +91,15 @@ pub(super) async fn run(
     if repeats {
         return fall("held");
     }
-    let shape = Shape::of(rt, op, t);
+    // A value the contract says is unique, held by a record in the create's collection:
+    // the generated path refuses it ([`repeats::enforced`]), so it takes the create.
+    if refuses_a_repeat(state, plan, call, t)
+        .instrument(state_span())
+        .await
+    {
+        return fall("repeated_value");
+    }
+    let shape = Shape::of(rt, op, t, response_schema);
     let request = call
         .body
         .as_ref()
@@ -154,10 +163,16 @@ pub(super) async fn run(
 
     // The members nobody else decides, then the initial state.
     let owned = server_owned(rt, t, field, request);
-    // A member whose schema fixes its value (a GraphQL `__typename`) takes it.
+    // A required member whose schema fixes its value (a GraphQL `__typename`) takes it.
     if let Value::Object(known) = &mut data {
+        let required: Vec<String> = shape
+            .schemas
+            .iter()
+            .flat_map(|s| required_members(rt.bundle(), s))
+            .collect();
         for (name, schema) in &shape.members {
             if !known.contains_key(name)
+                && required.contains(name)
                 && !owned.contains(name)
                 && let Some(value) = fixed(schema)
             {
@@ -186,7 +201,24 @@ pub(super) async fn run(
     }
     lifecycle::initial(rt, t, &mut data, request);
 
-    let Some(mut answer) = written(rt, plan, call, (&key, &data), response_schema) else {
+    // Its derived members are answered from what state holds (its children, if any),
+    // never stored; the record as stored is answered when the filled one does not render.
+    let filled = derived::filled_new(
+        state,
+        &plan.session,
+        &mb_state::StoredResource {
+            resource_type: t.to_owned(),
+            id: key.clone(),
+            data: data.clone(),
+        },
+    )
+    .instrument(state_span())
+    .await;
+    let answer = filled
+        .and_then(|f| written(rt, plan, call, (&key, &f.data), response_schema))
+        .or_else(|| written(rt, plan, call, (&key, &data), response_schema))
+        .or_else(|| enveloped(rt, op, (&key, t, &data), response_schema));
+    let Some(mut answer) = answer else {
         return fall(Fallback::RenderFailed.as_str());
     };
     answer.usage = usage;
@@ -213,6 +245,29 @@ pub(super) async fn run(
     let answer = commit(state, plan, call, (t, None), write, answer).await;
     answered(rt, plan, kind);
     Ran::Answered(Box::new(answer))
+}
+
+/// Whether the generated path refuses `call`, a create of type `t`, for a value the
+/// contract says is unique that a record in its collection holds: what
+/// [`value_index::same_values`] shows a create, enforced ([`repeats::enforced`]) as it
+/// is on a success that is no answer of the holder.
+async fn refuses_a_repeat(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    t: &str,
+) -> bool {
+    let same: Vec<(String, String, String)> =
+        value_index::same_values(state, plan, call, |_, _| false)
+            .await
+            .into_iter()
+            .map(|(hit, member)| (hit.resource_type, hit.id, member))
+            .collect();
+    if same.is_empty() {
+        return false;
+    }
+    let found = repeats::enforced(state, (&plan.session, plan.op, t), (call, None), &same).await;
+    matches!(found, Some(repeats::Enforced::Refuse { .. }))
 }
 
 /// The member type `t`'s records are keyed by: the described type's identity member,
@@ -264,14 +319,20 @@ struct Shape {
 
 impl Shape {
     /// The shape of `op`'s creates of type `t`: the members of the type's reads
-    /// ([`read_schemas`]), then those of the create's answer when it is the record. Its
+    /// ([`read_schemas`]), then those of the create's answer (`response_schema`, the one
+    /// the call asks for, else the declared one) when it is the record. Its
     /// answer is the record when the type has no read to tell its records by, or every
     /// member the answer's record declares is one the type's records declare too.
-    fn of(rt: &crate::MockRuntime, op: &Operation, t: &str) -> Self {
+    fn of(
+        rt: &crate::MockRuntime,
+        op: &Operation,
+        t: &str,
+        response_schema: Option<&Value>,
+    ) -> Self {
         let bundle = rt.bundle();
-        let answered = op
-            .success_output()
-            .and_then(|o| o.schema.as_ref())
+        // The answer as the call asks for it (a GraphQL selection), else as declared.
+        let answered = response_schema
+            .or_else(|| op.success_output()?.schema.as_ref())
             .and_then(
                 |s| match op.identity.as_ref().filter(|i| i.record.is_some()) {
                     Some(identity) => record_schema_of(bundle, identity, s),
@@ -285,6 +346,7 @@ impl Shape {
                 .all(|m| typed.iter().any(|d| d == m));
         let mut schemas = read_schemas(rt, t);
         schemas.extend(answered.filter(|_| answers_record));
+        let schemas: Vec<Value> = schemas.iter().map(|s| non_null(bundle, s)).collect();
         Self {
             members: members_of(rt, &schemas),
             schemas,
@@ -489,6 +551,50 @@ pub(super) fn fill_into(record: &mut Map<String, Value>, filled: Map<String, Val
 pub(super) fn fill_schema(members: &[(String, Value)]) -> Value {
     let properties: Map<String, Value> = members.iter().cloned().collect();
     serde_json::json!({"type": "object", "properties": properties})
+}
+
+/// `record` in the envelope `op`'s answer holds it in, the envelope's members nothing
+/// else gives drawn as a read's are (`true` for a boolean, else the faker's): a created
+/// record's envelope (`{success, result: [...]}`) has no answer of the session to
+/// take them from. `None` for an answer that holds no record.
+fn enveloped(
+    rt: &crate::MockRuntime,
+    op: &Operation,
+    (id, t, record): (&str, &str, &Value),
+    response_schema: Option<&Value>,
+) -> Option<GeneratedResponse> {
+    op.identity.as_ref()?.record.as_ref()?;
+    let drawn = rt.engine.envelope_draws(rt.bundle(), op, response_schema);
+    let held = mb_state::StoredResource {
+        resource_type: t.to_owned(),
+        id: id.to_owned(),
+        data: record.clone(),
+    };
+    (!drawn.is_empty())
+        .then(|| serve_held(rt, op, &held, Some(&drawn), response_schema))
+        .flatten()
+}
+
+/// `schema` without the `null` it admits: the one other branch of an `anyOf` or `oneOf`
+/// whose others are `null` (a GraphQL nullable object), else `schema` itself.
+fn non_null(bundle: &mb_mcm::Bundle, schema: &Value) -> Value {
+    let derefed = crate::call::bundle_index::def_name(schema)
+        .and_then(|def| bundle.defs.get(def))
+        .unwrap_or(schema);
+    for key in ["anyOf", "oneOf"] {
+        if let Some(Value::Array(branches)) = derefed.get(key) {
+            let others: Vec<&Value> = branches
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) != Some("null"))
+                .collect();
+            if let [only] = others.as_slice()
+                && others.len() < branches.len()
+            {
+                return (*only).clone();
+            }
+        }
+    }
+    schema.clone()
 }
 
 /// The value member schema `schema` fixes: its `const`, else its one `enum` value.

@@ -91,29 +91,22 @@ async fn update(
             return Ran::Generate(None);
         }
     };
-    // A replace leaving out what a read of the record requires has it filled.
-    let mut usage = mb_llm::Usage::default();
-    if kind == OpKind::Replace
-        && let missing = create::unread(rt, t, create::identity_member(rt, op, t), &data)
-        && !missing.is_empty()
-        && let Value::Object(known) = &mut data
-    {
-        let names: Vec<String> = missing.iter().map(|(name, _)| name.clone()).collect();
-        let filled = plan
-            .engine
-            .fill(
-                rt.bundle(),
-                &create::fill_schema(&missing),
-                known,
-                &names,
-                FillContext { op, call },
-            )
-            .await;
-        usage = filled.usage;
-        create::fill_into(known, filled.members);
-    }
     transitions::apply(rt, op, call.body.as_ref(), &mut data);
-    if added_violation(rt, t, &stored.data, &data).is_some() {
+    // What a replace leaves out that a read requires is filled below, once nothing
+    // falls back: until then the held values stand in for it.
+    let missing = match kind {
+        OpKind::Replace => create::unread(rt, t, create::identity_member(rt, op, t), &data),
+        _ => Vec::new(),
+    };
+    let mut checked = data.clone();
+    if let (Value::Object(checked), Value::Object(held)) = (&mut checked, &stored.data) {
+        let stand_in: Map<String, Value> = missing
+            .iter()
+            .filter_map(|(name, _)| Some((name.clone(), held.get(name)?.clone())))
+            .collect();
+        create::fill_into(checked, stand_in);
+    }
+    if added_violation(rt, t, &stored.data, &checked).is_some() {
         fell_back(rt, plan, kind, "adds_violation");
         return Ran::Generate(None);
     }
@@ -142,6 +135,25 @@ async fn update(
             return Ran::Generate(None);
         }
         tokens::advance(rt, (t, id), advancing, &stored.data, &mut data);
+    }
+    // A replace leaving out what a read of the record requires has it filled.
+    let mut usage = mb_llm::Usage::default();
+    if !missing.is_empty()
+        && let Value::Object(known) = &mut data
+    {
+        let names: Vec<String> = missing.iter().map(|(name, _)| name.clone()).collect();
+        let filled = plan
+            .engine
+            .fill(
+                rt.bundle(),
+                &create::fill_schema(&missing),
+                known,
+                &names,
+                FillContext { op, call },
+            )
+            .await;
+        usage = filled.usage;
+        create::fill_into(known, filled.members);
     }
     // Its derived members are answered from its children as state has them, never
     // stored; the record as stored is answered when the filled one does not render.

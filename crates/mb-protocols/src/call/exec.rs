@@ -564,13 +564,13 @@ pub(super) fn bodiless(op: &mb_mcm::Operation) -> Option<GeneratedResponse> {
 /// `{success, data: {id}}`). An acknowledgement is the faker's answer for the call,
 /// seeded by the mock's or the request's seed, else by the default one, so a call
 /// answers alike in every run. Its boolean members (at the top and one member down) are
-/// `true`, as the write succeeded; the record's members it declares at its top, and the
+/// `true`, as the write succeeded, but a member the record holds keeps the record's
+/// value, `false` included: the record's members it declares at its top, and the
 /// operation's identity member, take the record's values; an answer holding none of
 /// them at its top holds the record's members in the one envelope member whose schema
 /// declares the record's identity, and one not declaring the identity at its top holds
-/// the record's id there. Failing validation, it tries every boolean `true` (at the top
-/// and in its envelope), then the faker's answer with the identity alone (at its top,
-/// or in that envelope member), then as drawn. `None` only
+/// the record's id there. Failing validation, it tries the faker's answer with the
+/// identity alone (at its top, or in that envelope member), then as drawn. `None` only
 /// when none of these validates. Tagged `state`.
 pub(super) fn render(
     rt: &crate::MockRuntime,
@@ -706,11 +706,8 @@ pub(super) fn render(
         inner.insert(identity.to_owned(), own_id.clone());
     }
     held.extend(shown.clone());
-    // Failing that: every boolean `true`, in the envelope too; as drawn and held; the
-    // faker's answer with the record's identity alone, at its top or in its envelope;
-    // the faker's answer as drawn.
-    let mut all_true = held.clone();
-    affirm(&mut all_true, 2);
+    // Failing that: the faker's answer with the record's identity alone, at its top or
+    // in its envelope; the faker's answer as drawn.
     let mut identified = affirmed.clone();
     if let Some(field) = op.identity.as_ref().map(|i| i.field.as_str())
         && let Some(value) = shown.get(field)
@@ -722,9 +719,7 @@ pub(super) fn render(
     {
         inner.insert(identity.to_owned(), own_id);
     }
-    [&held, &all_true, &identified, &drawn]
-        .into_iter()
-        .find_map(serve)
+    [&held, &identified, &drawn].into_iter().find_map(serve)
 }
 
 /// Sets the boolean members of `answer`, and of its object members down to `depth`

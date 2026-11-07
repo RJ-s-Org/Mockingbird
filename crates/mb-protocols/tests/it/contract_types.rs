@@ -395,7 +395,7 @@ async fn a_ticket_beside_its_audit_is_one_record() {
         ],
     );
     let (status, _, created) = h
-        .call(
+        .seeded(
             "POST",
             "/tickets",
             Some(json!({"ticket": {"subject": "Printer"}})),

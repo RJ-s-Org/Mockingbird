@@ -3,7 +3,9 @@
 //! contract gives that refusal; on weaker evidence the refusal stays an offer and the
 //! LLM's success is served. Driven over HTTP with a scripted LLM.
 //!
-//! Step 6 deletes these tests: they check complete()'s create internals (seeded creates).
+//! The repeat each test sends runs unseeded, through the state-first executor, which
+//! leaves a create the contract's unique value refuses to the generated path; the tests
+//! of the offer to the model send it seeded.
 #![cfg(test)]
 use std::sync::Arc;
 use std::time::Duration;
@@ -156,6 +158,12 @@ fn harness_with(contract: &str, script: Vec<Value>) -> Harness {
 }
 
 impl Harness {
+    /// A create, unseeded: the state-first executor takes it, and leaves one the
+    /// generated path refuses for repeating a unique value to that path.
+    async fn post(&self, uri: &str, body: Value) -> (StatusCode, Value) {
+        self.post_with(uri, body, &[]).await
+    }
+
     /// A create, seeded: a seeded create takes the generated path, which stores the
     /// record the model answered under the id it chose, as these tests expect.
     async fn seeded(&self, uri: &str, body: Value) -> (StatusCode, Value) {
@@ -218,6 +226,7 @@ fn widget(id: &str, sku: &str) -> Value {
 /// A 400 that names the SKU only in prose, beside two codes, and a sentence of the API
 /// description are no tie strong enough to enforce: the LLM's success for a taken SKU
 /// stands, the refusal an offer.
+// Step 6 deletes this test: it checks complete()'s create internals (seeded).
 #[tokio::test]
 async fn a_prose_tie_to_a_400_is_only_an_offer() {
     let h = harness(vec![
@@ -234,6 +243,7 @@ async fn a_prose_tie_to_a_400_is_only_an_offer() {
 
 /// A 400 is validation as often as uniqueness: even naming the SKU in code position
 /// alone, it is only offered, and the LLM's success for a taken SKU stands.
+// Step 6 deletes this test: it checks complete()'s create internals (seeded).
 #[tokio::test]
 async fn a_400_naming_the_member_in_code_position_is_only_an_offer() {
     let contract = CONTRACT.replace(
@@ -257,6 +267,7 @@ async fn a_400_naming_the_member_in_code_position_is_only_an_offer() {
 
 /// The LLM's own refusal may be of anything: the API description's sentence about a
 /// repeat gives it no code.
+// Step 6 deletes this test: it checks complete()'s create internals (seeded).
 #[tokio::test]
 async fn an_llm_refusal_takes_no_code_from_a_repeats_sentence() {
     let h = harness(vec![
@@ -297,24 +308,26 @@ async fn a_taken_serial_is_refused_on_its_shelf_only() {
     let h = harness(vec![gadget("gd-000001"), success(gadget("gd-000002"))]);
     let body = json!({"serial": "SN-0042-7781-X"});
     h.seeded("/shelves/s1/gadgets", body.clone()).await;
-    let (status, out) = h.seeded("/shelves/s1/gadgets", body.clone()).await;
+    let (status, out) = h.post("/shelves/s1/gadgets", body.clone()).await;
     assert_eq!(status, StatusCode::CONFLICT, "{out} {}", h.prompt(1));
     assert_eq!(h.exported().await, ["gadgets/gd-000001"]);
 
-    // Shown nothing of the other shelf, the create is asked for a plain answer.
-    let h = harness(vec![gadget("gd-000001"), gadget("gd-000002")]);
+    // On another shelf the serial is no repeat: the executor creates the gadget, with
+    // no LLM call.
+    let h = harness(vec![gadget("gd-000001")]);
     h.seeded("/shelves/s1/gadgets", body.clone()).await;
-    let (status, out) = h.seeded("/shelves/s2/gadgets", body).await;
+    let (status, out) = h.post("/shelves/s2/gadgets", body).await;
     assert_eq!(status, StatusCode::CREATED, "another shelf: {out}");
-    assert!(!h.prompt(1).contains("same_values"), "{}", h.prompt(1));
-    assert_eq!(
-        h.exported().await,
-        ["gadgets/gd-000001", "gadgets/gd-000002"]
-    );
+    assert_eq!(h.provider.requests().len(), 1);
+    let id = out["id"].as_str().unwrap();
+    let mut held = vec!["gadgets/gd-000001".to_owned(), format!("gadgets/{id}")];
+    held.sort();
+    assert_eq!(h.exported().await, held);
 }
 
 /// A 409 that names no member is no tie: a badge repeating an email is offered the
 /// refusal, and the LLM's success stands.
+// Step 6 deletes this test: it checks complete()'s create internals (seeded).
 #[tokio::test]
 async fn a_refusal_naming_no_member_stays_an_offer() {
     let badge = |id: &str| json!({"id": id, "email": "jane.roe@example.com"});
@@ -338,7 +351,7 @@ async fn an_answer_that_is_the_held_record_is_never_refused() {
     existing["existing"] = json!(true);
     let h = harness(vec![tag.clone(), success(existing.clone())]);
     h.seeded("/tags", tag.clone()).await;
-    let (status, out) = h.seeded("/tags", tag.clone()).await;
+    let (status, out) = h.post("/tags", tag.clone()).await;
     assert!(h.prompt(1).contains("same_values"), "{}", h.prompt(1));
     assert_eq!(status, StatusCode::CREATED, "{out}");
     assert_eq!(out, existing);
@@ -348,12 +361,13 @@ async fn an_answer_that_is_the_held_record_is_never_refused() {
     renamed["label"] = json!("Relaunch");
     let h = harness(vec![tag.clone(), success(renamed.clone())]);
     h.seeded("/tags", tag).await;
-    let (status, out) = h.seeded("/tags", renamed).await;
+    let (status, out) = h.post("/tags", renamed).await;
     assert_eq!(status, StatusCode::CONFLICT, "{out}");
 }
 
 /// A widget create repeating a taken SKU, answered with the widget that holds it, as
 /// stored, stands too.
+// Step 6 deletes this test: it checks complete()'s create internals (seeded).
 #[tokio::test]
 async fn a_repeat_answered_with_its_holder_stands() {
     let held = widget("wd-000001", "WID-7781-BLU");
