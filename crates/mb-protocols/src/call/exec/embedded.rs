@@ -8,9 +8,13 @@
 
 use mb_state::StoredResource;
 use serde_json::Value;
+use tracing::Instrument;
 
+use super::Held;
 use super::list::item_type;
-use crate::call::{CallPlan, MAX_SCAN, OperationCall, StateAccess, id_string, records};
+use crate::call::{
+    CallPlan, MAX_SCAN, OperationCall, StateAccess, id_string, records, state_span, write_memory,
+};
 
 /// A record held in its parent's array member.
 pub(super) struct Embedded {
@@ -53,9 +57,31 @@ impl Embedded {
     }
 }
 
+/// The call's target held in its parent's array member, when the session does not
+/// hold it as a record of its own ([`find`]) and no write the parent does not show yet
+/// is remembered for the parent.
+pub(super) async fn current(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    held: &Held<'_>,
+) -> Option<Embedded> {
+    let (None, Some(id)) = (held.target, held.target_id) else {
+        return None;
+    };
+    let found = find(state, plan, call, id).instrument(state_span()).await?;
+    let parent = &found.parent;
+    let behind = write_memory::remembers(state, &plan.session, &parent.resource_type, &parent.id)
+        .instrument(state_span())
+        .await;
+    (!behind).then_some(found)
+}
+
 /// The record `id` of the call's type held in a parent's array member, when the type
-/// describes `parent.embedded` and a held parent holds it.
-pub(super) async fn find(
+/// describes `parent.embedded` and one held parent holds it: the parent the path names,
+/// else the one held parent of the type holding an item with that id (none when more
+/// than one does).
+async fn find(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
     call: &OperationCall,
@@ -81,7 +107,7 @@ pub(super) async fn find(
             .collect(),
         None => state.list(&plan.session, &parent.r#type, MAX_SCAN).await,
     };
-    parents.into_iter().find_map(|held| {
+    let mut holding = parents.into_iter().filter_map(|held| {
         let items = mb_mcm::member_at(&held.data, member)?.as_array()?;
         let at = items.iter().position(|item| {
             mb_mcm::member_at(item, field)
@@ -99,5 +125,7 @@ pub(super) async fn find(
             at,
             child,
         })
-    })
+    });
+    let found = holding.next()?;
+    holding.next().is_none().then_some(found)
 }

@@ -227,14 +227,7 @@ async fn read(
 ) -> Ran {
     let rt = state.rt;
     // One held in its parent's array member is that item.
-    let within = match (held.target, held.target_id) {
-        (None, Some(id)) => {
-            embedded::find(state, plan, call, id)
-                .instrument(state_span())
-                .await
-        }
-        _ => None,
-    };
+    let within = embedded::current(state, plan, call, &held).await;
     // A missing record the session knows of (deleted, or unknown under
     // `unknown_ids: 404`) was refused before this; any other generates.
     let Some(stored) = held.target.or(within.as_ref().map(|e| &e.child)) else {
@@ -516,14 +509,16 @@ pub(super) enum Write {
     },
     /// Stores `data`, the parent record held under `id` with the written record
     /// `child` changed or removed in its array member ([`embedded`]): in the parent's
-    /// collection, as it was.
+    /// collection, as it was. A removed child is marked deleted as a removed record is.
     Within {
         /// The parent's id.
         id: String,
         /// The parent record.
         data: Value,
-        /// The written record's id.
-        child: String,
+        /// The written record, as it was held.
+        child: StoredResource,
+        /// Whether the write removed it.
+        removed: bool,
     },
 }
 
@@ -552,10 +547,19 @@ pub(super) async fn commit(
         // The record the write was of: the child for a write within its parent.
         let mut written = None;
         let id = match write {
-            Write::Within { id, data, child } => {
-                written = Some(child);
+            Write::Within {
+                id,
+                data,
+                child,
+                removed,
+            } => {
                 let place = (None, None, true);
                 store_one(state, session, (op, t), (id.clone(), data), place).await;
+                if removed && state.tracks_deleted {
+                    let (ct, cid) = (child.resource_type.as_str(), child.id.as_str());
+                    deleted::mark(state, session, (op, call), ct, cid, Some(&child)).await;
+                }
+                written = Some(child.id);
                 id
             }
             Write::Put { id, data } => {
@@ -609,7 +613,9 @@ pub(super) async fn commit(
             feature = "grpc",
             feature = "soap"
         ))]
-        crate::webhooks::emit::emit(rt, &plan.engine, op, call, &answer, Some(&id), session);
+        // A write within a parent is one of the child, named by its own id.
+        let target = written.as_deref().unwrap_or(&id);
+        crate::webhooks::emit::emit(rt, &plan.engine, op, call, &answer, Some(target), session);
         answer
     }
     .instrument(state_span())

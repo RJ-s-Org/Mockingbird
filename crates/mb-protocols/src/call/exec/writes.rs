@@ -87,7 +87,7 @@ async fn update(
         fell_back(rt, plan, kind, "action_route");
         return Ran::Generate(None);
     }
-    let within = within_parent(state, plan, call, &held).await;
+    let within = embedded::current(state, plan, call, &held).await;
     let (Some(stored), Some(id)) = (
         held.target.or(within.as_ref().map(|e| &e.child)),
         held.target_id,
@@ -192,7 +192,8 @@ async fn update(
             let write = Write::Within {
                 id: e.parent.id.clone(),
                 data: e.with(data),
-                child: id.to_owned(),
+                child: e.child.clone(),
+                removed: false,
             };
             let held = (e.parent.resource_type.as_str(), Some(&e.parent));
             commit(state, plan, call, held, write, answer).await
@@ -542,7 +543,7 @@ async fn delete(
     kind: OpKind,
 ) -> Ran {
     let rt = state.rt;
-    let within = within_parent(state, plan, call, &held).await;
+    let within = embedded::current(state, plan, call, &held).await;
     let (Some(stored), Some(id)) = (
         held.target.or(within.as_ref().map(|e| &e.child)),
         held.target_id,
@@ -553,15 +554,18 @@ async fn delete(
     let t = stored.resource_type.as_str();
     let mut data = stored.data.clone();
     if let Some(e) = &within {
-        // Removed from its parent's array, which is stored.
+        // Removed from its parent's array, which is stored; a soft delete keeps it there
+        // in its deleted state.
+        let soft = lifecycle::delete_softly(rt, t, &mut data);
         let Some(answer) = delete_answer(rt, plan, call, (id, &data), response_schema) else {
             fell_back(rt, plan, kind, Fallback::RenderFailed.as_str());
             return Ran::Generate(None);
         };
         let write = Write::Within {
             id: e.parent.id.clone(),
-            data: e.without(),
-            child: id.to_owned(),
+            data: if soft { e.with(data) } else { e.without() },
+            child: e.child.clone(),
+            removed: !soft,
         };
         let held = (e.parent.resource_type.as_str(), Some(&e.parent));
         let answer = commit(state, plan, call, held, write, answer).await;
@@ -583,28 +587,6 @@ async fn delete(
     let answer = commit(state, plan, call, (t, Some(stored)), write, answer).await;
     answered(rt, plan, kind);
     Ran::Answered(Box::new(answer))
-}
-
-/// The target held in its parent's array member ([`embedded`]), when the session does
-/// not hold it as a record of its own and no write the parent does not show yet is
-/// remembered for it.
-async fn within_parent(
-    state: &mut StateAccess<'_>,
-    plan: &CallPlan<'_>,
-    call: &OperationCall,
-    held: &Held<'_>,
-) -> Option<embedded::Embedded> {
-    let (None, Some(id)) = (held.target, held.target_id) else {
-        return None;
-    };
-    let found = embedded::find(state, plan, call, id)
-        .instrument(state_span())
-        .await?;
-    let parent = &found.parent;
-    let behind = write_memory::remembers(state, &plan.session, &parent.resource_type, &parent.id)
-        .instrument(state_span())
-        .await;
-    (!behind).then_some(found)
 }
 
 /// What a delete answers: an empty object when its success response's schema declares
