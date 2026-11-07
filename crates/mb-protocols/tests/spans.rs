@@ -128,9 +128,12 @@ fn runtime(name: &str, bundle: Arc<Bundle>, provider: Arc<ScriptedProvider>) -> 
     )
 }
 
+/// A create of an order, seeded: a seeded create takes the generated path, whose
+/// stages these tests trace.
 fn create_order() -> Request<Body> {
     Request::post("/orders")
         .header(header::CONTENT_TYPE, "application/json")
+        .header("x-mockingbird-seed", "1")
         .body(Body::from(r#"{"customerId":"c1","total":10}"#))
         .unwrap()
 }

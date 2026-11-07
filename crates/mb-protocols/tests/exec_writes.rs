@@ -88,6 +88,10 @@ fn line(operation: &str, kind: &str, fallback: Option<&str>) -> ExecLine {
     }
 }
 
+/// A create's seed: a seeded create takes the generated path, which stores the record
+/// the model answered under the id it chose, as these tests expect.
+const SEEDED: &[(&str, &str)] = &[("x-mockingbird-seed", "1")];
+
 fn source(headers: &HeaderMap) -> &str {
     headers
         .get("x-mockingbird-source")
@@ -257,7 +261,7 @@ async fn with_item(world: Value, script: Vec<Value>) -> DescribedHarness {
             "POST",
             "/items",
             Some(json!({"name": "a", "size": 1, "note": "n"})),
-            &[],
+            SEEDED,
         )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
@@ -380,7 +384,7 @@ async fn an_update_advancing_a_token_only_a_model_moves_falls_back() {
         |rt| rt,
     );
     let (status, _, body) = h
-        .send("POST", "/docs", Some(json!({"title": "a"})), &[])
+        .send("POST", "/docs", Some(json!({"title": "a"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, _, body) = h
@@ -455,7 +459,7 @@ async fn an_update_whose_body_is_no_record_falls_back() {
         |rt| rt,
     );
     let (status, _, body) = h
-        .send("POST", "/boxes", Some(json!({"name": "a"})), &[])
+        .send("POST", "/boxes", Some(json!({"name": "a"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, _, body) = h
@@ -573,17 +577,35 @@ async fn a_replace_keeps_the_id_and_server_owned_members_and_drops_the_rest() {
 }
 
 #[tokio::test]
-async fn a_replace_missing_a_required_member_falls_back_for_fill() {
+async fn a_replace_missing_a_required_member_has_it_filled() {
     let (capture, _guard) = Capture::install();
-    let h = with_item(replacing(), vec![item(), decoy()]).await;
-    let (status, _, body) = h
+    // The create's answer, then the fill's: a value for `size`, and a `name` it never
+    // takes (the replace sent one).
+    let h = with_item(
+        replacing(),
+        vec![item(), json!({"size": 5, "name": "not sent"})],
+    )
+    .await;
+    let t = type_of(&h, "getItem");
+    let (status, headers, body) = h
         .send("PUT", "/items/i1", Some(json!({"name": "c"})), &[])
         .await;
-    assert!(status.is_success(), "{body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let replaced =
+        json!({"id": "i1", "name": "c", "size": 5, "created": "2026-01-01", "status": "open"});
+    assert_eq!(body, replaced);
+    assert_eq!(h.stored(&t, "i1").await, Some(replaced.clone()));
+    assert_eq!(h.provider.requests().len(), 2, "the fill's one LLM call");
     assert_eq!(
         capture.of("replaceItem"),
-        vec![line("replaceItem", "replace", Some("needs_fill"))]
+        vec![line("replaceItem", "replace", None)]
     );
+    // A later read is answered from state.
+    let (status, headers, read) = h.send("GET", "/items/i1", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(source(&headers), "state", "{read}");
+    assert_eq!(read, replaced);
 }
 
 #[tokio::test]
@@ -663,7 +685,7 @@ async fn an_update_answering_an_acknowledgement_renders_it_from_the_record() {
         |rt| rt,
     );
     let (status, _, body) = h
-        .send("POST", "/notes", Some(json!({"text": "hi"})), &[])
+        .send("POST", "/notes", Some(json!({"text": "hi"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, headers, body) = h
@@ -695,7 +717,7 @@ async fn a_bodiless_update_stores_the_merged_record() {
         |rt| rt,
     );
     let (status, _, body) = h
-        .send("POST", "/labels", Some(json!({"name": "a"})), &[])
+        .send("POST", "/labels", Some(json!({"name": "a"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, headers, body) = h
@@ -728,7 +750,7 @@ async fn an_accepted_long_running_update_lands_at_once_and_reads_as_done() {
         |rt| support::with_effective(rt, world, false),
     );
     let (status, _, body) = h
-        .send("POST", "/docs", Some(json!({"title": "a"})), &[])
+        .send("POST", "/docs", Some(json!({"title": "a"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, headers, body) = h
@@ -803,7 +825,7 @@ async fn an_update_answers_the_derived_members_from_the_children_held() {
         vec![json!({"id": "o1", "note": "a", "line_count": 0})],
     );
     let (status, _, body) = h
-        .send("POST", "/orders", Some(json!({"note": "a"})), &[])
+        .send("POST", "/orders", Some(json!({"note": "a"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     // Lines held under the order that no write of the session remembers (seeded).
@@ -865,10 +887,23 @@ type Mutation {
 "#;
 
     async fn post(router: &axum::Router, query: &str) -> Value {
-        let req = axum::http::Request::builder()
+        post_with(router, query, &[]).await
+    }
+
+    /// [`post`] of a create, seeded: it takes the generated path (see [`super::SEEDED`]).
+    async fn seeded(router: &axum::Router, query: &str) -> Value {
+        post_with(router, query, super::SEEDED).await
+    }
+
+    async fn post_with(router: &axum::Router, query: &str, headers: &[(&str, &str)]) -> Value {
+        let mut req = axum::http::Request::builder()
             .method("POST")
             .uri("/graphql")
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let req = req
             .body(axum::body::Body::from(json!({"query": query}).to_string()))
             .unwrap();
         super::support::send_to(router, req).await.2
@@ -910,7 +945,7 @@ type Mutation {
         );
         let rt = super::support::with_effective(rt, world, false);
         let router = mb_protocols::graphql::try_router(Arc::new(rt)).unwrap();
-        let created = post(
+        let created = seeded(
             &router,
             "mutation { createWidget(name: \"a\", size: 1) { id name size } }",
         )

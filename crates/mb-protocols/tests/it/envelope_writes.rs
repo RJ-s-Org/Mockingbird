@@ -55,7 +55,28 @@ fn harness(contract: &str, script: Vec<Value>) -> Harness {
 
 impl Harness {
     async fn call(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+        self.call_with(method, uri, body, &[]).await
+    }
+
+    /// [`Self::call`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+        self.call_with(method, uri, body, &[crate::support::SEED])
+            .await
+    }
+
+    async fn call_with(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
         let mut req = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
         if body.is_some() {
             req = req.header("content-type", "application/json");
         }
@@ -268,7 +289,7 @@ async fn a_create_answered_in_an_undeclared_envelope_stores_the_record_it_holds(
         vec![json!({"ok": true, "record": {"id": "w7", "name": "made"}})],
     );
     let (status, body) = h
-        .call("POST", "/widgets", Some(json!({"name": "made"})))
+        .seeded("POST", "/widgets", Some(json!({"name": "made"})))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(

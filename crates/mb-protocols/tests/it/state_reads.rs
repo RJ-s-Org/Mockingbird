@@ -54,6 +54,18 @@ impl Harness {
         self.send(method, uri, body, &[]).await
     }
 
+    /// [`Self::call`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, String, Value) {
+        self.send(method, uri, body, &[crate::support::SEED]).await
+    }
+
     /// A read on today's path: a seed (`X-Mockingbird-Seed`) takes it past the
     /// state-first executor, which answers an envelope's free members itself (a boolean
     /// `true`, any other from the faker, `tests/exec.rs`). Today's path generates such a read and keeps what it
@@ -231,7 +243,7 @@ async fn a_record_in_an_envelope_with_an_enum_member_is_read_from_state() {
         vec![json!({"status": "success", "data": event_type()})],
     );
     let (status, _, created) = h
-        .call(
+        .seeded(
             "POST",
             "/v2/event-types",
             Some(json!({"title": "Thirty Minute Chat"})),
@@ -279,7 +291,7 @@ async fn a_read_answers_the_envelope_it_answered_before() {
     let answer = json!({"success": true, "data": deal});
     let h = harness(PIPEDRIVE, vec![answer.clone(), answer.clone()]);
     let (status, _, created) = h
-        .call("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
+        .seeded("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
 
@@ -323,7 +335,7 @@ async fn a_patch_inside_the_record_still_remembers_the_envelope() {
         ],
     );
     let (status, _, created) = h
-        .call("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
+        .seeded("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let (status, source, read) = h.read("/v1/deals/7").await;
@@ -364,7 +376,7 @@ async fn a_patched_sibling_is_not_remembered() {
         ],
     );
     let (status, _, created) = h
-        .call("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
+        .seeded("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let (status, source, read) = h.read("/v1/deals/7").await;
@@ -399,7 +411,7 @@ async fn a_string_stays_with_the_operation_that_answered_it() {
         ],
     );
     let (status, _, created) = h
-        .call("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
+        .seeded("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
 
@@ -438,7 +450,7 @@ async fn an_envelope_with_no_record_is_not_remembered() {
         ],
     );
     let (status, _, created) = h
-        .call("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
+        .seeded("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let (status, _, missed) = h.read("/v1/deals/7").await;
@@ -472,7 +484,7 @@ async fn only_what_the_read_enumerates_is_shared_across_operations() {
         ],
     );
     let (status, _, created) = h
-        .call(
+        .seeded(
             "POST",
             "/v2/event-types",
             Some(json!({"title": "Thirty Minute Chat"})),
@@ -503,7 +515,7 @@ async fn a_camel_case_reference_finds_a_kebab_case_type() {
         ],
     );
     let (status, _, created) = h
-        .call(
+        .seeded(
             "POST",
             "/v2/event-types",
             Some(json!({"title": "Thirty Minute Chat"})),
@@ -512,7 +524,7 @@ async fn a_camel_case_reference_finds_a_kebab_case_type() {
     assert_eq!(status, StatusCode::CREATED, "{created}");
 
     let (status, _, booked) = h
-        .call(
+        .seeded(
             "POST",
             "/v2/bookings",
             Some(json!({"eventTypeId": 42, "start": "2026-11-04T10:00:00Z"})),

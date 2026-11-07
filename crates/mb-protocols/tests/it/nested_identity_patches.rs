@@ -282,6 +282,20 @@ impl Harness {
         self.send_as(method, uri, "application/json", body).await
     }
 
+    /// [`Self::send`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+        self.send_with(
+            method,
+            uri,
+            "application/json",
+            body,
+            &[crate::support::SEED],
+        )
+        .await
+    }
+
     async fn send_as(
         &self,
         method: &str,
@@ -289,10 +303,25 @@ impl Harness {
         content_type: &str,
         body: Option<Value>,
     ) -> (StatusCode, Value) {
-        let req = Request::builder()
+        self.send_with(method, uri, content_type, body, &[]).await
+    }
+
+    async fn send_with(
+        &self,
+        method: &str,
+        uri: &str,
+        content_type: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
+        let mut req = Request::builder()
             .method(method)
             .uri(uri)
-            .header("content-type", content_type)
+            .header("content-type", content_type);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let req = req
             .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
             .unwrap();
         let resp = self.router.clone().oneshot(req).await.unwrap();
@@ -336,7 +365,7 @@ fn alpha_request() -> Value {
 async fn a_create_keeps_the_nested_members_the_server_set_and_the_request_s_map_whole() {
     let h = harness(vec![made_alpha()]);
     let (status, made) = h
-        .send("POST", "/racks/r1/gadgets", Some(alpha_request()))
+        .seeded("POST", "/racks/r1/gadgets", Some(alpha_request()))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{made}");
     assert_eq!(made["info"]["label"], "alpha", "{made}");
@@ -351,7 +380,7 @@ async fn a_create_keeps_the_nested_members_the_server_set_and_the_request_s_map_
 #[tokio::test]
 async fn a_record_keyed_inside_its_metadata_is_stored_read_and_listed_by_it() {
     let h = harness(vec![made_alpha(), json!({"kind": "List"})]);
-    h.send("POST", "/racks/r1/gadgets", Some(alpha_request()))
+    h.seeded("POST", "/racks/r1/gadgets", Some(alpha_request()))
         .await;
     let before = h.requests();
     let (status, read) = h.send("GET", "/racks/r1/gadgets/alpha", None).await;
@@ -382,7 +411,7 @@ async fn a_merge_patch_null_removes_the_member_at_any_depth() {
         "settings": {"A": "1", "B": "2"},
     });
     let h = harness(vec![made_alpha(), patched]);
-    h.send("POST", "/racks/r1/gadgets", Some(alpha_request()))
+    h.seeded("POST", "/racks/r1/gadgets", Some(alpha_request()))
         .await;
     let (status, answer) = h
         .send_as(
@@ -431,7 +460,9 @@ async fn a_compound_path_value_is_written_to_the_member_it_fits_only() {
         // A rename by the old name, answered right.
         json!({"id": APP_ID, "name": "green", "paused": false}),
     ]);
-    let (status, made) = h.send("POST", "/apps", Some(json!({"name": "blue"}))).await;
+    let (status, made) = h
+        .seeded("POST", "/apps", Some(json!({"name": "blue"})))
+        .await;
     assert_eq!(status, StatusCode::CREATED, "{made}");
     assert_eq!(made["id"], APP_ID);
     let (status, renamed) = h

@@ -256,6 +256,21 @@ impl Harness {
         (status, body)
     }
 
+    /// [`Self::send`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
+        let mut headers = headers.to_vec();
+        headers.push(crate::support::SEED);
+        self.send(method, uri, body, &headers).await
+    }
+
     async fn put(&self, uri: &str, body: Value) -> StatusCode {
         self.send("PUT", uri, Some(body), &[]).await.0
     }
@@ -302,7 +317,7 @@ async fn a_stale_version_the_409_names_is_refused_before_the_llm() {
         answer(doc("d", 3)),
     ]);
     let (status, _) = h
-        .send("POST", "/docs", Some(json!({"title": "a"})), &[])
+        .seeded("POST", "/docs", Some(json!({"title": "a"})), &[])
         .await;
     assert_eq!(status, StatusCode::CREATED);
 
@@ -359,7 +374,7 @@ async fn a_request_value_is_never_replaced_by_the_answer() {
         answer(doc("a (renamed)", 2)),
         answer(doc("a", 3)),
     ]);
-    h.send("POST", "/docs", Some(json!({"title": "a"})), &[])
+    h.seeded("POST", "/docs", Some(json!({"title": "a"})), &[])
         .await;
     assert_eq!(
         h.put("/docs/d1", json!({"title": "a", "version": 1})).await,
@@ -387,7 +402,7 @@ async fn counters_timestamps_and_states_are_never_refused() {
         answer(step(3, "open")),
         answer(step(4, "closed")),
     ]);
-    h.send("POST", "/docs", Some(json!({"title": "t"})), &[])
+    h.seeded("POST", "/docs", Some(json!({"title": "t"})), &[])
         .await;
     let write = json!({"title": "t", "view_count": 1, "updated": 1001, "status": "closed"});
     assert_eq!(h.put("/docs/d1", write.clone()).await, StatusCode::OK);
@@ -412,7 +427,7 @@ async fn writes_with_nothing_to_refuse_reach_the_llm() {
         doc("a", 1),
         answer(doc("b", 2)),
     ]);
-    h.send("POST", "/docs", Some(json!({"title": "a"})), &[])
+    h.seeded("POST", "/docs", Some(json!({"title": "a"})), &[])
         .await;
     // The record's first write: nothing was seen of how its version moves.
     assert_eq!(
@@ -426,7 +441,7 @@ async fn writes_with_nothing_to_refuse_reach_the_llm() {
     );
     // Another session holds its own d1, at version 1.
     let other = [("X-Mockingbird-Session", "other")];
-    h.send("POST", "/docs", Some(json!({"title": "a"})), &other)
+    h.seeded("POST", "/docs", Some(json!({"title": "a"})), &other)
         .await;
     let (status, _) = h
         .send(
@@ -441,7 +456,7 @@ async fn writes_with_nothing_to_refuse_reach_the_llm() {
     assert_eq!(h.calls(), 5);
 
     let h = harness(vec![doc("a", 1), answer(doc("b", 2)), answer(doc("c", 3))]);
-    h.send("POST", "/drafts", Some(json!({"title": "a"})), &[])
+    h.seeded("POST", "/drafts", Some(json!({"title": "a"})), &[])
         .await;
     h.put("/drafts/d1", json!({"title": "b", "version": 1}))
         .await;
@@ -466,7 +481,7 @@ async fn a_problem_409_ties_no_member() {
         answer(item("rewritten again")),
         answer(item("c")),
     ]);
-    h.send("POST", "/items", Some(json!({"title": "a"})), &[])
+    h.seeded("POST", "/items", Some(json!({"title": "a"})), &[])
         .await;
     assert_eq!(
         h.put("/items/i1", json!({"notes": "x"})).await,
@@ -497,7 +512,7 @@ async fn a_member_the_write_sets_is_no_token() {
         answer(project("b")),
         answer(project("c")),
     ]);
-    h.send("POST", "/projects", Some(json!({"name": "a"})), &[])
+    h.seeded("POST", "/projects", Some(json!({"name": "a"})), &[])
         .await;
     assert_eq!(
         h.put("/projects/p1", json!({"name": "a"})).await,
@@ -533,7 +548,7 @@ async fn a_member_any_write_sets_is_no_token() {
         answer(project("made-up", true)),
         answer(project("a", false)),
     ]);
-    h.send("POST", "/projects", Some(json!({"name": "a"})), &[])
+    h.seeded("POST", "/projects", Some(json!({"name": "a"})), &[])
         .await;
     let (status, _) = h
         .send(
@@ -568,7 +583,7 @@ async fn a_read_only_enum_state_is_no_token() {
         answer(with_state("live", 2)),
         answer(with_state("draft", 3)),
     ]);
-    h.send("POST", "/docs", Some(json!({"title": "t"})), &[])
+    h.seeded("POST", "/docs", Some(json!({"title": "t"})), &[])
         .await;
     assert_eq!(
         h.put("/docs/d1", json!({"title": "t"})).await,

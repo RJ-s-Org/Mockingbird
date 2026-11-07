@@ -395,7 +395,7 @@ impl Engine {
         self.scrub_seeded(&mut value, checks.pii_seed("answer", 0));
         validator.mend_member_names(&mut value);
         if let Some(fill) = fill
-            && let Some(filled) = self.fill(validator, &value, fill, checks.seed)
+            && let Some(filled) = self.fill_budgeted(validator, &value, fill, checks.seed)
         {
             value = filled;
         }
@@ -1587,7 +1587,7 @@ fn unwrap_items(validator: &SchemaValidator, value: Value) -> Value {
 impl Engine {
     /// `value` with the required members the output budget left out filled
     /// by the faker from the full schema; `None` when nothing was missing.
-    fn fill(
+    fn fill_budgeted(
         &self,
         validator: &SchemaValidator,
         value: &Value,

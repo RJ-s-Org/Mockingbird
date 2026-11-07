@@ -1,5 +1,7 @@
 //! Regressions from the review of #234: false refusals on weak evidence, an LLM-written
 //! error code overwritten, and an answer under the holder's identity stored anew.
+//!
+//! Step 6 deletes these tests: they check complete()'s create internals (seeded creates).
 #![cfg(test)]
 use std::sync::Arc;
 use std::time::Duration;
@@ -92,13 +94,26 @@ fn harness(contract: &str, script: Vec<Value>) -> Harness {
 }
 
 impl Harness {
-    async fn post(&self, uri: &str, body: Value) -> (StatusCode, Value) {
-        let req = Request::builder()
+    /// A create, seeded: a seeded create takes the generated path, which stores the
+    /// record the model answered under the id it chose, as these tests expect.
+    async fn seeded(&self, uri: &str, body: Value) -> (StatusCode, Value) {
+        self.post_with(uri, body, &[crate::support::SEED]).await
+    }
+
+    async fn post_with(
+        &self,
+        uri: &str,
+        body: Value,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
+        let mut req = Request::builder()
             .method("POST")
             .uri(uri)
-            .header("content-type", "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap();
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let req = req.body(Body::from(body.to_string())).unwrap();
         let resp = self.router.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -150,8 +165,8 @@ async fn a_length_limit_beside_the_member_refuses_nothing() {
         ],
     );
     let body = json!({"sku": "WID-7781-BLU"});
-    h.post("/widgets", body.clone()).await;
-    let (status, out) = h.post("/widgets", body).await;
+    h.seeded("/widgets", body.clone()).await;
+    let (status, out) = h.seeded("/widgets", body).await;
     assert!(h.prompt(1).contains("same_values"), "{}", h.prompt(1));
     assert_eq!(status, StatusCode::CREATED, "false refusal: {out}");
 }
@@ -173,8 +188,8 @@ async fn a_count_in_the_api_description_refuses_nothing() {
         ],
     );
     let body = json!({"sku": "WID-7781-BLU"});
-    h.post("/widgets", body.clone()).await;
-    let (status, out) = h.post("/widgets", body).await;
+    h.seeded("/widgets", body.clone()).await;
+    let (status, out) = h.seeded("/widgets", body).await;
     assert_eq!(status, StatusCode::CREATED, "false refusal: {out}");
 }
 
@@ -196,13 +211,13 @@ async fn a_sentence_of_two_statuses_and_members_refuses_nothing() {
             ),
         ],
     );
-    h.post(
+    h.seeded(
         "/widgets",
         json!({"email": "jane.roe@example.com", "external_ref": "EXT-0001-AAAA"}),
     )
     .await;
     let (status, out) = h
-        .post(
+        .seeded(
             "/widgets",
             json!({"email": "jane.roe@example.com", "external_ref": "EXT-0002-BBBB"}),
         )
@@ -226,9 +241,9 @@ async fn an_llm_written_error_code_is_kept() {
             json!({"effects": [], "response": null, "refusal": 400, "refusal_body": {"code": "bad_param", "message": "label is too long"}}),
         ],
     );
-    h.post("/widgets", json!({"sku": "WID-7781-BLU"})).await;
+    h.seeded("/widgets", json!({"sku": "WID-7781-BLU"})).await;
     let (status, out) = h
-        .post("/widgets", json!({"sku": "WID-7781-BLU", "label": "x"}))
+        .seeded("/widgets", json!({"sku": "WID-7781-BLU", "label": "x"}))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
     assert_eq!(out["code"], "bad_param", "LLM-written code replaced: {out}");
@@ -250,10 +265,10 @@ async fn an_answer_under_the_holders_identity_serves_the_stored_record() {
             success(json!({"id": "wd-000001", "sku": "WID-7781-BLU", "label": "New"})),
         ],
     );
-    h.post("/widgets", json!({"sku": "WID-7781-BLU", "label": "Old"}))
+    h.seeded("/widgets", json!({"sku": "WID-7781-BLU", "label": "Old"}))
         .await;
     let (status, out) = h
-        .post("/widgets", json!({"sku": "WID-7781-BLU", "label": "New"}))
+        .seeded("/widgets", json!({"sku": "WID-7781-BLU", "label": "New"}))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{out}");
     assert_eq!(
@@ -290,10 +305,10 @@ async fn repeat_email(c: &str) -> (StatusCode, Value, String) {
             success(json!({"id": "wd-000002", "email": "jane.roe@example.com"})),
         ],
     );
-    h.post("/widgets", json!({"email": "jane.roe@example.com"}))
+    h.seeded("/widgets", json!({"email": "jane.roe@example.com"}))
         .await;
     let (s, o) = h
-        .post("/widgets", json!({"email": "jane.roe@example.com"}))
+        .seeded("/widgets", json!({"email": "jane.roe@example.com"}))
         .await;
     (s, o, h.prompt(1))
 }
@@ -306,8 +321,8 @@ async fn repeat_sku(c: &str) -> (StatusCode, Value, String) {
             success(json!({"id": "wd-000002", "sku": "WID-7781-BLU"})),
         ],
     );
-    h.post("/widgets", json!({"sku": "WID-7781-BLU"})).await;
-    let (s, o) = h.post("/widgets", json!({"sku": "WID-7781-BLU"})).await;
+    h.seeded("/widgets", json!({"sku": "WID-7781-BLU"})).await;
+    let (s, o) = h.seeded("/widgets", json!({"sku": "WID-7781-BLU"})).await;
     (s, o, h.prompt(1))
 }
 
@@ -401,10 +416,10 @@ async fn an_answer_under_the_holders_id_with_changes_serves_the_stored_record() 
             ),
         ],
     );
-    h.post("/widgets", json!({"sku": "WID-7781-BLU", "label": "Old"}))
+    h.seeded("/widgets", json!({"sku": "WID-7781-BLU", "label": "Old"}))
         .await;
     let (s, o) = h
-        .post(
+        .seeded(
             "/widgets",
             json!({"sku": "WID-7781-BLU", "label": "New", "email": "x@example.com"}),
         )

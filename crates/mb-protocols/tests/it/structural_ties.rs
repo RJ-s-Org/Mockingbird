@@ -47,7 +47,33 @@ impl Harness {
         uri: &str,
         body: Option<Value>,
     ) -> (StatusCode, String, Value) {
+        self.call_with(method, uri, body, &[]).await
+    }
+
+    /// [`Self::call`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, String, Value) {
+        self.call_with(method, uri, body, &[crate::support::SEED])
+            .await
+    }
+
+    async fn call_with(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, String, Value) {
         let mut req = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
         if body.is_some() {
             req = req.header("content-type", "application/json");
         }
@@ -137,7 +163,7 @@ async fn a_compound_owner_parameter_ties_the_record_s_owner_member() {
         ],
     );
     let (status, _, made) = h
-        .call(
+        .seeded(
             "POST",
             "/api/workspaces/acme/boards/",
             Some(json!({"name": "Roadmap", "slug": "roadmap"})),
@@ -215,11 +241,11 @@ async fn booked_seat(contract: &str) -> Value {
         ],
     );
     let (status, _, showing) = h
-        .call("POST", "/showings", Some(json!({"title": "Matinee"})))
+        .seeded("POST", "/showings", Some(json!({"title": "Matinee"})))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{showing}");
     let (status, _, booked) = h
-        .call(
+        .seeded(
             "POST",
             "/showings/78245196304/seats",
             Some(json!({"email": "ann@example.com"})),

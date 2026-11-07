@@ -71,7 +71,33 @@ impl Harness {
         uri: &str,
         body: Option<Value>,
     ) -> (StatusCode, String, Value) {
+        self.call_with(method, uri, body, &[]).await
+    }
+
+    /// [`Self::call`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, String, Value) {
+        self.call_with(method, uri, body, &[crate::support::SEED])
+            .await
+    }
+
+    async fn call_with(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, String, Value) {
         let mut req = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
         if body.is_some() {
             req = req.header("content-type", "application/json");
         }
@@ -268,7 +294,7 @@ async fn a_payment_in_an_envelope_is_one_record() {
         ],
     );
     let (status, _, created) = h
-        .call("POST", "/payments", Some(json!({"amount": 500})))
+        .seeded("POST", "/payments", Some(json!({"amount": 500})))
         .await;
     assert_eq!(status, StatusCode::OK, "{created}");
     assert_eq!(
@@ -369,7 +395,7 @@ async fn a_ticket_beside_its_audit_is_one_record() {
         ],
     );
     let (status, _, created) = h
-        .call(
+        .seeded(
             "POST",
             "/tickets",
             Some(json!({"ticket": {"subject": "Printer"}})),
@@ -508,7 +534,7 @@ async fn a_query_lists_pages_and_is_shown_them() {
             json!({"results": [page("pg-1", "Quarterly plan"), page("pg-2", "Retro notes")], "has_more": false}),
         ],
     );
-    h.call("POST", "/pages", Some(json!({"title": "Quarterly plan"})))
+    h.seeded("POST", "/pages", Some(json!({"title": "Quarterly plan"})))
         .await;
     let (status, _, found) = h
         .call("POST", "/data_sources/ds-1/query", Some(json!({})))
@@ -746,7 +772,7 @@ components:
         contract,
         vec![order.clone(), json!([{"id": "e1", "kind": "paid"}])],
     );
-    h.call("POST", "/orders", Some(json!({}))).await;
+    h.seeded("POST", "/orders", Some(json!({}))).await;
     let (_, source, read) = h.call("GET", "/orders/o1", None).await;
     assert_eq!((source.as_str(), &read), ("state", &order));
     // A list that is no member's schema is generated, and goes under its own type.
@@ -876,7 +902,7 @@ fn ticket(subject: &str, tags: &[&str]) -> Value {
 
 async fn created_ticket(h: &Harness) {
     let (status, _, created) = h
-        .call(
+        .seeded(
             "POST",
             "/tickets",
             Some(json!({"ticket": {"subject": "Printer"}})),
@@ -1098,7 +1124,7 @@ async fn a_refused_action_on_an_enveloped_record_changes_nothing() {
             json!({"effects": [], "response": {"payment": payment("COMPLETED")}}),
         ],
     );
-    h.call("POST", "/payments", Some(json!({"amount": 500})))
+    h.seeded("POST", "/payments", Some(json!({"amount": 500})))
         .await;
     let (status, _, body) = h.call("POST", "/payments/p1/complete", None).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body} {}", h.prompt(1));
@@ -1172,7 +1198,7 @@ async fn a_task_keyed_by_its_gid_is_read_back() {
     let task = json!({"gid": "1201", "name": "Write the brief"});
     let h = harness(KEYED_BY_PARAM, vec![json!({"data": task.clone()})]);
     let (status, _, created) = h
-        .call(
+        .seeded(
             "POST",
             "/tasks",
             Some(json!({"data": {"name": "Write the brief"}})),
@@ -1194,7 +1220,7 @@ async fn an_issue_is_read_back_by_its_iid() {
     let issue = json!({"id": 501, "iid": 3, "title": "Login fails"});
     let h = harness(KEYED_BY_PARAM, vec![issue.clone()]);
     let (status, _, created) = h
-        .call(
+        .seeded(
             "POST",
             "/projects/7/issues",
             Some(json!({"title": "Login fails"})),
@@ -1327,7 +1353,7 @@ async fn a_note_appears_in_its_tickets_conversations() {
     let note = json!({"id": 77, "body": "Called the customer back", "ticket_id": 9});
     let h = harness(CONVERSATIONS, vec![note.clone(), json!([note.clone()])]);
     let (status, _, created) = h
-        .call(
+        .seeded(
             "POST",
             "/tickets/9/notes",
             Some(json!({"body": "Called the customer back"})),

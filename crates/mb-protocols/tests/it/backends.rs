@@ -146,7 +146,28 @@ fn harness_of(contract: &str, store: Arc<dyn StateStore>, script: Vec<Value>, ws
 
 impl Harness {
     async fn call(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, String) {
+        self.call_with(method, uri, body, &[]).await
+    }
+
+    /// [`Self::call`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, String) {
+        self.call_with(method, uri, body, &[crate::support::SEED])
+            .await
+    }
+
+    async fn call_with(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, String) {
         let mut req = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
         if body.is_some() {
             req = req.header("content-type", "application/json");
         }
@@ -191,7 +212,7 @@ async fn write_memory(store: Arc<dyn StateStore>) {
         ],
     );
     let (status, _) = h
-        .call(
+        .seeded(
             "POST",
             "/items",
             Some(json!({"title": "A remembered title"})),
@@ -233,7 +254,7 @@ async fn deleted_markers(store: Arc<dyn StateStore>) {
             json!({"id": "i1", "title": "Back"}),
         ],
     );
-    h.call("POST", "/items", Some(json!({"title": "A title"})))
+    h.seeded("POST", "/items", Some(json!({"title": "A title"})))
         .await;
     let (status, _) = h.call("DELETE", "/items/i1", None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -307,7 +328,7 @@ async fn answers_reach_another_node(one: Arc<dyn StateStore>, other: Arc<dyn Sta
         assert!(sessions.is_empty(), "{sessions:?}");
         assert_eq!(h.state.session_count(&ws, "m").await.unwrap(), 0);
     }
-    b.call("POST", "/items", Some(json!({"title": "A title"})))
+    b.seeded("POST", "/items", Some(json!({"title": "A title"})))
         .await;
     let prompt = b.prompt(0);
     assert!(prompt.contains("user-4711"), "{prompt}");
@@ -355,13 +376,16 @@ components:
       properties: {id: {type: string}, subject: {type: string}}
 "##;
 
-/// `harness`'s POST of `body` to `uri` in session `session`.
+/// `harness`'s create of `body` at `uri` in session `session`, seeded: a seeded create
+/// takes the generated path, which stores the record the model answered under the id it
+/// chose, as these tests expect.
 async fn post_in(h: &Harness, session: &str, uri: &str, body: Value) -> StatusCode {
     let req = Request::builder()
         .method("POST")
         .uri(uri)
         .header("content-type", "application/json")
         .header("x-mockingbird-session", session)
+        .header(crate::support::SEED.0, crate::support::SEED.1)
         .body(Body::from(body.to_string()))
         .unwrap();
     h.router.clone().oneshot(req).await.unwrap().status()

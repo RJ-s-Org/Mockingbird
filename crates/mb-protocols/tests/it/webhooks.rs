@@ -864,8 +864,20 @@ components:
     rt.webhooks = Some(d);
     let app = http_rest::router(Arc::new(rt));
     let post = |uri: &str| Request::post(uri).body(Body::empty()).unwrap();
-    for uri in ["/comments", "/comments/c1/replies", "/comments/c1/replies"] {
-        let resp = app.clone().oneshot(post(uri)).await.unwrap();
+    // A create is seeded (`crate::support::SEED`): it stores the scripted record.
+    let seeded = |uri: &str| {
+        Request::post(uri)
+            .header(crate::support::SEED.0, crate::support::SEED.1)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let requests = [
+        seeded("/comments"),
+        post("/comments/c1/replies"),
+        post("/comments/c1/replies"),
+    ];
+    for req in requests {
+        let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
     }
     for _ in 0..200 {
@@ -929,8 +941,19 @@ components:
     rt.webhooks = Some(d);
     let app = http_rest::router(Arc::new(rt));
     let post = |uri: &str| Request::post(uri).body(Body::empty()).unwrap();
-    for uri in ["/orders", "/orders", "/orders/o1/copy"] {
-        let resp = app.clone().oneshot(post(uri)).await.unwrap();
+    // A create is seeded (`crate::support::SEED`): it stores the scripted record.
+    let seeded = |uri: &str| {
+        Request::post(uri)
+            .header(crate::support::SEED.0, crate::support::SEED.1)
+            .body(Body::empty())
+            .unwrap()
+    };
+    for req in [
+        seeded("/orders"),
+        seeded("/orders"),
+        post("/orders/o1/copy"),
+    ] {
+        let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
     }
     tokio::time::sleep(Duration::from_millis(100)).await;

@@ -5,6 +5,8 @@
 //! a success anyway, it stores nothing over the record. A create's effects never change
 //! another record of its own type that its request does not name. Driven over HTTP with
 //! a scripted LLM, asserting the prompts it was sent and what the store holds.
+//!
+//! Step 6 deletes these tests: they check complete()'s create internals (seeded creates).
 #![cfg(test)]
 use std::sync::Arc;
 use std::time::Duration;
@@ -211,8 +213,23 @@ impl Harness {
         )
     }
 
+    /// [`Self::send`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
+        let mut headers = headers.to_vec();
+        headers.push(crate::support::SEED);
+        self.send(method, uri, body, &headers).await
+    }
+
     async fn post(&self, uri: &str, body: Value) -> (StatusCode, Value) {
-        self.send("POST", uri, Some(body), &[]).await
+        self.seeded("POST", uri, Some(body), &[]).await
     }
 
     /// The user message of the `n`th LLM call.
@@ -401,8 +418,9 @@ async fn an_idempotent_retry_of_a_client_chosen_id_is_as_before() {
     );
     let key = [("Idempotency-Key", "key-000001")];
     let body = customer(ANA, "Ana", "ana@example.com");
-    h.send("POST", "/customers", Some(body.clone()), &key).await;
-    let (status, _) = h.send("POST", "/customers", Some(body), &key).await;
+    h.seeded("POST", "/customers", Some(body.clone()), &key)
+        .await;
+    let (status, _) = h.seeded("POST", "/customers", Some(body), &key).await;
     assert_eq!(status, StatusCode::OK);
     assert!(!h.prompt(1).contains("refusal"), "{}", h.prompt(1));
     assert!(!h.prompt(1).contains("same_values"), "{}", h.prompt(1));

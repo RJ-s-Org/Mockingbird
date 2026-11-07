@@ -92,6 +92,15 @@ fn get(uri: &str) -> Request<Body> {
     Request::get(uri).body(Body::empty()).unwrap()
 }
 
+/// `req`, a create, seeded: a seeded create takes the generated path, which stores the
+/// record the model answered under the id it chose, as these tests expect.
+fn seeded(mut req: Request<Body>) -> Request<Body> {
+    let (name, value) = crate::support::SEED;
+    req.headers_mut()
+        .insert(name, axum::http::HeaderValue::from_static(value));
+    req
+}
+
 fn post_json(uri: &str, body: &str) -> Request<Body> {
     Request::post(uri)
         .header(header::CONTENT_TYPE, "application/json")
@@ -125,7 +134,7 @@ async fn create_then_get_returns_stored_resource() {
     );
     let resp = send(
         &h,
-        post_json("/orders", r#"{"customerId":"c1","total":10}"#),
+        seeded(post_json("/orders", r#"{"customerId":"c1","total":10}"#)),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -148,7 +157,7 @@ async fn sessions_isolate_state() {
         .header("x-mockingbird-session", "a")
         .body(Body::from(r#"{"customerId":"c1","total":10}"#))
         .unwrap();
-    assert_eq!(send(&h, req).await.status(), StatusCode::CREATED);
+    assert_eq!(send(&h, seeded(req)).await.status(), StatusCode::CREATED);
     assert!(
         h.rt.state
             .get(&session("a"), "orders", O1)
@@ -182,7 +191,7 @@ async fn delete_returns_204_and_removes_state() {
     let h = harness(Some(vec![Ok(order(O1, "c1").to_string())]), true);
     let resp = send(
         &h,
-        post_json("/orders", r#"{"customerId":"c1","total":10}"#),
+        seeded(post_json("/orders", r#"{"customerId":"c1","total":10}"#)),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -1143,7 +1152,7 @@ async fn openapi3_form_body_reaches_the_engine_decoded() {
         &metadata[order_id]=42&expand[]=customer&expand[]=latest_charge\
         &automatic_payment_methods[enabled]=true\
         &shipping[name]=Jo&shipping[address][postal_code]=10115";
-    let resp = send(&h, post_form("/v1/payment_intents", FORM, body)).await;
+    let resp = send(&h, seeded(post_form("/v1/payment_intents", FORM, body))).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
         engine_request(&h, 0)["body"],
@@ -1160,7 +1169,7 @@ async fn openapi3_form_body_reaches_the_engine_decoded() {
 
     // Percent-encoded brackets, as stripe-node sends them.
     let body = "amount=5999&currency=eur&payment_method_types%5B0%5D=card&metadata=";
-    let resp = send(&h, post_form("/v1/payment_intents", FORM, body)).await;
+    let resp = send(&h, seeded(post_form("/v1/payment_intents", FORM, body))).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
         engine_request(&h, 1)["body"],
@@ -1170,7 +1179,11 @@ async fn openapi3_form_body_reaches_the_engine_decoded() {
     // Still validated against the declared schema.
     let resp = send(
         &h,
-        post_form("/v1/payment_intents", FORM, "amount=lots&currency=eur"),
+        seeded(post_form(
+            "/v1/payment_intents",
+            FORM,
+            "amount=lots&currency=eur",
+        )),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -1199,7 +1212,11 @@ async fn openapi3_multipart_body_is_decoded() {
         Content-Type: image/png\r\n\r\n\x01\x02\r\n--XyZ--\r\n";
     let resp = send(
         &h,
-        post_form("/v1/files", "multipart/form-data; boundary=XyZ", multipart),
+        seeded(post_form(
+            "/v1/files",
+            "multipart/form-data; boundary=XyZ",
+            multipart,
+        )),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1293,7 +1310,7 @@ async fn get_after_create_is_served_from_state() {
     let h = harness(Some(vec![Ok(order(O1, "c1").to_string())]), true);
     send(
         &h,
-        post_json("/orders", r#"{"customerId":"c1","total":10}"#),
+        seeded(post_json("/orders", r#"{"customerId":"c1","total":10}"#)),
     )
     .await;
     let resp = send(&h, get(&format!("/orders/{O1}"))).await;
@@ -1515,7 +1532,7 @@ async fn listing_keeps_a_created_resource() {
     );
     send(
         &h,
-        post_json("/orders", r#"{"customerId":"c1","total":10}"#),
+        seeded(post_json("/orders", r#"{"customerId":"c1","total":10}"#)),
     )
     .await;
     send(&h, get("/orders")).await;
@@ -1829,8 +1846,14 @@ async fn created_issue_gets_a_new_number_and_reads_back_by_it() {
         ],
     );
     send(&h, get("/repos/o/r/issues")).await;
-    let created =
-        body_json(send(&h, post_json("/repos/o/r/issues", r#"{"title":"new"}"#)).await).await;
+    let created = body_json(
+        send(
+            &h,
+            seeded(post_json("/repos/o/r/issues", r#"{"title":"new"}"#)),
+        )
+        .await,
+    )
+    .await;
     assert_eq!(created["number"], 413, "{created}");
     assert_eq!(
         created["url"],
@@ -1856,18 +1879,22 @@ async fn twilio_and_jira_reads_find_the_created_resource() {
     );
     send(
         &h,
-        post_form(
+        seeded(post_form(
             "/Accounts/AC1/Messages.json",
             FORM,
             "To=%2B15550100&Body=Hi+Dana",
-        ),
+        )),
     )
     .await;
     let resp = send(&h, get("/Accounts/AC1/Messages/SM0123.json")).await;
     assert_eq!(header_str(&resp, "x-mockingbird-source"), "state");
     assert_eq!(body_json(resp).await["body"], "Hi Dana");
 
-    send(&h, post_json("/rest/api/3/issue", r#"{"fields":{}}"#)).await;
+    send(
+        &h,
+        seeded(post_json("/rest/api/3/issue", r#"{"fields":{}}"#)),
+    )
+    .await;
     for path in ["/rest/api/3/issue/PROJ-7", "/rest/api/3/issue/10001"] {
         let resp = send(&h, get(path)).await;
         assert_eq!(header_str(&resp, "x-mockingbird-source"), "state", "{path}");
@@ -1904,7 +1931,7 @@ async fn a_write_clears_cached_lists_of_other_resource_types() {
     send(&h, get("/Accounts/AC1/Messages.json")).await;
     send(
         &h,
-        post_form("/Accounts/AC1/Messages.json", FORM, "Body=Hi"),
+        seeded(post_form("/Accounts/AC1/Messages.json", FORM, "Body=Hi")),
     )
     .await;
     let after = send(&h, get("/Accounts/AC1/Messages.json")).await;
@@ -2302,18 +2329,23 @@ async fn generation_is_given_the_request_shape_of_the_media_type_sent() {
     );
     let resp = send(
         &h,
-        send_typed(
+        seeded(send_typed(
             "POST",
             "/notes",
             "application/json; version=2",
             &json!({"text": "hi"}),
-        ),
+        )),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
     let resp = send(
         &h,
-        send_typed("POST", "/notes", "application/json", &json!({"text": "hi"})),
+        seeded(send_typed(
+            "POST",
+            "/notes",
+            "application/json",
+            &json!({"text": "hi"}),
+        )),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);

@@ -103,10 +103,13 @@ async fn ticket_prompt(bus: Arc<dyn Bus>) -> (bool, String) {
             json!({"subject": "Help", "email": "jane.roe@example.com"}),
         ),
     ] {
+        // Each create is seeded: a seeded create takes the generated path, which stores
+        // the record the model answered under the id it chose, as this test expects.
         let req = Request::builder()
             .method("POST")
             .uri(uri)
             .header("content-type", "application/json")
+            .header("x-mockingbird-seed", "1")
             .body(Body::from(body.to_string()))
             .unwrap();
         router.clone().oneshot(req).await.unwrap();

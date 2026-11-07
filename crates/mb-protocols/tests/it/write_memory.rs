@@ -638,7 +638,33 @@ impl Harness {
         uri: &str,
         body: Option<Value>,
     ) -> (StatusCode, String, Value) {
+        self.call_with(method, uri, body, &[]).await
+    }
+
+    /// [`Self::call`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, String, Value) {
+        self.call_with(method, uri, body, &[crate::support::SEED])
+            .await
+    }
+
+    async fn call_with(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, String, Value) {
         let mut req = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
         if body.is_some() {
             req = req.header("content-type", "application/json");
         }
@@ -755,7 +781,7 @@ async fn a_minimal_create_reaches_its_later_read() {
     );
     let h = jira(vec![created_issue(), bean.clone()]);
     let (status, _, _) = h
-        .call("POST", "/rest/api/3/issue", Some(create_issue_request()))
+        .seeded("POST", "/rest/api/3/issue", Some(create_issue_request()))
         .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(h.calls(), 1);
@@ -787,7 +813,7 @@ async fn a_204_action_reaches_its_later_read_once() {
         issue_bean("Pump fails", "To Do", &[]),
         issue_bean("Pump fails", "Done", &[]),
     ]);
-    h.call("POST", "/rest/api/3/issue", Some(create_issue_request()))
+    h.seeded("POST", "/rest/api/3/issue", Some(create_issue_request()))
         .await;
     let (_, _, first) = h.call("GET", "/rest/api/3/issue/PLNT-1", None).await;
     assert_eq!(first["fields"]["status"]["name"], "To Do");
@@ -864,12 +890,12 @@ async fn a_create_under_a_parent_shows_on_the_parents_read() {
         json!({"id": "ref1", "amount": 100}),
         json!({"id": "cap1", "amount": 100, "status": "REFUNDED"}),
     ]);
-    h.call("POST", "/captures", Some(json!({"amount": 100})))
+    h.seeded("POST", "/captures", Some(json!({"amount": 100})))
         .await;
     let (_, source, _) = h.call("GET", "/captures/cap1", None).await;
     assert_eq!(source, "state");
 
-    let (status, _, _) = h.call("POST", "/captures/cap1/refunds", None).await;
+    let (status, _, _) = h.seeded("POST", "/captures/cap1/refunds", None).await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(h.calls(), 2);
 
@@ -912,11 +938,11 @@ async fn an_applied_effect_on_the_parent_costs_no_extra_call() {
             "response": {"id": "ref1", "amount": 100},
         }),
     ]);
-    h.call("POST", "/captures", Some(json!({"amount": 100})))
+    h.seeded("POST", "/captures", Some(json!({"amount": 100})))
         .await;
     // `capture_id` shows the capture to the answer, so it can list a change.
     let (status, _, _) = h
-        .call(
+        .seeded(
             "POST",
             "/captures/cap1/refunds",
             Some(json!({"amount": 100, "capture_id": "cap1"})),
@@ -942,7 +968,7 @@ async fn an_applied_effect_on_the_parent_costs_no_extra_call() {
 #[tokio::test]
 async fn a_create_answering_as_its_read_remembers_nothing() {
     let h = things(vec![json!({"id": "n1", "text": "hello", "pinned": true})]);
-    h.call(
+    h.seeded(
         "POST",
         "/notes",
         Some(json!({"text": "hello", "pinned": true, "colour": "red"})),
@@ -967,7 +993,8 @@ async fn a_short_answer_holding_the_request_remembers_nothing() {
 #[tokio::test]
 async fn a_small_value_elsewhere_does_not_count_as_carried() {
     let h = things(vec![json!({"id": "r1", "version": 1})]);
-    h.call("POST", "/receipts", Some(json!({"count": 1}))).await;
+    h.seeded("POST", "/receipts", Some(json!({"count": 1})))
+        .await;
     assert_eq!(h.memory().await.len(), 1);
 }
 
@@ -1371,7 +1398,7 @@ async fn an_llm_failure_with_no_servable_copy_falls_back_and_retries() {
             Ok(issue_bean("Pump fails after restart", "To Do", &[]).to_string()),
         ],
     );
-    h.call("POST", "/rest/api/3/issue", Some(create_issue_request()))
+    h.seeded("POST", "/rest/api/3/issue", Some(create_issue_request()))
         .await;
     let (_, source, _) = h.call("GET", "/rest/api/3/issue/PLNT-1", None).await;
     assert_eq!(source, "fallback");
@@ -1444,7 +1471,7 @@ async fn a_204_update_merges_into_the_copy_found_by_key() {
         created_issue(),
         issue_bean("Pump fails", "To Do", &[]),
     ]);
-    h.call("POST", "/rest/api/3/issue", Some(create_issue_request()))
+    h.seeded("POST", "/rest/api/3/issue", Some(create_issue_request()))
         .await;
     h.call("GET", "/rest/api/3/issue/PLNT-1", None).await;
     let (status, _, _) = h
@@ -1478,7 +1505,8 @@ fn pet(name: &str) -> Value {
 #[tokio::test]
 async fn a_plain_204_update_applies_at_write_time() {
     let h = things(vec![pet("old")]);
-    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "old"})))
+        .await;
     let (status, _, _) = h
         .call(
             "PUT",
@@ -1505,7 +1533,8 @@ async fn a_204_update_remembers_only_what_it_could_not_apply() {
         pet("old"),
         json!({"id": "p1", "name": "new", "meta": {"age": 1, "tag": "calm"}}),
     ]);
-    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "old"})))
+        .await;
     h.call(
         "PUT",
         "/pets/p1",
@@ -1531,7 +1560,8 @@ async fn a_204_update_remembers_only_what_it_could_not_apply() {
 #[tokio::test]
 async fn a_204_update_that_breaks_the_schema_is_remembered_not_merged() {
     let h = things(vec![pet("old")]);
-    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "old"})))
+        .await;
     h.call(
         "PUT",
         "/pets/p1",
@@ -1661,7 +1691,7 @@ async fn a_capped_short_copy_stops_calling_too() {
         &jira_contract(),
         vec![Ok(created_issue().to_string()), down(), down()],
     );
-    h.call("POST", "/rest/api/3/issue", Some(create_issue_request()))
+    h.seeded("POST", "/rest/api/3/issue", Some(create_issue_request()))
         .await;
     for _ in 0..2 {
         let (_, source, _) = h.call("GET", "/rest/api/3/issue/PLNT-1", None).await;
@@ -1682,7 +1712,8 @@ async fn a_catch_up_keeps_nested_members() {
         pet("Rex"),
         json!({"id": "other", "name": "Rex", "meta": {"age": 3}}),
     ]);
-    h.call("POST", "/pets", Some(json!({"name": "Rex"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "Rex"})))
+        .await;
     h.call("POST", "/pets/p1/birthday", None).await;
     let (_, source, read) = h.call("GET", "/pets/p1", None).await;
     assert_eq!(source, "llm");
@@ -1718,7 +1749,7 @@ async fn a_childs_body_is_never_overlaid_on_its_parent() {
         post.clone(),
     ]);
     hold(&h, "posts", "po1", post.clone()).await;
-    h.call(
+    h.seeded(
         "POST",
         "/posts/po1/comments",
         Some(json!({"body": "child text", "status": "pending"})),
@@ -1759,7 +1790,8 @@ async fn an_actions_body_is_never_overlaid_on_its_target() {
 #[tokio::test]
 async fn a_null_on_a_non_nullable_member_is_not_applied() {
     let h = things(vec![pet("old")]);
-    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "old"})))
+        .await;
     for body in [json!({"name": null}), json!({"meta": null})] {
         let (status, _, _) = h.call("PUT", "/pets/p1", Some(body.clone())).await;
         assert!(status.is_success(), "{body}");
@@ -1779,7 +1811,7 @@ async fn a_null_on_a_non_nullable_member_is_not_applied() {
 #[tokio::test]
 async fn a_value_elsewhere_in_the_copy_is_not_the_member() {
     let h = things(vec![json!({"id": "p1", "name": "x"})]);
-    h.call("POST", "/pets", Some(json!({"name": "x"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "x"}))).await;
     h.call("PUT", "/pets/p1", Some(json!({"alias": "x"}))).await;
     let memory = h.memory().await;
     assert_eq!(memory[0].data["requests"][0]["body"], json!({"alias": "x"}));
@@ -1790,7 +1822,8 @@ async fn a_value_elsewhere_in_the_copy_is_not_the_member() {
 #[tokio::test]
 async fn a_remainder_of_redacted_values_is_not_remembered() {
     let h = things(vec![pet("old")]);
-    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "old"})))
+        .await;
     h.call(
         "PUT",
         "/pets/p1",
@@ -1809,7 +1842,8 @@ async fn a_remainder_of_redacted_values_is_not_remembered() {
 #[tokio::test]
 async fn a_redacted_member_is_left_out_of_what_is_told() {
     let h = things(vec![pet("old")]);
-    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "old"})))
+        .await;
     h.call(
         "PUT",
         "/pets/p1",
@@ -1829,7 +1863,8 @@ async fn a_redacted_member_is_left_out_of_what_is_told() {
 #[tokio::test]
 async fn a_204_update_tells_only_what_a_schema_declares() {
     let h = things(vec![pet("old"), pet("new")]);
-    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "old"})))
+        .await;
     h.call(
         "PUT",
         "/pets/p1",
@@ -1876,7 +1911,7 @@ async fn an_action_ends_what_an_older_create_can_overlay() {
         json!({"id": "i1"}),
         json!({"id": "i1", "title": "t", "status": "submitted"}),
     ]);
-    h.call(
+    h.seeded(
         "POST",
         "/items",
         Some(json!({"title": "t", "status": "draft"})),
@@ -1900,7 +1935,8 @@ async fn an_action_ends_what_an_older_create_can_overlay() {
 #[tokio::test]
 async fn an_action_ends_what_an_older_update_can_overlay() {
     let h = things(vec![pet("old"), pet("after the action")]);
-    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "old"})))
+        .await;
     h.call(
         "PUT",
         "/pets/p1",
@@ -1961,7 +1997,7 @@ async fn a_childs_create_ends_what_an_older_body_can_overlay() {
     };
     older.data["own"] = json!({"status": "older"});
     h.store.upsert(&session(), older).await.unwrap();
-    h.call("POST", "/posts/po1/comments", Some(json!({"body": "hi"})))
+    h.seeded("POST", "/posts/po1/comments", Some(json!({"body": "hi"})))
         .await;
     let (_, _, read) = h.call("GET", "/posts/po1", None).await;
     assert_eq!(read["status"], "commented");
@@ -1975,7 +2011,8 @@ async fn an_oversized_own_body_brings_back_nothing() {
     let huge = "h".repeat(70 * 1024);
     for name in [big, huge] {
         let h = things(vec![pet("old"), json!({"id": "p1", "name": "model"})]);
-        h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+        h.seeded("POST", "/pets", Some(json!({"name": "old"})))
+            .await;
         h.call(
             "PUT",
             "/pets/p1",
@@ -2126,7 +2163,7 @@ async fn a_body_told_to_a_parent_gets_the_whole_predicate() {
     let post = json!({"id": "po1", "body": "text", "status": "open"});
     let h = things(vec![json!({"id": "c1", "body": "hi"}), post.clone()]);
     hold(&h, "posts", "po1", post).await;
-    h.call(
+    h.seeded(
         "POST",
         "/posts/po1/comments",
         Some(json!({"body": "hi", "session_title": "gone-1"})),
@@ -2145,7 +2182,7 @@ async fn a_fully_applied_update_stands_over_an_older_create() {
         json!({"id": "t1"}),
         json!({"id": "t1", "status": "draft"}),
     ]);
-    h.call("POST", "/tickets", Some(json!({"status": "draft"})))
+    h.seeded("POST", "/tickets", Some(json!({"status": "draft"})))
         .await;
     h.call("PATCH", "/tickets/t1", Some(json!({"status": "shipped"})))
         .await;
@@ -2236,7 +2273,8 @@ async fn a_redacted_value_is_never_overlaid() {
     let headers = json!([{"name": "Authorization", "value": "abc"}]);
     let answer = json!({"id": "p1", "name": "x", "headers": headers});
     let h = things(vec![pet("old"), answer]);
-    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "old"})))
+        .await;
     h.call(
         "PUT",
         "/pets/p1",
@@ -2263,7 +2301,8 @@ async fn a_redacted_value_is_never_overlaid() {
 #[tokio::test]
 async fn a_catch_up_cannot_revert_what_the_update_applied() {
     let h = things(vec![pet("old"), pet("old")]);
-    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "old"})))
+        .await;
     h.call(
         "PUT",
         "/pets/p1",
@@ -2302,7 +2341,7 @@ async fn an_updates_own_body_stands_on_a_short_copy() {
         created_issue(),
         issue_bean("what the model wrote", "To Do", &[]),
     ]);
-    h.call("POST", "/rest/api/3/issue", Some(create_issue_request()))
+    h.seeded("POST", "/rest/api/3/issue", Some(create_issue_request()))
         .await;
     h.call(
         "PUT",
@@ -2320,7 +2359,7 @@ async fn a_union_member_is_remembered_not_merged() {
     let h = things(vec![
         json!({"id": "p1", "name": "x", "shape": {"kind": "dog", "bark": true}}),
     ]);
-    h.call("POST", "/pets", Some(json!({"name": "x"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "x"}))).await;
     h.call("PUT", "/pets/p1", Some(json!({"shape": {"meow": true}})))
         .await;
     let stored = h
@@ -2363,7 +2402,7 @@ async fn a_map_member_merges_at_write_time() {
     let h = things(vec![
         json!({"id": "p1", "name": "x", "metadata": {"a": "1"}}),
     ]);
-    h.call("POST", "/pets", Some(json!({"name": "x"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "x"}))).await;
     h.call("PUT", "/pets/p1", Some(json!({"metadata": {"b": "2"}})))
         .await;
     assert!(h.memory().await.is_empty(), "{:?}", h.memory().await);
@@ -2377,7 +2416,7 @@ async fn a_map_member_merges_at_write_time() {
 #[tokio::test]
 async fn a_merge_leaves_identity_and_read_only_members() {
     let h = things(vec![json!({"id": "p1", "name": "x", "version": 1})]);
-    h.call("POST", "/pets", Some(json!({"name": "x"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "x"}))).await;
     h.call(
         "PUT",
         "/pets/p1",
@@ -2401,7 +2440,7 @@ async fn a_childs_create_does_not_republish_its_parent() {
     let order =
         |listed: Vec<StoredResource>| -> Vec<String> { listed.into_iter().map(|r| r.id).collect() };
     let mut changes = h.store.subscribe();
-    h.call("POST", "/posts/po1/comments", Some(json!({"body": "hi"})))
+    h.seeded("POST", "/posts/po1/comments", Some(json!({"body": "hi"})))
         .await;
     while let Ok(change) = changes.try_recv() {
         assert_ne!(change.resource_type, "posts", "{change:?}");
@@ -2455,7 +2494,7 @@ async fn a_replica_catches_up_on_a_parent_with_no_publish() {
     let (_, source, _) = reader.call("GET", "/posts/po1", None).await;
     assert_eq!(source, "state");
     writer
-        .call("POST", "/posts/po1/comments", Some(json!({"body": "hi"})))
+        .seeded("POST", "/posts/po1/comments", Some(json!({"body": "hi"})))
         .await;
     let (_, source, _) = reader.call("GET", "/posts/po1", None).await;
     assert_eq!(source, "llm", "told, on the other node");
@@ -2472,7 +2511,7 @@ async fn a_catch_up_pins_the_key_its_path_reads_by() {
         issue_bean("Pump fails", "To Do", &[]),
         rewritten,
     ]);
-    h.call("POST", "/rest/api/3/issue", Some(create_issue_request()))
+    h.seeded("POST", "/rest/api/3/issue", Some(create_issue_request()))
         .await;
     h.call("GET", "/rest/api/3/issue/PLNT-1", None).await;
     h.call(
@@ -2519,9 +2558,9 @@ async fn a_catch_up_cannot_move_a_resource_to_another_owner() {
 }
 
 async fn a_capture_and_its_refund(h: &Harness) {
-    h.call("POST", "/captures", Some(json!({"amount": 100})))
+    h.seeded("POST", "/captures", Some(json!({"amount": 100})))
         .await;
-    h.call("POST", "/captures/cap1/refunds", None).await;
+    h.seeded("POST", "/captures/cap1/refunds", None).await;
     let (_, source, _) = h.call("GET", "/captures/cap1", None).await;
     assert_eq!(source, "llm", "the create told the capture");
     assert!(h.memory().await.is_empty());
@@ -2606,7 +2645,7 @@ async fn a_recorded_prompt_replays() {
             issue_bean("Pump fails", "To Do", &[]),
             issue_bean("Pump fails", "Done", &[]),
         ]);
-        h.call("POST", "/rest/api/3/issue", Some(create_issue_request()))
+        h.seeded("POST", "/rest/api/3/issue", Some(create_issue_request()))
             .await;
         h.call("GET", "/rest/api/3/issue/PLNT-1", None).await;
         h.call(
@@ -2725,7 +2764,8 @@ async fn credentials_go_however_they_are_named() {
 #[tokio::test]
 async fn a_seed_read_neither_forces_nor_settles() {
     let h = things(vec![pet("Rex")]);
-    h.call("POST", "/pets", Some(json!({"name": "Rex"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "Rex"})))
+        .await;
     h.call("POST", "/pets/p1/birthday", None).await;
     let req = Request::get("/pets/p1")
         .header("x-mockingbird-seed", "7")
@@ -2759,7 +2799,8 @@ async fn a_scenario_read_is_told_and_settles_nothing() {
             );
         },
     );
-    h.call("POST", "/pets", Some(json!({"name": "Rex"}))).await;
+    h.seeded("POST", "/pets", Some(json!({"name": "Rex"})))
+        .await;
     h.call("POST", "/pets/p1/birthday", None).await;
     let req = Request::get("/pets/p1")
         .header("x-mockingbird-scenario", SCENARIO_NAME)
@@ -2873,7 +2914,7 @@ fn team(org: &str, name: &str) -> Value {
 /// whose it is.
 async fn octos_team(h: &Harness) {
     let (status, _, _) = h
-        .call("POST", "/orgs/octo/teams", Some(json!({"name": "Core"})))
+        .seeded("POST", "/orgs/octo/teams", Some(json!({"name": "Core"})))
         .await;
     assert_eq!(status, StatusCode::CREATED);
     assert!(h.memory().await.is_empty(), "{:?}", h.memory().await);
@@ -2944,7 +2985,7 @@ async fn a_create_under_another_owners_parent_remembers_nothing() {
         json!({"id": "m2", "login": "bob"}),
     ]);
     octos_team(&h).await;
-    h.call(
+    h.seeded(
         "POST",
         "/orgs/acme/teams/core/members",
         Some(json!({"login": "ann"})),
@@ -2952,7 +2993,7 @@ async fn a_create_under_another_owners_parent_remembers_nothing() {
     .await;
     assert!(h.memory().await.is_empty(), "{:?}", h.memory().await);
 
-    h.call(
+    h.seeded(
         "POST",
         "/orgs/octo/teams/core/members",
         Some(json!({"login": "bob"})),

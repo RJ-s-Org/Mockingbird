@@ -56,7 +56,33 @@ impl Harness {
         uri: &str,
         body: Option<Value>,
     ) -> (StatusCode, String, Value) {
+        self.call_with(method, uri, body, &[]).await
+    }
+
+    /// [`Self::call`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, String, Value) {
+        self.call_with(method, uri, body, &[crate::support::SEED])
+            .await
+    }
+
+    async fn call_with(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, String, Value) {
         let mut req = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
         if body.is_some() {
             req = req.header("content-type", "application/json");
         }
@@ -177,7 +203,7 @@ async fn an_odata_keyed_record_round_trips_from_state() {
         ],
     );
     let (status, _, made) = h
-        .call(
+        .seeded(
             "POST",
             &format!("{C1}/customers"),
             Some(json!({"displayName": "Ann"})),
@@ -231,7 +257,7 @@ async fn a_bound_action_acts_on_the_stored_record() {
         ],
     );
     let (status, _, made) = h
-        .call(
+        .seeded(
             "POST",
             &format!("{C1}/customers"),
             Some(json!({"displayName": "Ann"})),
@@ -240,7 +266,7 @@ async fn a_bound_action_acts_on_the_stored_record() {
     assert_eq!(status, StatusCode::CREATED, "{made}");
 
     let (status, _, blocked) = h
-        .call("POST", &format!("{C1}/customers(cu-1)/Ledger.block"), None)
+        .seeded("POST", &format!("{C1}/customers(cu-1)/Ledger.block"), None)
         .await;
     assert_eq!(status, StatusCode::OK, "{blocked}");
     assert_eq!(blocked["id"], "cu-1");
@@ -268,7 +294,7 @@ async fn sibling_collections_under_one_keyed_parent_keep_their_own_records() {
         ],
     );
     let (status, _, _) = h
-        .call(
+        .seeded(
             "POST",
             &format!("{C1}/customers"),
             Some(json!({"displayName": "Ann"})),
@@ -276,7 +302,7 @@ async fn sibling_collections_under_one_keyed_parent_keep_their_own_records() {
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let (status, _, _) = h
-        .call(
+        .seeded(
             "POST",
             &format!("{C1}/vendors"),
             Some(json!({"displayName": "Bolts Inc"})),
@@ -368,7 +394,7 @@ async fn a_record_round_trips_by_its_alternate_key() {
         ],
     );
     let (status, _, made) = h
-        .call("POST", "/carts", Some(json!({"key": "k-1", "total": 0})))
+        .seeded("POST", "/carts", Some(json!({"key": "k-1", "total": 0})))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{made}");
     assert_eq!(
@@ -413,7 +439,7 @@ async fn a_record_round_trips_by_its_alternate_key() {
 async fn a_record_named_with_a_format_suffix_round_trips() {
     let h = harness(SHOP, vec![json!({"name": "report", "size": 3})]);
     let (status, _, made) = h
-        .call(
+        .seeded(
             "POST",
             "/files.json",
             Some(json!({"name": "report", "size": 3})),

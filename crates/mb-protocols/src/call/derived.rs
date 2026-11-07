@@ -421,6 +421,18 @@ pub(super) async fn fill_page(
     items: &mut [Value],
     items_schema: Option<&Value>,
 ) -> Vec<Vec<String>> {
+    fill_items(state, session, (t, false), items, items_schema).await
+}
+
+/// [`fill_page`], each item taken for one this runtime created when `new` (a create
+/// being answered, not stored yet).
+async fn fill_items(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    (t, new): (&str, bool),
+    items: &mut [Value],
+    items_schema: Option<&Value>,
+) -> Vec<Vec<String>> {
     let mut set: Vec<Vec<String>> = vec![Vec::new(); items.len()];
     let rt = state.rt;
     if items.is_empty() || !describes(rt, t) {
@@ -473,10 +485,11 @@ pub(super) async fn fill_page(
             continue;
         };
         let id = bare(rt, t, None, &value);
-        let created = [value.as_str(), id.as_str()]
-            .into_iter()
-            .chain(records::in_pattern(rt, t, &id).as_deref())
-            .any(|key| rt.collections().created(session, t, key));
+        let created = new
+            || [value.as_str(), id.as_str()]
+                .into_iter()
+                .chain(records::in_pattern(rt, t, &id).as_deref())
+                .any(|key| rt.collections().created(session, t, key));
         let any_child = groups.values().any(|g| !g.under(&id).is_empty());
         if !created && !any_child {
             continue;
@@ -541,11 +554,41 @@ pub(super) async fn filled(
     session: &SessionKey,
     stored: &StoredResource,
 ) -> Option<StoredResource> {
+    filled_as(state, session, stored, false).await
+}
+
+/// [`filled`] for a record a create is about to store: it counts as created in the
+/// session (its derived members are those of a record with no children yet, but
+/// those state holds under its id).
+pub(super) async fn filled_new(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    stored: &StoredResource,
+) -> Option<StoredResource> {
+    filled_as(state, session, stored, true).await
+}
+
+async fn filled_as(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    stored: &StoredResource,
+    new: bool,
+) -> Option<StoredResource> {
     if !describes(state.rt, &stored.resource_type) {
         return None;
     }
     let mut data = stored.data.clone();
-    let set = fill(state, session, &stored.resource_type, &mut data).await;
+    let t = stored.resource_type.as_str();
+    let set = fill_items(
+        state,
+        session,
+        (t, new),
+        std::slice::from_mut(&mut data),
+        None,
+    )
+    .await
+    .pop()
+    .unwrap_or_default();
     (!set.is_empty()).then(|| StoredResource {
         data,
         ..stored.clone()

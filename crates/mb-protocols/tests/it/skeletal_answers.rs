@@ -137,10 +137,32 @@ fn harness(answers: Vec<Value>) -> Harness {
 
 impl Harness {
     async fn send(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
-        let req = Request::builder()
+        self.send_with(method, uri, body, &[]).await
+    }
+
+    /// [`Self::send`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+        self.send_with(method, uri, body, &[crate::support::SEED])
+            .await
+    }
+
+    async fn send_with(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
+        let mut req = Request::builder()
             .method(method)
             .uri(uri)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let req = req
             .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
             .unwrap();
         let resp = self.router.clone().oneshot(req).await.unwrap();
@@ -248,10 +270,10 @@ async fn a_list_answered_without_its_list_member_serves_the_stored_records() {
         json!({"count": 0}),
     ]);
     let (_, lamp) = h
-        .send("POST", "/gadgets", Some(json!({"label": "lamp"})))
+        .seeded("POST", "/gadgets", Some(json!({"label": "lamp"})))
         .await;
     let (_, desk) = h
-        .send("POST", "/gadgets", Some(json!({"label": "desk"})))
+        .seeded("POST", "/gadgets", Some(json!({"label": "desk"})))
         .await;
     let (status, list) = h.send("GET", "/gadgets", None).await;
     assert_eq!(status, StatusCode::OK, "{list}");
@@ -271,7 +293,7 @@ async fn a_list_answered_without_its_list_member_serves_the_stored_records() {
 #[tokio::test]
 async fn a_stored_record_the_query_does_not_show_stays_off_the_filled_page() {
     let h = harness(vec![json!({"label": "lamp"}), json!({"count": 0})]);
-    h.send("POST", "/gadgets", Some(json!({"label": "lamp"})))
+    h.seeded("POST", "/gadgets", Some(json!({"label": "lamp"})))
         .await;
     let (status, list) = h.send("GET", "/gadgets?q=zebra", None).await;
     assert_eq!(status, StatusCode::OK, "{list}");
@@ -289,7 +311,7 @@ async fn a_list_answered_without_its_list_member_and_nothing_stored_is_empty() {
 #[tokio::test]
 async fn the_prompt_schema_requires_what_the_answer_is_sure_to_need() {
     let h = harness(vec![json!({"label": "lamp"}), json!({"count": 0})]);
-    h.send(
+    h.seeded(
         "POST",
         "/gadgets",
         Some(json!({"label": "lamp", "passcode": "hunter2"})),

@@ -61,7 +61,33 @@ impl Harness {
         uri: &str,
         body: Option<Value>,
     ) -> (StatusCode, String, Value) {
+        self.call_with(method, uri, body, &[]).await
+    }
+
+    /// [`Self::call`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, String, Value) {
+        self.call_with(method, uri, body, &[crate::support::SEED])
+            .await
+    }
+
+    async fn call_with(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, String, Value) {
         let mut req = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
         if body.is_some() {
             req = req.header("content-type", "application/json");
         }
@@ -175,7 +201,7 @@ async fn one_auth0_user_on_every_route() {
     );
 
     let create = json!({"connection": "Username-Password-Authentication", "email": "ann@example.com", "name": "Ann"});
-    let (status, _, created) = h.call("POST", "/api/v2/users", Some(create)).await;
+    let (status, _, created) = h.seeded("POST", "/api/v2/users", Some(create)).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     assert_eq!(created["user_id"], id);
     assert_eq!(h.exported().await, [("users".to_owned(), id.to_owned())]);
@@ -246,7 +272,7 @@ async fn a_category_is_found_by_category_id() {
         contract.as_bytes(),
         vec![json!({"category_id": "c-1", "name": "one"})],
     );
-    h.call("POST", "/categories", Some(json!({"name": "one"})))
+    h.seeded("POST", "/categories", Some(json!({"name": "one"})))
         .await;
     assert_eq!(
         h.exported().await,
@@ -313,7 +339,7 @@ async fn a_contract_with_an_id_is_as_it_was() {
     let contract = by_path("things", "id", "id");
     let thing = |name: &str| json!({"id": "w-1", "name": name});
     let h = harness(contract.as_bytes(), vec![thing("one"), thing("two")]);
-    h.call("POST", "/things", Some(json!({"name": "one"})))
+    h.seeded("POST", "/things", Some(json!({"name": "one"})))
         .await;
     assert_eq!(
         h.exported().await,

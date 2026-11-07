@@ -205,6 +205,21 @@ impl Harness {
         )
     }
 
+    /// [`Self::send`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut headers = headers.to_vec();
+        headers.push(crate::support::SEED);
+        self.send(method, uri, body, &headers).await
+    }
+
     async fn patch_note(
         &self,
         if_match: Option<&str>,
@@ -277,7 +292,7 @@ async fn a_stale_if_match_is_refused_and_the_etag_advances() {
         answer(note("c", "\"e3\"")),
     ]);
     let (status, _, _) = h
-        .send("POST", "/notes", Some(json!({"title": "a"})), &[])
+        .seeded("POST", "/notes", Some(json!({"title": "a"})), &[])
         .await;
     assert_eq!(status, StatusCode::CREATED);
 
@@ -329,7 +344,7 @@ async fn an_unchanged_etag_is_minted_anew() {
         answer(note("b", "\"7f3a\"")),
         refused(),
     ]);
-    h.send("POST", "/notes", Some(json!({"title": "a"})), &[])
+    h.seeded("POST", "/notes", Some(json!({"title": "a"})), &[])
         .await;
     let (status, headers, body) = h.patch_note(Some("\"7f3a\""), "b").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -362,7 +377,7 @@ async fn no_token_a_wildcard_or_nothing_stored_is_never_refused() {
         answer(note("e", "\"e5\"")),
         answer(json!({"id": "n9", "title": "x", "etag": "\"z\""})),
     ]);
-    h.send("POST", "/notes", Some(json!({"title": "a"})), &[])
+    h.seeded("POST", "/notes", Some(json!({"title": "a"})), &[])
         .await;
     // First write, an etag the note never held: nothing seen of how it moves.
     assert_eq!(h.patch_note(Some("\"other\""), "b").await.0, StatusCode::OK);
@@ -409,7 +424,7 @@ async fn a_body_token_is_tied_by_evidence() {
         answer(ledger("c", 3)),
         answer(ledger("d", 4)),
     ]);
-    h.send("POST", "/ledgers", Some(json!({"name": "a"})), &[])
+    h.seeded("POST", "/ledgers", Some(json!({"name": "a"})), &[])
         .await;
     let (status, _, body) = h
         .send("PUT", "/ledgers/l1", Some(rename(1, "b")), &[])
@@ -458,7 +473,7 @@ async fn a_version_header_pairs_once_the_client_tracks_it() {
         answer(board("d", 6)),
         refused(),
     ]);
-    h.send("POST", "/boards", Some(json!({"name": "a"})), &[])
+    h.seeded("POST", "/boards", Some(json!({"name": "a"})), &[])
         .await;
     // A candidate: the header holds the revision, which the model moves.
     assert_eq!(h.put_board("b", "4").await.0, StatusCode::OK);

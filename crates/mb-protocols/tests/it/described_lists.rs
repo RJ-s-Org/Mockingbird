@@ -509,7 +509,7 @@ async fn held_records_a_list_adds_follow_the_described_query() {
         ("h3", "a@x.io", 1),
     ] {
         let (status, _, _) = h
-            .send("POST", "/contacts", Some(held(id, billing, hour)), &[])
+            .seeded("POST", "/contacts", Some(held(id, billing, hour)), &[])
             .await;
         assert_eq!(status, StatusCode::CREATED);
     }

@@ -1,5 +1,5 @@
 //! Updates, replaces and deletes (step 3 of the plan), each of the held target, with no
-//! LLM call: the record the write leaves is stored through [`commit`] and rendered into
+//! LLM call but a replace's fill: the record the write leaves is stored through [`commit`] and rendered into
 //! the operation's answer ([`render`]).
 //!
 //! - An update merges the record its request holds (and the record members its query
@@ -8,7 +8,8 @@
 //!   changes ([`transitions::apply`]).
 //! - A replace stores the record its request holds, keeping the held identity and
 //!   read-only members, and the lifecycle state and derived members it does not send.
-//!   One that leaves a required member out generates (`needs_fill`) until fill fills it.
+//!   The members a read of the record requires that it leaves out are filled
+//!   ([`mb_engine::Engine::fill`], the one LLM call of a write here).
 //! - Either keeps the record's identity and read-only members, a member saying the
 //!   record is another owner's than the path names, and mints the concurrency tokens it
 //!   advances ([`tokens::advance`]).
@@ -26,14 +27,14 @@
 //! long-running answer holds the record as its result, and is done: the write landed
 //! when it was accepted.
 
-use mb_engine::GeneratedResponse;
-use mb_engine::consistency::{declared_members, property_schema, required_members};
+use mb_engine::consistency::{declared_members, property_schema};
+use mb_engine::{FillContext, GeneratedResponse};
 use mb_mcm::world::OpKind;
 use mb_state::StoredResource;
 use serde_json::{Map, Value, json};
 use tracing::Instrument;
 
-use super::{Fallback, Held, Ran, Write, answered, commit, fell_back, render};
+use super::{Fallback, Held, Ran, Write, answered, commit, create, fell_back, render};
 use crate::call::bundle_index::schema_parts;
 use crate::call::entities::added_violation;
 use crate::call::write_memory::{self, read_only, read_schema, without_contradictions};
@@ -91,7 +92,21 @@ async fn update(
         }
     };
     transitions::apply(rt, op, call.body.as_ref(), &mut data);
-    if added_violation(rt, t, &stored.data, &data).is_some() {
+    // What a replace leaves out that a read requires is filled below, once nothing
+    // falls back: until then the held values stand in for it.
+    let missing = match kind {
+        OpKind::Replace => create::unread(rt, t, create::identity_member(rt, op, t), &data),
+        _ => Vec::new(),
+    };
+    let mut checked = data.clone();
+    if let (Value::Object(checked), Value::Object(held)) = (&mut checked, &stored.data) {
+        let stand_in: Map<String, Value> = missing
+            .iter()
+            .filter_map(|(name, _)| Some((name.clone(), held.get(name)?.clone())))
+            .collect();
+        create::fill_into(checked, stand_in);
+    }
+    if added_violation(rt, t, &stored.data, &checked).is_some() {
         fell_back(rt, plan, kind, "adds_violation");
         return Ran::Generate(None);
     }
@@ -121,6 +136,25 @@ async fn update(
         }
         tokens::advance(rt, (t, id), advancing, &stored.data, &mut data);
     }
+    // A replace leaving out what a read of the record requires has it filled.
+    let mut usage = mb_llm::Usage::default();
+    if !missing.is_empty()
+        && let Value::Object(known) = &mut data
+    {
+        let names: Vec<String> = missing.iter().map(|(name, _)| name.clone()).collect();
+        let filled = plan
+            .engine
+            .fill(
+                rt.bundle(),
+                &create::fill_schema(&missing),
+                known,
+                &names,
+                FillContext { op, call },
+            )
+            .await;
+        usage = filled.usage;
+        create::fill_into(known, filled.members);
+    }
     // Its derived members are answered from its children as state has them, never
     // stored; the record as stored is answered when the filled one does not render.
     let filled = derived::filled(
@@ -136,10 +170,11 @@ async fn update(
     let answer = filled
         .and_then(|f| written(rt, plan, call, (id, &f.data), response_schema))
         .or_else(|| written(rt, plan, call, (id, &data), response_schema));
-    let Some(answer) = answer else {
+    let Some(mut answer) = answer else {
         fell_back(rt, plan, kind, Fallback::RenderFailed.as_str());
         return Ran::Generate(None);
     };
+    answer.usage = usage;
     let write = Write::Put {
         id: id.to_owned(),
         data,
@@ -247,13 +282,6 @@ fn changed(
             if kept(name) || unsent {
                 out.insert(name.clone(), value.clone());
             }
-        }
-        if let Some(schema) = schema
-            && required_members(bundle, schema)
-                .iter()
-                .any(|name| !out.contains_key(name))
-        {
-            return Err("needs_fill");
         }
     }
     Ok(Value::Object(out))
@@ -366,7 +394,7 @@ fn is_merge_patch(call: &OperationCall) -> bool {
 /// description says the answer is long-running, the faker's operation holding `record`
 /// as its result, and done (the write landed when it was accepted). `None` when that
 /// does not suit the schema.
-fn written(
+pub(super) fn written(
     rt: &crate::MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,

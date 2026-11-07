@@ -252,6 +252,21 @@ impl Harness {
         (status, headers, bytes.to_vec())
     }
 
+    /// [`Self::send`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let mut headers = headers.to_vec();
+        headers.push(crate::support::SEED);
+        self.send(method, uri, body, &headers).await
+    }
+
     async fn get(&self, uri: &str, headers: &[(&str, &str)]) -> (StatusCode, HeaderMap, Value) {
         let (status, headers, bytes) = self.send("GET", uri, None, headers).await;
         let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
@@ -259,7 +274,7 @@ impl Harness {
     }
 
     async fn create(&self, path: &str, body: Value) {
-        let (status, _, bytes) = self.send("POST", path, Some(body), &[]).await;
+        let (status, _, bytes) = self.seeded("POST", path, Some(body), &[]).await;
         assert_eq!(
             status,
             StatusCode::CREATED,
