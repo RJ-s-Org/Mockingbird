@@ -107,6 +107,17 @@ impl PageAsk {
         matches!(self.style, PagingStyle::Page | PagingStyle::Offset)
     }
 
+    /// Whether the description says where a token goes and comes back, or the position
+    /// is a page number or an offset: a token paging naming its `request` parameter and
+    /// its `response` member or header. One naming only one side (a `next_url` the
+    /// client only follows, a `request` with nothing answering it) leaves the other side
+    /// to the heuristics ([`super::pages::slot`]).
+    pub(super) fn places(&self) -> bool {
+        self.counts()
+            || (self.request.is_some()
+                && (self.response.is_some() || self.response_header.is_some()))
+    }
+
     /// The position's value at the first item.
     pub(super) fn first(&self) -> usize {
         match self.style {
@@ -466,6 +477,10 @@ fn holds(filter: &Filter, item: &Value, source: Source) -> bool {
                 return true;
             };
             match filter.member.as_str() {
+                // Naming no member, the filter says nothing a model's item can be
+                // checked against (a query with qualifiers, `language:rust`): kept, as
+                // an item lacking a filtered member is.
+                "" if absent => true,
                 "" => holds_text(item, &wanted, 0),
                 member => match mb_mcm::member_at(item, member).filter(|h| !h.is_null()) {
                     None => absent,

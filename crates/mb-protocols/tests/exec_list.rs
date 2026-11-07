@@ -34,6 +34,7 @@ struct ExecLine {
     operation: String,
     exec: String,
     exec_fallback: Option<String>,
+    exec_fallback_on: Option<String>,
 }
 
 impl Visit for ExecLine {
@@ -46,8 +47,10 @@ impl Visit for ExecLine {
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "operation" {
-            self.operation = format!("{value:?}");
+        match field.name() {
+            "operation" => self.operation = format!("{value:?}"),
+            "exec_fallback_on" => self.exec_fallback_on = Some(format!("{value:?}")),
+            _ => {}
         }
     }
 }
@@ -83,6 +86,17 @@ impl Capture {
             .filter(|l| l.operation == operation)
             .inspect(|l| assert_eq!(l.exec, "list", "{l:?}"))
             .map(|l| l.exec_fallback.clone())
+            .collect()
+    }
+
+    /// What caused each fallback logged for `operation` (`exec_fallback_on`).
+    fn causes(&self, operation: &str) -> Vec<Option<String>> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.operation == operation && l.exec_fallback.is_some())
+            .map(|l| l.exec_fallback_on.clone())
             .collect()
     }
 }
@@ -254,6 +268,8 @@ async fn a_search_the_description_does_not_name_is_generated() {
         capture.of("listSites"),
         [Some("undescribed_param".to_owned())]
     );
+    // The line names the parameter.
+    assert_eq!(capture.causes("listSites"), [Some("q".to_owned())]);
     assert_eq!(h.provider.requests().len(), 1);
 }
 
@@ -706,6 +722,11 @@ async fn a_body_filter_the_executor_does_not_read_is_generated() {
             Some("undescribed_param".to_owned())
         ]
     );
+    // Each line names the body member it could not read.
+    assert_eq!(
+        capture.causes("queryQueues"),
+        [Some("filter".to_owned()), Some("start_cursor".to_owned())]
+    );
 }
 
 /// With no LLM at all, a list is still the session's records.
@@ -855,6 +876,257 @@ async fn a_next_url_walks_the_held_records() {
     assert!(last["next"].is_null(), "{last}");
     assert_eq!(capture.of("listNotes"), [None, None]);
     assert!(h.provider.requests().is_empty());
+}
+
+/// Twilio's messages: a next-page URL beside the list, a page size and a page token
+/// that shares its first word.
+const MESSAGES: &str = r##"
+openapi: 3.0.0
+info: {title: Messages, version: "1"}
+paths:
+  /v2/messages:
+    get:
+      operationId: listMessages
+      parameters:
+        - {name: PageSize, in: query, schema: {type: integer, minimum: 1}}
+        - {name: Page, in: query, schema: {type: integer, minimum: 0}}
+        - {name: PageToken, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [messages, next_page_uri]
+                properties:
+                  messages: {type: array, items: {$ref: "#/components/schemas/Message"}}
+                  next_page_uri: {type: string, format: uri-reference, nullable: true}
+  /v2/messages/{id}:
+    get:
+      operationId: getMessage
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}}
+components:
+  schemas:
+    Message:
+      type: object
+      required: [id, body]
+      properties:
+        id: {type: string}
+        body: {type: string}
+"##;
+
+/// Walks [`MESSAGES`] described with `paging` from a page of one: the first page holds
+/// the first message and a next link carrying `PageToken`, which reaches the second.
+async fn walk_messages(paging: Value) {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"listMessages": {"paging": paging}}});
+    let h = support::described(MESSAGES, world, Vec::new());
+    let held: Vec<Value> = (1..=2)
+        .map(|i| json!({"id": format!("SM{i}"), "body": format!("text {i}")}))
+        .collect();
+    h.hold("messages", &held).await;
+    let (source, first) = get(&h, "/v2/messages?PageSize=1").await;
+    assert_eq!(source, "state", "{first}");
+    let sids = |page: &Value| -> Vec<Value> {
+        page["messages"]
+            .as_array()
+            .map(|items| items.iter().map(|i| i["id"].clone()).collect())
+            .unwrap_or_default()
+    };
+    assert_eq!(sids(&first), [json!("SM1")], "{first}");
+    let next = first["next_page_uri"].as_str().expect("a next link");
+    assert!(next.contains("PageToken="), "{next}");
+    let at = next.find("/v2/messages").expect("the route's URL");
+    let (source, last) = get(&h, &next[at..]).await;
+    assert_eq!(source, "state", "{last}");
+    assert_eq!(sids(&last), [json!("SM2")], "{last}");
+    assert_eq!(capture.of("listMessages"), [None, None]);
+    assert!(h.provider.requests().is_empty());
+}
+
+/// A next-page URL whose token parameter the description leaves out (the client only
+/// follows the URL): the described member holds the link, its parameter guessed.
+#[tokio::test]
+async fn a_next_url_with_no_described_parameter_cuts_the_page_to_its_size() {
+    walk_messages(json!({"style": "next_url", "response": "next_page_uri", "size": "PageSize"}))
+        .await;
+}
+
+/// A token paging naming its parameter and no place answering it: the parameter as
+/// described, the place (the one next-page URL member) guessed.
+#[tokio::test]
+async fn a_token_paging_naming_only_its_parameter_guesses_its_place() {
+    walk_messages(json!({"style": "next_url", "request": "PageToken", "size": "PageSize"})).await;
+}
+
+/// SendGrid's templates: the list answers a lean schema of the record the read answers
+/// in full, under an envelope member named for neither.
+const TEMPLATES: &str = r##"
+openapi: 3.0.0
+info: {title: Templates, version: "1"}
+paths:
+  /v3/templates:
+    get:
+      operationId: listTemplates
+      parameters:
+        - {name: page_size, in: query, schema: {type: integer, minimum: 1}}
+        - {name: page_token, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [result]
+                properties:
+                  result: {type: array, items: {$ref: "#/components/schemas/TemplateLean"}}
+    post:
+      operationId: createTemplate
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Template"}}}}}
+  /v3/templates/{template_id}:
+    get:
+      operationId: getTemplate
+      parameters: [{name: template_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Template"}}}}}
+components:
+  schemas:
+    TemplateLean:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
+    Template:
+      type: object
+      required: [id, name, versions]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        versions: {type: array, items: {type: object, properties: {id: {type: string}}}}
+"##;
+
+/// A path's only list of its type answers every held record of it, whatever schema
+/// name its items go by.
+#[tokio::test]
+async fn the_only_unscoped_list_of_a_described_type_lists_its_records() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"templates": {"identity": {"member": "id"}}},
+        "operations": {"listTemplates": {"type": "templates", "kind": "list", "answer": {"records": "/result"}}}
+    });
+    let h = support::described(TEMPLATES, world, Vec::new());
+    let held: Vec<Value> = (1..=2)
+        .map(|i| json!({"id": format!("t{i}"), "name": format!("template {i}"), "versions": []}))
+        .collect();
+    h.hold("templates", &held).await;
+    let (source, page) = get(&h, "/v3/templates").await;
+    assert_eq!(capture.of("listTemplates"), [None]);
+    assert_eq!(source, "state", "{page}");
+    assert_eq!(ids(&page["result"]), [json!("t1"), json!("t2")]);
+}
+
+/// A token paging naming its request parameter, whose answer has no place the
+/// heuristics find for a token either: the page is served whole rather than cut with
+/// the rest out of reach.
+#[tokio::test]
+async fn a_token_paging_with_no_place_found_serves_the_page_whole() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"templates": {"identity": {"member": "id"}}},
+        "operations": {"listTemplates": {
+            "type": "templates", "kind": "list", "answer": {"records": "/result"},
+            "paging": {"style": "cursor", "request": "page_token", "size": "page_size"}
+        }}
+    });
+    let h = support::described(TEMPLATES, world, Vec::new());
+    let held: Vec<Value> = (1..=2)
+        .map(|i| json!({"id": format!("t{i}"), "name": format!("template {i}"), "versions": []}))
+        .collect();
+    h.hold("templates", &held).await;
+    let (source, page) = get(&h, "/v3/templates?page_size=1").await;
+    assert_eq!(capture.of("listTemplates"), [None]);
+    assert_eq!(source, "state", "{page}");
+    assert_eq!(ids(&page["result"]), [json!("t1"), json!("t2")], "{page}");
+}
+
+/// GitHub's repository search: a query with qualifiers, answered by the model.
+const SEARCH: &str = r##"
+openapi: 3.0.0
+info: {title: Search, version: "1"}
+paths:
+  /search/repositories:
+    get:
+      operationId: searchRepos
+      parameters:
+        - {name: q, in: query, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/Repo"}}
+  /repositories/{id}:
+    get:
+      operationId: getRepo
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Repo"}}}}}
+components:
+  schemas:
+    Repo:
+      type: object
+      required: [id, full_name]
+      properties: {id: {type: string}, full_name: {type: string}}
+"##;
+
+/// A text filter naming no member says nothing the model's items can be checked
+/// against (`language:rust` is in none of their members): the answered items stay.
+#[tokio::test]
+async fn a_text_filter_naming_no_member_keeps_the_model_s_items() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"searchRepos": {
+        "type": "repositories", "kind": "list", "answer": {"records": "/items"},
+        "filters": [{"kind": "text", "param": "q"}]
+    }}, "types": {"repositories": {"identity": {"member": "id"}}}});
+    let answered = json!({"items": [
+        {"id": "r1", "full_name": "octo/one"},
+        {"id": "r2", "full_name": "octo/two"}
+    ]});
+    let h = support::described(SEARCH, world, vec![answered]);
+    let (source, page) = get(&h, "/search/repositories?q=language:rust").await;
+    assert_eq!(source, "llm", "{page}");
+    assert_eq!(ids(&page["items"]), [json!("r1"), json!("r2")], "{page}");
+    assert_eq!(
+        capture.of("searchRepos"),
+        [Some("never_written".to_owned())]
+    );
+}
+
+/// Pipedrive's deals: a search beside the list, path-less too, answering hits that
+/// hold the record one level down; the description gives both the record's type.
+#[tokio::test]
+async fn a_search_beside_the_list_leaves_it_the_type_s_only_list() {
+    let (capture, _guard) = Capture::install();
+    let contract = ITEMS.replace(
+        "  /v1/items/{id}:",
+        "  /v1/items/search:\n    get:\n      operationId: searchItems\n      parameters: [{name: term, in: query, schema: {type: string}}]\n      responses: {\"200\": {description: ok, content: {application/json: {schema: {type: object, properties: {data: {type: object, properties: {items: {type: array, items: {type: object, properties: {result_score: {type: number}, item: {$ref: \"#/components/schemas/Item\"}}}}}}}}}}}}\n  /v1/items/{id}:",
+    );
+    let mut world = items_world();
+    world["operations"]["searchItems"] = json!({"kind": "list", "type": "items"});
+    let h = support::described(&contract, world, Vec::new());
+    let held: Vec<Value> = (1..=2)
+        .map(|i| json!({"id": format!("it_{i}"), "amount": i * 100}))
+        .collect();
+    h.hold("items", &held).await;
+    let (source, page) = get(&h, "/v1/items").await;
+    assert_eq!(source, "state", "{page}");
+    assert_eq!(ids(&page["data"]), [json!("it_1"), json!("it_2")]);
+    assert_eq!(capture.of("listItems"), [None]);
 }
 
 /// Heroku's apps: paged by the `Range` request header, a `206` with a `Next-Range`

@@ -295,12 +295,13 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
             let Some(id) = target_id else {
                 return WriteOutcome::default();
             };
-            // A described soft delete keeps the held record, in its deleted state.
+            // A described soft delete keeps the held record, in its deleted state, unless
+            // it is in that state already.
             if lifecycle::exclusion(rt, resource_type).is_some()
                 && let Some(held) = state.get(session, resource_type, &id).await
             {
                 let mut data = held.data;
-                if lifecycle::soft_delete(rt, resource_type, &mut data) {
+                if lifecycle::delete_softly(rt, resource_type, &mut data) {
                     let place = (collection, None, true);
                     store_one(state, session, (op, resource_type), (id, data), place).await;
                     return WriteOutcome::default();

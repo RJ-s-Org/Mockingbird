@@ -609,6 +609,84 @@ async fn a_soft_delete_keeps_the_record_in_its_deleted_state() {
     );
 }
 
+/// A record already in its soft-deleted state has nowhere further to move: a second
+/// delete (Okta's deactivate, then delete) removes it, and its read is not found.
+#[tokio::test]
+async fn a_delete_of_a_soft_deleted_record_removes_it() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"types": {"folders": {"lifecycle": {
+        "member": "state", "states": ["ACTIVE", "DELETED"], "initial": "ACTIVE",
+        "soft_delete": {"state": "DELETED"}
+    }}}, "operations": {"getFolder": {"kind": "read", "type": "folders", "not_found": 404}}});
+    let h = support::harness(
+        DELETES,
+        vec![json!({"id": "f1", "name": "docs", "state": "ACTIVE"})],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    let t = type_of(&h, "getFolder");
+    let (status, _, body) = h
+        .send("POST", "/folders", Some(json!({"name": "docs"})), SEEDED)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    for _ in 0..2 {
+        let (status, headers, body) = h.send("DELETE", "/folders/f1", None, &[]).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        assert_eq!(source(&headers), "state");
+    }
+    assert_eq!(h.stored(&t, "f1").await, None);
+    assert_eq!(h.provider.requests().len(), 1, "no delete asked the model");
+    assert!(
+        capture
+            .of("deleteFolder")
+            .iter()
+            .all(|l| l.exec_fallback.is_none()),
+        "{:?}",
+        capture.of("deleteFolder")
+    );
+    let (status, _, body) = h.send("GET", "/folders/f1", None, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+/// The generated path agrees: a seeded delete (`seeded`, which the executor leaves to
+/// generation) of a record already soft-deleted removes it too.
+#[tokio::test]
+async fn a_generated_delete_of_a_soft_deleted_record_removes_it() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"types": {"folders": {"lifecycle": {
+        "member": "state", "states": ["ACTIVE", "DELETED"], "initial": "ACTIVE",
+        "soft_delete": {"state": "DELETED"}
+    }}}});
+    let h = support::harness(
+        DELETES,
+        vec![json!({"id": "f1", "name": "docs", "state": "ACTIVE"})],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    let t = type_of(&h, "getFolder");
+    let (status, _, body) = h
+        .send("POST", "/folders", Some(json!({"name": "docs"})), SEEDED)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, _, body) = h.send("DELETE", "/folders/f1", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(
+        h.stored(&t, "f1").await,
+        Some(json!({"id": "f1", "name": "docs", "state": "DELETED"}))
+    );
+    let seeded = [("x-mockingbird-seed", "7")];
+    let (status, _, body) = h.send("DELETE", "/folders/f1", None, &seeded).await;
+    assert!(status.is_success(), "{body}");
+    assert_eq!(
+        capture
+            .of("deleteFolder")
+            .last()
+            .and_then(|l| l.exec_fallback.clone()),
+        Some("seeded".to_owned())
+    );
+    assert_eq!(h.stored(&t, "f1").await, None);
+}
+
 #[tokio::test]
 async fn a_delete_of_an_unheld_record_falls_back() {
     let (capture, _guard) = Capture::install();
@@ -974,8 +1052,10 @@ async fn an_envelope_member_holds_the_record_s_id_as_the_record_holds_it() {
 
 /// Items with a lifecycle, acted on by actions answering the item (`archiveItem`),
 /// nothing (`starItem`), an acknowledgement (`renameItem`), the item in an envelope
-/// (`pinItem`, and `boostItem` whose envelope requires what the mock does not hold),
-/// and two the description sets nothing for (`pingItem`, and `nudgeItem` answering nothing).
+/// (`pinItem`; `boostItem`, whose envelope also requires a `receipt` the faker draws;
+/// and `auditItem`, whose envelope also requires an `audit` object, another resource
+/// the model writes), and two the description sets nothing for (`pingItem`, and
+/// `nudgeItem` answering nothing).
 const ACTIONS: &str = r##"
 openapi: 3.0.0
 info: {title: Actions, version: "1"}
@@ -1041,6 +1121,21 @@ paths:
                 type: object
                 required: [item, receipt]
                 properties: {item: {$ref: "#/components/schemas/Item"}, receipt: {type: string}}
+  /items/{id}/audit:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: auditItem
+      responses:
+        "200":
+          description: audited
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [item, audit]
+                properties:
+                  item: {$ref: "#/components/schemas/Item"}
+                  audit: {type: object, required: [id], properties: {id: {type: string}}}
   /items/{id}/ping:
     parameters: [{name: id, in: path, required: true, schema: {type: string}}]
     post:
@@ -1082,6 +1177,10 @@ fn actions_world() -> serde_json::Value {
                 "changes": {"pinned": {"value": true}, "rank": {"from_request": "/rank"}}
             },
             "boostItem": {
+                "kind": "action", "target": target, "answer": {"record": "/item"},
+                "changes": {"pinned": {"value": true}}
+            },
+            "auditItem": {
                 "kind": "action", "target": target, "answer": {"record": "/item"},
                 "changes": {"pinned": {"value": true}}
             },
@@ -1392,22 +1491,50 @@ async fn an_action_on_an_unheld_target_falls_back() {
     );
 }
 
+/// An action answering its record in an envelope that also requires a member nothing
+/// the mock holds gives (Cal.com's `{status, data}`) fills it as a read of the record
+/// does, from the faker, and is answered from state.
 #[tokio::test]
-async fn an_action_whose_record_does_not_render_falls_back() {
+async fn an_action_s_envelope_is_filled_as_a_read_s_is() {
     let (capture, _guard) = Capture::install();
-    // `boostItem` answers the item in an envelope that also requires a `receipt`,
-    // which nothing the mock holds gives.
-    let h = actions(vec![
-        item_i1(),
-        json!({"item": {"id": "i1", "name": "a", "status": "ACTIVE", "pinned": true}, "receipt": "r1"}),
-    ]);
+    // `boostItem` answers the item in an envelope that also requires a `receipt`.
+    let h = actions(vec![item_i1()]);
     create_i1(&h).await;
     let (status, headers, body) = h.send("POST", "/items/i1/boost", None, &[]).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(source(&headers), "llm", "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let boosted = json!({"id": "i1", "name": "a", "status": "ACTIVE", "pinned": true});
+    assert_eq!(body["item"], boosted, "{body}");
+    assert!(body["receipt"].is_string(), "{body}");
     assert_eq!(
         capture.of("boostItem"),
-        vec![action_line("boostItem", Some("render_failed"))]
+        vec![action_line("boostItem", None)]
+    );
+    assert_eq!(
+        h.provider.requests().len(),
+        1,
+        "the action made no LLM call"
+    );
+    assert_eq!(h.stored("items", "i1").await, Some(boosted));
+}
+
+/// An envelope member beside the record that is an object (Zendesk's `audit`) is
+/// another resource the write made, not metadata the faker draws: the action falls
+/// back and the model answers it.
+#[tokio::test]
+async fn an_action_whose_envelope_requires_an_object_falls_back() {
+    let (capture, _guard) = Capture::install();
+    let h = actions(vec![
+        item_i1(),
+        json!({"item": {"id": "i1", "name": "a", "status": "ACTIVE", "pinned": true}, "audit": {"id": "a1"}}),
+    ]);
+    create_i1(&h).await;
+    let (status, headers, body) = h.send("POST", "/items/i1/audit", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "llm", "{body}");
+    assert_eq!(
+        capture.of("auditItem"),
+        vec![action_line("auditItem", Some("render_failed"))]
     );
 }
 
@@ -2886,4 +3013,121 @@ async fn a_nested_create_holds_the_path_value_its_list_s_scope_matches() {
         vec![line("listIssueNotes", "list", None); 2]
     );
     assert!(h.provider.requests().is_empty(), "no LLM call");
+}
+
+/// Chargebee's customers: an id the client may give, unique, and the codes the API's
+/// description says a taken one and a deleted one answer.
+const CUSTOMERS: &str = r##"
+openapi: 3.0.0
+info:
+  title: Customers
+  version: "1"
+  description: |
+    A customer's `id` can be given on create; it is unique, and a create with an id
+    in use is refused with 400 and `api_error_code` `duplicate_entry`. A deleted
+    customer answers 404 with `api_error_code` `resource_not_found`.
+paths:
+  /customers:
+    post:
+      operationId: createCustomer
+      requestBody: {content: {application/json: {schema: {type: object, properties: {id: {type: string}, name: {type: string}}}}}}
+      responses:
+        "200": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Customer"}}}}
+        "400": {description: invalid, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+  /customers/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getCustomer
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Customer"}}}}
+        "404": {description: missing, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+    delete:
+      operationId: deleteCustomer
+      responses: {"204": {description: deleted}}
+components:
+  schemas:
+    Customer:
+      type: object
+      required: [id]
+      properties: {id: {type: string}, name: {type: string}}
+    Error:
+      type: object
+      required: [message, api_error_code]
+      properties:
+        message: {type: string}
+        api_error_code: {type: string, description: "What went wrong: `duplicate_entry`, `resource_not_found` and so on."}
+"##;
+
+fn customers(script: Vec<serde_json::Value>) -> support::DescribedHarness {
+    let world = json!({
+        "types": {"customers": {
+            "identity": {"member": "id"},
+            "unique": [{"members": ["id"], "conflict": 400}]
+        }},
+        "operations": {"getCustomer": {"kind": "read", "type": "customers", "not_found": 404}}
+    });
+    support::harness(CUSTOMERS, script, &HarnessOptions::default(), |rt| {
+        support::with_effective(rt, world, false)
+    })
+}
+
+/// A unique set refused from state fills what the model's body left empty with the
+/// code the contract gives a taken value, and lays the call's message over it.
+#[tokio::test]
+async fn a_unique_refusal_from_state_fills_the_contract_s_code_where_left_empty() {
+    let (_capture, _guard) = Capture::install();
+    let h = customers(vec![
+        json!({"id": "c1", "name": "Ana"}),
+        json!({"message": "taken", "api_error_code": ""}),
+    ]);
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/customers",
+            Some(json!({"id": "c1", "name": "Ana"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, headers, body) = h
+        .send(
+            "POST",
+            "/customers",
+            Some(json!({"id": "c1", "name": "Rui"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body["api_error_code"], json!("duplicate_entry"), "{body}");
+    assert_eq!(
+        body["message"],
+        json!("id 'c1' is already in use"),
+        "{body}"
+    );
+}
+
+/// A not-found refusal from state keeps the code the model wrote for it, whatever the
+/// contract's prose names: only the members it left empty take a value.
+#[tokio::test]
+async fn a_not_found_refusal_from_state_keeps_the_model_s_code() {
+    let (_capture, _guard) = Capture::install();
+    let h = customers(vec![
+        json!({"id": "c1", "name": "Ana"}),
+        json!({"message": "gone", "api_error_code": "customer_gone"}),
+    ]);
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/customers",
+            Some(json!({"id": "c1", "name": "Ana"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, body) = h.send("DELETE", "/customers/c1", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, _, body) = h.send("GET", "/customers/c1", None, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["api_error_code"], json!("customer_gone"), "{body}");
 }

@@ -286,8 +286,9 @@ async fn a_described_page_follows_a_numeric_filter() {
 
 #[tokio::test]
 async fn a_described_cut_with_no_token_place_keeps_its_filters() {
-    // A cursor paging that names no answer member nor header has no place for a token:
-    // the page is served whole, but narrowed as described.
+    // A cursor paging that names no answer member nor header, and whose answer has no
+    // place the heuristics find either, has no place for a token: the page is served
+    // whole, but narrowed as described.
     let amounts = (1..=5)
         .map(|i| json!({"id": format!("c{i}"), "amount": i}))
         .collect();

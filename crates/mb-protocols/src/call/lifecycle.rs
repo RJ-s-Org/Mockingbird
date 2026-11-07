@@ -113,6 +113,17 @@ pub(super) fn soft_delete(rt: &MockRuntime, t: &str, record: &mut Value) -> bool
     set_state(rt, t, record, &gone.member, gone.state)
 }
 
+/// Moves `record`, a held record of type `t`, to the described soft-delete state as a
+/// delete of it does; answers whether it did. A record already in that state has
+/// nowhere further to move, so a delete of it removes it (`false`), as a second delete
+/// does where a first one deactivates or trashes.
+pub(super) fn delete_softly(rt: &MockRuntime, t: &str, record: &mut Value) -> bool {
+    if exclusion(rt, t).is_some_and(|gone| gone.excludes(record)) {
+        return false;
+    }
+    soft_delete(rt, t, record)
+}
+
 /// Sets `member` of `record` to `value`, unless that leaves a record type `t`'s schema
 /// refuses; answers whether it set it.
 fn set_state(rt: &MockRuntime, t: &str, record: &mut Value, member: &str, value: Value) -> bool {

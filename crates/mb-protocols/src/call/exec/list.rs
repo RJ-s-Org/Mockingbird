@@ -64,7 +64,7 @@ use mb_mcm::{Binding, Operation, OperationKind, StatusSelector};
 use serde_json::{Map, Value};
 use tracing::Instrument;
 
-use super::{Held, Ran, answered, fell_back};
+use super::{Held, Ran, Stop, answered, fell_back_on};
 use crate::MockRuntime;
 use crate::call::state_lists::Shape;
 use crate::call::{
@@ -110,8 +110,8 @@ pub(super) async fn run(
             answered(rt, plan, OpKind::List);
             Ran::Answered(Box::new(served))
         }
-        Err(reason) => {
-            fell_back(rt, plan, OpKind::List, reason);
+        Err(stop) => {
+            fell_back_on(rt, plan, OpKind::List, &stop);
             Ran::Generate(None)
         }
     }
@@ -123,30 +123,30 @@ async fn answer(
     plan: &CallPlan<'_>,
     call: &OperationCall,
     response_schema: Option<&Value>,
-) -> Result<GeneratedResponse, &'static str> {
+) -> Result<GeneratedResponse, Stop<'static>> {
     let rt = state.rt;
     let op = plan.op;
     let bundle = rt.bundle();
     let Binding::Http { path, .. } = &op.binding else {
-        return Err("not_http");
+        return Err("not_http".into());
     };
     if !matches!(op.kind, OperationKind::Query) || response_schema.is_some() {
-        return Err("not_http");
+        return Err("not_http".into());
     }
     // The next page of a list this session cut, by the token it minted.
     if let Some(served) = pages::serve(state, plan, call).await {
         cursors::after_answer(state, plan, &served).await;
         return Ok(served);
     }
-    let t = item_type(rt, op).ok_or("render_failed")?;
+    let t = item_type(rt, op).ok_or(Stop::from("render_failed"))?;
     let q = list_query::of(rt, op, call);
     if q.as_ref()
         .and_then(|q| q.page.as_ref())
         .is_some_and(|p| !p.counts() && p.position.is_some())
     {
-        return Err("unknown_token");
+        return Err("unknown_token".into());
     }
-    let shape = Shape::of(rt, op).ok_or("render_failed")?;
+    let shape = Shape::of(rt, op).ok_or(Stop::from("render_failed"))?;
     let (item_parts, _) = schema_parts(bundle, Some(&shape.items));
     let size = list_query::requested_page(rt, op, call);
     let size_ref = size.as_ref().map(|(name, limit)| (name.as_str(), *limit));
@@ -163,10 +163,10 @@ async fn answer(
     .filter(|(param, _)| !q.as_ref().is_some_and(|q| q.pages_with(param)))
     .collect();
     let paging = runs::Paging::of(bundle, op, size_ref.map(|(name, _)| name));
-    let undescribed = call.query.iter().any(|(param, raw)| {
+    let undescribed = call.query.iter().find(|(param, raw)| {
         !knows(param)
-            && size_ref.is_none_or(|(name, _)| name != param)
-            && !filters.iter().any(|(name, _)| name == param)
+            && size_ref.is_none_or(|(name, _)| name != param.as_str())
+            && !filters.iter().any(|(name, _)| name == *param)
             && !asks_nothing(bundle, op, (param, raw), &paging)
     });
     // A list asked by a body (a POST query) reads no member of it, a filter or a
@@ -175,21 +175,20 @@ async fn answer(
         .body
         .as_ref()
         .and_then(Value::as_object)
-        .is_some_and(|members| members.values().any(asks));
-    if undescribed || body_asks {
-        return Err("undescribed_param");
+        .and_then(|members| members.iter().find(|(_, value)| asks(value)));
+    if let Some((on, _)) = undescribed.or(body_asks) {
+        return Err(Stop::on("undescribed_param", on));
     }
     let unscoped = call.path_params.is_empty()
-        && !(rt.index().unscoped_lists.get(t) == Some(&1)
-            && rt.index().unscoped_paths.get(path).map(String::as_str) == Some(t))
+        && !only_unscoped(rt, path, t)
         && q.as_ref().is_none_or(|q| q.scope.is_none());
     if unscoped {
-        return Err("unscoped_list");
+        return Err("unscoped_list".into());
     }
-    let envelope = envelope(rt, plan, call, &shape).ok_or("render_failed")?;
+    let envelope = envelope(rt, plan, call, &shape).ok_or(Stop::from("render_failed"))?;
     let mut records = state.list(&plan.session, t, MAX_SCAN + 1).await;
     if records.len() > MAX_SCAN {
-        return Err("over_cap");
+        return Err("over_cap".into());
     }
     // As the collection's mark placed them; then those no create noted, least recently
     // written first; then the created, in the order they were created.
@@ -206,7 +205,7 @@ async fn answer(
         && created.is_empty()
         && !state_lists::deleted_some(state, &plan.session, t).await
     {
-        return Err("never_written");
+        return Err("never_written".into());
     }
     let created: HashMap<&str, usize> = created
         .iter()
@@ -252,7 +251,7 @@ async fn answer(
         && !route_ties(rt, op, call, t, &records)
         && !state_lists::listed(state, (plan, call), t).await
     {
-        return Err("scope_unresolved");
+        return Err("scope_unresolved".into());
     }
     let ids: Vec<String> = items
         .iter()
@@ -271,8 +270,8 @@ async fn answer(
     // Served anyway, a page is refused only when it does not render, or says no page
     // follows one that does.
     .map_err(|unserved| match unserved {
-        state_lists::Unserved::Render => "render_failed",
-        state_lists::Unserved::NoPlace => "no_next_place",
+        state_lists::Unserved::Render => Stop::from("render_failed"),
+        state_lists::Unserved::NoPlace => Stop::from("no_next_place"),
     })?;
     // The collection is marked listed: its creates are placed in it from now on.
     state_lists::mark_listed(state, (plan, call), t, &served, ids).await;
@@ -284,6 +283,34 @@ async fn answer(
     }
     cursors::after_answer(state, plan, &served).await;
     Ok(served)
+}
+
+/// Whether the list at `path`, of items of type `t`, is the type's one list with no path
+/// parameter: where the contract's schemas name its items' type
+/// (`BundleIndex::unscoped_lists`), the only such list of that type, which is `t`;
+/// where they name none (a lean schema of the record, SendGrid's `TemplateLean` under
+/// `result`), the only one the description gives type `t`.
+fn only_unscoped(rt: &MockRuntime, path: &str, t: &str) -> bool {
+    let index = rt.index();
+    if let Some(indexed) = index.unscoped_paths.get(path) {
+        return indexed == t && index.unscoped_lists.get(t) == Some(&1);
+    }
+    let described = rt
+        .bundle()
+        .operations
+        .iter()
+        .filter(|op| {
+            let kind = rt
+                .described()
+                .op(&op.id)
+                .and_then(|d| d.kind)
+                .or_else(|| OpKind::of(op));
+            kind == Some(OpKind::List)
+                && matches!(&op.binding, Binding::Http { path, .. } if !path.contains('{'))
+                && item_type(rt, op) == Some(t)
+        })
+        .count();
+    described == 1
 }
 
 /// Whether stored `r`, of type `t`, names the parent the call's path names: its type's

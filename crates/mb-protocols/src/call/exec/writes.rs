@@ -39,7 +39,10 @@ use mb_state::StoredResource;
 use serde_json::{Map, Value, json};
 use tracing::Instrument;
 
-use super::{Fallback, Held, Ran, Write, answered, commit, create, fell_back, patches, render};
+use super::{
+    Fallback, Held, Ran, Stop, Write, answered, commit, create, fell_back, fell_back_on, patches,
+    render,
+};
 use crate::call::bundle_index::schema_parts;
 use crate::call::entities::added_violation;
 use crate::call::write_memory::{self, keep_owner, read_only, read_schema, without_contradictions};
@@ -91,8 +94,8 @@ async fn update(
     let t = stored.resource_type.as_str();
     let mut data = match changed(rt, (plan, call), stored, kind == OpKind::Replace) {
         Ok(data) => data,
-        Err(reason) => {
-            fell_back(rt, plan, kind, reason);
+        Err(stop) => {
+            fell_back_on(rt, plan, kind, &stop);
             return Ran::Generate(None);
         }
     };
@@ -202,7 +205,7 @@ fn changed(
     (plan, call): (&CallPlan<'_>, &OperationCall),
     stored: &StoredResource,
     replace: bool,
-) -> Result<Value, &'static str> {
+) -> Result<Value, Stop<'static>> {
     let op = plan.op;
     let t = stored.resource_type.as_str();
     // A patch document, or the instructions the description names, says how the held
@@ -214,7 +217,7 @@ fn changed(
         .and_then(|r| r.instructions.as_ref());
     let multi = |steps: &[String]| declared_array(rt, t, steps);
     if !replace && let Some(patched) = patches::patched(call, instructions, &stored.data, &multi) {
-        return guarded(rt, (plan, call), stored, patched?);
+        return Ok(guarded(rt, (plan, call), stored, patched?)?);
     }
     let empty = Value::Object(Map::new());
     let sent = call
@@ -225,7 +228,7 @@ fn changed(
     // the path wins.
     let sent = without_contradictions(rt, plan, call, stored, sent);
     let (Value::Object(sent), Value::Object(held)) = (&sent, &stored.data) else {
-        return Err("unmerged_body");
+        return Err("unmerged_body".into());
     };
     let bundle = rt.bundle();
     let schema = read_schema(rt, t);
@@ -236,11 +239,11 @@ fn changed(
     let kept = |name: &str| identity.iter().any(|field| field == name) || read_only(name);
     let declared = schema.and_then(|s| declared_members(bundle, s));
     if let Some(declared) = &declared
-        && sent
+        && let Some(name) = sent
             .keys()
-            .any(|name| !kept(name) && !declared.contains(name))
+            .find(|name| !kept(name) && !declared.contains(*name))
     {
-        return Err("undeclared_member");
+        return Err(Stop::on("undeclared_member", name));
     }
     // A record member the query names is set as the body sets it (Trello's
     // `PUT /cards/{id}?name=…`).
@@ -256,10 +259,10 @@ fn changed(
         held.get(name)
             .is_some_and(|now| now == value || id_string(now) == id_string(value))
     };
-    if sent.iter().any(|(name, value)| {
-        read_only(name) && !identity.iter().any(|f| f == name) && !echoes(name, value)
+    if let Some((name, _)) = sent.iter().find(|(name, value)| {
+        read_only(name) && !identity.iter().any(|f| f == *name) && !echoes(name, value)
     }) {
-        return Err("read_only_member");
+        return Err(Stop::on("read_only_member", name));
     }
     sent.retain(|name, _| !kept(name));
     let mut out = match replace {
@@ -279,7 +282,7 @@ fn changed(
     let mut out = Value::Object(out);
     keep_nested_identity(&identity, stored, &mut out);
     let Value::Object(mut out) = out else {
-        return Err("unmerged_body");
+        return Err("unmerged_body".into());
     };
     if replace {
         let described = rt.described().type_desc(t);
@@ -510,8 +513,9 @@ pub(super) fn written(
         .serve_stored(rt.bundle(), op, answer.body.as_ref()?, response_schema)
 }
 
-/// A delete of the held target: removed, or moved to its type's soft-deleted state,
-/// answered with the operation's declared delete answer.
+/// A delete of the held target: removed, or moved to its type's soft-deleted state
+/// (removed when it is in that state already), answered with the operation's declared
+/// delete answer.
 async fn delete(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
@@ -527,7 +531,7 @@ async fn delete(
     };
     let t = stored.resource_type.as_str();
     let mut data = stored.data.clone();
-    let soft = lifecycle::soft_delete(rt, t, &mut data);
+    let soft = lifecycle::delete_softly(rt, t, &mut data);
     let Some(answer) = delete_answer(rt, plan, call, (id, &data), response_schema) else {
         fell_back(rt, plan, kind, Fallback::RenderFailed.as_str());
         return Ran::Generate(None);
