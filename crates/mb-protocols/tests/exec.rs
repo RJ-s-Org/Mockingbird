@@ -3393,26 +3393,32 @@ async fn an_array_item_declaring_the_identity_gets_a_minted_id_of_its_own() {
 }
 
 #[tokio::test]
-async fn a_create_whose_array_item_lacks_what_its_read_requires_generates() {
+async fn what_a_sent_array_item_lacks_is_filled_item_by_item() {
     let (capture, _guard) = Capture::install();
+    // The fill's answer: the `sku` the line lacks, and a `qty` it never takes.
     let h = support::harness(
         GATED,
-        vec![json!({"id": "o-gen"})],
+        vec![json!({"lines": [{"sku": "s-1", "qty": 9}]})],
         &HarnessOptions::default(),
         |rt| rt,
     );
-    // Fill writes no array item's members: the line has no `sku`.
     let sent = json!({"lines": [{"qty": 2}]});
     let (status, headers, body) = h.send("POST", "/orders", Some(sent), &[]).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    assert_eq!(source(&headers), "llm", "{body}");
-    assert_eq!(body["id"], json!("o-gen"));
+    assert_eq!(source(&headers), "state", "{body}");
     assert_eq!(
         capture.of("createOrder"),
-        vec![invalid_line("createOrder", "/lines/0/sku required")]
+        vec![create_line("createOrder", None)]
     );
-    let t = type_of(&h, "getOrder");
-    assert_eq!(h.stored_ids(&t).await, vec!["o-gen".to_owned()]);
+    let id = body["id"].as_str().unwrap().to_owned();
+    let stored = h.stored(&type_of(&h, "getOrder"), &id).await.unwrap();
+    let line = &stored["lines"][0];
+    assert_eq!(
+        (&line["sku"], &line["qty"]),
+        (&json!("s-1"), &json!(2)),
+        "{stored}"
+    );
+    assert!(line["id"].is_string(), "minted: {stored}");
 }
 
 #[tokio::test]
@@ -3782,4 +3788,444 @@ async fn reads_declaring_conflicting_ids_mint_none_and_the_create_generates() {
         capture.of("createThing"),
         vec![create_line("createThing", Some("no_id"))]
     );
+}
+
+/// Creates whose records only the server completes: a lifecycle state the member does not
+/// take, a nullable reference, a member sent as another JSON type, a sender's wrapper, a
+/// nullable parent sent short, a version a write carries, a server-set boolean, a
+/// comment under its pull request and a secret embedding the id.
+const SERVER_SET: &str = r##"
+openapi: 3.0.0
+info: {title: ServerSet, version: "1"}
+paths:
+  /folders:
+    post:
+      operationId: createFolder
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}, parent: {type: object, properties: {id: {type: string}}}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /folders/{id}:
+    get:
+      operationId: getFolder
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Folder"}}}}}
+  /tasks:
+    post:
+      operationId: createTask
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}, assignee: {type: string, nullable: true}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /tasks/{id}:
+    get:
+      operationId: getTask
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}}
+  /docs:
+    post:
+      operationId: createDoc
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}, owner: {}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /docs/{id}:
+    get:
+      operationId: getDoc
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Doc"}}}}}
+  /members/{id}:
+    get:
+      operationId: getMember
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Member"}}}}}
+  /issues:
+    post:
+      operationId: createIssue
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}, labels: {type: string}, notes: {type: string}, zip: {type: integer}, count: {type: string}, open: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /issues/{id}:
+    get:
+      operationId: getIssue
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}}
+  /conversations:
+    post:
+      operationId: createConversation
+      requestBody: {content: {application/json: {schema: {type: object, properties: {from: {type: object, properties: {type: {type: string}, id: {type: string}}}, body: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /conversations/{id}:
+    get:
+      operationId: getConversation
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Conversation"}}}}}
+  /carts:
+    post:
+      operationId: createCart
+      requestBody: {content: {application/json: {schema: {type: object, properties: {currency: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Cart"}}}}}
+  /carts/{id}:
+    get:
+      operationId: getCart
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Cart"}}}}}
+    post:
+      operationId: updateCart
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, required: [version, actions], properties: {version: {type: integer}, actions: {type: array, items: {type: object}}}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Cart"}}}}
+        "409": {description: stale version, content: {application/json: {schema: {type: object, properties: {message: {type: string}}}}}}
+  /workspaces:
+    post:
+      operationId: createWorkspace
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Workspace"}}}}}
+  /workspaces/{id}:
+    get:
+      operationId: getWorkspace
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Workspace"}}}}}
+  /pulls/{pull_request_id}:
+    get:
+      operationId: getPull
+      parameters: [{name: pull_request_id, in: path, required: true, schema: {type: integer}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Pull"}}}}}
+  /pulls/{pull_request_id}/comments:
+    post:
+      operationId: createComment
+      parameters: [{name: pull_request_id, in: path, required: true, schema: {type: integer}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {content: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}}
+  /pulls/{pull_request_id}/comments/{comment_id}:
+    get:
+      operationId: getComment
+      parameters:
+        - {name: pull_request_id, in: path, required: true, schema: {type: integer}}
+        - {name: comment_id, in: path, required: true, schema: {type: integer}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}}
+  /intents:
+    post:
+      operationId: createIntent
+      requestBody: {content: {application/json: {schema: {type: object, properties: {amount: {type: integer}}}}}}
+      responses: {"200": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Intent"}}}}}
+  /intents/{id}:
+    get:
+      operationId: getIntent
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Intent"}}}}}
+components:
+  schemas:
+    Ack:
+      type: object
+      required: [id]
+      properties: {id: {type: string}}
+    Folder:
+      type: object
+      required: [id, name, item_status, parent]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        item_status: {type: string, enum: [active, trashed]}
+        parent:
+          anyOf:
+            - {type: object, required: [id, name], properties: {id: {type: string}, name: {type: string}}}
+            - {type: "null"}
+    Member:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
+    Doc:
+      type: object
+      required: [id, title, owner]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        owner: {anyOf: [{$ref: "#/components/schemas/Member"}, {type: "null"}]}
+    Task:
+      type: object
+      required: [id, name, assignee]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        assignee: {allOf: [{$ref: "#/components/schemas/Member"}], nullable: true}
+    Issue:
+      type: object
+      required: [id, title, labels]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        labels: {type: array, items: {type: string}}
+        notes: {type: array, items: {type: object, required: [body], properties: {body: {type: string}}}}
+        zip: {type: string}
+        count: {type: integer}
+        open: {type: boolean}
+    Conversation:
+      type: object
+      required: [id, type, body]
+      properties: {id: {type: string}, type: {type: string, enum: [conversation]}, body: {type: string}}
+    Cart:
+      type: object
+      required: [id, version, currency]
+      properties: {id: {type: string}, version: {type: integer}, currency: {type: string}}
+    Workspace:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}, locked: {type: boolean, nullable: true}, "@odata.etag": {type: string}}
+    Pull:
+      type: object
+      required: [id, title]
+      properties: {id: {type: integer}, title: {type: string}}
+    Comment:
+      type: object
+      required: [id, content, pullrequest]
+      properties: {id: {type: integer}, content: {type: string}, pullrequest: {$ref: "#/components/schemas/Pull"}}
+    Intent:
+      type: object
+      required: [id, amount, client_secret]
+      properties:
+        id: {type: string, pattern: "^pi_[A-Za-z0-9]{24}$"}
+        amount: {type: integer}
+        client_secret: {type: string, pattern: "^pi_[A-Za-z0-9]{24}_secret_[A-Za-z0-9]{24}$"}
+"##;
+
+#[tokio::test]
+async fn a_lifecycle_state_its_member_does_not_take_is_filled_instead() {
+    let (capture, _guard) = Capture::install();
+    let world =
+        json!({"types": {"folders": {"lifecycle": {"member": "item_status", "initial": "LIVE"}}}});
+    let h = support::described(SERVER_SET, world, vec![json!({"item_status": "active"})]);
+    let sent = json!({"name": "docs", "parent": {"id": "0"}});
+    let (status, _, body) = h.send("POST", "/folders", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        capture.of("createFolder"),
+        vec![create_line("createFolder", None)]
+    );
+    let id = body["id"].as_str().unwrap().to_owned();
+    let stored = h.stored("folders", &id).await.unwrap();
+    assert!(
+        ["active", "trashed"].contains(&stored["item_status"].as_str().unwrap_or("LIVE")),
+        "filled as its member declares it: {stored}"
+    );
+    // The nullable parent sent with its id alone is kept, its name filled.
+    assert_eq!(stored["parent"]["id"], json!("0"), "{stored}");
+    assert!(stored["parent"]["name"].is_string(), "{stored}");
+}
+
+#[tokio::test]
+async fn a_nullable_reference_through_an_all_of_is_embedded_or_settled() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(SERVER_SET, vec![], &HarnessOptions::default(), |rt| rt);
+    let members = type_of(&h, "getMember");
+    h.hold(&members, &[json!({"id": "u1", "name": "Ann"})])
+        .await;
+    let (_, _, body) = h
+        .send(
+            "POST",
+            "/tasks",
+            Some(json!({"name": "a", "assignee": "u1"})),
+            &[],
+        )
+        .await;
+    let id = body["id"].as_str().unwrap().to_owned();
+    let t = type_of(&h, "getTask");
+    let stored = h.stored(&t, &id).await.unwrap();
+    assert_eq!(stored["assignee"], json!({"id": "u1", "name": "Ann"}));
+    let (_, _, body) = h
+        .send(
+            "POST",
+            "/tasks",
+            Some(json!({"name": "b", "assignee": "u404"})),
+            &[],
+        )
+        .await;
+    assert_eq!(
+        capture.of("createTask"),
+        vec![
+            create_line("createTask", None),
+            create_line("createTask", None)
+        ]
+    );
+    let id = body["id"].as_str().unwrap().to_owned();
+    let stored = h.stored(&t, &id).await.unwrap();
+    assert_eq!(
+        stored["assignee"],
+        json!(null),
+        "a reference to no held record names none: never the raw id, never invented"
+    );
+    assert!(
+        stored.as_object().unwrap().contains_key("assignee"),
+        "{stored}"
+    );
+}
+
+#[tokio::test]
+async fn a_member_sent_as_another_json_type_is_converted_losing_nothing() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(SERVER_SET, vec![], &HarnessOptions::default(), |rt| rt);
+    let sent =
+        json!({"title": "t", "labels": "bug,ui", "zip": 94107, "count": "3", "open": "true"});
+    let (status, _, body) = h.send("POST", "/issues", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        capture.of("createIssue"),
+        vec![create_line("createIssue", None)]
+    );
+    let id = body["id"].as_str().unwrap().to_owned();
+    let stored = h.stored(&type_of(&h, "getIssue"), &id).await.unwrap();
+    assert_eq!(stored["labels"], json!(["bug", "ui"]));
+    assert_eq!(stored["zip"], json!("94107"));
+    assert_eq!(stored["count"], json!(3));
+    assert_eq!(stored["open"], json!(true));
+}
+
+#[tokio::test]
+async fn a_member_of_another_json_type_with_no_lossless_form_is_refused_never_filled() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(
+        SERVER_SET,
+        vec![json!({"id": "i-gen"})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    // Neither text becomes what the reads hold without losing or inventing something.
+    for (sent, why) in [
+        (
+            json!({"title": "t", "labels": "a", "notes": "hello"}),
+            "/notes type",
+        ),
+        (
+            json!({"title": "t", "labels": "a", "count": "0.50"}),
+            "/count type",
+        ),
+    ] {
+        let (status, _, body) = h.send("POST", "/issues", Some(sent), &[]).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let lines = capture.of("createIssue");
+        assert_eq!(
+            lines.last(),
+            Some(&invalid_line("createIssue", why)),
+            "{lines:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_wrapper_s_member_that_does_not_fit_the_record_is_not_taken() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(SERVER_SET, vec![], &HarnessOptions::default(), |rt| rt);
+    let sent = json!({"from": {"type": "user", "id": "c9"}, "body": "hi"});
+    let (status, _, body) = h.send("POST", "/conversations", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        capture.of("createConversation"),
+        vec![create_line("createConversation", None)]
+    );
+    let id = body["id"].as_str().unwrap().to_owned();
+    let stored = h
+        .stored(&type_of(&h, "getConversation"), &id)
+        .await
+        .unwrap();
+    assert_eq!(stored["type"], json!("conversation"), "{stored}");
+}
+
+#[tokio::test]
+async fn a_version_a_write_carries_starts_at_one() {
+    let (capture, _guard) = Capture::install();
+    // A fill's answer for `version`, never taken.
+    let h = support::harness(
+        SERVER_SET,
+        vec![json!({"version": 2})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let (status, _, body) = h
+        .send("POST", "/carts", Some(json!({"currency": "EUR"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        capture.of("createCart"),
+        vec![create_line("createCart", None)]
+    );
+    assert_eq!(body["version"], json!(1), "{body}");
+}
+
+#[tokio::test]
+async fn a_nullable_boolean_fill_leaves_null_stays_null() {
+    let (_capture, _guard) = Capture::install();
+    let h = support::harness(
+        SERVER_SET,
+        vec![json!({"locked": null, "@odata.etag": "W/\"1\""})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let (status, _, body) = h
+        .send("POST", "/workspaces", Some(json!({"name": "w"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["locked"], json!(null), "{body}");
+}
+
+#[tokio::test]
+async fn a_member_named_for_the_path_s_parent_is_that_record() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(SERVER_SET, vec![], &HarnessOptions::default(), |rt| rt);
+    let pulls = type_of(&h, "getPull");
+    h.hold(&pulls, &[json!({"id": 2, "title": "Fix totals"})])
+        .await;
+    let sent = json!({"content": "looks good"});
+    let (status, _, body) = h.send("POST", "/pulls/2/comments", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        capture.of("createComment"),
+        vec![create_line("createComment", None)]
+    );
+    assert_eq!(body["pullrequest"], json!({"id": 2, "title": "Fix totals"}));
+}
+
+#[tokio::test]
+async fn a_member_whose_pattern_embeds_the_id_starts_with_the_record_s_id() {
+    let (_capture, _guard) = Capture::install();
+    let h = support::harness(SERVER_SET, vec![], &HarnessOptions::default(), |rt| rt);
+    let (status, _, body) = h
+        .send("POST", "/intents", Some(json!({"amount": 5})), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = body["id"].as_str().unwrap();
+    let secret = body["client_secret"].as_str().unwrap();
+    assert!(secret.starts_with(&format!("{id}_secret_")), "{body}");
+}
+
+#[tokio::test]
+async fn an_embedded_record_s_id_is_never_invented_through_a_nullable_wrapper() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(
+        SERVER_SET,
+        vec![json!({"owner": {"id": "invented", "name": "Ann"}})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    // The owner is a member (`anyOf: [$ref, null]`) sent without its id.
+    let sent = json!({"title": "a", "owner": {"name": "Ann"}});
+    let (status, _, body) = h.send("POST", "/docs", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let lines = capture.of("createDoc");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(
+        lines[0].exec_fallback.as_deref(),
+        Some("record_invalid"),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_lifecycle_state_is_matched_to_its_member_s_enum_spelling() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"types": {"folders": {"lifecycle": {"member": "item_status", "initial": "ACTIVE"}}}});
+    let h = support::described(SERVER_SET, world, Vec::new());
+    let sent = json!({"name": "docs", "parent": {"id": "0", "name": "root"}});
+    let (status, _, body) = h.send("POST", "/folders", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        capture.of("createFolder"),
+        vec![create_line("createFolder", None)]
+    );
+    let id = body["id"].as_str().unwrap().to_owned();
+    let stored = h.stored("folders", &id).await.unwrap();
+    assert_eq!(stored["item_status"], json!("active"), "{stored}");
 }

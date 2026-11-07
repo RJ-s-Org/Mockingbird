@@ -392,6 +392,34 @@ fn body_candidate(rt: &MockRuntime, op: &Operation, t: &str, member: &str) -> bo
     read_only(bundle, &read, 0) || body_shaped(rt, op, t, member)
 }
 
+/// The integer members of type `t`'s records that some write of the type carries as a
+/// token in its body or query ([`body_candidate`], [`body_shaped`]: the `{version,
+/// actions}` shape): a version a create starts at its first value, never the model's.
+pub(super) fn integer_body_tokens(rt: &MockRuntime, t: &str) -> Vec<String> {
+    let bundle = rt.bundle();
+    let mut members = Vec::new();
+    if let Some(schema) = write_memory::read_schema(rt, t) {
+        properties_of(bundle, schema, 0, &mut members);
+    }
+    members.retain(|member| {
+        let integer =
+            token_schema(rt, t, member, false).is_some_and(|schema| {
+                match deref_schema(bundle, &schema).get("type") {
+                    Some(Value::String(t)) => t == "integer",
+                    Some(Value::Array(ts)) => ts.iter().any(|t| t.as_str() == Some("integer")),
+                    _ => false,
+                }
+            });
+        integer
+            && bundle.operations.iter().any(|op| {
+                op.resource_type.as_deref() == Some(t)
+                    && body_candidate(rt, op, t, member)
+                    && body_shaped(rt, op, t, member)
+            })
+    });
+    members
+}
+
 /// Whether `op`'s input requires member `member` of a stored `t` as the only member of
 /// the record it declares (the `{version, actions}` shape).
 fn body_shaped(rt: &MockRuntime, op: &Operation, t: &str, member: &str) -> bool {
