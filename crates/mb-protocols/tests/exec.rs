@@ -3173,7 +3173,7 @@ paths:
   /orders:
     post:
       operationId: createOrder
-      requestBody: {content: {application/json: {schema: {type: object, properties: {lines: {type: array, items: {type: object, properties: {sku: {type: string}}}}}}}}}
+      requestBody: {content: {application/json: {schema: {type: object, properties: {lines: {type: array, items: {type: object, properties: {sku: {type: string}, qty: {type: integer}}}}}}}}}
       responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
   /orders/{id}:
     get:
@@ -3248,7 +3248,7 @@ components:
       required: [id, lines]
       properties:
         id: {type: string}
-        lines: {type: array, items: {type: object, required: [id, sku], properties: {id: {type: string}, sku: {type: string}}}}
+        lines: {type: array, items: {type: object, required: [id, sku], properties: {id: {type: string}, sku: {type: string}, qty: {type: integer}}}}
     Account:
       type: object
       required: [id, name]
@@ -3326,7 +3326,31 @@ async fn a_reference_to_no_held_record_is_filled_never_stored_raw() {
 }
 
 #[tokio::test]
-async fn a_create_whose_read_requires_an_id_on_each_array_item_generates() {
+async fn an_array_item_declaring_the_identity_gets_a_minted_id_of_its_own() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(GATED, vec![], &HarnessOptions::default(), |rt| rt);
+    let sent = json!({"lines": [{"sku": "a"}, {"sku": "b"}]});
+    let (status, headers, body) = h.send("POST", "/orders", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(
+        capture.of("createOrder"),
+        vec![create_line("createOrder", None)]
+    );
+    let id = body["id"].as_str().unwrap().to_owned();
+    let t = type_of(&h, "getOrder");
+    let stored = h.stored(&t, &id).await.unwrap();
+    let lines = stored["lines"].as_array().unwrap();
+    let ids: Vec<&str> = lines.iter().filter_map(|l| l["id"].as_str()).collect();
+    assert_eq!(ids.len(), 2, "{stored}");
+    assert_ne!(ids[0], ids[1]);
+    assert_eq!(lines[0]["sku"], json!("a"));
+    let (_, headers, read) = h.send("GET", &format!("/orders/{id}"), None, &[]).await;
+    assert_eq!(source(&headers), "state", "{read}");
+}
+
+#[tokio::test]
+async fn a_create_whose_array_item_lacks_what_its_read_requires_generates() {
     let (capture, _guard) = Capture::install();
     let h = support::harness(
         GATED,
@@ -3334,14 +3358,15 @@ async fn a_create_whose_read_requires_an_id_on_each_array_item_generates() {
         &HarnessOptions::default(),
         |rt| rt,
     );
-    let sent = json!({"lines": [{"sku": "a"}]});
+    // Fill writes no array item's members: the line has no `sku`.
+    let sent = json!({"lines": [{"qty": 2}]});
     let (status, headers, body) = h.send("POST", "/orders", Some(sent), &[]).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(source(&headers), "llm", "{body}");
     assert_eq!(body["id"], json!("o-gen"));
     assert_eq!(
         capture.of("createOrder"),
-        vec![invalid_line("createOrder", "/lines/0/id required")]
+        vec![invalid_line("createOrder", "/lines/0/sku required")]
     );
     let t = type_of(&h, "getOrder");
     assert_eq!(h.stored_ids(&t).await, vec!["o-gen".to_owned()]);

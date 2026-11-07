@@ -19,7 +19,8 @@
 //!   `__typename`; a `default`) takes that value, at any depth the record holds
 //!   ([`preset`]), optional members included. Fill then writes every other member
 //!   the record declares that nothing set, optional ones too, but a reference to
-//!   another record the request could have sent ([`unsent_reference`]).
+//!   another record the request could have sent ([`unsent_reference`]). An array
+//!   item declaring the type's identity member gets a minted id ([`mint_items`]).
 //! - Before it is stored, the record is checked against every read of its type
 //!   ([`read_schemas`]), as those reads render it: one a read would not render (a
 //!   reference where the read holds an object, an array item lacking a required id)
@@ -189,6 +190,11 @@ pub(super) async fn run(
     // So does one whose request schema gives the value the server assumes when it is
     // left out (harvest's `is_active: {default: true}`), where the record holds it.
     preset_from_request(rt, op, &shape, &mut data, &owned);
+    // A nested item declaring the type's identity member gets an id of its own.
+    let leaf = mb_mcm::leaf_member(field).to_owned();
+    for schema in &shape.schemas {
+        mint_items(rt, schema, &mut data, &leaf, GAP_DEPTH);
+    }
     let mut missing = gaps(rt, &shape.schemas, &data, &owned);
     // And every other member nobody set, but a reference the request could have sent.
     if let Value::Object(known) = &data {
@@ -970,6 +976,61 @@ fn fits(rt: &crate::MockRuntime, schema: &Value, value: &Value) -> bool {
         .schema_violations(rt.bundle(), schema, value)
         .is_some_and(|v| v.is_empty())
 }
+
+/// Mints an id ([`crate::call::header_ids::draw_id_as`]) for each array item `value`
+/// holds, as `schema` declares it, whose schema declares member `field` (the type's
+/// identity member: a line item's `id`) and that lacks it, at any depth (to `depth`);
+/// unique among the items of its array.
+fn mint_items(
+    rt: &crate::MockRuntime,
+    schema: &Value,
+    value: &mut Value,
+    field: &str,
+    depth: usize,
+) {
+    if depth == 0 {
+        return;
+    }
+    let bundle = rt.bundle();
+    let parts = whole_parts(bundle, schema);
+    match value {
+        Value::Object(held) => {
+            for part in &parts {
+                let Some(Value::Object(properties)) = part.get("properties") else {
+                    continue;
+                };
+                for (name, member) in properties {
+                    if let Some(inner) = held.get_mut(name) {
+                        mint_items(rt, member, inner, field, depth - 1);
+                    }
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in parts.iter().filter_map(|p| p.get("items")) {
+                let declared = property_schema(bundle, item, field);
+                let mut given: Vec<Value> =
+                    items.iter().filter_map(|i| i.get(field).cloned()).collect();
+                for held in items.iter_mut() {
+                    if let (Some(declared), Value::Object(members)) = (&declared, &mut *held)
+                        && !members.contains_key(field)
+                        && let Some(id) = (0..MINT_ITEM_ATTEMPTS)
+                            .filter_map(|_| crate::call::header_ids::draw_id_as(rt, declared))
+                            .find(|id| !given.contains(id))
+                    {
+                        given.push(id.clone());
+                        members.insert(field.to_owned(), id);
+                    }
+                    mint_items(rt, item, held, field, depth - 1);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Draws [`mint_items`] tries for an id no other item of its array holds.
+const MINT_ITEM_ATTEMPTS: usize = 8;
 
 /// The schema of the record `op`'s request holds: its body's, at the described
 /// `request.record`.

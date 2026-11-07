@@ -359,6 +359,16 @@ pub(super) fn draw_record_id(rt: &MockRuntime, t: &str, field: &str) -> Option<V
     }
 }
 
+/// An id for a nested item whose identity member's schema is `declared` (a line item's
+/// `id`), drawn as [`draw_record_id`] draws one: as declared, else a plain string, and
+/// valid as declared. `None` when no draw is.
+pub(super) fn draw_id_as(rt: &MockRuntime, declared: &Value) -> Option<Value> {
+    let string = json!({"type": "string"});
+    let string_identity = declared.get("type").and_then(Value::as_str) == Some("string");
+    let checks = IdChecks::new(rt, Some(declared), &string, false)?;
+    draw(rt, Some(declared), &string, string_identity, &checks)
+}
+
 /// Whether `id` can stand in a URL path segment as it is.
 fn url_safe(id: &str) -> bool {
     id.chars()
