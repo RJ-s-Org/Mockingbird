@@ -915,3 +915,51 @@ async fn a_repeated_idempotency_key_replays_an_executed_delete() {
     );
     assert_eq!(h.provider.requests().len(), 1);
 }
+
+/// Deals are numbered: their delete answers `{success, data: {id}}` with an integer id.
+const DEALS: &str = r##"
+openapi: 3.0.0
+info: {title: Deals, version: "1"}
+paths:
+  /deals:
+    post:
+      operationId: createDeal
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Deal"}}}}}
+  /deals/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    get:
+      operationId: getDeal
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Deal"}}}}, "404": {description: missing}}
+    delete:
+      operationId: deleteDeal
+      responses:
+        "200":
+          description: deleted
+          content: {application/json: {schema: {type: object, required: [success, data], properties: {success: {type: boolean}, data: {type: object, required: [id], properties: {id: {type: integer}}}}}}}
+components:
+  schemas:
+    Deal:
+      type: object
+      required: [id, title]
+      properties: {id: {type: integer}, title: {type: string}}
+"##;
+
+#[tokio::test]
+async fn an_envelope_member_holds_the_record_s_id_as_the_record_holds_it() {
+    let (_capture, _guard) = Capture::install();
+    let h = support::harness(
+        DEALS,
+        vec![json!({"id": 7, "title": "big"})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let (status, _, body) = h
+        .send("POST", "/deals", Some(json!({"title": "big"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, headers, body) = h.send("DELETE", "/deals/7", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body, json!({"success": true, "data": {"id": 7}}));
+}

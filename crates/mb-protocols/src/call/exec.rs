@@ -665,7 +665,10 @@ pub(super) fn render(
                 }
             }
         }
-        inner.insert(identity.to_owned(), Value::String(id.to_owned()));
+        // The record's own id as it holds it (`7`, not `"7"`), else the id it is held by.
+        if !record.get(identity).is_some_and(|held| !held.is_null()) {
+            inner.insert(identity.to_owned(), Value::String(id.to_owned()));
+        }
     }
     held.extend(shown.clone());
     // Failing that: every boolean `true`; as drawn and held; the faker's answer with the
