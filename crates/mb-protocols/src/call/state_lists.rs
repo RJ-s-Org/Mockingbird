@@ -155,8 +155,40 @@ fn described_list_of(rt: &MockRuntime, t: &str) -> bool {
 }
 
 /// Whether `call` asks for nothing of the list but a page: each query parameter is
-/// the described paging's, or one that pages the list by its name.
+/// the described paging's, or one that pages the list by its name, and its body holds
+/// nothing but the described paging's members.
 fn asks_only_a_page(rt: &MockRuntime, op: &Operation, call: &OperationCall, q: &ListQuery) -> bool {
+    let bundle = rt.bundle();
+    let paged = |name: &str| {
+        q.pages_with(name)
+            || q.page.as_ref().is_some_and(|p| {
+                [&p.request, &p.size_param]
+                    .into_iter()
+                    .flatten()
+                    .any(|param| {
+                        list_query::body_pointer(bundle, op, param).as_deref() == Some(name)
+                    })
+            })
+    };
+    let body_pages_only = call
+        .body
+        .as_ref()
+        .and_then(Value::as_object)
+        .is_none_or(|members| {
+            members.iter().all(|(name, value)| {
+                let asks_nothing = match value {
+                    Value::Null => true,
+                    Value::String(text) => text.trim().is_empty(),
+                    Value::Array(items) => items.is_empty(),
+                    Value::Object(inner) => inner.is_empty(),
+                    _ => false,
+                };
+                asks_nothing || paged(&format!("/{}", name.replace('~', "~0").replace('/', "~1")))
+            })
+        });
+    if !body_pages_only {
+        return false;
+    }
     if call.query.is_empty() {
         return true;
     }

@@ -18,8 +18,8 @@ use super::{
     AnswerDesc, ChangeDesc, ConcurrencyDesc, DerivedDesc, Extra, FilterDesc, FilterGrammar,
     HeaderRef, IdentityDesc, IdentityHeader, InstructionDesc, InstructionsDesc, LifecycleDesc,
     LongRunning, MAX_BYTES, MAX_DEPTH, OpDesc, OpKind, OrderDesc, PagingDesc, ParamValue,
-    ParentDesc, Pointer, RecordsAt, ScopeDesc, SoftDelete, TargetDesc, TypeDesc, UniqueDesc,
-    VERSION, World,
+    ParentDesc, Pointer, RecordsAt, ScopeDesc, ScopeKind, SoftDelete, TargetDesc, TypeDesc,
+    UniqueDesc, VERSION, World,
 };
 use crate::{Binding, Bundle, Operation, RecordAt, StatusSelector};
 
@@ -1015,6 +1015,10 @@ impl<'a> Ctx<'a> {
                         .pattern
                         .clone()
                         .filter(|pat| self.check_pattern(pat, &p.join("pattern"))),
+                    embedded: parent.embedded.clone().filter(|m| {
+                        let held_in = self.record_schema(&parent.r#type);
+                        self.check_member(held_in, Some(&parent.r#type), m, &p.join("embedded"))
+                    }),
                     extra: Extra::new(),
                 });
             } else {
@@ -1446,10 +1450,24 @@ impl<'a> Ctx<'a> {
             self.unknown(&p, &s.extra);
             let param = self.check_param(op, &s.param, &p.join("param"));
             let member = self.check_member(record, ty, &s.member, &p.join("member"));
-            if param && member {
+            let recursive = match &s.recursive {
+                Some(_) if s.kind != Some(ScopeKind::Prefix) => {
+                    self.refuse(
+                        &p.join("recursive"),
+                        RefusalCode::Invalid,
+                        "`recursive` applies to a `prefix` scope only".to_string(),
+                    );
+                    false
+                }
+                Some(q) => self.check_param(op, q, &p.join("recursive")),
+                None => true,
+            };
+            if param && member && recursive {
                 out.scope = Some(ScopeDesc {
                     param: s.param.clone(),
                     member: s.member.clone(),
+                    kind: s.kind,
+                    recursive: s.recursive.clone(),
                     extra: Extra::new(),
                 });
             }
@@ -1539,6 +1557,14 @@ impl<'a> Ctx<'a> {
                 extra: Extra::new(),
             });
         }
+
+        out.ignores = d
+            .ignores
+            .iter()
+            .enumerate()
+            .filter(|(i, q)| self.check_param(op, q, &path.join("ignores").join(*i)))
+            .map(|(_, q)| q.clone())
+            .collect();
 
         if let Some(h) = &d.idempotency {
             let p = path.join("idempotency");
@@ -1748,7 +1774,19 @@ fn declares_path_param(b: &Bundle, op: &Operation, name: &str) -> bool {
 
 /// A path or query parameter, or a top-level request body member (RPC-style
 /// and non-HTTP operations take their parameters in the body).
+/// A declared path, query or top-level body parameter `name`, or, for a pointer
+/// (`/a/b`), a member of the request body.
 fn declares_param(b: &Bundle, op: &Operation, name: &str) -> bool {
+    if name.starts_with('/') {
+        let Ok(pointer) = Pointer::parse(name) else {
+            return false;
+        };
+        return op
+            .input
+            .body
+            .as_ref()
+            .is_some_and(|body| at_pointer(b, body, &pointer.tokens()).is_some());
+    }
     declares_path_param(b, op, name)
         || has_property(b, op.input.query.as_ref(), |k| k == name)
         || op
@@ -2519,6 +2557,63 @@ mod tests {
         assert_eq!(kept.len(), 2);
         assert_eq!(kept[0].grammar, Some(FilterGrammar::Scim));
         assert_eq!(kept[1].member_prefix.as_deref(), Some("meta"));
+    }
+
+    #[test]
+    fn validate_checks_body_params_prefix_scopes_ignores_and_embedded_parents() {
+        let mut b = folders();
+        op(&mut b, "ListFolders").input.body = Some(json!({"type": "object", "properties": {
+            "path": {"type": "string"},
+            "page": {"type": "object", "properties": {"number": {"type": "integer"}}}
+        }}));
+        let w = world(json!({
+            "types": {
+                "folder": {"parent": {"type": "folder", "member": "parent", "embedded": "nope"}}
+            },
+            "operations": {
+                "ListFolders": {
+                    "scope": {"param": "/path", "member": "parent", "kind": "prefix", "recursive": "/nope"},
+                    "paging": {"style": "page", "request": "/page/number", "size": "/page/size"},
+                    "ignores": ["showDeleted", "/page", "/version"]
+                },
+                "GetFolder": {"scope": {"param": "name", "member": "parent", "recursive": "name"}}
+            }
+        }));
+        let v = validate(&w, &b);
+        let refused: Vec<(String, RefusalCode)> =
+            v.refused.iter().map(|r| (r.path.clone(), r.code)).collect();
+        assert_eq!(
+            refused,
+            vec![
+                (
+                    "/types/folder/parent/embedded".to_owned(),
+                    RefusalCode::Unresolved
+                ),
+                (
+                    "/operations/GetFolder/scope/recursive".to_owned(),
+                    RefusalCode::Invalid
+                ),
+                (
+                    "/operations/ListFolders/scope/recursive".to_owned(),
+                    RefusalCode::Unresolved
+                ),
+                (
+                    "/operations/ListFolders/paging/size".to_owned(),
+                    RefusalCode::Unresolved
+                ),
+                (
+                    "/operations/ListFolders/ignores/2".to_owned(),
+                    RefusalCode::Unresolved
+                ),
+            ]
+        );
+        let list = &v.applied.operations["ListFolders"];
+        assert_eq!(
+            list.paging.as_ref().and_then(|p| p.request.as_deref()),
+            Some("/page/number")
+        );
+        assert_eq!(list.ignores, ["showDeleted", "/page"]);
+        assert!(list.scope.is_none());
     }
 
     #[test]

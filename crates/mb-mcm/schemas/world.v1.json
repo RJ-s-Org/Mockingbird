@@ -32,7 +32,7 @@
     "param": {
       "type": "string",
       "minLength": 1,
-      "description": "A declared request parameter."
+      "description": "A declared request parameter, or a pointer into the request body (`/q`, `/ActiveList/Pagination/PageNumber`)."
     },
     "header": {
       "type": "string",
@@ -221,6 +221,10 @@
         },
         "pattern": {
           "$ref": "#/$defs/pattern"
+        },
+        "embedded": {
+          "$ref": "#/$defs/member",
+          "description": "The parent's array member records of the type live in, when they are held inside their parent."
         }
       },
       "required": [
@@ -492,6 +496,17 @@
             },
             "member": {
               "$ref": "#/$defs/member"
+            },
+            "kind": {
+              "enum": [
+                "eq",
+                "prefix"
+              ],
+              "description": "`eq` (the default): the member holds the parameter's value; `prefix`: the member is a path directly under the parameter's."
+            },
+            "recursive": {
+              "$ref": "#/$defs/param",
+              "description": "With `kind: prefix`, the parameter whose `true` asks for every record below the path."
             }
           },
           "required": [
@@ -622,6 +637,13 @@
           "required": [
             "style"
           ]
+        },
+        "ignores": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/param"
+          },
+          "description": "Request parameters (or body pointers) that ask nothing of a list's items, e.g. an API version."
         },
         "idempotency": {
           "type": "object",
