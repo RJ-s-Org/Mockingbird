@@ -6537,9 +6537,13 @@ async fn an_own_effect_is_owner_checked_as_merged() {
         Arc::clone(&state) as Arc<dyn StateStore>,
     );
     rt.recorder = Some(Arc::clone(&records) as Arc<dyn mb_protocols::RequestRecorder>);
+    // A member no team declares leaves the update to the model, whose effect this is
+    // about: the state-first executor would answer it from the store.
     let req = Request::patch("/orgs/octo/teams/core")
         .header("content-type", "application/json")
-        .body(Body::from(json!({"name": "Platform"}).to_string()))
+        .body(Body::from(
+            json!({"name": "Platform", "notify": false}).to_string(),
+        ))
         .unwrap();
     let resp = http_rest::router(Arc::new(rt)).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);

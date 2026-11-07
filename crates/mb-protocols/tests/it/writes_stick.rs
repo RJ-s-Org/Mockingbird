@@ -95,6 +95,16 @@ impl Harness {
         uri: &str,
         body: Option<Value>,
     ) -> (StatusCode, String, Value) {
+        // These tests are about how an update's answer settles: each update also sends
+        // a member no record declares, which the state-first executor leaves to the
+        // model.
+        let body = match (method, body) {
+            ("PUT" | "PATCH", Some(Value::Object(mut members))) => {
+                members.insert("comment".into(), json!("from the client"));
+                Some(Value::Object(members))
+            }
+            (_, body) => body,
+        };
         let mut req = Request::builder().method(method).uri(uri);
         if body.is_some() {
             req = req.header("content-type", "application/json");

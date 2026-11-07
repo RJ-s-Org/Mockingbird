@@ -218,7 +218,7 @@ async fn an_odata_keyed_record_round_trips_from_state() {
     let (status, _, gone) = h.call("GET", &customer, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{gone}");
     assert!(h.exported().await.is_empty());
-    assert_eq!(h.calls(), 2);
+    assert_eq!(h.calls(), 1, "the patch is the state-first executor's");
 }
 
 #[tokio::test]
@@ -406,7 +406,7 @@ async fn a_record_round_trips_by_its_alternate_key() {
     let (status, _, gone) = h.call("GET", "/carts/key=k-1", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{gone}");
     assert!(h.exported().await.is_empty());
-    assert_eq!(h.calls(), 2);
+    assert_eq!(h.calls(), 1, "the patch is the state-first executor's");
 }
 
 #[tokio::test]

@@ -255,7 +255,9 @@ async fn a_put_replaces_a_map_member_with_the_requests() {
     let answer = json!({"response": {"id": "r1", "fields": {"Name": "n", "Status": "Done"}}, "effects": [
         {"type": "rows", "id": "r1", "set": {"fields": {"Name": "n", "Status": "Done", "Due date": null, "Quantity": null}}},
     ]});
-    let edit = json!({"fields": {"Name": "n", "Status": "Done"}});
+    // A member no row declares (`typecast`) leaves the update to the model, whose
+    // effect this is about: the state-first executor merges an update's objects.
+    let edit = json!({"fields": {"Name": "n", "Status": "Done"}, "typecast": true});
     let stored = after_update(
         ROWS,
         ("rows", "r1", row()),

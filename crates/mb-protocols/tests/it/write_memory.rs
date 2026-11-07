@@ -1401,8 +1401,13 @@ async fn a_write_answered_by_the_faker_is_remembered() {
         ],
     );
     h.call("GET", "/items/i1", None).await;
+    // A member no item declares leaves the update to the model, which fails.
     let (_, source, _) = h
-        .call("PATCH", "/items/i1", Some(json!({"title": "new"})))
+        .call(
+            "PATCH",
+            "/items/i1",
+            Some(json!({"title": "new", "comment": "x"})),
+        )
         .await;
     assert_eq!(source, "fallback");
     assert_eq!(h.memory().await.len(), 1);
@@ -1749,16 +1754,16 @@ async fn an_actions_body_is_never_overlaid_on_its_target() {
     assert_eq!(read["status"], "paid");
 }
 
-/// A null the schema does not allow is not applied, so it is told.
+/// A null the schema does not allow is no value: the state-first executor leaves the
+/// member as it was, and nothing is left to tell.
 #[tokio::test]
-async fn a_null_on_a_non_nullable_member_is_remembered() {
+async fn a_null_on_a_non_nullable_member_is_not_applied() {
     let h = things(vec![pet("old")]);
     h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
     for body in [json!({"name": null}), json!({"meta": null})] {
-        h.call("PUT", "/pets/p1", Some(body.clone())).await;
-        let memory = h.memory().await;
-        let requests = memory[0].data["requests"].as_array().unwrap();
-        assert_eq!(requests.last().unwrap()["body"], body, "{memory:?}");
+        let (status, _, _) = h.call("PUT", "/pets/p1", Some(body.clone())).await;
+        assert!(status.is_success(), "{body}");
+        assert!(h.memory().await.is_empty(), "{:?}", h.memory().await);
     }
     let stored = h
         .store
@@ -1766,7 +1771,8 @@ async fn a_null_on_a_non_nullable_member_is_remembered() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stored.data["name"], "old");
+    assert_eq!(stored.data, pet("old"));
+    assert_eq!(h.calls(), 1);
 }
 
 /// A member counts as shown only at its own path: `"x"` elsewhere is not it.
@@ -2331,9 +2337,10 @@ async fn a_union_member_is_remembered_not_merged() {
     );
 }
 
-/// So too where the union sits beside `properties`: its stale members would mix.
+/// Where the union sits beside `properties`, a request's member is set whole by the
+/// state-first executor: no stale member of another branch mixes in.
 #[tokio::test]
-async fn a_member_beside_a_union_is_remembered_not_merged() {
+async fn a_member_beside_a_union_is_set_whole() {
     let h = things(vec![
         json!({"id": "p1", "name": "x", "form": {"kind": "dog", "bark": true}}),
     ]);
@@ -2346,8 +2353,8 @@ async fn a_member_beside_a_union_is_remembered_not_merged() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stored.data["form"], json!({"kind": "dog", "bark": true}));
-    assert_eq!(h.memory().await.len(), 1);
+    assert_eq!(stored.data["form"], json!({"kind": "cat"}));
+    assert!(h.memory().await.is_empty(), "{:?}", h.memory().await);
 }
 
 /// A map's members are declared by its `additionalProperties`.
@@ -2520,8 +2527,8 @@ async fn a_capture_and_its_refund(h: &Harness) {
     assert!(h.memory().await.is_empty());
 }
 
-/// Updating a child costs its parent nothing, and neither does deleting it: the delete
-/// is executed from state, which tells the parent nothing.
+/// Updating a child costs its parent nothing, and neither does deleting it: both are
+/// executed from state, which tells the parent nothing.
 #[tokio::test]
 async fn a_nested_put_or_delete_does_not_tell_the_parent() {
     let capture = json!({"id": "cap1", "amount": 100, "status": "COMPLETED"});
@@ -2540,13 +2547,13 @@ async fn a_nested_put_or_delete_does_not_tell_the_parent() {
     )
     .await;
     let (_, source, _) = h.call("GET", "/captures/cap1", None).await;
-    assert_eq!(source, "state", "a PUT with its own answer");
-    assert_eq!(h.calls(), before + 1, "only the PUT's own generation");
+    assert_eq!(source, "state", "a PUT executed from state");
+    assert_eq!(h.calls(), before, "the PUT makes no call");
     h.call("DELETE", "/captures/cap1/refunds/ref1", None).await;
-    assert_eq!(h.calls(), before + 1, "the delete makes no call");
+    assert_eq!(h.calls(), before, "the delete makes no call");
     let (_, source, _) = h.call("GET", "/captures/cap1", None).await;
     assert_eq!(source, "state", "the delete told the capture nothing");
-    assert_eq!(h.calls(), before + 1);
+    assert_eq!(h.calls(), before);
 }
 
 /// A body-less action on a child does tell its parent: nothing else will.

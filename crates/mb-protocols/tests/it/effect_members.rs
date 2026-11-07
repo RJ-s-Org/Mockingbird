@@ -58,6 +58,15 @@ async fn call(
     );
     rt.recorder = Some(Arc::clone(&records) as Arc<dyn mb_protocols::RequestRecorder>);
     let mut req = Request::builder().method(method).uri(path);
+    // These tests are about the model's effects on an update: each update also sends a
+    // member no record declares, which the state-first executor leaves to the model.
+    let body = match (method, body) {
+        ("PUT" | "PATCH", Some(Value::Object(mut members))) => {
+            members.insert("comment".into(), json!("from the client"));
+            Some(Value::Object(members))
+        }
+        (_, body) => body,
+    };
     let body = match body {
         Some(body) => {
             req = req.header("content-type", "application/json");

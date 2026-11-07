@@ -1547,7 +1547,8 @@ async fn a_served_page_is_overlaid_and_filtered() {
         ))
         .await;
     assert_eq!(ids_in(&second, "users"), ["u4"], "{second}");
-    assert_eq!(api.provider.requests().len(), 2);
+    // The rename is the state-first executor's.
+    assert_eq!(api.provider.requests().len(), 1);
 }
 
 /// A token is bound to the first request's filters: with others it is the model's.
@@ -2746,8 +2747,8 @@ async fn page_two_sees_a_delete_and_an_update_since_page_one() {
         zoho_page(&[stored_task("t3", "C2", "done")], 2, true),
         "{second}"
     );
-    // The delete needs no model call.
-    assert_eq!(api.provider.requests().len(), 5);
+    // The update and the delete are the state-first executor's.
+    assert_eq!(api.provider.requests().len(), 4);
 }
 
 const PROJECT_NUMBERED: &str = r##"
@@ -4825,7 +4826,8 @@ async fn a_store_served_empty_page_stays_a_200() {
         .await;
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(second["data"], json!([]), "{second}");
-    assert_eq!(api.provider.requests().len(), 4);
+    // The update is the state-first executor's.
+    assert_eq!(api.provider.requests().len(), 3);
 }
 
 /// A nullable object parent (`nullable: true` in 3.0, `type: [object, "null"]` in 3.1)

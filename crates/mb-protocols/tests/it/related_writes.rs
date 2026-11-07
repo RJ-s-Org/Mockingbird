@@ -474,18 +474,14 @@ async fn an_update_by_query_moves_the_record() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(answered["name"], "new name");
     assert_eq!(answered["idList"], "list_100002");
-    let prompt = h.prompt(1);
-    assert!(
-        prompt.contains("kept only when listed as effects"),
-        "the update is told the rule: {prompt}"
-    );
 
     let (_, source, read) = h.call("GET", "/cards/card_100001", None).await;
     assert_eq!(source, "state");
     assert_eq!(read["name"], "new name");
     assert_eq!(read["idList"], "list_100002");
     assert_eq!(read["closed"], false);
-    assert_eq!(h.calls(), 2);
+    // The state-first executor sets what the query names, with no call.
+    assert_eq!(h.calls(), 1);
 }
 
 /// What the query does not name stays as stored, whatever the answer says.

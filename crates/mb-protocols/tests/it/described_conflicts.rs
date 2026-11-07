@@ -217,7 +217,8 @@ async fn an_update_onto_another_records_values_is_refused() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(calls(&h), 3);
+    // The state-first executor answers it from the store.
+    assert_eq!(calls(&h), 2);
 }
 
 fn etag_world() -> Value {
@@ -248,7 +249,8 @@ async fn a_stale_if_match_is_refused_on_the_first_write() {
 
 #[tokio::test]
 async fn a_described_token_advances_after_an_update() {
-    // A string entity tag the model leaves as it was is minted anew.
+    // A string entity tag an update leaves as it was is minted anew: the state-first
+    // executor answers each update, minting it.
     let h = support::described(
         CONTRACT,
         etag_world(),
@@ -276,9 +278,9 @@ async fn a_described_token_advances_after_an_update() {
         )
         .await;
     assert_eq!(status, StatusCode::PRECONDITION_FAILED);
-    assert_eq!(calls(&h), 2);
+    assert_eq!(calls(&h), 1);
 
-    // An integer version in the body, left as it was by the model, goes one up.
+    // An integer version in the body, left as it was by the update, goes one up.
     let h = support::described(
         CONTRACT,
         json!({"types": {"notes": {"concurrency": {"member": "version", "conflict": 409}}}}),
@@ -311,7 +313,7 @@ async fn a_described_token_advances_after_an_update() {
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(calls(&h), 2);
+    assert_eq!(calls(&h), 1);
 }
 
 #[tokio::test]
@@ -344,7 +346,8 @@ async fn if_match_star_and_no_token_pass() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(calls(&h), 3);
+    // The state-first executor answers both.
+    assert_eq!(calls(&h), 1);
 }
 
 /// `extra`'s top-level keys, with `createFolder`'s idempotency header described.
@@ -500,7 +503,8 @@ async fn a_replayed_refusal_is_refused_again() {
     let (status, _, again) = h.send("POST", "/folders", Some(body), &k2).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(refused, again);
-    assert_eq!(calls(&h), 2);
+    // The create's; the rename is the state-first executor's.
+    assert_eq!(calls(&h), 1);
 }
 
 #[tokio::test]
@@ -647,15 +651,16 @@ async fn a_described_token_is_not_minted_past_its_schema() {
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{member}: {body}");
-        // The model's value stays: a minted one would not be a date-time, or would be
-        // four characters long.
+        // The value stays: a minted one would not be a date-time, or would be four
+        // characters long.
         assert_eq!(body[member], held, "{member}");
         assert_eq!(
             h.stored("pages", "g1").await.map(|r| r[member].clone()),
             Some(json!(held)),
             "{member}"
         );
-        assert_eq!(calls(&h), 2);
+        // The create's; the update is the state-first executor's.
+        assert_eq!(calls(&h), 1);
     }
 }
 
@@ -865,7 +870,8 @@ async fn a_refusal_with_a_written_body_is_replayed_for_its_key() {
     let (status, again) = create_alias(&h, "welcome-1", &k2).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(refused, again);
-    assert_eq!(calls(&h), 3);
+    // The create's and the refusal's body; the rename is the state-first executor's.
+    assert_eq!(calls(&h), 2);
 }
 
 /// Aliases unique by `alias`, refused with `422`: the `422` and the read's `404` share

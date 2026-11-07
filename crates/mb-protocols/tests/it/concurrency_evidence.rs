@@ -350,7 +350,8 @@ async fn an_unchanged_etag_is_minted_anew() {
 }
 
 /// No `If-Match`, `If-Match: *`, and the record's first write with an etag it never
-/// held all reach the model; so does a write to a record nothing stores.
+/// held are all answered (by the state-first executor, from the store); a write to a
+/// record nothing stores reaches the model.
 #[tokio::test]
 async fn no_token_a_wildcard_or_nothing_stored_is_never_refused() {
     let h = harness(vec![
@@ -373,7 +374,7 @@ async fn no_token_a_wildcard_or_nothing_stored_is_never_refused() {
         StatusCode::OK,
         "wildcard"
     );
-    assert_eq!(h.calls(), 5, "each reached the model");
+    assert_eq!(h.calls(), 1, "each answered from the store");
     let (status, _, _) = h
         .send(
             "PATCH",
@@ -383,7 +384,7 @@ async fn no_token_a_wildcard_or_nothing_stored_is_never_refused() {
         )
         .await;
     assert_ne!(status, StatusCode::PRECONDITION_FAILED, "nothing stored");
-    assert!(h.calls() > 5, "it reached the model");
+    assert!(h.calls() > 1, "it reached the model");
 }
 
 fn ledger(name: &str, revision: i64) -> Value {
