@@ -122,6 +122,8 @@ YAML or JSON, `version: 1`. Every key is optional; an absent key falls back to t
 | `ignores` | `[param]` | Request parameters that ask nothing of a list's items (an API version, a detail level, an include switch): a list from state reads past them. One the list's `filters`, `scope` or `paging` reads, or named as an item member, is refused. A `deep_object` filter's `param` is a query parameter, never a body pointer. |
 | `idempotency` | `{header}` | The header that makes a replay answer as the first call did. |
 | `not_found` | status | The declared status of a missing record. |
+| `fields` | `{param, separator?, always?, default?}` | A read's or list's sparse fieldset parameter (`fields=id,name`, `$select=name`): a record from state, or each listed item, answers only the members it names (split on `separator`, `,` by default; `a/b` or `a.b` a member inside an object), plus the `always` members (`[id]`). A request not sending it answers the `default` members (`[]`: the `always` ones alone), or the whole record when `default` is absent. `*`, or a value in a grammar of its own (`items(id)`), answers the whole record; a named member the record does not hold is left out. A list takes the parameter as described, never as an undescribed one. |
+| `queue` | `{effect: append \| take, count?, requeue?, redelivered?}` | An action's messages on its target, first in first out ([Message queues](#message-queues)). |
 
 A list's `param` (of `scope`, `filters`, `paging.request`, `paging.size`, `ignores`) names a path or query parameter, or a member of the request body: a JSON pointer (`/q`, `/ActiveList/Pagination/PageNumber`), or a plain name the body declares and the path and query do not (`limit` of a `POST` search).
 

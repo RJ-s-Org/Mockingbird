@@ -76,6 +76,7 @@ impl Fallback {
 mod action;
 mod create;
 mod embedded;
+mod fields;
 mod list;
 mod patches;
 mod writes;
@@ -386,6 +387,8 @@ async fn held_read(
     match kept.as_ref().and_then(|kept| held(Some(kept))).or(bare) {
         Some(mut served) => {
             write_memory::note_not_caught_up(&mut served, plan, Some(stored), &earlier);
+            // A described fields parameter narrows the record the answer holds.
+            fields::narrow_read(rt, op, call, served.body.as_mut());
             HeldRead::Served(Box::new(served))
         }
         None => HeldRead::Unrendered(Some(earlier), why(kept.as_ref())),

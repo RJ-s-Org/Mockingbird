@@ -951,6 +951,81 @@ async fn a_link_header_names_the_next_page_s_url() {
     assert!(h.provider.requests().is_empty());
 }
 
+/// Products whose read and list take a sparse fieldset (`fields=id,name`).
+const FIELDED: &str = r##"
+openapi: 3.0.0
+info: {title: Fielded, version: "1"}
+paths:
+  /products:
+    get:
+      operationId: listProducts
+      parameters: [{name: fields, in: query, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: {data: {type: array, items: {$ref: "#/components/schemas/Product"}}}
+  /products/{id}:
+    get:
+      operationId: getProduct
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: fields, in: query, schema: {type: string}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Product"}}}}}
+components:
+  schemas:
+    Product:
+      type: object
+      required: [id, name, sku]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        sku: {type: string}
+        size: {type: object, properties: {w: {type: integer}, h: {type: integer}}}
+"##;
+
+#[tokio::test]
+async fn a_fields_parameter_narrows_a_read_and_each_listed_item() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {
+        "getProduct": {"fields": {"param": "fields", "always": ["id"], "default": []}},
+        "listProducts": {"fields": {"param": "fields"}}
+    }});
+    let h = support::described(FIELDED, world, Vec::new());
+    let held: Vec<Value> = (1..=2)
+        .map(|i| {
+            json!({"id": format!("p{i}"), "name": format!("lamp {i}"), "sku": format!("L{i}"),
+                        "size": {"w": i, "h": 9}})
+        })
+        .collect();
+    h.hold("products", &held).await;
+    // The members named, the identity always, a dotted one inside its object.
+    let (source, read) = get(&h, "/products/p1?fields=name,size.w").await;
+    assert_eq!(source, "state", "{read}");
+    assert_eq!(
+        read,
+        json!({"id": "p1", "name": "lamp 1", "size": {"w": 1}})
+    );
+    // Not sent: the default members, here none but the identity.
+    let (_, bare) = get(&h, "/products/p1").await;
+    assert_eq!(bare, json!({"id": "p1"}));
+    // `*` names everything.
+    let (_, whole) = get(&h, "/products/p1?fields=*").await;
+    assert_eq!(whole, held[0]);
+    // A list narrows each item, and takes the parameter as described.
+    let (source, listed) = get(&h, "/products?fields=sku").await;
+    assert_eq!(source, "state", "{listed}");
+    assert_eq!(listed, json!({"data": [{"sku": "L1"}, {"sku": "L2"}]}));
+    let (_, all) = get(&h, "/products").await;
+    assert_eq!(all["data"], json!(held));
+    assert_eq!(capture.of("listProducts"), [None, None]);
+    assert!(h.provider.requests().is_empty());
+}
+
 /// Twilio's messages: a next-page URL beside the list, a page size and a page token
 /// that shares its first word.
 const MESSAGES: &str = r##"
