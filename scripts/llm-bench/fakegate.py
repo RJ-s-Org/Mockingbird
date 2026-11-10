@@ -171,12 +171,28 @@ def target_dir():
     return os.path.abspath(os.environ.get("CARGO_TARGET_DIR") or os.path.expanduser("~/.cache/mb-targets/lane-1"))
 
 
+def touch_sources(tree):
+    """Marks every workspace source of `tree` as just changed. Cargo shares one fingerprint
+    per workspace crate across every checkout that builds into a lane and decides staleness
+    by mtime, so without this a build after another checkout's build is a no-op that leaves
+    that checkout's binary in the lane."""
+    now = time.time()
+    paths = [os.path.join(tree, "Cargo.toml")]
+    for root, dirs, files in os.walk(os.path.join(tree, "crates")):
+        dirs[:] = [d for d in dirs if d not in ("target", "node_modules", ".git")]
+        paths += [os.path.join(root, f) for f in files]
+    for path in paths:
+        with contextlib.suppress(FileNotFoundError):
+            os.utime(path, (now, now))
+
+
 def build(sha, work, claims):
-    """The release binary of `sha`, built in its own worktree into the shared lane, so a
-    second build recompiles only the crates that changed, and copied out under `work`.
-    Other builds use the lane too (the lock only keeps fakegates apart), so after the copy
-    the build runs again: it is a no-op that leaves the same binary only when nothing else
-    linked there in between; otherwise the copy is taken again."""
+    """The release binary of `sha`, built in its own worktree into the shared lane and
+    copied out under `work`. The touch, the build and the copy hold one lock: a fakegate
+    building another checkout between the build and the copy would otherwise leave its
+    binary there to be copied. Other builds in the lane do not take the lock; the touch
+    makes them see our sources as newer, and the window left is between our build and the
+    copy."""
     binary = os.path.join(work, "bin", f"mockingbird-{sha[:12]}")
     if os.access(binary, os.X_OK):
         return binary
@@ -185,23 +201,16 @@ def build(sha, work, claims):
     target = target_dir()
     built = os.path.join(target, "release", "mockingbird")
     env = dict(os.environ, CARGO_TARGET_DIR=target)
-
-    def cargo():
+    with world_author.file_lock(os.path.join(target, "fakegate-build.lock")):
+        print(f"fakegate: building {sha[:12]} into {target}", file=sys.stderr)
+        touch_sources(tree)
         done = subprocess.run(["cargo", "build", "--release", "-q", "-p", "mockingbird-cli"], cwd=tree, env=env)
         if done.returncode != 0:
             raise SystemExit(f"{sha[:12]}: build failed")
-
-    with world_author.file_lock(os.path.join(target, "fakegate-build.lock")):
-        print(f"fakegate: building {sha[:12]} into {target}", file=sys.stderr)
-        cargo()
-        for _ in range(5):
-            shutil.copy2(built, binary + ".tmp")
-            cargo()
-            if world_author.sha256_file(built) == world_author.sha256_file(binary + ".tmp"):
-                os.replace(binary + ".tmp", binary)
-                return binary
-        os.remove(binary + ".tmp")
-        raise SystemExit(f"{sha[:12]}: another build kept replacing the binary in {target}")
+        shutil.copy2(built, binary + ".tmp")
+        os.replace(binary + ".tmp", binary)
+    print(f"fakegate: {sha[:12]} binary sha256 {world_author.sha256_file(binary)}", file=sys.stderr)
+    return binary
 
 
 def checkout(sha, work, claims):
@@ -270,7 +279,7 @@ def side_meta(tree, binary, suites, models, cache, e2e=None):
         inputs[s] = {os.path.relpath(c, tree): [world_author.sha256_file(c),
                      world_author.sha256_file(world_author.cache_path(cache, aid, world_author.sha256_file(c))) if aid else None]
                      for c in contracts}
-    meta = {"binary": world_author.sha256_file(binary), "tree": git("rev-parse", "HEAD", cwd=tree),
+    meta = {"binary_sha256": world_author.sha256_file(binary), "tree": git("rev-parse", "HEAD", cwd=tree),
             "authors": groups, "agent_uncovered": uncovered, "inputs": inputs}
     if e2e:
         meta["e2e"] = e2e_meta(tree, suites, e2e)
@@ -402,6 +411,7 @@ def run_fresh(out, done, meta, name, tree, binary, suites, jobs, cache):
 
 def print_report(report, cand_name, base_sha, meta, bmeta, noise):
     print(f"fake-LLM gate: {cand_name} (tree {meta['tree'][:12]}) vs base {base_sha[:12]} (noise ±{noise})")
+    print(f"binaries (sha256): candidate {meta['binary_sha256']}, base {bmeta['binary_sha256']}")
     print(f"agent tier authors: {meta['authors']}; not on the agent tier (no cached descriptions): {meta['agent_uncovered']}")
     if (bmeta["authors"], bmeta["agent_uncovered"]) != (meta["authors"], meta["agent_uncovered"]):
         print(f"WARNING: the base took other descriptions: {bmeta['authors']}; uncovered {bmeta['agent_uncovered']}")
@@ -500,7 +510,7 @@ def gate(a, work, claims):
     report = compare(base_rows, cand_rows, a.noise)
     if a.json:
         with open(a.json, "w") as f:
-            json.dump({"base": base_sha, "candidate": name, "meta": cmeta,
+            json.dump({"base": base_sha, "candidate": name, "meta": cmeta, "base_meta": meta,
                        "tiers": {t: dict(r, lost=[list(k) for k in r["lost"]], gained=[list(k) for k in r["gained"]],
                                          missing=[list(k) for k in r["missing"]],
                                          exec_new=[list(k) for k in r["exec_new"]],

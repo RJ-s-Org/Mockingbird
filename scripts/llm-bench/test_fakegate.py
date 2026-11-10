@@ -3,6 +3,7 @@ python3 -m unittest discover -s scripts/llm-bench -p 'test_*.py'"""
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -88,7 +89,7 @@ class LoadTest(unittest.TestCase):
 
 class ReuseTest(unittest.TestCase):
     def test_results_are_reused_only_for_the_same_inputs(self):
-        meta = {"binary": "b1", "tree": "t1", "authors": {}, "agent_uncovered": [], "inputs": {}}
+        meta = {"binary_sha256": "b1", "tree": "t1", "authors": {}, "agent_uncovered": [], "inputs": {}}
         with tempfile.TemporaryDirectory() as d:
             done = os.path.join(d, "done")
             self.assertFalse(fakegate.reusable(done, meta))
@@ -105,7 +106,7 @@ class ReuseTest(unittest.TestCase):
         binary = os.path.join(fakegate.HERE, "fake_llm.py")
         meta = fakegate.side_meta(fakegate.REPO, binary, ["journeys_blind11"], list(fakegate.DEFAULT_MODELS), cache)
         self.assertEqual(meta["tree"], fakegate.git("rev-parse", "HEAD"))
-        self.assertEqual(meta["binary"], world_author.sha256_file(binary))
+        self.assertEqual(meta["binary_sha256"], world_author.sha256_file(binary))
         entries = meta["inputs"]["journeys_blind11"]
         self.assertEqual(len(entries), 5)
         self.assertTrue(all(contract and description for contract, description in entries.values()))
@@ -113,7 +114,7 @@ class ReuseTest(unittest.TestCase):
 
 class RunDirTest(unittest.TestCase):
     def test_other_inputs_get_another_directory(self):
-        meta = {"binary": "b", "tree": "t", "authors": {"m": ["s1", "s2"]}, "agent_uncovered": [],
+        meta = {"binary_sha256": "b", "tree": "t", "authors": {"m": ["s1", "s2"]}, "agent_uncovered": [],
                 "inputs": {"s1": {}, "s2": {}}}
         subset = dict(meta, authors={"m": ["s1"]}, inputs={"s1": {}})
         self.assertEqual(fakegate.run_dir("/w", "abc", meta), fakegate.run_dir("/w", "abc", dict(meta)))
@@ -238,28 +239,59 @@ class CleanupTest(unittest.TestCase):
 
 @mock.patch.object(fakegate, "git", fake_git)
 class BuildTest(unittest.TestCase):
-    def test_a_binary_another_build_linked_in_the_lane_is_not_kept(self):
+    def test_touch_build_and_copy_hold_one_lock(self):
         with tempfile.TemporaryDirectory() as work, tempfile.TemporaryDirectory() as lane:
             built = os.path.join(lane, "release", "mockingbird")
             os.makedirs(os.path.dirname(built))
-            # Our build, then another build's binary lands in the lane before the copy; the
-            # next build relinks ours, and the one after is a no-op.
-            linked = iter([b"another commit", b"ours", None])
+            lock = os.path.join(lane, "fakegate-build.lock")
+            tree = os.path.join(work, "src-" + "c" * 12)
+            source = os.path.join(tree, "crates", "x", "src", "lib.rs")
+            seen = []
+
+            def held(step):
+                with open(lock, "a") as f:
+                    try:
+                        fakegate.fcntl.flock(f, fakegate.fcntl.LOCK_EX | fakegate.fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        seen.append(step)
+                        return
+                self.fail(f"{step} ran without the build lock")
+
+            def worktree_add(*args, cwd=None, check=True):
+                fake_git(*args)
+                if args[:2] == ("worktree", "add"):
+                    os.makedirs(os.path.dirname(source))
+                    open(source, "w").close()
+                    os.utime(source, (1, 1))  # older than any build output
+                return ""
 
             def cargo(cmd, cwd, env):
+                held("build")
                 self.assertEqual(env["CARGO_TARGET_DIR"], lane)
-                data = next(linked)
-                if data is not None:
-                    with open(built, "wb") as f:
-                        f.write(data)
-                os.chmod(built, 0o755)
+                self.assertGreater(os.path.getmtime(source), 1, "the sources were not touched before the build")
+                with open(built, "wb") as f:
+                    f.write(b"ours")
                 return subprocess.CompletedProcess(cmd, 0)
 
+            real_copy, real_touch = shutil.copy2, fakegate.touch_sources
+
+            def touch(t):
+                held("touch")
+                return real_touch(t)
+
+            def copy(src, dst):
+                held("copy")
+                return real_copy(src, dst)
+
+            claims = []
             with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": lane}), \
-                    mock.patch.object(fakegate.subprocess, "run", cargo):
-                claims = []
+                    mock.patch.object(fakegate, "git", worktree_add), \
+                    mock.patch.object(fakegate.subprocess, "run", cargo), \
+                    mock.patch.object(fakegate.shutil, "copy2", copy), \
+                    mock.patch.object(fakegate, "touch_sources", touch):
                 binary = fakegate.build("c" * 40, work, claims)
-                fakegate.cleanup(work, claims)
+            fakegate.cleanup(work, claims)
+            self.assertEqual(seen, ["touch", "build", "copy"])
             with open(binary, "rb") as f:
                 self.assertEqual(f.read(), b"ours")
 
