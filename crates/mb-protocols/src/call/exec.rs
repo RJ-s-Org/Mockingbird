@@ -79,6 +79,7 @@ mod embedded;
 mod fields;
 mod list;
 mod patches;
+mod queue;
 mod writes;
 
 /// What [`run`] did with a call.

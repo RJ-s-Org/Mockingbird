@@ -1,6 +1,7 @@
 //! Actions (step 5 of the plan): an action whose description sets members of its
 //! target (a `transition`, `changes`) sets them on the held target, stores it, and
-//! answers it, with no LLM call. Any other action generates, as does one on a target
+//! answers it, with no LLM call; one whose description gives it a `queue` puts messages
+//! on its target or takes them off ([`super::queue`]). Any other action generates, as does one on a target
 //! behind writes that write memory keeps for it.
 
 use mb_mcm::world::OpKind;
@@ -30,6 +31,10 @@ pub(super) async fn run(
     let rt = state.rt;
     let op = plan.op;
     let kind = OpKind::Action;
+    // A message queue's publish or get ([`super::queue`]).
+    if let Some(queue) = rt.described().op(&op.id).and_then(|d| d.queue.as_ref()) {
+        return super::queue::run(state, plan, call, held, response_schema, queue).await;
+    }
     if !transitions::sets_members(rt, op) {
         fell_back(rt, plan, kind, "undescribed");
         return Ran::Generate(None);

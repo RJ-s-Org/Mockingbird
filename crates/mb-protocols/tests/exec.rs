@@ -1168,6 +1168,131 @@ async fn an_envelope_member_holds_the_record_s_id_as_the_record_holds_it() {
     assert_eq!(body, json!({"success": true, "data": {"id": 7}}));
 }
 
+/// Queues a message is published to (`routed`) and got from, oldest first, `count` at a
+/// time, kept or removed by `ackmode`.
+const QUEUES: &str = r##"
+openapi: 3.0.0
+info: {title: Queues, version: "1"}
+paths:
+  /queues:
+    post:
+      operationId: createQueue
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Queue"}}}}}
+  /queues/{name}:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getQueue
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Queue"}}}}}
+  /queues/{name}/publish:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: publish
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {payload: {type: string}, routing_key: {type: string}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {routed: {type: boolean}}}}}}
+  /queues/{name}/get:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: getMessages
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                count: {type: integer}
+                ackmode: {type: string, enum: [ack_requeue_true, ack_requeue_false]}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Message"}}}}}
+components:
+  schemas:
+    Queue:
+      type: object
+      required: [name]
+      properties: {name: {type: string}, durable: {type: boolean}}
+    Message:
+      type: object
+      properties: {payload: {type: string}, routing_key: {type: string}, redelivered: {type: boolean}}
+"##;
+
+#[tokio::test]
+async fn a_queue_hands_out_its_messages_oldest_first_kept_or_removed() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"types": {"queues": {"identity": {"member": "name"}}}, "operations": {
+        "publish": {"kind": "action", "type": "queues", "target": {"path_param": "name"},
+                    "queue": {"effect": "append"}},
+        "getMessages": {"kind": "action", "type": "queues", "target": {"path_param": "name"},
+                        "queue": {"effect": "take", "count": "/count",
+                                  "requeue": {"at": "/ackmode", "value": ["ack_requeue_true"]},
+                                  "redelivered": "redelivered"}}
+    }});
+    let h = support::harness(
+        QUEUES,
+        vec![json!({"name": "audit", "durable": true})],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    let (status, _, body) = h
+        .send("POST", "/queues", Some(json!({"name": "audit"})), SEEDED)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    for payload in ["one", "two"] {
+        let sent = json!({"payload": payload, "routing_key": "audit"});
+        let (status, headers, body) = h
+            .send("POST", "/queues/audit/publish", Some(sent), &[])
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(source(&headers), "state");
+        assert_eq!(body, json!({"routed": true}));
+    }
+    let get = |count: u64, ackmode: &str| {
+        let body = json!({"count": count, "ackmode": ackmode});
+        let h = &h;
+        async move {
+            let (status, _, body) = h.send("POST", "/queues/audit/get", Some(body), &[]).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body
+        }
+    };
+    let message = |payload: &str, redelivered: bool| json!({"payload": payload, "routing_key": "audit", "redelivered": redelivered});
+    // The oldest first, put back and then marked redelivered.
+    assert_eq!(
+        get(1, "ack_requeue_true").await,
+        json!([message("one", false)])
+    );
+    assert_eq!(
+        get(5, "ack_requeue_true").await,
+        json!([message("one", true), message("two", false)])
+    );
+    // Taken off for good.
+    assert_eq!(
+        get(1, "ack_requeue_false").await,
+        json!([message("one", true)])
+    );
+    assert_eq!(
+        get(5, "ack_requeue_false").await,
+        json!([message("two", true)])
+    );
+    assert_eq!(get(5, "ack_requeue_false").await, json!([]));
+    assert_eq!(
+        h.provider.requests().len(),
+        1,
+        "only the create asked the model"
+    );
+    let lines = capture.0.lock().unwrap().clone();
+    assert!(
+        lines
+            .iter()
+            .filter(|l| l.operation == "publish" || l.operation == "getMessages")
+            .all(|l| l.exec == "action" && l.exec_fallback.is_none()),
+        "{lines:?}"
+    );
+}
+
 /// Items with a lifecycle, acted on by actions answering the item (`archiveItem`),
 /// nothing (`starItem`), an acknowledgement (`renameItem`), the item in an envelope
 /// (`pinItem`; `boostItem`, whose envelope also requires a `receipt` the faker draws;
