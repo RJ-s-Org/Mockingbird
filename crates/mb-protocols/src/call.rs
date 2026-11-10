@@ -126,7 +126,7 @@ pub(crate) fn target_id(op: &Operation, call: &OperationCall) -> Option<String> 
     let from_body = || {
         identity
             .and_then(|i| i.input_field.as_deref())
-            .and_then(|f| call.body.as_ref()?.get(f))
+            .and_then(|f| mb_mcm::member_at(call.body.as_ref()?, f))
             .and_then(id_string)
     };
     if op.kind == OperationKind::Command(Effect::Create)
@@ -158,6 +158,32 @@ pub(crate) fn target_id(op: &Operation, call: &OperationCall) -> Option<String> 
     call.path_params
         .get(&last_path_param(path)?)
         .and_then(id_string)
+}
+
+/// [`target_id`], else, where the request body names the record by its input field and
+/// leaves that out, the first identity alternate the description gives the operation's
+/// type ([`records::alternates`]) that the body holds, beside where the input field would
+/// be (`Item.SKU` for `Item.ItemID`), as a path value may name it by one.
+pub(crate) fn named_target(
+    rt: &MockRuntime,
+    op: &Operation,
+    call: &OperationCall,
+) -> Option<String> {
+    if let Some(id) = target_id(op, call) {
+        return Some(id);
+    }
+    let field = op.identity.as_ref()?.input_field.as_deref()?;
+    let body = call.body.as_ref().filter(|b| b.is_object())?;
+    let parent = field.rsplit_once('.').map(|(parent, _)| parent);
+    records::alternates(rt, op.resource_type.as_deref()?)
+        .iter()
+        .find_map(|alternate| {
+            let at = match parent {
+                Some(parent) => format!("{parent}.{alternate}"),
+                None => alternate.clone(),
+            };
+            mb_mcm::member_at(body, &at).and_then(id_string)
+        })
 }
 
 /// The last parameter of a route template, when it alone names something:
@@ -469,7 +495,7 @@ pub(crate) async fn prepare<'a>(
         state.touch(session).instrument(state_span()).await;
         return Prepared::Answered(Box::new(replay));
     }
-    let mut target_id = target_id(op, call);
+    let mut target_id = named_target(rt, op, call);
     // Before any state is read: an answer generated from older state must
     // not be cached after a write that lands meanwhile.
     let since = rt.state.response_cache().map(|c| c.epoch(session));

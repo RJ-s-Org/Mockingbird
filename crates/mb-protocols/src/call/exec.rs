@@ -28,8 +28,8 @@ use super::write_memory::Earlier;
 use super::writes::store_one;
 use super::{
     CallPlan, OperationCall, StateAccess, collection_of, deleted, derived, envelopes, id_string,
-    minted, plain, records, replays, serve_held, state_lists, state_span, target_id, tokens, world,
-    write_memory,
+    minted, named_target, plain, records, replays, serve_held, state_lists, state_span, tokens,
+    world, write_memory,
 };
 
 /// Why a classified call goes on to generation.
@@ -139,7 +139,8 @@ pub(super) fn classify(
         })
     {
         Some(Fallback::NoIdentity)
-    } else if !matches!(kind, OpKind::Create | OpKind::List) && target_id(op, call).is_none() {
+    } else if !matches!(kind, OpKind::Create | OpKind::List) && named_target(rt, op, call).is_none()
+    {
         Some(Fallback::NoTarget)
     } else {
         None

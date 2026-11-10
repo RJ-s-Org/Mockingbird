@@ -91,6 +91,7 @@
 //! effect) answers no `304` until a read serves it again. A record whose value was
 //! never kept answers no `304`.
 
+use mb_mcm::{member_at, set_member_at};
 use mb_state::INTERNAL_TYPE;
 use sha2::{Digest, Sha256};
 
@@ -590,7 +591,7 @@ fn stale_described(
     member: &str,
     header: Option<&str>,
 ) -> bool {
-    let Some(now) = target.data.get(member).filter(|v| as_text(v).is_some()) else {
+    let Some(now) = member_at(&target.data, member).filter(|v| as_text(v).is_some()) else {
         return false;
     };
     if let Some(header) = header
@@ -598,11 +599,12 @@ fn stale_described(
     {
         return sent_header(call, header).is_some_and(|values| !holds(header, &values, now));
     }
-    let sent = match call.body.as_ref() {
-        Some(Value::Object(body)) => body.get(member),
-        _ => None,
-    }
-    .or_else(|| call.query.get(member));
+    let sent = call
+        .body
+        .as_ref()
+        .filter(|b| b.is_object())
+        .and_then(|b| member_at(b, member))
+        .or_else(|| call.query.get(member));
     sent.is_some_and(|sent| compared(sent).is_some() && stale(sent, now))
 }
 
@@ -663,7 +665,7 @@ pub(super) async fn check(
         Some(Value::Object(members)) => Some(members),
         _ => None,
     };
-    let current = |member: &str| target.data.get(member).filter(|v| as_text(v).is_some());
+    let current = |member: &str| member_at(&target.data, member).filter(|v| as_text(v).is_some());
     let headers = sent_headers(op, call);
     let is_confirmed = |member: &str| confirmed.iter().any(|m| m == member);
 
@@ -753,7 +755,10 @@ pub(super) async fn check(
     {
         // The client sets it anew: it is the client's.
         let set_anew = |member: &str| {
-            body.and_then(|b| b.get(member))
+            call.body
+                .as_ref()
+                .filter(|_| body.is_some())
+                .and_then(|b| member_at(b, member))
                 .or_else(|| call.query.get(member))
                 .is_some_and(|s| compared(s) != current(member).and_then(compared))
         };
@@ -874,7 +879,7 @@ pub(super) async fn check(
         }
         // A described token advances with every update, minted anew when left as it was.
         if let Some((Some(member), header, _)) = &described
-            && held.get(member).and_then(as_text).is_some()
+            && current(member).is_some()
             && !set_anew(member)
         {
             advance(member, true, &mut advancing);
@@ -925,7 +930,10 @@ pub(super) async fn after_update(
     let mut confirmed = tokens.confirmed.clone();
     let mut minted = Map::new();
     for member in &tokens.advancing {
-        let (Some(was), Some(now)) = (before.data.get(member), after.data.get(member)) else {
+        let (Some(was), Some(now)) = (
+            member_at(&before.data, member),
+            member_at(&after.data, member),
+        ) else {
             continue;
         };
         let (Some(was_text), Some(now_text)) = (compared(was), compared(now)) else {
@@ -948,17 +956,17 @@ pub(super) async fn after_update(
             confirmed.push(member.clone());
         }
     }
-    if !minted.is_empty()
-        && let Value::Object(data) = &mut after.data
-    {
-        data.extend(minted.clone());
+    if !minted.is_empty() && after.data.is_object() {
+        for (member, new) in &minted {
+            set_member_at(&mut after.data, member, new.clone());
+        }
         state.upsert(session, after).await;
-        if let Some(Value::Object(record)) = served {
+        if let Some(record) = served.filter(|r| r.is_object()) {
             for (member, new) in &minted {
-                let shows_old = record.get(member).and_then(compared)
-                    == before.data.get(member).and_then(compared);
+                let shows_old = member_at(record, member).and_then(compared)
+                    == member_at(&before.data, member).and_then(compared);
                 if shows_old {
-                    record.insert(member.clone(), new.clone());
+                    set_member_at(record, member, new.clone());
                 }
             }
         }
@@ -1028,7 +1036,7 @@ pub(super) fn advance(
     after: &mut Value,
 ) {
     for member in &tokens.mintable {
-        let (Some(was), Some(now)) = (before.get(member), after.get(member)) else {
+        let (Some(was), Some(now)) = (member_at(before, member), member_at(after, member)) else {
             continue;
         };
         if compared(was) != compared(now) {
@@ -1036,9 +1044,8 @@ pub(super) fn advance(
         }
         if let Some(new) =
             mint(was, &format!("{t}\0{id}")).filter(|new| mint_fits(rt, t, member, new))
-            && let Value::Object(record) = after
         {
-            record.insert(member.clone(), new);
+            set_member_at(after, member, new);
         }
     }
 }
