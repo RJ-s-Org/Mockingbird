@@ -739,6 +739,18 @@ fn resolve<'a>(n: &'a Node, scope: &mut Vec<&'a str>) -> Result<(), Fail> {
                 ))
             }
         }
+        Kind::Index(base, _) if is_request(base, scope) => Err(Fail::new(
+            n.pos,
+            "request cannot be indexed: use request.body, .query, .path or .headers",
+        )),
+        Kind::Has(base, part)
+            if is_request(base, scope) && !REQUEST_PARTS.contains(&part.as_str()) =>
+        {
+            Err(Fail::new(
+                n.pos,
+                format!("request has no '{part}': use request.body, .query, .path or .headers"),
+            ))
+        }
         Kind::Comp {
             var, range, body, ..
         } => {

@@ -232,7 +232,23 @@ fn number_policy() {
     assert_eq!(six_halves, json!(3));
     assert!(six_halves.is_i64(), "6 / 2 stays an int");
     assert!(ok("1 + 2").is_i64());
-    assert!(ok("1.0 + 2").is_f64());
+    // An integral result is an int, however its operands were spelled.
+    assert!(ok("1.0 + 2").is_i64());
+    assert!(ok("1.5 + 1.5").is_i64());
+    assert_eq!(ok("(1.5 + 1.5) % 2"), json!(1));
+    let two = json!({"n": 2.0});
+    assert_eq!(run_with("record.n % 2", &two, None), Ok(json!(0)));
+    assert_eq!(
+        run_with("record.n", &two, None),
+        Ok(json!(2.0)),
+        "passed through as spelled"
+    );
+    assert!(ok("0.5 + 0.25").is_f64());
+    assert_eq!(ok("string(1.5 * 2)"), json!("3"));
+    // Ints and doubles compare exactly, beyond 2^53 too.
+    assert_eq!(ok("9007199254740993 == 9007199254740992.0"), json!(false));
+    assert_eq!(ok("9007199254740993 > 9007199254740992.0"), json!(true));
+    assert_eq!(ok("9223372036854775807 < 1e19"), json!(true));
     assert_eq!(ok("-7 / 2"), json!(-3.5));
     assert_eq!(ok("7 % 3"), json!(1));
     assert_eq!(ok("-7 % 3"), json!(-1));
@@ -244,7 +260,7 @@ fn number_policy() {
         ok("record.amount_refunded + request.body.frac"),
         json!(502.5)
     );
-    assert_eq!(ok("request.body.frac * 2"), json!(5.0));
+    assert_eq!(ok("request.body.frac * 2"), json!(5));
     assert_eq!(
         ok("record.amount == 1000.0 && request.body.frac > 2"),
         json!(true)
@@ -273,7 +289,8 @@ fn number_policy() {
     }
     assert!(eval_err("1 / 0").contains("division by zero"));
     assert!(eval_err("1 % 0").contains("division by zero"));
-    assert!(eval_err("1.0 / 0").contains("not a finite number"));
+    assert!(eval_err("1.0 / 0").contains("division by zero"));
+    assert!(eval_err("1.5 / 0").contains("not a finite number"));
     assert!(eval_err("1.5 % 1").contains("'%' needs two ints"));
     assert!(eval_err("1e308 * 10").contains("not a finite number"));
     // a u64 beyond i64 is a double
@@ -331,7 +348,7 @@ fn string_functions() {
     assert_eq!(ok("int('42')"), json!(42));
     assert_eq!(ok("int(2.9)"), json!(2));
     assert_eq!(ok("int(-2.9)"), json!(-2));
-    assert_eq!(ok("double(2)"), json!(2.0));
+    assert_eq!(ok("double(2)"), json!(2), "an integral result is an int");
     assert_eq!(ok("double('2.5')"), json!(2.5));
     assert!(eval_err("int('x')").contains("cannot parse"));
     assert!(eval_err("int(1e19)").contains("out of range"));
@@ -439,7 +456,7 @@ fn list_macros() {
     assert_eq!(ok("[1, 2, 3].filter(x, x % 2 == 1)"), json!([1, 3]));
     assert_eq!(
         ok("request.body.lines.map(l, l.price * l.qty)"),
-        json!([6, 6.0])
+        json!([6, 6])
     );
     assert_eq!(
         ok("{'a': 1, 'b': 2}.map(k, k)"),
@@ -476,10 +493,7 @@ fn global_macros_with_it() {
     assert!(ok("sum([1, 2, 3], it)").is_i64());
     assert_eq!(ok("sum([{'a': 1}, {'a': 2.5}], it.a)"), json!(3.5));
     assert_eq!(ok("sum([], it)"), json!(0));
-    assert_eq!(
-        ok("sum(request.body.lines, it.price * it.qty)"),
-        json!(12.0)
-    );
+    assert_eq!(ok("sum(request.body.lines, it.price * it.qty)"), json!(12));
     // an inner `it` shadows an outer one
     assert_eq!(
         ok("sum([1, 2], count('Incident', it.amount > 5))"),
@@ -573,6 +587,20 @@ fn unknown_names_and_arity() {
             .message
             .contains("request has no 'method'")
     );
+    for src in ["request['body'].secret", "request['nope']", "request[0]"] {
+        assert!(
+            compile_err(src)
+                .message
+                .contains("request cannot be indexed"),
+            "{src}"
+        );
+    }
+    assert!(
+        compile_err("has(request.method)")
+            .message
+            .contains("request has no 'method'")
+    );
+    assert_eq!(ok("has(request.body)"), json!(true));
     assert!(
         compile_err("[1].map(record, 1)")
             .message
@@ -725,10 +753,76 @@ fn step_cap() {
     .unwrap();
     let e = p.eval(&b, &mut f).unwrap_err();
     assert!(e.message.contains("budget"), "{e}");
+    // count and exists pay for every record the host returns, even when
+    // exists stops at the first
+    let p = Program::compile("exists('Big', true)").unwrap();
+    assert!(p.eval_with_budget(&b, &mut f, 2000).is_err());
+    assert_eq!(p.eval_with_budget(&b, &mut f, 4000), Ok(json!(true)));
+    // a computed pattern costs a compile on every call
+    let p = Program::compile("[1,2,3,4,5,6,7,8,9,10].all(x, 'a'.matches('a' + 'b?'))").unwrap();
+    assert!(p.eval_with_budget(&b, &mut f, 400).is_err());
+    assert_eq!(p.eval_with_budget(&b, &mut f, 1000), Ok(json!(true)));
+    let p = Program::compile("[1,2,3,4,5,6,7,8,9,10].all(x, 'a'.matches('ab?'))").unwrap();
+    assert_eq!(p.eval_with_budget(&b, &mut f, 400), Ok(json!(true)));
     // a small budget trips on plain nodes
     let p = Program::compile("1 + 2 + 3").unwrap();
     assert!(p.eval_with_budget(&b, &mut f, 3).is_err());
     assert_eq!(p.eval_with_budget(&b, &mut f, 5), Ok(json!(6)));
+}
+
+/// Evaluates `src` against a request whose body is `body`.
+fn eval_body(src: &str, body: Value) -> Result<Value, EvalError> {
+    let req = json!({ "body": body });
+    let n = Value::Null;
+    let b = Bindings {
+        request: &req,
+        record: &n,
+        now: &n,
+        it: None,
+    };
+    Program::compile(src).unwrap().eval(&b, &mut Fake::new())
+}
+
+#[test]
+fn size_cap() {
+    // Each level doubles a string while the tree grows by one level only.
+    let mut src = String::from("[request.body.s]");
+    let levels = 14;
+    for i in 0..levels {
+        src.push_str(&format!(".map(v{i}, [v{i} + v{i}]"));
+    }
+    src.push_str(".map(w, size(w))");
+    src.push_str(&")".repeat(levels));
+    let e = eval_body(&src, json!({"s": "x".repeat(1024)})).unwrap_err();
+    assert!(e.message.contains("budget"), "{e}");
+    // A big value read once per item is charged each time.
+    let e = eval_body(
+        "request.body.items.map(x, request.body.big)",
+        json!({"items": vec![0; 200], "big": "y".repeat(64 * 1024)}),
+    )
+    .unwrap_err();
+    assert!(e.message.contains("budget"), "{e}");
+    // Lists, case changes and filters are charged too.
+    for src in [
+        "request.body.items.map(x, request.body.list + request.body.list)",
+        "request.body.items.map(x, upper(request.body.big))",
+        "request.body.items.filter(x, true).map(x, request.body.items.filter(y, true))",
+    ] {
+        let e = eval_body(
+            src,
+            json!({"items": vec![0; 200], "big": "y".repeat(64 * 1024), "list": vec!["z"; 4096]}),
+        )
+        .unwrap_err();
+        assert!(e.message.contains("budget"), "{src}: {e}");
+    }
+    // An ordinary amount of data is well within the budget.
+    assert_eq!(
+        eval_body(
+            "size(request.body.big + request.body.big)",
+            json!({"big": "y".repeat(256 * 1024)})
+        ),
+        Ok(json!(512 * 1024))
+    );
 }
 
 // ---- static check

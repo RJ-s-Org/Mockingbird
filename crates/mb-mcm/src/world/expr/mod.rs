@@ -16,9 +16,11 @@
 //! Deliberate differences from CEL:
 //! - a member or index of `null`, a missing key or an index past the end of a
 //!   list is `null`, not an error; `has(a.b)` tests presence;
-//! - an integral JSON number is an int and any other a double; int with int
-//!   stays an int (overflow is an error), any double makes a double, and an
-//!   int `/` that does not divide evenly gives a double; `%` takes ints only;
+//! - a number whose value is integral and fits `i64` is an int, however it is
+//!   spelled (`2` and `2.0` alike), and any other a double; int with int stays
+//!   an int (overflow is an error), any double makes a double, and an int `/`
+//!   that does not divide evenly gives a double; a computed result that is
+//!   integral is written as an int (`1.5 + 1.5` is `3`); `%` takes ints only;
 //! - ints and doubles compare with each other, and `null == null`;
 //! - the type arguments of `held`, `count` and `exists` are string literals.
 //!
@@ -64,8 +66,9 @@ pub const MAX_DEPTH: usize = 32;
 /// The most nodes an expression's tree may have.
 pub const MAX_NODES: usize = 512;
 
-/// The default evaluation budget: every node evaluated and every macro
-/// iteration costs one step.
+/// The default evaluation budget: every node evaluated, every macro iteration
+/// and every record `count` or `exists` reads costs one step, every KiB of data
+/// copied or built one more, and compiling a computed `matches` pattern 50.
 pub const MAX_STEPS: u64 = 10_000;
 
 /// The largest compiled size of a `matches` pattern, in bytes.
@@ -235,7 +238,7 @@ impl Program {
         let mut e = eval::Eval {
             bindings,
             host,
-            steps: 0,
+            steps: std::cell::Cell::new(0),
             max_steps,
             scope: Vec::new(),
         };

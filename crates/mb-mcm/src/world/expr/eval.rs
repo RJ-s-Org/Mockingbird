@@ -1,16 +1,24 @@
 //! The tree-walking evaluator over `serde_json::Value`, with a step budget.
 
+use std::cell::Cell;
 use std::cmp::Ordering;
 
 use serde_json::{Map, Value};
 
-use super::parse::{BinOp, CompOp, Kind, Node};
+use super::parse::{BinOp, CompOp, Func, Kind, Node};
 use super::{Bindings, Fail, Host, funcs};
+
+/// Bytes of data copied or built per extra step, so that the step budget also
+/// bounds memory.
+const BYTES_PER_STEP: u64 = 1024;
+
+/// The steps a `matches` whose pattern is computed costs for compiling it.
+const REGEX_COMPILE_STEPS: u64 = 50;
 
 static NULL: Value = Value::Null;
 
-/// A number as the evaluator sees it: an integral JSON number that fits `i64`
-/// is an int, any other number a double.
+/// A number as the evaluator sees it: a number whose value is integral and fits
+/// `i64` is an int, however it is spelled (`2` or `2.0`); any other a double.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Num {
     I(i64),
@@ -22,7 +30,18 @@ impl Num {
         let Value::Number(n) = v else { return None };
         match n.as_i64() {
             Some(i) => Some(Num::I(i)),
-            None => n.as_f64().map(Num::D),
+            None => n.as_f64().map(Num::from_f64),
+        }
+    }
+
+    /// An integral `d` in range is an int (the cast is then exact).
+    fn from_f64(d: f64) -> Num {
+        if d.fract() == 0.0
+            && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&d)
+        {
+            Num::I(d as i64)
+        } else {
+            Num::D(d)
         }
     }
 
@@ -34,19 +53,28 @@ impl Num {
     }
 }
 
-/// A double as a JSON value; NaN and infinities are errors.
+/// A computed double as a JSON value: an int when it is integral and in range;
+/// NaN and infinities are errors.
 pub(super) fn double(d: f64, pos: usize) -> Result<Value, Fail> {
-    serde_json::Number::from_f64(d)
-        .map(Value::Number)
-        .ok_or_else(|| Fail::new(pos, "the result is not a finite number"))
+    if !d.is_finite() {
+        return Err(Fail::new(pos, "the result is not a finite number"));
+    }
+    match Num::from_f64(d) {
+        Num::I(i) => Ok(Value::from(i)),
+        Num::D(d) => serde_json::Number::from_f64(d)
+            .map(Value::Number)
+            .ok_or_else(|| Fail::new(pos, "the result is not a finite number")),
+    }
 }
 
 pub(super) fn type_name(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
         Value::Bool(_) => "bool",
-        Value::Number(n) if n.is_i64() => "int",
-        Value::Number(_) => "double",
+        Value::Number(_) => match Num::of(v) {
+            Some(Num::I(_)) => "int",
+            _ => "double",
+        },
         Value::String(_) => "string",
         Value::Array(_) => "list",
         Value::Object(_) => "map",
@@ -56,7 +84,9 @@ pub(super) fn type_name(v: &Value) -> &'static str {
 pub(super) struct Eval<'p, 'b, 'h> {
     pub bindings: &'b Bindings<'b>,
     pub host: &'h mut dyn Host,
-    pub steps: u64,
+    /// Steps taken; a `Cell` so that a value borrowed from `self` can be
+    /// charged for before it is cloned.
+    pub steps: Cell<u64>,
     pub max_steps: u64,
     /// Macro variables in scope, innermost last.
     pub scope: Vec<(&'p str, Value)>,
@@ -69,15 +99,34 @@ enum Key<'p> {
 }
 
 impl<'p> Eval<'p, '_, '_> {
-    fn step(&mut self, pos: usize) -> Result<(), Fail> {
-        self.steps += 1;
-        if self.steps > self.max_steps {
+    fn step(&self, pos: usize) -> Result<(), Fail> {
+        self.steps_n(1, pos)
+    }
+
+    fn steps_n(&self, n: u64, pos: usize) -> Result<(), Fail> {
+        self.steps.set(self.steps.get().saturating_add(n));
+        if self.steps.get() > self.max_steps {
             return Err(Fail::new(
                 pos,
                 format!("evaluation exceeded its budget of {} steps", self.max_steps),
             ));
         }
         Ok(())
+    }
+
+    /// Charges for a value copied or built: one step per [`BYTES_PER_STEP`].
+    fn charge(&self, v: &Value, pos: usize) -> Result<(), Fail> {
+        match weight(v) / BYTES_PER_STEP {
+            0 => Ok(()),
+            n => self.steps_n(n, pos),
+        }
+    }
+
+    /// Clones a value (which may borrow from `self`), charging for its size
+    /// before the copy is made.
+    fn copy_ref(&self, v: &Value, pos: usize) -> Result<Value, Fail> {
+        self.charge(v, pos)?;
+        Ok(v.clone())
     }
 
     fn lookup(&self, name: &str, pos: usize) -> Result<&Value, Fail> {
@@ -101,7 +150,10 @@ impl<'p> Eval<'p, '_, '_> {
         let pos = n.pos;
         match &n.kind {
             Kind::Lit(v) => Ok(v.clone()),
-            Kind::Ident(name) => self.lookup(name, pos).cloned(),
+            Kind::Ident(name) => {
+                let v = self.lookup(name, pos)?;
+                self.copy_ref(v, pos)
+            }
             Kind::Member(..) | Kind::Index(..) => self.chain(n),
             Kind::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
@@ -166,14 +218,23 @@ impl<'p> Eval<'p, '_, '_> {
             Kind::Bin(op, a, b) => {
                 let l = self.eval(a)?;
                 let r = self.eval(b)?;
-                binary(*op, &l, &r, pos)
+                let v = binary(*op, &l, &r, pos)?;
+                if *op == BinOp::Add {
+                    self.charge(&v, pos)?;
+                }
+                Ok(v)
             }
             Kind::Call { func, args, re } => {
+                if *func == Func::Matches && re.is_none() {
+                    self.steps_n(REGEX_COMPILE_STEPS, pos)?;
+                }
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {
                     vals.push(self.eval(a)?);
                 }
-                funcs::call(*func, &vals, re.as_deref(), self.host, pos)
+                let v = funcs::call(*func, &vals, re.as_deref(), self.host, pos)?;
+                self.charge(&v, pos)?;
+                Ok(v)
             }
             Kind::Has(operand, field) => match self.eval(operand)? {
                 Value::Object(m) => Ok(Value::Bool(m.contains_key(field))),
@@ -184,11 +245,13 @@ impl<'p> Eval<'p, '_, '_> {
                 if id.is_null() {
                     return Ok(Value::Null);
                 }
-                Ok(self.host.held(&ty.name, &id).unwrap_or(Value::Null))
+                let v = self.host.held(&ty.name, &id).unwrap_or(Value::Null);
+                self.charge(&v, pos)?;
+                Ok(v)
             }
             Kind::Count(ty, cond) => {
                 let mut count: i64 = 0;
-                for item in self.host.all(&ty.name) {
+                for item in self.all(&ty.name, pos)? {
                     if self.iterate("it", item, cond)? {
                         count += 1;
                     }
@@ -196,7 +259,7 @@ impl<'p> Eval<'p, '_, '_> {
                 Ok(Value::from(count))
             }
             Kind::ExistsType(ty, cond) => {
-                for item in self.host.all(&ty.name) {
+                for item in self.all(&ty.name, pos)? {
                     if self.iterate("it", item, cond)? {
                         return Ok(Value::Bool(true));
                     }
@@ -249,7 +312,8 @@ impl<'p> Eval<'p, '_, '_> {
                     CompOp::Filter => {
                         let mut out = Vec::new();
                         for item in items {
-                            if self.iterate(var, item.clone(), body)? {
+                            let bound = self.copy_ref(&item, body.pos)?;
+                            if self.iterate(var, bound, body)? {
                                 out.push(item);
                             }
                         }
@@ -269,6 +333,17 @@ impl<'p> Eval<'p, '_, '_> {
                 }
             }
         }
+    }
+
+    /// The held records of a type, charged one step each plus their size,
+    /// whether or not the caller looks at them all.
+    fn all(&mut self, ty: &str, pos: usize) -> Result<Vec<Value>, Fail> {
+        let items = self.host.all(ty);
+        self.steps_n(u64::try_from(items.len()).unwrap_or(u64::MAX), pos)?;
+        for item in &items {
+            self.charge(item, pos)?;
+        }
+        Ok(items)
     }
 
     /// Evaluates a condition with `var` bound to `item`; one step per iteration.
@@ -339,8 +414,30 @@ impl<'p> Eval<'p, '_, '_> {
         for (key, (_, pos)) in keys.iter().zip(&links) {
             v = descend(v, key, *pos)?;
         }
-        Ok(v.clone())
+        self.copy_ref(v, n.pos)
     }
+}
+
+/// Roughly how many bytes a value takes: its strings and keys, plus 8 for each
+/// value. Walked without recursion, as values can nest deeply.
+fn weight(v: &Value) -> u64 {
+    let mut total: u64 = 0;
+    let mut stack = vec![v];
+    while let Some(v) = stack.pop() {
+        total = total.saturating_add(8);
+        match v {
+            Value::String(s) => total = total.saturating_add(s.len() as u64),
+            Value::Array(a) => stack.extend(a),
+            Value::Object(m) => {
+                for (k, x) in m {
+                    total = total.saturating_add(k.len() as u64);
+                    stack.push(x);
+                }
+            }
+            _ => {}
+        }
+    }
+    total
 }
 
 fn descend<'v>(v: &'v Value, key: &Key<'_>, pos: usize) -> Result<&'v Value, Fail> {
