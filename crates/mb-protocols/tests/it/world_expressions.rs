@@ -322,3 +322,27 @@ async fn why_the_executor_generated_is_on_the_request_record() {
     assert_eq!(request["exec_fallback"], "not_held", "{request}");
     assert!(request.get("exec_fallback_on").is_none(), "{request}");
 }
+
+#[tokio::test]
+async fn a_create_s_changes_set_nothing_as_before() {
+    let world = json!({"operations": {"addMember": {
+        "kind": "create",
+        "changes": {"tier": {"value": "gold"}},
+        "set": {"label": "'set'"}
+    }}});
+    let h = members(world, vec![fill_decoys()]);
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "a@x.io", "name": "A"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["label"], "set", "{body}");
+    assert_eq!(
+        body["tier"], "decoy",
+        "changes never applied to a create: {body}"
+    );
+}

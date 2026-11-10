@@ -66,9 +66,9 @@ impl SeqCounters {
     }
 }
 
-/// A call's `set` values: each member, and its value (`None` when its expression
-/// failed or gave `null`).
-type SetValues = Vec<(String, Option<Value>)>;
+/// A call's `set` values: each member, its value (`None` when its expression failed
+/// or gave `null`), and whether it is a `changes` entry.
+type SetValues = Vec<(String, Option<Value>, bool)>;
 
 /// What one call's world expressions decided, and what the executor noted of the call
 /// for its request record.
@@ -433,7 +433,7 @@ pub(super) async fn set_values(
     };
     let mut host = host(state, rt, (plan, call), ops).await;
     let bound = Bound::new(rt, call, before);
-    let values: Vec<(String, Option<Value>)> =
+    let values: SetValues =
         ops.set
             .iter()
             .map(|entry| {
@@ -442,7 +442,7 @@ pub(super) async fn set_values(
                     SetValue::Expr(p) => eval(plan, rt, (p, &entry.pointer), &bound, &mut host)
                         .filter(|v| !v.is_null()),
                 };
-                (entry.member.clone(), value)
+                (entry.member.clone(), value, entry.from_changes)
             })
             .collect();
     *plan

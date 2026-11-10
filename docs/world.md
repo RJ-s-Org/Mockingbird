@@ -223,7 +223,7 @@ operations:
         message: {expr: "'member ' + request.body.email + ' exists'"}
 ```
 
-`changes` (`{<member>: {from_request: <pointer>} | {value}}`), the key `set` replaces, still loads: each entry is read as a `set` entry, `from_request: /a/0/b` as `request.body.a[0].b` and `value` as that literal, and a `set` entry for the same member wins. Write `set` in new descriptions.
+`changes` (`{<member>: {from_request: <pointer>} | {value}}`), the key `set` replaces, still loads: each entry is read as a `set` entry, `from_request: /a/0/b` as `request.body.a[0].b` and `value` as that literal, and a `set` entry for the same member wins. As before, `changes` applies to updates, replaces and actions, not to creates. Write `set` in new descriptions.
 
 ## At runtime
 

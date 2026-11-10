@@ -54,6 +54,25 @@ pub(super) async fn apply(
     before: Option<&Value>,
     record: &mut Value,
 ) -> Vec<String> {
+    applied(state, (plan, call), (before, false), record).await
+}
+
+/// [`apply`] on the record a create stores: its `set` alone, since `changes` (which
+/// `set` replaces) never applied to a create, nor does a `transition`.
+pub(super) async fn apply_on_create(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    record: &mut Value,
+) -> Vec<String> {
+    applied(state, (plan, call), (None, true), record).await
+}
+
+async fn applied(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    (before, creating): (Option<&Value>, bool),
+    record: &mut Value,
+) -> Vec<String> {
     let rt = state.rt;
     let op = plan.op;
     let Some(t) = op.resource_type.as_deref() else {
@@ -63,7 +82,7 @@ pub(super) async fn apply(
         return Vec::new();
     }
     let mut wanted: Vec<(String, Option<Value>)> = Vec::new();
-    if let Some(d) = rt.described().op(&op.id) {
+    if let Some(d) = rt.described().op(&op.id).filter(|_| !creating) {
         for (member, value) in d.transition.iter().flatten() {
             let typed = match value {
                 Value::String(state) => rt.described().state_value(t, state),
@@ -72,7 +91,10 @@ pub(super) async fn apply(
             wanted.push((member.clone(), typed));
         }
     }
-    for (member, value) in exprs::set_values(state, (plan, call), before).await {
+    for (member, value, from_changes) in exprs::set_values(state, (plan, call), before).await {
+        if creating && from_changes {
+            continue;
+        }
         let value = value.map(|v| exprs::written_back(rt, t, &member, v));
         wanted.push((member, value));
     }

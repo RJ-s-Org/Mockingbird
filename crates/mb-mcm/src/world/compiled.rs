@@ -45,6 +45,9 @@ pub struct SetEntry {
     pub pointer: String,
     /// Its value.
     pub value: SetValue,
+    /// Whether it is a `changes` entry, which a create does not apply (`changes`
+    /// never applied to creates).
+    pub from_changes: bool,
 }
 
 /// The value a [`SetEntry`] sets.
@@ -116,6 +119,7 @@ impl OpExpressions {
                     member: member.to_string(),
                     pointer,
                     value,
+                    from_changes: true,
                 },
             );
         }
@@ -129,6 +133,7 @@ impl OpExpressions {
                     member: member.clone(),
                     pointer: format!("{base}/set/{}", escape(member)),
                     value: SetValue::Expr(program),
+                    from_changes: false,
                 },
             );
         }
