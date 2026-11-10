@@ -282,3 +282,135 @@ components:
         refused[0].message
     );
 }
+
+/// One contract that signals each behaviour the new gaps point at.
+const SIGNALS: &[u8] = br##"
+openapi: 3.0.0
+info: {title: Signals, version: "1"}
+paths:
+  /projects:
+    post:
+      operationId: createProject
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}
+      responses:
+        "201": {description: made, content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}
+        "409": {description: taken}
+  /projects/{id}:
+    get:
+      operationId: getProject
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}}
+    patch:
+      operationId: updateProject
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: If-Match, in: header, schema: {type: string}}
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}
+        "412": {description: stale}
+    delete:
+      operationId: deleteProject
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"204": {description: gone}}
+  /projects/{id}/archive:
+    post:
+      operationId: archiveProject
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}}
+  /projects/{id}/tasks:
+    get:
+      operationId: listTasks
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: sort, in: query, schema: {type: string}}
+        - {name: title, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Task"}}}}
+    post:
+      operationId: createTask
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+      responses: {"201": {description: made, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}}
+components:
+  schemas:
+    Project:
+      type: object
+      properties: {id: {type: string}, name: {type: string}, archived: {type: boolean}, version: {type: integer}}
+    Task:
+      type: object
+      properties: {id: {type: string}, title: {type: string}, project_id: {type: string}}
+"##;
+
+fn signal_gaps(overlay_doc: Option<serde_json::Value>) -> Vec<mb_protocols::world_gaps::Gap> {
+    let b = compile(SIGNALS).unwrap();
+    let mut world = tier0(&b);
+    if let Some(doc) = overlay_doc {
+        let parsed: World = serde_json::from_value(doc).unwrap();
+        world = overlay(&world, &parsed);
+    }
+    let v = validate(&world, &b);
+    gaps(&b, &v.applied, &v.refused)
+}
+
+#[test]
+fn gaps_point_at_behaviour_the_contract_signals() {
+    let all = signal_gaps(None);
+    let effect = codes(&all, GapCode::NoEffect);
+    assert!(
+        effect
+            .iter()
+            .any(|g| g.operation.as_deref() == Some("archiveProject")),
+        "{all:?}"
+    );
+    let unscoped = codes(&all, GapCode::UnscopedList);
+    assert_eq!(unscoped.len(), 1, "{all:?}");
+    assert!(
+        unscoped[0].message.contains("`id`"),
+        "{}",
+        unscoped[0].message
+    );
+    // `title` is a member of the items, so only `sort` is open.
+    let open = codes(&all, GapCode::UndescribedParam);
+    assert_eq!(open.len(), 1, "{all:?}");
+    assert!(open[0].message.contains("`sort`"), "{}", open[0].message);
+    assert!(!open[0].message.contains("`title`"), "{}", open[0].message);
+    assert_eq!(codes(&all, GapCode::NoUnique).len(), 1, "{all:?}");
+    assert_eq!(codes(&all, GapCode::NoConcurrency).len(), 1, "{all:?}");
+    let soft = codes(&all, GapCode::NoSoftDelete);
+    assert_eq!(soft.len(), 1, "{all:?}");
+    assert!(
+        soft[0].message.contains("`archived`"),
+        "{}",
+        soft[0].message
+    );
+}
+
+#[test]
+fn behaviour_gaps_close_when_described() {
+    let all = signal_gaps(Some(json!({
+        "types": {
+            "projects": {
+                "unique": [{"members": ["name"], "conflict": 409}],
+                "concurrency": {"member": "version", "header": "If-Match", "conflict": 412},
+                "lifecycle": {"member": "archived", "states": ["false", "true"], "soft_delete": {"state": "true"}}
+            }
+        },
+        "operations": {
+            "archiveProject": {"kind": "action", "changes": {"archived": {"value": true}}},
+            "listTasks": {"scope": {"param": "id", "member": "project_id"}, "ignores": ["sort"]}
+        }
+    })));
+    for code in [
+        GapCode::NoEffect,
+        GapCode::UnscopedList,
+        GapCode::UndescribedParam,
+        GapCode::NoUnique,
+        GapCode::NoConcurrency,
+        GapCode::NoSoftDelete,
+    ] {
+        assert!(codes(&all, code).is_empty(), "{code}: {all:?}");
+    }
+}

@@ -36,7 +36,7 @@ The MCP tool is `get_world {mock, version?}`, and `get_world_schema` answers the
 | `refused` | Entries of the newest revision that did not validate; each falls back to tier 0. |
 | `gaps` | What the description leaves open. |
 
-Gaps (the same codes mark the recorded calls of each operation they concern, see [Gaps in the request log](#gaps-in-the-request-log)):
+Gaps. The first five codes also mark the recorded calls of each operation they concern (see [Gaps in the request log](#gaps-in-the-request-log)). The last six point at behaviour the contract signals and the description does not state yet: read the docs for each, and write an entry only when they say so.
 
 | Code | Meaning |
 | --- | --- |
@@ -45,6 +45,12 @@ Gaps (the same codes mark the recorded calls of each operation they concern, see
 | `no_record` | A create or update answer in which no member fits the type, and no `answer.record` says where it is. |
 | `skipped_route` | An HTTP route of the contract that is not served (it matches the same requests as an earlier one, or is not a valid route pattern). |
 | `refused` | An entry refused at validation. |
+| `no_effect` | An action (by its `kind`, or by the contract's route) other than a create, read, list or delete, with no `changes`, `transition` or `queue`: nothing says what it does to the record. |
+| `unscoped_list` | A list whose route has path parameters and that has no `scope`, so it lists every record of its type in the session. |
+| `undescribed_param` | A list's query parameters that its description never mentions and that are not members of its items. A request that sends one is answered by the model, not from the records; describe it as a filter, the scope, order, paging or fields, or list it in `ignores`. |
+| `no_unique` | A type whose create can answer `409` and that has no `unique`. |
+| `no_concurrency` | A type whose update, replace, delete or action takes an `If-Match` header or can answer `412`, and that has no `concurrency`. |
+| `no_soft_delete` | A type a delete removes whose record has a member such as `deleted`, `is_archived` or `deleted_at`, with no `lifecycle.soft_delete`. |
 
 ## Writing it
 

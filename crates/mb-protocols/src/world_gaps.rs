@@ -47,6 +47,22 @@ pub enum GapCode {
     SkippedRoute,
     /// An entry of the description refused at validation.
     Refused,
+    /// An action (by the description or the contract's route) that the
+    /// description gives nothing to change: no `changes`, `transition` or
+    /// `queue`.
+    NoEffect,
+    /// A list under path parameters with no `scope`.
+    UnscopedList,
+    /// A list query parameter the description does not mention.
+    UndescribedParam,
+    /// A type whose create can answer `409` with no `unique`.
+    NoUnique,
+    /// A type whose writes take `If-Match` or can answer `412` with no
+    /// `concurrency`.
+    NoConcurrency,
+    /// A deleted type whose record has a deleted or archived member, with no
+    /// `lifecycle.soft_delete`.
+    NoSoftDelete,
 }
 
 impl GapCode {
@@ -59,6 +75,12 @@ impl GapCode {
             Self::NoRecord => "no_record",
             Self::SkippedRoute => "skipped_route",
             Self::Refused => "refused",
+            Self::NoEffect => "no_effect",
+            Self::UnscopedList => "unscoped_list",
+            Self::UndescribedParam => "undescribed_param",
+            Self::NoUnique => "no_unique",
+            Self::NoConcurrency => "no_concurrency",
+            Self::NoSoftDelete => "no_soft_delete",
         }
     }
 }
@@ -88,6 +110,26 @@ impl fmt::Display for GapCode {
 ///   skips, with its message (only with the `http-rest` feature).
 /// - [`GapCode::Refused`]: one per refusal, naming the operation or type
 ///   its path is under.
+///
+/// Then the behaviour the contract signals and the description does not
+/// state, in contract order (each a pointer to what to read in the docs, never
+/// a claim about the API):
+/// - [`GapCode::NoEffect`]: an operation that is an action by its kind or
+///   by the contract's route, other than a create, read, list or delete,
+///   with no `changes`, `transition` or `queue`.
+/// - [`GapCode::UnscopedList`]: a list whose route has path parameters and
+///   that has no `scope`.
+/// - [`GapCode::UndescribedParam`]: a list's query parameters that appear
+///   nowhere in its description and are not members of its items, once per
+///   list.
+/// - [`GapCode::NoUnique`]: a type a create writes that can answer `409`,
+///   with no `unique`; once per type.
+/// - [`GapCode::NoConcurrency`]: a type an update, replace, delete or action
+///   writes that takes an `If-Match` header or can answer `412`, with no
+///   `concurrency`; once per type.
+/// - [`GapCode::NoSoftDelete`]: a type a delete removes whose record has a
+///   member such as `deleted`, `is_archived` or `deleted_at`, with no
+///   `lifecycle.soft_delete`; once per type.
 #[must_use]
 pub fn gaps(bundle: &Bundle, world: &World, refused: &[Refusal]) -> Vec<Gap> {
     let mut out = Vec::new();
@@ -196,7 +238,238 @@ pub fn gaps(bundle: &Bundle, world: &World, refused: &[Refusal]) -> Vec<Gap> {
             message: r.to_string(),
         });
     }
+    behaviour_gaps(bundle, world, &desc, &kind, &ty, &mut out);
     out
+}
+
+/// Member names a record keeps when a delete only marks it.
+const SOFT_DELETE_MEMBERS: &[&str] = &[
+    "deleted",
+    "is_deleted",
+    "isdeleted",
+    "deleted_at",
+    "deletedat",
+    "archived",
+    "is_archived",
+    "isarchived",
+    "archived_at",
+    "archivedat",
+    "trashed",
+    "is_trashed",
+];
+
+/// The gaps of behaviour the contract signals that `world` does not state.
+/// See [`gaps`].
+fn behaviour_gaps<'a>(
+    bundle: &'a Bundle,
+    world: &World,
+    desc: &dyn Fn(&Operation) -> &'a OpDesc,
+    kind: &dyn Fn(&Operation) -> Option<OpKind>,
+    ty: &dyn Fn(&Operation) -> Option<String>,
+    out: &mut Vec<Gap>,
+) where
+    World: 'a,
+{
+    let mut seen: BTreeSet<(&'static str, String)> = BTreeSet::new();
+    let mut once = |code: GapCode, t: &str| seen.insert((code.as_str(), t.to_owned()));
+    for op in &bundle.operations {
+        let (Some(t), Some(k)) = (ty(op), kind(op)) else {
+            continue;
+        };
+        let d = desc(op);
+        let td = world.types.get(&t);
+        let by_route = op.is_action();
+        if (k == OpKind::Action || by_route)
+            && !matches!(
+                k,
+                OpKind::Create | OpKind::Read | OpKind::List | OpKind::Delete
+            )
+            && d.changes.is_empty()
+            && d.transition.is_none()
+            && d.queue.is_none()
+        {
+            out.push(Gap {
+                code: GapCode::NoEffect,
+                operation: Some(op.id.clone()),
+                r#type: Some(t.clone()),
+                message: format!(
+                    "operation `{}` is an action on `{t}` and the description gives it nothing to change: if the docs say what it does to the record, write `changes` (members it sets, from the request or a value) or a `transition` of `{t}`'s lifecycle, with kind `action`",
+                    op.id
+                ),
+            });
+        }
+        if k == OpKind::List {
+            let path_params = names(bundle, op.input.path.as_ref());
+            if !path_params.is_empty() && d.scope.is_none() {
+                out.push(Gap {
+                    code: GapCode::UnscopedList,
+                    operation: Some(op.id.clone()),
+                    r#type: Some(t.clone()),
+                    message: format!(
+                        "list `{}` sits under {} but has no `scope`: say which member of `{t}` holds the parent it lists, or every `{t}` of the session is listed",
+                        op.id,
+                        quoted(&path_params)
+                    ),
+                });
+            }
+            let mentioned = strings(&serde_json::to_value(d).unwrap_or(Value::Null));
+            let members = item_members(bundle, op);
+            let open: Vec<String> = names(bundle, op.input.query.as_ref())
+                .into_iter()
+                .filter(|p| !mentioned.contains(p.as_str()) && !members.contains(p.as_str()))
+                .collect();
+            if !open.is_empty() {
+                out.push(Gap {
+                    code: GapCode::UndescribedParam,
+                    operation: Some(op.id.clone()),
+                    r#type: Some(t.clone()),
+                    message: format!(
+                        "list `{}` takes {} that the description does not mention: a request that sends one is answered by the model, not from the records. Describe each as a filter, the scope, order, paging or fields as the docs define it, or list it in `ignores` when it asks nothing of the items",
+                        op.id,
+                        quoted(&open)
+                    ),
+                });
+            }
+        }
+        if k == OpKind::Create
+            && answers(op, 409)
+            && td.is_none_or(|td| td.unique.is_empty())
+            && once(GapCode::NoUnique, &t)
+        {
+            out.push(Gap {
+                code: GapCode::NoUnique,
+                operation: Some(op.id.clone()),
+                r#type: Some(t.clone()),
+                message: format!(
+                    "creating `{t}` (`{}`) can answer 409 but `{t}` has no `unique`: write the member sets the docs say must be unique, with that conflict status",
+                    op.id
+                ),
+            });
+        }
+        if matches!(
+            k,
+            OpKind::Update | OpKind::Replace | OpKind::Delete | OpKind::Action
+        ) && (answers(op, 412)
+            || names(bundle, op.input.headers.as_ref())
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case("if-match")))
+            && td.is_none_or(|td| td.concurrency.is_none())
+            && once(GapCode::NoConcurrency, &t)
+        {
+            out.push(Gap {
+                code: GapCode::NoConcurrency,
+                operation: Some(op.id.clone()),
+                r#type: Some(t.clone()),
+                message: format!(
+                    "`{}` takes If-Match or can answer 412 but `{t}` has no `concurrency`: say which member or header holds the version or ETag the docs compare",
+                    op.id
+                ),
+            });
+        }
+        if k == OpKind::Delete
+            && td
+                .and_then(|td| td.lifecycle.as_ref())
+                .is_none_or(|l| l.soft_delete.is_none())
+            && let Some(member) = record_members(bundle, &t, ty)
+                .into_iter()
+                .find(|m| SOFT_DELETE_MEMBERS.contains(&m.to_ascii_lowercase().as_str()))
+            && once(GapCode::NoSoftDelete, &t)
+        {
+            out.push(Gap {
+                code: GapCode::NoSoftDelete,
+                operation: Some(op.id.clone()),
+                r#type: Some(t.clone()),
+                message: format!(
+                    "`{}` deletes `{t}`, whose records have `{member}`: if the docs say a delete only marks the record, write `lifecycle` with `soft_delete` (and `listed_with` when a list parameter still shows such records); otherwise leave it",
+                    op.id
+                ),
+            });
+        }
+    }
+}
+
+/// The property names of an input schema (path, query or headers).
+fn names(b: &Bundle, schema: Option<&Value>) -> Vec<String> {
+    schema
+        .map(|s| {
+            properties(b, s)
+                .into_iter()
+                .map(|(k, _)| k.to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every string anywhere in `v`.
+fn strings(v: &Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut stack = vec![v];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::String(s) => {
+                out.insert(s.trim_start_matches('/').to_owned());
+            }
+            Value::Array(a) => stack.extend(a),
+            Value::Object(o) => stack.extend(o.values()),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The members of a list's items: its success answer's array items, or the
+/// items of an array property of it.
+fn item_members(b: &Bundle, op: &Operation) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    if let Some(answer) = success_schema(op) {
+        let resolved = b.resolve(answer);
+        let mut arrays = vec![resolved];
+        arrays.extend(properties(b, answer).into_iter().map(|(_, s)| b.resolve(s)));
+        for a in arrays {
+            if a.get("items").is_some_and(Value::is_object) {
+                out.extend(
+                    properties(b, item(b, a))
+                        .into_iter()
+                        .map(|(k, _)| k.to_owned()),
+                );
+            }
+        }
+    }
+    out
+}
+
+/// The members of a `t` record: the success answer of a read of `t`, else of
+/// a create.
+fn record_members(b: &Bundle, t: &str, ty: &dyn Fn(&Operation) -> Option<String>) -> Vec<String> {
+    for want in [OpKind::Read, OpKind::Create] {
+        for op in &b.operations {
+            if ty(op).as_deref() == Some(t)
+                && OpKind::of(op) == Some(want)
+                && let Some(answer) = success_schema(op)
+            {
+                let props = properties(b, answer);
+                if !props.is_empty() {
+                    return props.into_iter().map(|(k, _)| k.to_owned()).collect();
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Whether `op` declares the status `code`.
+fn answers(op: &Operation, code: u16) -> bool {
+    op.outputs
+        .iter()
+        .any(|o| matches!(o.status, mb_mcm::StatusSelector::Code(c) if c == code))
+}
+
+fn quoted(names: &[String]) -> String {
+    let q: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
+    match q.len() {
+        1 => format!("the parameter {}", q[0]),
+        _ => format!("the parameters {}", q.join(", ")),
+    }
 }
 
 #[cfg(feature = "http-rest")]

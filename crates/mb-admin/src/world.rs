@@ -558,6 +558,18 @@ pub enum GapCodeSchema {
     SkippedRoute,
     /// An entry of the description refused at validation.
     Refused,
+    /// An action the description gives nothing to change.
+    NoEffect,
+    /// A list under path parameters with no `scope`.
+    UnscopedList,
+    /// A list query parameter the description does not mention.
+    UndescribedParam,
+    /// A type whose create can answer 409 with no `unique`.
+    NoUnique,
+    /// A type whose writes take `If-Match` or can answer 412 with no `concurrency`.
+    NoConcurrency,
+    /// A deleted type whose record has a deleted or archived member, with no `lifecycle.soft_delete`.
+    NoSoftDelete,
 }
 
 /// Keeps the schema in step with [`GapCode`].
@@ -569,6 +581,12 @@ impl From<GapCode> for GapCodeSchema {
             GapCode::NoRecord => Self::NoRecord,
             GapCode::SkippedRoute => Self::SkippedRoute,
             GapCode::Refused => Self::Refused,
+            GapCode::NoEffect => Self::NoEffect,
+            GapCode::UnscopedList => Self::UnscopedList,
+            GapCode::UndescribedParam => Self::UndescribedParam,
+            GapCode::NoUnique => Self::NoUnique,
+            GapCode::NoConcurrency => Self::NoConcurrency,
+            GapCode::NoSoftDelete => Self::NoSoftDelete,
         }
     }
 }
