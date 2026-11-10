@@ -81,9 +81,11 @@ BLOCKED = ("start_server", "stop_server", "init_config", "configure_llm", "test_
            "put_llm_profile", "delete_llm_profile")
 # The deciding call of a failing check reached the model: only then can a real model change it.
 MODEL_REACHED = ("llm", "llm-repaired", "repaired", "patched", "fallback")
-# Tools whose `path` is an HTTP request path on the mock, not a file.
-REQUEST_PATH_TOOLS = ("call_mock", "get_request", "list_requests", "admin_api")
-FILE_KEYS = ("source", "path", "file", "file_path", "contract", "dir", "directory", "url")
+# The MCP arguments that read a local file or fetch a URL (from the tools' schemas). Only
+# these are audited: payloads (fixtures, world documents, scenarios, request bodies)
+# carry URLs and absolute `path`/`url` values as data.
+FILE_ARGS = {"import_contract": ("source", "urls"), "validate_contract": ("path",), "doctor": ("config",),
+             "server_status": ("config",), "server_logs": ("config",), "proxy_env": ("config",)}
 SNAPSHOT_PARTS = "scenarios,chaos,limits,world"
 # A deciding call answered by the engine itself (no model call): its result is the same
 # on a real model, so a failure there is floor.
@@ -356,23 +358,27 @@ def input_problems(lines, roots):
     roots = [os.path.realpath(r) for r in roots]
     problems = []
 
-    def walk(tool, key, v):
-        if isinstance(v, dict):
-            for k, x in v.items():
-                walk(tool, k, x)
-        elif isinstance(v, list):
+    def check(tool, key, v):
+        if isinstance(v, list):
             for x in v:
-                walk(tool, key, x)
-        elif isinstance(v, str):
-            m = re.match(r"(?i)^\s*(https?|file)://([^/:?#]*)", v)
-            if m and not (m.group(1).lower() != "file" and m.group(2).lower() in ("127.0.0.1", "localhost", "[::1]")):
+                check(tool, key, x)
+            return
+        if not isinstance(v, str):
+            return
+        m = re.match(r"(?i)^\s*([a-z][a-z0-9+.-]*)://([^/:?#]*)", v)
+        if m:
+            if not (m.group(1).lower() in ("http", "https") and m.group(2).lower() in ("127.0.0.1", "localhost", "[::1]")):
                 problems.append(f"{tool}: {key}={v[:120]}")
-            elif str(key).lower() in FILE_KEYS and tool not in REQUEST_PATH_TOOLS and not m:
-                path = os.path.expanduser(v.strip())
-                if os.path.isabs(path) or ".." in path.split(os.sep):
-                    real = os.path.realpath(path if os.path.isabs(path) else os.path.join(roots[0], path))
-                    if not any(real == r or real.startswith(r + os.sep) for r in roots):
-                        problems.append(f"{tool}: {key}={v[:120]}")
+            return
+        path = os.path.expanduser(v.strip())
+        real = os.path.realpath(path if os.path.isabs(path) else os.path.join(roots[0], path))
+        if not any(real == r or real.startswith(r + os.sep) for r in roots):
+            problems.append(f"{tool}: {key}={v[:120]}")
+
+    def walk(tool, _key, inp):
+        for key in FILE_ARGS.get(tool, ()):
+            if isinstance(inp, dict) and key in inp:
+                check(tool, key, inp[key])
 
     for line in lines:
         try:

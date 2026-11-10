@@ -319,9 +319,25 @@ class IsolationInputTest(unittest.TestCase):
                   tool_use("5", mb + "call_mock", {"url": "http://127.0.0.1:4010/a/v1/x"})]
             self.assertEqual(e2e.input_problems(ok, [work, plugin]), [])
             for bad in ({"source": "/etc/passwd"}, {"source": "../../scripts/llm-bench/server_suites.py"},
-                        {"source": "https://example.com/openapi.yaml"}, {"source": "file:///tmp/x"}):
+                        {"source": "https://example.com/openapi.yaml"}, {"source": "file:///tmp/x"},
+                        {"urls": ["https://docs.example.com/api"]}):
                 self.assertTrue(e2e.input_problems([tool_use("9", mb + "import_contract", bad)], [work, plugin]),
                                 bad)
+            self.assertTrue(e2e.input_problems([tool_use("9", mb + "validate_contract", {"path": "/etc/hosts"})],
+                                               [work, plugin]))
+
+    def test_urls_and_paths_inside_payloads_are_data(self):
+        with tempfile.TemporaryDirectory() as work:
+            mb = e2e.MCP_PREFIX
+            lines = [
+                tool_use("1", mb + "seed_session", {"resources": [{"receipt_url": "https://pay.stripe.com/receipts/x",
+                                                                   "object": "list", "url": "/v1/customers"}]}),
+                tool_use("2", mb + "patch_world", {"patch": {"types": {"project": {"fields": {"path": "/group/p"}}}}}),
+                tool_use("3", mb + "put_scenario", {"scenario": {"set": {"next_page_url": "https://api.example.com/x"}}}),
+                tool_use("4", mb + "call_mock", {"method": "POST", "path": "/hooks",
+                                                 "body": {"callback_url": "https://example.com/hook"}}),
+            ]
+            self.assertEqual(e2e.input_problems(lines, [work]), [])
 
 
 class ReportTest(unittest.TestCase):
