@@ -283,7 +283,7 @@ pub(super) async fn run(
     // what a read requires, then every other member nobody set, but a reference the
     // request could have sent.
     let request_schema = request_schema(rt, op);
-    let unsent = Unsent::All(request_schema.as_ref());
+    let unsent = Unsent::All(request_schema.as_ref(), request);
     let mut missing = gaps(rt, (t, &shape.schemas), &data, &owned, unsent);
     let required: Vec<String> = missing.iter().map(|(name, _)| name.clone()).collect();
     if let Value::Object(known) = &data {
@@ -1108,10 +1108,13 @@ const GAP_DEPTH: usize = 6;
 pub(super) enum Unsent<'r> {
     /// Only those a schema requires (what a replace's reads need).
     Required,
-    /// Every declared one nothing set (a create's), optional ones too, but a
-    /// `writeOnly` member and a reference the request could have sent
-    /// ([`unsent_reference`]), by the request's schema at that level, when it has one.
-    All(Option<&'r Value>),
+    /// Every declared one nothing set (a create's), optional ones too, of an object
+    /// the request sent, but a `writeOnly` member and a reference the request could
+    /// have sent ([`unsent_reference`]): with the request's schema and the request's
+    /// value at that level, when it has them. An object the request did not send (one
+    /// the server's own members opened, such as a `sys` holding the id) is completed
+    /// with what it requires only.
+    All(Option<&'r Value>, Option<&'r Value>),
 }
 
 /// What `schemas` require that `record` does not hold, each top member with the schema
@@ -1172,11 +1175,11 @@ fn lacking(
             // taken below the top only (the create takes those of its top itself), and
             // what an object it holds lacks at any depth.
             let mut names = required.clone();
-            let request = match unsent {
-                Unsent::All(request) => request,
-                Unsent::Required => None,
+            let (request, sent) = match unsent {
+                Unsent::All(request, sent) => (request, sent),
+                Unsent::Required => (None, None),
             };
-            if matches!(unsent, Unsent::All(_)) {
+            if matches!(unsent, Unsent::All(..)) {
                 for part in whole_parts(bundle, &schema) {
                     let Some(Value::Object(declared)) = part.get("properties") else {
                         continue;
@@ -1197,16 +1200,18 @@ fn lacking(
                     continue;
                 };
                 // The request's schema of this member, for what lies below it.
-                let sent = request.and_then(|r| property_schema(bundle, r, &name));
+                let request_below = request.and_then(|r| property_schema(bundle, r, &name));
                 let below = match unsent {
-                    Unsent::All(_) => Unsent::All(sent.as_ref()),
+                    Unsent::All(..) => {
+                        Unsent::All(request_below.as_ref(), sent.and_then(|v| v.get(&name)))
+                    }
                     Unsent::Required => Unsent::Required,
                 };
                 match held.get(&name) {
                     None if required.contains(&name) => {
                         properties.insert(name, member);
                     }
-                    None if depth == GAP_DEPTH => {}
+                    None if depth == GAP_DEPTH || !sent.is_some_and(Value::is_object) => {}
                     None => {
                         let left = write_only(bundle, &member)
                             || unsent_reference(rt, request, &name, &member);
@@ -1233,20 +1238,25 @@ fn lacking(
             let item = whole_parts(bundle, &schema)
                 .iter()
                 .find_map(|p| p.get("items").cloned())?;
-            let item_request = match unsent {
-                Unsent::All(request) => request.and_then(|r| {
-                    whole_parts(bundle, r)
-                        .iter()
-                        .find_map(|p| p.get("items").cloned())
-                }),
-                Unsent::Required => None,
-            };
-            let below = match unsent {
-                Unsent::All(_) => Unsent::All(item_request.as_ref()),
-                Unsent::Required => Unsent::Required,
+            let (item_request, sent) = match unsent {
+                Unsent::All(request, sent) => (
+                    request.and_then(|r| {
+                        whole_parts(bundle, r)
+                            .iter()
+                            .find_map(|p| p.get("items").cloned())
+                    }),
+                    sent.and_then(Value::as_array),
+                ),
+                Unsent::Required => (None, None),
             };
             let mut properties = Map::new();
-            for held in items {
+            for (at, held) in items.iter().enumerate() {
+                let below = match unsent {
+                    Unsent::All(..) => {
+                        Unsent::All(item_request.as_ref(), sent.and_then(|s| s.get(at)))
+                    }
+                    Unsent::Required => Unsent::Required,
+                };
                 let Some(Value::Object(below)) = lacking((rt, t), &item, held, depth, below)
                     .as_ref()
                     .and_then(|s| s.get("properties"))

@@ -5011,6 +5011,16 @@ paths:
       operationId: getLine
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Line"}}}}}
+  /entries:
+    post:
+      operationId: createEntry
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Entry"}}}}}
+  /entries/{id}:
+    get:
+      operationId: getEntry
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Entry"}}}}}
   /builds:
     post:
       operationId: createBuild
@@ -5064,6 +5074,12 @@ components:
       type: object
       required: [id, sku]
       properties: {id: {type: integer}, deal_id: {type: integer}, sku: {type: string}}
+    Entry:
+      type: object
+      required: [meta, title]
+      properties:
+        title: {type: string}
+        meta: {type: object, required: [id], properties: {id: {type: string}, published: {type: integer}}}
     Build:
       type: object
       required: [id, number, branch]
@@ -5120,6 +5136,19 @@ async fn fill_completes_the_optional_members_of_an_object_member_sent() {
         capture.of("createWorkspace"),
         vec![create_line("createWorkspace", None)]
     );
+}
+
+#[tokio::test]
+async fn an_object_only_the_server_opened_takes_no_optional_members() {
+    // What a fill would answer for the entry's unpublished version.
+    let world = json!({"types": {"entries": {"identity": {"member": "meta.id"}}}});
+    let h = support::described(REPAIRS, world, vec![json!({"meta": {"published": 1}})]);
+    let (status, _, body) = h
+        .send("POST", "/entries", Some(json!({"title": "t"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let meta = body["meta"].as_object().unwrap();
+    assert_eq!(meta.keys().collect::<Vec<_>>(), vec!["id"], "{body}");
 }
 
 #[tokio::test]
