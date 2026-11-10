@@ -335,6 +335,33 @@ impl Collections {
             .is_ok_and(|held| held.records.contains_key(&OwnReads::key(session, r)))
     }
 
+    /// `old`'s place, in a collection or at the top level, moves to `new`, the record
+    /// a write moved to a new key, with its order, its create's mark and its scope;
+    /// what was known of `old` as it stood stays known of `new`.
+    pub(super) fn rename(&self, session: &SessionKey, old: &StoredResource, new: &StoredResource) {
+        let Ok(mut held) = self.0.lock() else {
+            return;
+        };
+        let from = OwnReads::key(session, old);
+        let (was, now) = (OwnReads::digest(&old.data), OwnReads::digest(&new.data));
+        let moved = |scope: &mut Option<Scope>| {
+            if let Some(scope) = scope.as_mut().filter(|scope| scope.digest == was) {
+                scope.digest = now;
+            }
+        };
+        if let Some(mut record) = held.records.remove(&from) {
+            if record.digest == was {
+                record.digest = now;
+            }
+            moved(&mut record.scope);
+            held.records.insert(OwnReads::key(session, new), record);
+        }
+        if let Some(mut top) = held.top_level.remove(&from) {
+            moved(&mut top.scope);
+            held.top_level.insert(OwnReads::key(session, new), top);
+        }
+    }
+
     /// `old`'s record goes on to what replaced it, `new`, a create's mark with it.
     pub(super) fn carry(&self, session: &SessionKey, old: &StoredResource, new: &StoredResource) {
         let created = {

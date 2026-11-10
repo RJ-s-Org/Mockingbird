@@ -536,7 +536,9 @@ pub(super) enum Write {
 /// returns `answer` as it is: the session listed, the write noted as the session's
 /// latest and told to its list routes' memory, the record stored in its collection (a create noted as a
 /// member of its listed collection; a write of a held record that changed its identity
-/// moved to its new key, the old one removed and marked deleted, and the old values of
+/// moved to its new key unless another record holds it, in the old one's place in its
+/// collection and its type's creation order, the old key removed, marked deleted and its
+/// write memory settled, and the old values of
 /// its described alternate members retired, [`deleted::retire`]), a removal marked deleted under its route's parent
 /// and its tokens ended, the requests write memory kept for it forgotten (the executor's
 /// record is authoritative), the entity tag's state, the answer kept for a repeat of its
@@ -583,23 +585,36 @@ pub(super) async fn commit(
                 if let Some(held) = held {
                     retire_names(state, (plan, call), t, held, &data).await;
                 }
-                // A write that rewrote the identity moves the record to its new key: the
-                // old one is gone, as a delete leaves it.
-                let moved = held.and_then(|h| re_keyed(rt, op, t, (&id, h), &data));
+                // A write that rewrote the identity moves the record to its new key, in
+                // the old one's place in its collection and its type's creation order:
+                // the old key is gone, as a delete leaves it. A new key another record
+                // holds is left to it, and the record stays where it was.
+                let mut moved = held.and_then(|h| re_keyed(rt, op, t, (&id, h), &data));
+                if let Some(new) = &moved
+                    && state.get(session, t, new).await.is_some()
+                {
+                    moved = None;
+                }
                 let was_held = held.is_some() && moved.is_none();
-                let id = match moved {
-                    Some(new) => {
+                let id = match (moved, held) {
+                    (Some(new), Some(gone)) => {
+                        // Moved before the delete, which forgets the old key's place.
+                        let renamed = StoredResource {
+                            resource_type: t.to_string(),
+                            id: new.clone(),
+                            data: data.clone(),
+                        };
+                        rt.collections().rename(session, gone, &renamed);
                         state.delete(session, t, &id).await;
-                        if let Some(gone) = held {
-                            rt.collections().forget(session, gone);
-                        }
+                        state_lists::note_renamed(state, session, t, (&id, &new)).await;
                         if state.tracks_deleted {
                             deleted::mark(state, session, (op, call), t, &id, None).await;
                         }
                         tokens::forget(state, session, t, &id).await;
+                        write_memory::settled(state, session, t, &id).await;
                         new
                     }
-                    None => id,
+                    _ => id,
                 };
                 let place = (collection, Some(&call.query), was_held);
                 store_one(state, session, (op, t), (id.clone(), data), place).await;

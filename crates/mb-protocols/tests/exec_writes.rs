@@ -1780,3 +1780,187 @@ async fn an_action_rewriting_the_identity_re_keys_the_record() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(h.provider.requests().len(), 0);
 }
+
+/// Assets made under a parent and listed there, renamed by an action rewriting their key.
+const SHELVED: &str = r##"
+openapi: 3.0.0
+info: {title: Shelved, version: "1"}
+paths:
+  /parents/{p}/assets:
+    parameters: [{name: p, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listAssets
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Asset"}}}}}}
+    post:
+      operationId: createAsset
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Asset"}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Asset"}}}}}
+  /assets/{key}:
+    parameters: [{name: key, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getAsset
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Asset"}}}}, "404": {description: missing}}
+  /assets/{key}/rename:
+    post:
+      operationId: renameAsset
+      parameters: [{name: key, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, required: [to], properties: {to: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Asset"}}}}}
+components:
+  schemas:
+    Asset:
+      type: object
+      required: [key, size]
+      properties: {key: {type: string}, size: {type: integer}}
+"##;
+
+fn shelved_world() -> Value {
+    json!({
+        "types": {"assets": {"identity": {"member": "key"}}},
+        "operations": {
+            "listAssets": {"kind": "list", "type": "assets"},
+            "renameAsset": {"kind": "action", "type": "assets", "changes": {"key": {"from_request": "/to"}}}
+        }
+    })
+}
+
+/// A renamed record stays where its create put it, in its place there: the parent's
+/// list shows it under its new key, after the one made before it.
+#[tokio::test]
+async fn a_re_keyed_record_stays_in_its_collection_and_its_order() {
+    let (_capture, _guard) = Capture::install();
+    let h = support::described(SHELVED, shelved_world(), Vec::new());
+    for (parent, key) in [("p1", "a1"), ("p1", "a2"), ("p2", "b1")] {
+        let uri = format!("/parents/{parent}/assets");
+        let (status, _, body) = h
+            .send("POST", &uri, Some(json!({"key": key, "size": 1})), &[])
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let (status, headers, body) = h
+        .send("POST", "/assets/a2/rename", Some(json!({"to": "z2"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let (status, headers, body) = h.send("GET", "/parents/p1/assets", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let keys: Vec<&Value> = body
+        .as_array()
+        .map(|items| items.iter().map(|i| &i["key"]).collect())
+        .unwrap_or_default();
+    assert_eq!(keys, [&json!("a1"), &json!("z2")], "{body}");
+    assert_eq!(h.provider.requests().len(), 0);
+}
+
+/// A rename onto a key another record holds leaves that record as it was.
+#[tokio::test]
+async fn a_rename_onto_a_held_key_leaves_its_record() {
+    let (_capture, _guard) = Capture::install();
+    let h = support::described(
+        RENAMED,
+        json!({
+            "types": {"assets": {"identity": {"member": "key"}}},
+            "operations": {"renameAsset": {"kind": "action", "type": "assets", "changes": {"key": {"from_request": "/to"}}}}
+        }),
+        vec![json!({"key": "made-up", "size": 1})],
+    );
+    h.hold_by(
+        "assets",
+        "key",
+        &[
+            json!({"key": "old", "size": 7}),
+            json!({"key": "new", "size": 9}),
+        ],
+    )
+    .await;
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/assets/old/rename",
+            Some(json!({"to": "new"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        h.stored("assets", "new").await,
+        Some(json!({"key": "new", "size": 9}))
+    );
+}
+
+/// Items keyed by an integer id.
+const NUMBERED: &str = r##"
+openapi: 3.0.0
+info: {title: Numbered, version: "1"}
+paths:
+  /items/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    get:
+      operationId: getItem
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}, "404": {description: missing}}
+    patch:
+      operationId: updateItem
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+components:
+  schemas:
+    Item:
+      type: object
+      required: [id, name]
+      properties: {id: {type: integer}, name: {type: string}}
+"##;
+
+/// An update whose body echoes the identity, a number where the path gives text, is
+/// no rename: the record stays under its key.
+#[tokio::test]
+async fn an_update_echoing_the_identity_keeps_the_record_s_key() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({"types": {"items": {"identity": {"member": "id"}}}});
+    let h = support::described(NUMBERED, world, Vec::new());
+    h.hold("items", &[json!({"id": 7, "name": "a"})]).await;
+    let (status, headers, body) = h
+        .send(
+            "PATCH",
+            "/items/7",
+            Some(json!({"id": 7, "name": "b"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(
+        h.stored("items", "7").await,
+        Some(json!({"id": 7, "name": "b"}))
+    );
+    let (status, _, body) = h.send("GET", "/items/7", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], json!("b"), "{body}");
+    assert_eq!(h.provider.requests().len(), 0);
+}
+
+/// A plain update whose body gives the identity a new value is no rename either: the
+/// identity stays as stored, and so does the record's key.
+#[tokio::test]
+async fn an_update_sending_a_new_identity_keeps_the_record_s_key() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({"types": {"items": {"identity": {"member": "id"}}}});
+    let h = support::described(NUMBERED, world, Vec::new());
+    h.hold("items", &[json!({"id": 7, "name": "a"})]).await;
+    let (status, headers, body) = h
+        .send(
+            "PATCH",
+            "/items/7",
+            Some(json!({"id": 8, "name": "b"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(
+        h.stored("items", "7").await,
+        Some(json!({"id": 7, "name": "b"}))
+    );
+    assert_eq!(h.stored("items", "8").await, None);
+    assert_eq!(h.provider.requests().len(), 0);
+}

@@ -434,10 +434,11 @@ impl BundleIndex {
     }
 
     /// Whether `path` is a list read of `resource_type` with no path parameter, and the
-    /// type's only one: a search ([`searches`]) beside a list that is no search is no
-    /// second list (`/search/tickets?query=` beside `/tickets`), and is never the only
-    /// one itself; where every such list of the type is a search (`/tasks?org=`), each
-    /// counts.
+    /// type's only one: a search ([`searches`]) beside the type's written collection
+    /// (a list that is no search, with a write on its path) is no second list
+    /// (`/search/tickets?query=` beside `/tickets`), and is never the only one itself.
+    /// Beside any other list (`/tasks?org=` beside `/me/tasks`), and where every such
+    /// list of the type is a search, each counts.
     pub(super) fn sole_unscoped(&self, path: &str, resource_type: &str) -> bool {
         let Some((t, search)) = self.unscoped_paths.get(path) else {
             return false;
@@ -445,9 +446,8 @@ impl BundleIndex {
         let lists = self.unscoped_lists.get(t).copied().unwrap_or_default();
         let searches = self.unscoped_searches.get(t).copied().unwrap_or_default();
         let count = match (lists, search) {
-            (0, _) => searches,
-            (_, true) => lists + searches,
-            (_, false) => lists,
+            (_, false) if self.written_lists.contains_key(path) => lists,
+            _ => lists + searches,
         };
         t == resource_type && count == 1
     }

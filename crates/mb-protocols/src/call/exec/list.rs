@@ -14,7 +14,8 @@
 //!   with no path parameter (`BundleIndex::unscoped_lists`); another (`/me/tasks`
 //!   beside `/tasks`) shows a part of them only, and falls back (`unscoped_list`)
 //!   unless the request gives the described scope. A search, whose query requires a
-//!   parameter (`/search/tickets?query=`), is no second list beside `/tickets`.
+//!   parameter (`/search/tickets?query=`), is no second list beside the type's written
+//!   collection (`/tickets` with its create); beside another list it counts.
 //!
 //! A session that never wrote a record of the type (holds none, created none, deleted
 //! none) falls back (`never_written`): the type may be a catalog the model makes up,
@@ -318,12 +319,13 @@ async fn answer(
 /// name its items' type (`BundleIndex::unscoped_lists`), the only such list of that
 /// type, which is `t`; where they name none (a lean schema of the record, SendGrid's
 /// `TemplateLean` under `result`), and for an operation with no path, the only one the
-/// description gives type `t`. A search beside a list (one whose query requires a
-/// parameter, [`bundle_index::searches`]) is no second list of the type
-/// (`BundleIndex::sole_unscoped`).
+/// description gives type `t`. A search (one whose query requires a parameter,
+/// [`bundle_index::searches`]) beside the type's written collection is no second list
+/// of the type (`BundleIndex::sole_unscoped`).
 fn only_unscoped(rt: &MockRuntime, op: &Operation, path: Option<&str>, t: &str) -> bool {
     let index = rt.index();
     let search = bundle_index::searches(op);
+    let written = path.is_some_and(|path| index.written_lists.contains_key(path));
     if let Some(path) = path.filter(|path| index.unscoped_paths.contains_key(*path)) {
         return index.sole_unscoped(path, t);
     }
@@ -331,7 +333,7 @@ fn only_unscoped(rt: &MockRuntime, op: &Operation, path: Option<&str>, t: &str) 
         .bundle()
         .operations
         .iter()
-        .filter(|other| search || !bundle_index::searches(other))
+        .filter(|other| search || !written || !bundle_index::searches(other))
         .filter(|op| {
             let kind = rt
                 .described()

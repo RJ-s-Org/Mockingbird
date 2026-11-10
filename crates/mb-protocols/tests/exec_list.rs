@@ -2417,7 +2417,7 @@ async fn a_search_by_a_required_query_leaves_the_collection_the_type_s_only_list
             "searchRecords": {"kind": "list", "type": "records", "answer": {"records": "/results"}}
         }
     });
-    let h = support::described(SEARCHED, world, Vec::new());
+    let h = support::described(SEARCHED, world, vec![json!({"results": [], "total": 0})]);
     let held: Vec<Value> = (1..=2)
         .map(|i| json!({"id": i, "name": format!("record {i}")}))
         .collect();
@@ -2426,4 +2426,72 @@ async fn a_search_by_a_required_query_leaves_the_collection_the_type_s_only_list
     assert_eq!(capture.of("listRecords"), [None]);
     assert_eq!(source, "state", "{page}");
     assert_eq!(ids(&page), [json!(1), json!(2)]);
+    // The search itself, whose query the description gives no filter, falls back.
+    let (source, page) = get(&h, "/search/records?query=record").await;
+    assert_eq!(source, "llm", "{page}");
+    assert_eq!(
+        capture.of("searchRecords"),
+        [Some("undescribed_param".to_owned())]
+    );
+}
+
+/// Records listed by a required scope beside their create, and the caller's own
+/// records, a part of them, at a path with no parameter.
+const SCOPED_SEARCH: &str = r##"
+openapi: 3.0.0
+info: {title: ScopedSearch, version: "1"}
+paths:
+  /records:
+    get:
+      operationId: listRecords
+      parameters:
+        - {name: group, in: query, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Record"}}}}}
+    post:
+      operationId: createRecord
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Record"}}}}}
+  /own/records:
+    get:
+      operationId: listOwnRecords
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Record"}}}}}
+  /records/{id}:
+    get:
+      operationId: getRecord
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Record"}}}}}
+components:
+  schemas:
+    Record:
+      type: object
+      required: [id, name]
+      properties: {id: {type: integer}, name: {type: string}}
+"##;
+
+/// A list a required query scopes is still a list of the type when the list beside it
+/// is not the type's written collection: the caller's own records are a part of them
+/// only, so that list falls back.
+#[tokio::test]
+async fn a_required_scope_beside_a_list_that_is_no_collection_still_counts() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"records": {"identity": {"member": "id"}}},
+        "operations": {
+            "listRecords": {"kind": "list", "type": "records"},
+            "listOwnRecords": {"kind": "list", "type": "records"}
+        }
+    });
+    let h = support::described(SCOPED_SEARCH, world, vec![json!([])]);
+    let held: Vec<Value> = (1..=2)
+        .map(|i| json!({"id": i, "name": format!("record {i}")}))
+        .collect();
+    h.hold("records", &held).await;
+    let (source, page) = get(&h, "/own/records").await;
+    assert_eq!(source, "llm", "{page}");
+    assert_eq!(
+        capture.of("listOwnRecords"),
+        [Some("unscoped_list".to_owned())]
+    );
 }
