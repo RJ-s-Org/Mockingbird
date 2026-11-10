@@ -10,7 +10,14 @@
 //! - `filters` (non-empty) replace the name-matched query filters; unset or empty, the
 //!   heuristic filters run as before.
 //! - `scope` is checked as well as everything else (a held record also stays in its
-//!   route's collection).
+//!   route's collection). A `prefix` scope keeps a record whose member is a path
+//!   directly under the requested one (`/a/b` under `/a`, any one-step path under a
+//!   blank or `/` root), at any depth when its `recursive` parameter is `true`; a
+//!   member value holding no upper-case letter is compared with the path in lower case.
+//! - A parameter names a path or query parameter, else a request body member: a
+//!   pointer (`/ActiveList/Pagination/PageNumber`), or a name the body declares and the
+//!   path and query do not ([`body_pointer`]). `ignores` names parameters that ask
+//!   nothing of the items.
 //! - `order` sorts the kept items; unset, the order is the model's, then the store's.
 //! - `paging` replaces the page parameter, page size and token place detection; unset,
 //!   they are found as before.
@@ -78,15 +85,20 @@ pub(super) struct ListQuery {
     deep_roots: Vec<String>,
     /// The scope's member and the value the request gives its parameter.
     pub(super) scope: Option<(String, String)>,
+    /// For a `prefix` scope: whether the request asks for every record below its path
+    /// (`true`), or only those directly under it (`false`).
+    scope_prefix: Option<bool>,
     /// The member the list is ordered by, and whether largest first.
     pub(super) order: Option<(String, bool)>,
     /// How the list pages.
     pub(super) page: Option<PageAsk>,
     /// Whether the description sets a scope (the request may not carry it).
     scope_described: bool,
-    /// The request parameters a described filter, scope or paging names, and the
-    /// soft delete's `listed_with` parameter.
+    /// The request parameters a described filter, scope or paging names, those the
+    /// description `ignores`, and the soft delete's `listed_with` parameter.
     params: Vec<String>,
+    /// The request body pointers of those of them read from the body.
+    body_reads: Vec<String>,
     /// What leaves a soft-deleted record of the list's item type out, unless the
     /// request asks for deleted ones (then `None`).
     pub(super) lifecycle: Option<lifecycle::Exclusion>,
@@ -205,6 +217,19 @@ impl ListQuery {
         !self.filters.is_empty() || self.grammar_described
     }
 
+    /// Whether body member `pointer` is read by the description: one of its body
+    /// parameters is the member or holds it.
+    pub(super) fn reads_body(&self, pointer: &str) -> bool {
+        self.body_reads.iter().any(|read| within(pointer, read))
+    }
+
+    /// Whether some body parameter of the description is a member below `pointer`.
+    pub(super) fn reads_below(&self, pointer: &str) -> bool {
+        self.body_reads
+            .iter()
+            .any(|read| read != pointer && within(read, pointer))
+    }
+
     /// Whether `param` is one of the described paging's parameters.
     pub(super) fn pages_with(&self, param: &str) -> bool {
         self.page.as_ref().is_some_and(|p| {
@@ -284,11 +309,64 @@ fn typed(ty: Option<&str>, kind: FilterKind, text: &str) -> Option<Value> {
     }
 }
 
-/// The value the request gives parameter `param`, in its path or query.
-fn request_value(call: &OperationCall, param: &str) -> Option<Value> {
+/// Whether body pointer `pointer` is `at` or a member below it.
+fn within(pointer: &str, at: &str) -> bool {
+    pointer
+        .strip_prefix(at)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// The request body pointer described parameter `param` names: `param` itself when it
+/// is a pointer (`/q`, `/ActiveList/Pagination/PageNumber`), else `/<param>` when the
+/// request body declares a member `param` and neither the path nor the query declares
+/// the parameter; `None` for a path or query parameter.
+pub(super) fn body_pointer(bundle: &mb_mcm::Bundle, op: &Operation, param: &str) -> Option<String> {
+    if param.starts_with('/') {
+        return Some(param.to_owned());
+    }
+    let declares = |schema: Option<&Value>| {
+        schema.is_some_and(|s| property_schema(bundle, s, param).is_some())
+    };
+    if declares(op.input.path.as_ref()) || declares(op.input.query.as_ref()) {
+        return None;
+    }
+    declares(op.input.body.as_ref())
+        .then(|| format!("/{}", param.replace('~', "~0").replace('/', "~1")))
+}
+
+/// The value the request gives described parameter `param`: in its body at the
+/// pointer it names ([`body_pointer`]), else in its path or query.
+fn request_value(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    call: &OperationCall,
+    param: &str,
+) -> Option<Value> {
+    if let Some(pointer) = body_pointer(bundle, op, param) {
+        return call.body.as_ref()?.pointer(&pointer).cloned();
+    }
     call.path_params
         .get(param)
         .or_else(|| call.query.get(param))
+        .cloned()
+}
+
+/// The declared schema of described parameter `param`: its query parameter's, else
+/// the request body's member at the pointer it names.
+pub(super) fn declared(bundle: &mb_mcm::Bundle, op: &Operation, param: &str) -> Option<Value> {
+    if let Some(pointer) = body_pointer(bundle, op, param) {
+        let mut at = op.input.body.clone()?;
+        for token in pointer.split('/').skip(1) {
+            let token = token.replace("~1", "/").replace("~0", "~");
+            at = property_schema(bundle, &at, &token)?;
+        }
+        return Some(at);
+    }
+    op.input
+        .query
+        .as_ref()
+        .and_then(|q| q.get("properties"))
+        .and_then(|props| props.get(param))
         .cloned()
 }
 
@@ -307,17 +385,23 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
         && d.filters.is_empty()
         && d.scope.is_none()
         && d.order.is_none()
+        && d.ignores.is_empty()
         && gone.is_none()
     {
         return None;
     }
     let bundle = rt.bundle();
     let item = item_schema(bundle, op);
-    let mut params = Vec::new();
+    let request_value = |param: &str| request_value(bundle, op, call, param);
+    let mut params = d.ignores.clone();
+    let mut asked = serde_json::Map::new();
     if let Some((param, _)) = gone.as_ref().and_then(|g| g.unless.as_ref()) {
         params.push(param.clone());
+        if let Some(value) = request_value(param) {
+            asked.insert(param.clone(), value);
+        }
     }
-    let lifecycle = gone.filter(|g| !g.lifted_by(&call.query));
+    let lifecycle = gone.filter(|g| !g.lifted_by(&asked));
     let mut grammars = Grammars::default();
     let filters = d
         .filters
@@ -325,7 +409,7 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
         .filter_map(|f| {
             params.push(f.param.clone());
             if let Some(grammar) = f.grammar {
-                grammars.add(bundle, item.as_ref(), call, (f, grammar));
+                grammars.add((bundle, op), item.as_ref(), call, (f, grammar));
                 return None;
             }
             let kind = f.kind?;
@@ -338,7 +422,7 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
                 FilterKind::Text | FilterKind::Contains => None,
                 _ => member_type(bundle, item.as_ref(), &member),
             };
-            let values = request_value(call, &f.param)
+            let values = request_value(&f.param)
                 .map(|raw| texts(&raw))
                 .unwrap_or_default()
                 .iter()
@@ -351,27 +435,38 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
             })
         })
         .collect();
+    let prefix = d
+        .scope
+        .as_ref()
+        .is_some_and(|s| s.kind == Some(mb_mcm::world::ScopeKind::Prefix));
     let scope = d.scope.as_ref().and_then(|s| {
         params.push(s.param.clone());
-        let value = request_value(call, &s.param)?;
-        let text = texts(&value).into_iter().next()?;
+        params.extend(s.recursive.iter().cloned());
+        let value = request_value(&s.param)?;
+        // A path scope's root is blank (Dropbox's `""`).
+        let text = match (prefix, &value) {
+            (true, Value::String(path)) => path.clone(),
+            _ => texts(&value).into_iter().next()?,
+        };
         Some((s.member.clone(), text))
+    });
+    let scope_prefix = prefix.then(|| {
+        d.scope
+            .as_ref()
+            .and_then(|s| s.recursive.as_deref())
+            .and_then(&request_value)
+            .is_some_and(|v| same(&v, &Value::Bool(true)))
     });
     let page = d.paging.as_ref().map(|p| {
         params.extend(p.request.iter().cloned());
         params.extend(p.size.iter().cloned());
         let bound = |param: &str, at: &str| {
-            let schema = op
-                .input
-                .query
-                .as_ref()
-                .and_then(|q| q.get("properties"))
-                .and_then(|props| props.get(param))?;
-            let (parts, _) = schema_parts(bundle, Some(schema));
+            let schema = declared(bundle, op, param)?;
+            let (parts, _) = schema_parts(bundle, Some(&schema));
             parts.iter().find_map(|p| p.get(at).and_then(Value::as_u64))
         };
         let size = p.size.as_deref().and_then(|param| {
-            let asked = request_value(call, param)
+            let asked = request_value(param)
                 .and_then(|raw| texts(&raw).into_iter().next())
                 .and_then(|t| t.trim().parse::<u64>().ok())
                 .filter(|n| *n > 0);
@@ -384,7 +479,7 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
             position: p
                 .request
                 .as_deref()
-                .and_then(|param| request_value(call, param))
+                .and_then(&request_value)
                 .and_then(|raw| texts(&raw).into_iter().next()),
             from_zero: p
                 .request
@@ -397,6 +492,10 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
             response_header: p.response_header.clone(),
         }
     });
+    let body_reads = params
+        .iter()
+        .filter_map(|param| body_pointer(bundle, op, param))
+        .collect();
     Some(ListQuery {
         filters,
         expressions: grammars.expressions,
@@ -404,10 +503,12 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
         unparsed: grammars.unparsed,
         deep_roots: grammars.deep_roots,
         scope,
+        scope_prefix,
         order: d.order.as_ref().map(|o| (o.member.clone(), o.descending)),
         page,
         scope_described: d.scope.is_some(),
         params,
+        body_reads,
         lifecycle,
     })
 }
@@ -426,7 +527,7 @@ impl Grammars {
     /// declares them.
     fn add(
         &mut self,
-        bundle: &mb_mcm::Bundle,
+        (bundle, op): (&mb_mcm::Bundle, &Operation),
         item: Option<&Value>,
         call: &OperationCall,
         (f, grammar): (&mb_mcm::world::FilterDesc, FilterGrammar),
@@ -440,7 +541,7 @@ impl Grammars {
                 Err(()) => None,
             }
         } else {
-            let values = request_value(call, &f.param)
+            let values = request_value(bundle, op, call, &f.param)
                 .map(|raw| texts(&raw))
                 .unwrap_or_default();
             match values.as_slice() {
@@ -659,10 +760,34 @@ fn holds(filter: &Filter, item: &Value, source: Source) -> bool {
 /// Whether `item` holds the described scope, when the request gives one.
 fn in_scope(q: &ListQuery, item: &Value) -> bool {
     q.scope.as_ref().is_none_or(|(member, value)| {
-        mb_mcm::member_at(item, member)
-            .filter(|h| !h.is_null())
-            .is_some_and(|held| same(held, &Value::String(value.clone())))
+        let held = mb_mcm::member_at(item, member).filter(|h| !h.is_null());
+        match q.scope_prefix {
+            Some(deep) => held
+                .and_then(Value::as_str)
+                .is_some_and(|path| under(path, value, deep)),
+            None => held.is_some_and(|held| same(held, &Value::String(value.clone()))),
+        }
     })
+}
+
+/// Whether `/`-separated `path` is below `dir` (the root when blank or `/`): directly,
+/// or at any depth with `deep`. A `path` holding no upper-case letter (Dropbox's
+/// `path_lower`) is a lower-cased path: `dir` is compared in lower case too.
+fn under(path: &str, dir: &str, deep: bool) -> bool {
+    let lowered;
+    let dir = match path.chars().any(char::is_uppercase) {
+        true => dir,
+        false => {
+            lowered = dir.to_lowercase();
+            lowered.as_str()
+        }
+    };
+    let dir = dir.trim_end_matches('/');
+    let Some(rest) = path.strip_prefix(dir).and_then(|r| r.strip_prefix('/')) else {
+        return false;
+    };
+    let rest = rest.trim_end_matches('/');
+    !rest.is_empty() && (deep || !rest.contains('/'))
 }
 
 /// Whether `item` is soft-deleted and the request does not ask for deleted records.

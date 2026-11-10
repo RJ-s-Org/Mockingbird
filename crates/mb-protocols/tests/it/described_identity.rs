@@ -440,10 +440,16 @@ async fn a_described_identity_header_reaches_a_header_the_detector_misses() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(source(&headers), "state", "{body}");
     assert_eq!(body["subject"], json!("hello"), "{body}");
-    // With no world, the detector finds no header: no id is minted for one.
+    // With no world, the detector finds no header: no id is minted for one. The
+    // seed keeps the create on the generated path, whose detector this checks.
     let h = plain(vec![json!({"threadIds": [1]})]);
     let (_, headers, _) = h
-        .send("POST", "/threads", Some(json!({"subject": "hello"})), &[])
+        .send(
+            "POST",
+            "/threads",
+            Some(json!({"subject": "hello"})),
+            &[support::SEED],
+        )
         .await;
     let placed = header(&headers, "x-thread");
     assert_eq!(h.stored("threads", &placed).await, None, "{headers:?}");

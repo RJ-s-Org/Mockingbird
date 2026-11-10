@@ -1508,3 +1508,175 @@ type Mutation {
         );
     }
 }
+
+/// Statuspage's incidents, whose updates live in the incident's `incident_updates`.
+const INCIDENTS: &str = r##"
+openapi: 3.0.0
+info: {title: Incidents, version: "1"}
+paths:
+  /incidents/{incident_id}:
+    get:
+      operationId: getIncident
+      parameters: [{name: incident_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Incident"}}}}}
+  /incidents/{incident_id}/incident_updates/{incident_update_id}:
+    parameters:
+      - {name: incident_id, in: path, required: true, schema: {type: string}}
+      - {name: incident_update_id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getIncidentUpdate
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/IncidentUpdate"}}}}, "404": {description: missing}}
+    patch:
+      operationId: patchIncidentUpdate
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                incident_update: {type: object, properties: {body: {type: string}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/IncidentUpdate"}}}}}
+    delete:
+      operationId: deleteIncidentUpdate
+      responses: {"204": {description: deleted}}
+  /incident_updates/{incident_update_id}:
+    get:
+      operationId: getUpdate
+      parameters: [{name: incident_update_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/IncidentUpdate"}}}}}
+components:
+  schemas:
+    IncidentUpdate:
+      type: object
+      required: [id, status, body]
+      properties:
+        id: {type: string}
+        incident_id: {type: string}
+        status: {type: string}
+        body: {type: string}
+    Incident:
+      type: object
+      required: [id, name, incident_updates]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        incident_updates: {type: array, items: {$ref: "#/components/schemas/IncidentUpdate"}}
+"##;
+
+/// A record held in its parent's array member (`parent.embedded`) is read, edited and
+/// removed by its own route in place: the parent holding it is what is stored.
+#[tokio::test]
+async fn an_embedded_child_is_read_edited_and_removed_in_its_parent() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {
+            "incidents": {"identity": {"member": "id"}},
+            "incident_updates": {
+                "identity": {"member": "id"},
+                "parent": {"type": "incidents", "member": "incident_id", "path_param": "incident_id", "embedded": "incident_updates"}
+            }
+        },
+        "operations": {
+            "getIncidentUpdate": {"kind": "read", "type": "incident_updates"},
+            "patchIncidentUpdate": {"kind": "update", "type": "incident_updates", "request": {"record": "/incident_update"}},
+            "deleteIncidentUpdate": {"kind": "delete", "type": "incident_updates"},
+            "getUpdate": {"kind": "read", "type": "incident_updates"}
+        }
+    });
+    let h = support::described(INCIDENTS, world, Vec::new());
+    let update = |id: &str, status: &str, body: &str| json!({"id": id, "incident_id": "i1", "status": status, "body": body});
+    h.hold(
+        "incidents",
+        &[
+            json!({"id": "i1", "name": "Payments failing", "incident_updates": [
+                update("u2", "identified", "Cause found."),
+                update("u1", "investigating", "Looking."),
+            ]}),
+        ],
+    )
+    .await;
+    let route = "/incidents/i1/incident_updates/u1";
+    let (status, headers, body) = h.send("GET", route, None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body, update("u1", "investigating", "Looking."));
+    let edit = json!({"incident_update": {"body": "Looking at EU cards."}});
+    let (status, headers, body) = h.send("PATCH", route, Some(edit), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body, update("u1", "investigating", "Looking at EU cards."));
+    let held = h.stored("incidents", "i1").await.unwrap();
+    assert_eq!(
+        held["incident_updates"],
+        json!([
+            update("u2", "identified", "Cause found."),
+            update("u1", "investigating", "Looking at EU cards.")
+        ])
+    );
+    assert!(h.stored_ids("incident_updates").await.is_empty());
+    let (status, _, _) = h
+        .send("DELETE", "/incidents/i1/incident_updates/u2", None, &[])
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let held = h.stored("incidents", "i1").await.unwrap();
+    assert_eq!(
+        held["incident_updates"],
+        json!([update("u1", "investigating", "Looking at EU cards.")])
+    );
+    // It is known deleted: a read of it is the declared 404, not the model's.
+    let (status, _, body) = h
+        .send("GET", "/incidents/i1/incident_updates/u2", None, &[])
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let kinds = |op: &str| -> Vec<(String, Option<String>)> {
+        capture
+            .of(op)
+            .into_iter()
+            .map(|l| (l.exec, l.exec_fallback))
+            .collect()
+    };
+    assert_eq!(kinds("getIncidentUpdate"), [("read".to_owned(), None)]);
+    assert_eq!(kinds("patchIncidentUpdate"), [("update".to_owned(), None)]);
+    assert_eq!(kinds("deleteIncidentUpdate"), [("delete".to_owned(), None)]);
+    assert!(h.provider.requests().is_empty());
+}
+
+/// With no path parameter naming the parent, the one held parent holding the id holds
+/// the record; when two hold it, which one is meant is a guess, and the call generates.
+#[tokio::test]
+async fn an_embedded_child_is_found_in_the_one_held_parent_holding_it() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {
+            "incidents": {"identity": {"member": "id"}},
+            "incident_updates": {
+                "identity": {"member": "id"},
+                "parent": {"type": "incidents", "member": "incident_id", "embedded": "incident_updates"}
+            }
+        },
+        "operations": {"getUpdate": {"kind": "read", "type": "incident_updates"}}
+    });
+    let generated = json!({"id": "u1", "status": "resolved", "body": "drawn"});
+    let h = support::described(INCIDENTS, world, vec![generated.clone()]);
+    let update = |id: &str, incident: &str| json!({"id": id, "incident_id": incident, "status": "investigating", "body": format!("{id} of {incident}")});
+    h.hold(
+        "incidents",
+        &[
+            json!({"id": "i1", "name": "one", "incident_updates": [update("u1", "i1")]}),
+            json!({"id": "i2", "name": "two", "incident_updates": [update("u1", "i2"), update("u3", "i2")]}),
+        ],
+    )
+    .await;
+    let (status, headers, body) = h.send("GET", "/incident_updates/u3", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body, update("u3", "i2"));
+    let (_, headers, body) = h.send("GET", "/incident_updates/u1", None, &[]).await;
+    assert_ne!(source(&headers), "state", "{body}");
+    let reasons: Vec<Option<String>> = capture
+        .of("getUpdate")
+        .into_iter()
+        .map(|l| l.exec_fallback)
+        .collect();
+    assert_eq!(reasons, [None, Some("not_held".to_owned())]);
+}
