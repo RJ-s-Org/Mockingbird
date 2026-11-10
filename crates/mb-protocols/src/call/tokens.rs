@@ -91,6 +91,7 @@
 //! effect) answers no `304` until a read serves it again. A record whose value was
 //! never kept answers no `304`.
 
+use mb_mcm::{member_at, set_member_at};
 use mb_state::INTERNAL_TYPE;
 use sha2::{Digest, Sha256};
 
@@ -590,7 +591,7 @@ fn stale_described(
     member: &str,
     header: Option<&str>,
 ) -> bool {
-    let Some(now) = target.data.get(member).filter(|v| as_text(v).is_some()) else {
+    let Some(now) = member_at(&target.data, member).filter(|v| as_text(v).is_some()) else {
         return false;
     };
     if let Some(header) = header
@@ -598,11 +599,12 @@ fn stale_described(
     {
         return sent_header(call, header).is_some_and(|values| !holds(header, &values, now));
     }
-    let sent = match call.body.as_ref() {
-        Some(Value::Object(body)) => body.get(member),
-        _ => None,
-    }
-    .or_else(|| call.query.get(member));
+    let sent = call
+        .body
+        .as_ref()
+        .filter(|b| b.is_object())
+        .and_then(|b| member_at(b, member))
+        .or_else(|| call.query.get(member));
     sent.is_some_and(|sent| compared(sent).is_some() && stale(sent, now))
 }
 
@@ -663,7 +665,7 @@ pub(super) async fn check(
         Some(Value::Object(members)) => Some(members),
         _ => None,
     };
-    let current = |member: &str| target.data.get(member).filter(|v| as_text(v).is_some());
+    let current = |member: &str| member_at(&target.data, member).filter(|v| as_text(v).is_some());
     let headers = sent_headers(op, call);
     let is_confirmed = |member: &str| confirmed.iter().any(|m| m == member);
 
@@ -753,7 +755,10 @@ pub(super) async fn check(
     {
         // The client sets it anew: it is the client's.
         let set_anew = |member: &str| {
-            body.and_then(|b| b.get(member))
+            call.body
+                .as_ref()
+                .filter(|b| b.is_object())
+                .and_then(|b| member_at(b, member))
                 .or_else(|| call.query.get(member))
                 .is_some_and(|s| compared(s) != current(member).and_then(compared))
         };
@@ -784,7 +789,7 @@ pub(super) async fn check(
                 let learned = pairs
                     .get(IF_MATCH)
                     .and_then(Value::as_str)
-                    .filter(|m| held.contains_key(*m) && fits(m))
+                    .filter(|m| current(m).is_some() && fits(m))
                     .map(str::to_string);
                 let Some(member) = learned.or_else(|| only_match(header, values, &fits)) else {
                     continue;
@@ -795,7 +800,7 @@ pub(super) async fn check(
                 }
                 continue;
             }
-            let fits = |m: &str| held.contains_key(m) && header_member(rt, op, t, m);
+            let fits = |m: &str| current(m).is_some() && header_member(rt, op, t, m);
             // A pairing seen tracked.
             if let Some(member) = pairs.get(header).and_then(Value::as_str) {
                 if fits(member) && current(member).is_some_and(|now| holds(header, values, now)) {
@@ -874,7 +879,7 @@ pub(super) async fn check(
         }
         // A described token advances with every update, minted anew when left as it was.
         if let Some((Some(member), header, _)) = &described
-            && held.get(member).and_then(as_text).is_some()
+            && current(member).is_some()
             && !set_anew(member)
         {
             advance(member, true, &mut advancing);
@@ -925,7 +930,10 @@ pub(super) async fn after_update(
     let mut confirmed = tokens.confirmed.clone();
     let mut minted = Map::new();
     for member in &tokens.advancing {
-        let (Some(was), Some(now)) = (before.data.get(member), after.data.get(member)) else {
+        let (Some(was), Some(now)) = (
+            member_at(&before.data, member),
+            member_at(&after.data, member),
+        ) else {
             continue;
         };
         let (Some(was_text), Some(now_text)) = (compared(was), compared(now)) else {
@@ -948,17 +956,22 @@ pub(super) async fn after_update(
             confirmed.push(member.clone());
         }
     }
-    if !minted.is_empty()
-        && let Value::Object(data) = &mut after.data
-    {
-        data.extend(minted.clone());
-        state.upsert(session, after).await;
-        if let Some(Value::Object(record)) = served {
+    if !minted.is_empty() && after.data.is_object() {
+        let written = after.clone();
+        for (member, new) in &minted {
+            set_member_at(&mut after.data, member, new.clone());
+        }
+        if state.upsert(session, after.clone()).await {
+            // The record stays in the collection the write placed it in.
+            state.rt.collections().carry(session, &written, &after);
+            state.rt.collections().refresh_scope(session, &after);
+        }
+        if let Some(record) = served.filter(|r| r.is_object()) {
             for (member, new) in &minted {
-                let shows_old = record.get(member).and_then(compared)
-                    == before.data.get(member).and_then(compared);
+                let shows_old = member_at(record, member).and_then(compared)
+                    == member_at(&before.data, member).and_then(compared);
                 if shows_old {
-                    record.insert(member.clone(), new.clone());
+                    set_member_at(record, member, new.clone());
                 }
             }
         }
@@ -1028,7 +1041,7 @@ pub(super) fn advance(
     after: &mut Value,
 ) {
     for member in &tokens.mintable {
-        let (Some(was), Some(now)) = (before.get(member), after.get(member)) else {
+        let (Some(was), Some(now)) = (member_at(before, member), member_at(after, member)) else {
             continue;
         };
         if compared(was) != compared(now) {
@@ -1036,9 +1049,8 @@ pub(super) fn advance(
         }
         if let Some(new) =
             mint(was, &format!("{t}\0{id}")).filter(|new| mint_fits(rt, t, member, new))
-            && let Value::Object(record) = after
         {
-            record.insert(member.clone(), new);
+            set_member_at(after, member, new);
         }
     }
 }
@@ -1097,14 +1109,11 @@ pub(super) async fn entity_tag(
         .get(IF_MATCH)?
         .as_str()?
         .to_string();
-    let value = match record.and_then(|r| r.get(&member)).and_then(as_text) {
+    let value = match record.and_then(|r| member_at(r, &member)).and_then(as_text) {
         Some(value) => value,
-        None => state
-            .get(&plan.session, t, &id)
-            .await?
-            .data
-            .get(&member)
-            .and_then(as_text)?,
+        None => {
+            member_at(&state.get(&plan.session, t, &id).await?.data, &member).and_then(as_text)?
+        }
     };
     Some((name, as_entity_tag(value)))
 }
@@ -1211,7 +1220,20 @@ pub(super) async fn after_answer(
         .unwrap_or_default();
     let is_read = matches!(op.kind, OperationKind::Query);
     let mut now = Map::new();
-    for (member, value) in held {
+    // The top-level members, and a described token nested deeper (`meta.rev`).
+    let nested = described(rt, t)
+        .and_then(|(member, _, _)| member)
+        .filter(|member| member.contains('.'))
+        .and_then(|member| {
+            let value = member_at(&record.data, &member)?;
+            Some((member, value))
+        });
+    let members = held.iter().map(|(m, v)| (m.as_str(), v)).chain(
+        nested
+            .as_ref()
+            .map(|(member, value)| (member.as_str(), *value)),
+    );
+    for (member, value) in members {
         let Some(text) = as_text(value).filter(|_| etag_member(rt, t, member)) else {
             continue;
         };
@@ -1228,7 +1250,7 @@ pub(super) async fn after_answer(
             Some(Some(_)) => None,
         };
         now.insert(
-            member.clone(),
+            member.to_string(),
             serde_json::json!({"value": text, "digest": stands_for}),
         );
     }
@@ -1295,7 +1317,7 @@ async fn current_etag(
         })
         .filter(|member| fits(member));
     if let Some(member) = paired {
-        let value = held.get(&member).and_then(as_text)?;
+        let value = member_at(&target.data, &member).and_then(as_text)?;
         return Some((member, value));
     }
     let mut found = held.iter().filter(|(member, value)| {

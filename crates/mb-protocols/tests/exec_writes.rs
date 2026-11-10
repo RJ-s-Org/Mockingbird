@@ -1964,3 +1964,489 @@ async fn an_update_sending_a_new_identity_keeps_the_record_s_key() {
     assert_eq!(h.stored("items", "8").await, None);
     assert_eq!(h.provider.requests().len(), 0);
 }
+
+/// Things hold their version and their owner's view in nested members; they are
+/// revised and fetched by a request body naming them, as RPC-style APIs do.
+const NESTED: &str = r##"
+openapi: 3.0.0
+info: {title: Nested, version: "1"}
+paths:
+  /things:
+    post:
+      operationId: createThing
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}}
+  /things/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getThing
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}, "404": {description: missing}}
+    put:
+      operationId: replaceThing
+      parameters: [{name: X-Version, in: header, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+        "409": {description: conflict, content: {application/json: {schema: {type: object, properties: {message: {type: string}}}}}}
+  /revise:
+    post:
+      operationId: reviseThing
+      requestBody: {content: {application/json: {schema: {type: object, properties: {Thing: {$ref: "#/components/schemas/Thing"}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}}
+  /fetch:
+    post:
+      operationId: fetchThing
+      requestBody: {content: {application/json: {schema: {type: object, properties: {id: {type: string}, code: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}}
+components:
+  schemas:
+    Thing:
+      type: object
+      required: [name]
+      properties:
+        id: {type: string}
+        code: {type: string}
+        name: {type: string}
+        meta:
+          type: object
+          properties: {rev: {type: string}, version: {type: integer}}
+"##;
+
+/// The thing every nested test starts from.
+fn thing() -> Value {
+    json!({"id": "t1", "code": "c-1", "name": "a", "meta": {"rev": "abc", "version": 1}})
+}
+
+/// A harness over [`NESTED`] serving `world`, its thing `t1` created.
+async fn with_thing(world: Value, script: Vec<Value>) -> DescribedHarness {
+    let h = support::harness(NESTED, script, &HarnessOptions::default(), |rt| {
+        support::with_effective(rt, world, false)
+    });
+    let (status, _, body) = h.send("POST", "/things", Some(thing()), SEEDED).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    h
+}
+
+#[tokio::test]
+async fn a_nested_described_token_sent_in_a_header_is_checked_and_advanced() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"things": {"concurrency": {"member": "meta.version", "header": "X-Version", "conflict": 409}}},
+        "operations": {"replaceThing": {"kind": "replace"}}
+    });
+    let h = with_thing(world, vec![thing(), json!({"message": "stale"})]).await;
+    let sent =
+        json!({"id": "t1", "code": "c-1", "name": "b", "meta": {"rev": "abc", "version": 1}});
+    let (status, _, body) = h
+        .send(
+            "PUT",
+            "/things/t1",
+            Some(sent.clone()),
+            &[("X-Version", "0")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "a stale version: {body}");
+    let (status, _, body) = h
+        .send(
+            "PUT",
+            "/things/t1",
+            Some(sent.clone()),
+            &[("X-Version", "1")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["meta"]["version"], json!(2), "{body}");
+    assert_eq!(body["name"], json!("b"), "{body}");
+    let (status, _, body) = h
+        .send("PUT", "/things/t1", Some(sent), &[("X-Version", "1")])
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "stale once advanced: {body}");
+}
+
+#[tokio::test]
+async fn a_replace_mints_a_new_nested_body_token_so_the_old_one_is_stale() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"things": {"concurrency": {"member": "meta.rev", "conflict": 409}}},
+        "operations": {"replaceThing": {"kind": "replace"}}
+    });
+    let h = with_thing(world, vec![thing(), json!({"message": "stale"})]).await;
+    let sent =
+        json!({"id": "t1", "code": "c-1", "name": "b", "meta": {"rev": "abc", "version": 1}});
+    let (status, headers, body) = h.send("PUT", "/things/t1", Some(sent.clone()), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let rev = body["meta"]["rev"].as_str().unwrap().to_owned();
+    assert_ne!(rev, "abc", "a new token: {body}");
+    assert_eq!(rev.len(), 3, "of the same shape: {body}");
+    assert_eq!(
+        h.stored("things", "t1").await.unwrap()["meta"]["rev"],
+        json!(rev)
+    );
+    assert_eq!(
+        capture.of("replaceThing"),
+        vec![line("replaceThing", "replace", None)]
+    );
+    let (status, _, body) = h.send("PUT", "/things/t1", Some(sent), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "the old token is stale: {body}"
+    );
+    assert_eq!(h.stored("things", "t1").await.unwrap()["name"], json!("b"));
+}
+
+#[tokio::test]
+async fn a_body_target_at_a_nested_member_names_the_record() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"reviseThing": {
+        "kind": "update", "type": "things",
+        "target": {"member": "Thing.id"}, "request": {"record": "/Thing"}, "answer": {"record": ""}
+    }}});
+    let h = with_thing(world, vec![thing(), decoy()]).await;
+    let (status, headers, body) = h
+        .send(
+            "POST",
+            "/revise",
+            Some(json!({"Thing": {"id": "t1", "name": "z"}})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body["id"], json!("t1"), "{body}");
+    assert_eq!(body["name"], json!("z"), "{body}");
+    assert_eq!(
+        capture.of("reviseThing"),
+        vec![line("reviseThing", "update", None)]
+    );
+    assert_eq!(h.stored("things", "t1").await.unwrap()["name"], json!("z"));
+}
+
+#[tokio::test]
+async fn a_body_target_may_name_the_record_by_an_identity_alternate() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"things": {"identity": {"member": "id", "alternates": ["code"]}}},
+        "operations": {"fetchThing": {
+            "kind": "read", "type": "things", "target": {"member": "id"}, "answer": {"record": ""}
+        }}
+    });
+    let h = with_thing(world, vec![thing(), decoy()]).await;
+    let (status, headers, body) = h
+        .send("POST", "/fetch", Some(json!({"code": "c-1"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body, thing());
+    assert_eq!(
+        capture.of("fetchThing"),
+        vec![line("fetchThing", "read", None)]
+    );
+}
+
+#[tokio::test]
+async fn a_create_carrying_an_existing_alternate_names_no_record() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"things": {"identity": {"member": "id", "alternates": ["code"]}}},
+        "operations": {"createThing": {"kind": "create", "type": "things", "target": {"member": "id"}}}
+    });
+    let h = with_thing(world, vec![thing(), decoy()]).await;
+    let (status, headers, body) = h
+        .send(
+            "POST",
+            "/things",
+            Some(json!({"code": "c-1", "name": "other"})),
+            &[],
+        )
+        .await;
+    // The body names no record: t1 is neither answered nor changed. Its alternate
+    // being another record's, the create is generated, never stored twice.
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "llm", "{body}");
+    assert_ne!(body["id"], json!("t1"), "a new record: {body}");
+    assert_eq!(body["name"], json!("other"), "{body}");
+    assert_eq!(
+        capture.of("createThing").last(),
+        Some(&line("createThing", "create", Some("repeated_key")))
+    );
+    assert_eq!(h.stored("things", "t1").await.unwrap(), thing());
+}
+
+#[tokio::test]
+async fn an_update_names_its_record_by_an_alternate_beside_a_nested_target() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"things": {"identity": {"member": "id", "alternates": ["code"]}}},
+        "operations": {"reviseThing": {
+            "kind": "update", "type": "things",
+            "target": {"member": "Thing.id"}, "request": {"record": "/Thing"}, "answer": {"record": ""}
+        }}
+    });
+    let h = with_thing(world, vec![thing(), decoy()]).await;
+    let (status, headers, body) = h
+        .send(
+            "POST",
+            "/revise",
+            Some(json!({"Thing": {"code": "c-1", "name": "z"}})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body["id"], json!("t1"), "{body}");
+    assert_eq!(body["name"], json!("z"), "{body}");
+    assert_eq!(
+        capture.of("reviseThing"),
+        vec![line("reviseThing", "update", None)]
+    );
+    assert_eq!(h.stored("things", "t1").await.unwrap()["name"], json!("z"));
+    assert!(h.stored("things", "c-1").await.is_none());
+}
+
+#[tokio::test]
+async fn a_nested_body_token_is_minted_on_the_generated_path_too() {
+    let (_capture, _guard) = Capture::install();
+    // A seeded replace takes the generated path.
+    let world =
+        json!({"types": {"things": {"concurrency": {"member": "meta.rev", "conflict": 409}}}});
+    let answered =
+        json!({"id": "t1", "code": "c-1", "name": "b", "meta": {"rev": "abc", "version": 1}});
+    let h = with_thing(
+        world,
+        vec![thing(), answered.clone(), json!({"message": "stale"})],
+    )
+    .await;
+    let (status, headers, body) = h
+        .send("PUT", "/things/t1", Some(answered.clone()), SEEDED)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_ne!(source(&headers), "state", "{body}");
+    let rev = body["meta"]["rev"].as_str().unwrap().to_owned();
+    assert_ne!(rev, "abc", "a new token: {body}");
+    assert_eq!(
+        h.stored("things", "t1").await.unwrap()["meta"]["rev"],
+        json!(rev)
+    );
+    let (status, _, body) = h.send("PUT", "/things/t1", Some(answered), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "the old token is stale: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_nested_token_sent_in_the_query_is_checked() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"things": {"concurrency": {"member": "meta.rev", "conflict": 409}}},
+        "operations": {"replaceThing": {"kind": "replace"}}
+    });
+    let h = with_thing(world, vec![thing(), json!({"message": "stale"})]).await;
+    let sent = json!({"id": "t1", "name": "b"});
+    let (status, _, body) = h
+        .send("PUT", "/things/t1?meta.rev=old", Some(sent.clone()), &[])
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "a stale token: {body}");
+    let (status, _, body) = h
+        .send("PUT", "/things/t1?meta.rev=abc", Some(sent), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], json!("b"), "{body}");
+}
+
+/// [`NESTED`]'s things, their nested `meta.rev` server-set, guarded by `If-Match` and
+/// read with an `ETag` and `If-None-Match`.
+const TAGGED: &str = r##"
+openapi: 3.0.0
+info: {title: Tagged, version: "1"}
+paths:
+  /things:
+    post:
+      operationId: createThing
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}}
+  /things/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getThing
+      parameters: [{name: If-None-Match, in: header, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          headers: {ETag: {schema: {type: string}}}
+          content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}
+        "304": {description: not modified}
+        "404": {description: missing}
+    put:
+      operationId: replaceThing
+      parameters: [{name: If-Match, in: header, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+        "412": {description: stale, content: {application/json: {schema: {type: object, properties: {message: {type: string}}}}}}
+components:
+  schemas:
+    Thing:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        meta:
+          type: object
+          readOnly: true
+          properties: {rev: {type: string, readOnly: true}}
+"##;
+
+#[tokio::test]
+async fn a_nested_if_match_token_is_paired_and_served_as_the_entity_tag() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"things": {"concurrency": {"member": "meta.rev", "header": "If-Match", "conflict": 412}}},
+        "operations": {"replaceThing": {"kind": "replace"}}
+    });
+    let made = json!({"id": "t1", "name": "a", "meta": {"rev": "abc"}});
+    let h = support::harness(
+        TAGGED,
+        vec![made.clone(), json!({"message": "stale"})],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    let (status, _, body) = h.send("POST", "/things", Some(made), SEEDED).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, _, body) = h
+        .send(
+            "PUT",
+            "/things/t1",
+            Some(json!({"id": "t1", "name": "b"})),
+            &[("If-Match", "\"abc\"")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rev = body["meta"]["rev"].as_str().unwrap().to_owned();
+    assert_ne!(rev, "abc", "a new token: {body}");
+    let tag = format!("\"{rev}\"");
+    let (status, headers, body) = h.send("GET", "/things/t1", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        headers.get("etag").and_then(|v| v.to_str().ok()),
+        Some(tag.as_str()),
+        "{body}"
+    );
+    let (status, _, body) = h
+        .send(
+            "GET",
+            "/things/t1",
+            None,
+            &[("If-None-Match", tag.as_str())],
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED, "{body}");
+}
+
+/// Things kept per space, their server-set `sys` holding their id and version.
+const SPACED: &str = r##"
+openapi: 3.0.0
+info: {title: Spaced, version: "1"}
+paths:
+  /spaces/{space}/things:
+    parameters: [{name: space, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listThings
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Thing"}}}}}}}}
+    post:
+      operationId: createThing
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}}
+  /spaces/{space}/things/{id}:
+    parameters:
+      - {name: space, in: path, required: true, schema: {type: string}}
+      - {name: id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getThing
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}, "404": {description: missing}}
+    put:
+      operationId: replaceThing
+      parameters: [{name: X-Version, in: header, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/ThingInput"}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+        "409": {description: conflict, content: {application/json: {schema: {type: object, properties: {message: {type: string}}}}}}
+components:
+  schemas:
+    ThingInput:
+      type: object
+      properties:
+        name: {type: string}
+    Thing:
+      type: object
+      required: [name, sys]
+      properties:
+        name: {type: string}
+        sys:
+          type: object
+          required: [id, version]
+          properties: {id: {type: string}, version: {type: integer}}
+"##;
+
+#[tokio::test]
+async fn a_record_whose_nested_token_is_minted_stays_in_its_collection() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"things": {
+            "identity": {"member": "sys.id"},
+            "concurrency": {"member": "sys.version", "header": "X-Version", "conflict": 409}
+        }},
+        "operations": {
+            "getThing": {"kind": "read", "type": "things", "target": {"path_param": "id"}},
+            "replaceThing": {
+                "kind": "update", "type": "things", "target": {"path_param": "id"}, "answer": {"record": ""}
+            }
+        }
+    });
+    let one = json!({"name": "a", "sys": {"id": "t1", "version": 1}});
+    let two = json!({"name": "c", "sys": {"id": "t2", "version": 1}});
+    // The model's answer to the replace leaves the version as it was: it is minted anew.
+    let answered = json!({"name": "b", "sys": {"id": "t1", "version": 1}});
+    let h = support::harness(
+        SPACED,
+        vec![
+            one.clone(),
+            two.clone(),
+            answered,
+            json!({"message": "stale"}),
+        ],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    for made in [&one, &two] {
+        let (status, _, body) = h
+            .send("POST", "/spaces/s1/things", Some(made.clone()), SEEDED)
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let (status, headers, body) = h
+        .send(
+            "PUT",
+            "/spaces/s1/things/t1",
+            Some(json!({"name": "b"})),
+            &[("X-Version", "1"), SEEDED[0]],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_ne!(source(&headers), "state", "{body}");
+    assert_eq!(body["sys"]["version"], json!(2), "a new version: {body}");
+    let (status, headers, body) = h.send("GET", "/spaces/s1/things", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let names: Vec<&Value> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| &item["name"])
+        .collect();
+    assert_eq!(names, [&json!("b"), &json!("c")], "{body}");
+}
