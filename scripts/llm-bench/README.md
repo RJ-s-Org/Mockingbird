@@ -126,13 +126,18 @@ Results are cached in `<cache>/<key>/<task>/`. The key hashes the skills, the MC
 
 `fakegate.py --e2e-cache <cache>/<key>` adds this as the `e2e` tier. Both sides load the same snapshots, so the tier gates the engine on fixed builds.
 
-**The report: `e2e.py report RUN --stage1 <cache>/<key> [--paid DIR ...] [--curated RUN] [--attribution FILE ...]`.** For each suite and tier it prints the fake pass rate, the projected rate, the floor, and the missed and model-dependent counts. A failed check counts as model-dependent, so recoverable by a real model, only when every one of these allows it, in order:
-- the classifier agents' attribution of its deciding call (`--attribution`: `[{suite, check, reclass|cls}]`);
-- the deciding call reached the model (`source` llm, fallback, repaired or patched);
-- the curated tier (`agent`, the run's own or `--curated`, on the same binary) did not pass it (a pass makes it missed) and did not decide it from state;
-- some `--paid` run passed it.
+**The report: `e2e.py report RUN --stage1 <cache>/<key> [--paid DIR ...] [--curated RUN] [--attribution FILE ...]`.** For each suite and tier it prints the fake pass rate, the projected rate, and the failures split into floor, missed and model. Each failed check is in exactly one class, so floor + missed + model is the failure count. The projected rate is (passed + model) / total: missed and floor failures do not count toward it.
 
-Every other failure is floor. Model-dependent failures that no attribution names are counted as unattributed, an upper bound on the projection. A baseline's attribution comes from classifier agents reading each model-reached failure's deciding call: its executor fallback and the curated diff.
+The class of a failed check is the first of these that applies:
+1. An attribution names it `missed`: **missed**. An attribution names it `engine`, `inexpressible` or `journey`: **floor**.
+2. The curated tier (`agent`, the run's own or `--curated`, on the same binary) passes it: **missed**.
+3. Its deciding call never reached the model, so `source` is not llm, llm-repaired, repaired, patched or fallback: **floor**. That covers the engine-decided sources (state, rejected) and calls that never ran (error, `?`).
+4. `--paid` runs are given and none of them passed it: **floor**.
+5. Otherwise: **model**.
+
+An attribution only demotes a check out of model. Naming it `model` keeps whatever class the other rules give, so it can never promote a floor or missed check into model. A curated row that fails, or is missing, changes nothing. The curated tier and the attributions judge only the `e2e` tier; the `agent`, `none` and derived tiers use rules 3 to 5. The `--paid` rule applies to every tier.
+
+`--attribution` takes classifier output, `[{suite, check, reclass|cls}]`, where the class is one of `model`, `missed`, `engine`, `inexpressible` or `journey`. Any other class stops the report with an error. With `--attribution` given, model failures that no attribution names are shown as unattributed: the projection is an upper bound by that many. A baseline's attribution comes from classifier agents reading each model-reached failure's deciding call: its executor fallback and the curated diff.
 
 ## Budget
 

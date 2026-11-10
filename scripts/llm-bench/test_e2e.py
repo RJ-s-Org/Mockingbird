@@ -375,30 +375,178 @@ class AttributionTest(unittest.TestCase):
             ("agent", "s", "d"): {"ok": False, "source": "llm"},
             ("agent", "s", "e"): {"ok": False, "source": "state"}}
 
-    def test_the_curated_tier_tells_missed_and_engine_decided_from_model(self):
+    def cls(self, r, **kw):
+        return e2e.failure_class("s", "x", r, **kw)
+
+    def assertPartition(self, s):
+        self.assertEqual(len(s["floor"]) + len(s["missed"]) + len(s["model_dependent"]), s["total"] - s["passed"])
+        self.assertEqual(sum(s["classes"].values()), s["total"] - s["passed"])
+        self.assertFalse(set(s["floor"]) & set(s["missed"]))
+
+    def test_a_curated_pass_is_missed_and_a_curated_failure_changes_nothing(self):
         curated = e2e.curated_rows(self.ROWS)
         s = e2e.summarize(self.ROWS, curated=curated)[("e2e", "s")]
         self.assertEqual(s["missed"], ["a"])
-        self.assertEqual(sorted(s["model_dependent"]), ["c", "d"])
-        self.assertEqual(s["classes"], {"missed": 1, "engine_decided": 2, "model": 2})
-        # The curated tier is not judged against itself.
-        self.assertEqual(sorted(e2e.summarize(self.ROWS, curated=curated)[("agent", "s")]["model_dependent"]),
-                         ["c", "d"])
+        # b's curated row failed from state: that says nothing about the e2e failure.
+        self.assertEqual(sorted(s["model_dependent"]), ["b", "c", "d"])
+        self.assertEqual(s["floor"], ["e"])
+        self.assertEqual(s["classes"], {"missed": 1, "floor": 1, "model": 3})
+        self.assertPartition(s)
 
-    def test_an_attribution_overrides_and_the_rest_is_marked_unattributed(self):
+    def test_curated_rows_that_failed_or_are_missing_leave_the_model_class(self):
+        model = {"ok": False, "source": "llm"}
+        for c in ({}, {("s", "x"): {"ok": False, "source": "error"}}, {("s", "x"): {"ok": False, "source": "?"}},
+                  {("s", "x"): {"ok": False, "source": "rejected"}}, {("s", "x"): {"ok": False, "source": "state"}}):
+            self.assertEqual(self.cls(model, curated=c), ("model", "unattributed"), c)
+        self.assertEqual(self.cls(model, curated=None), ("model", "unattributed"))
+
+    def test_an_attribution_demotes_a_model_failure(self):
+        model = {"ok": False, "source": "llm"}
+        self.assertEqual(self.cls(model, attribution={("s", "x"): "missed"}), ("missed", "attributed"))
+        for fixable in ("engine", "inexpressible", "journey"):
+            self.assertEqual(self.cls(model, attribution={("s", "x"): fixable}), ("floor", fixable))
+        self.assertEqual(self.cls(model, attribution={("s", "x"): "model"}), ("model", "attributed"))
+        self.assertEqual(self.cls(model, attribution={}), ("model", "unattributed"))
+
+    def test_an_attribution_of_model_never_promotes(self):
+        model = {("s", "x"): "model"}
+        # A state-sourced or rejected failure stays floor.
+        self.assertEqual(self.cls({"ok": False, "source": "state"}, attribution=model), ("floor", "state"))
+        self.assertEqual(self.cls({"ok": False, "source": "rejected"}, attribution=model), ("floor", "rejected"))
+        # A check the curated tier passes stays missed.
+        self.assertEqual(self.cls({"ok": False, "source": "llm"}, attribution=model,
+                                  curated={("s", "x"): {"ok": True, "source": "state"}}), ("missed", "curated_pass"))
+        # A check no paid run passed stays floor.
+        self.assertEqual(self.cls({"ok": False, "source": "llm"}, attribution=model, paid=set()),
+                         ("floor", "no_paid_pass"))
+
+    def test_an_attribution_on_a_state_sourced_failure_never_makes_it_model(self):
+        state = {"ok": False, "source": "state"}
+        self.assertEqual(self.cls(state, attribution={("s", "x"): "inexpressible"}), ("floor", "inexpressible"))
+        self.assertEqual(self.cls(state, attribution={("s", "x"): "missed"}), ("missed", "attributed"))
+
+    def test_an_attribution_on_a_check_no_paid_run_passed(self):
+        model = {"ok": False, "source": "llm"}
+        self.assertEqual(self.cls(model, paid=set(), attribution={("s", "x"): "missed"}), ("missed", "attributed"))
+        self.assertEqual(self.cls(model, paid={("s", "x")}, attribution={("s", "x"): "model"}), ("model", "attributed"))
+
+    def test_paid_runs_and_the_curated_tier_together(self):
+        rows = dict(self.ROWS)
+        s = e2e.summarize(rows, paid={("s", "a"), ("s", "c")}, curated=e2e.curated_rows(rows))[("e2e", "s")]
+        # a: the curated pass wins over the paid pass; c: model; b, d: no paid pass; e: state.
+        self.assertEqual(s["missed"], ["a"])
+        self.assertEqual(s["model_dependent"], ["c"])
+        self.assertEqual(sorted(s["floor"]), ["b", "d", "e"])
+        self.assertEqual(s["reasons"], {"curated_pass": 1, "no_paid_pass": 2, "state": 1, "unattributed": 1})
+        self.assertEqual(s["projected"], round(100 * 1 / 5, 1))
+        self.assertPartition(s)
+
+    def test_the_curated_tier_and_the_attribution_judge_the_e2e_tier_only(self):
+        rows = {("e2e", "s", "x"): {"ok": False, "source": "llm"},
+                ("none", "s", "x"): {"ok": False, "source": "llm"},
+                ("derived", "s", "x"): {"ok": False, "source": "llm"},
+                ("agent", "s", "x"): {"ok": False, "source": "llm"}}
+        curated = {("s", "x"): {"ok": True, "source": "state"}}
+        rep = e2e.summarize(rows, curated=curated, attribution={("s", "x"): "inexpressible"})
+        self.assertEqual(rep[("e2e", "s")]["missed"], [])
+        self.assertEqual(rep[("e2e", "s")]["floor"], ["x"])
+        for tier in ("none", "derived", "agent"):
+            self.assertEqual(rep[(tier, "s")]["model_dependent"], ["x"], tier)
+            self.assertEqual(rep[(tier, "s")]["unattributed"], 0, tier)
+        rep = e2e.summarize(rows, curated=curated)
+        self.assertEqual(rep[("e2e", "s")]["missed"], ["x"])
+        self.assertEqual(rep[("none", "s")]["model_dependent"], ["x"])
+
+    def test_unattributed_is_counted_only_with_an_attribution(self):
         curated = e2e.curated_rows(self.ROWS)
         s = e2e.summarize(self.ROWS, curated=curated, attribution={("s", "c"): "inexpressible"})[("e2e", "s")]
-        self.assertEqual(s["model_dependent"], ["d"])
-        self.assertEqual(s["unattributed"], 1)
+        self.assertEqual(sorted(s["model_dependent"]), ["b", "d"])
+        self.assertEqual(s["unattributed"], 2)
         self.assertIn("c", s["floor"])
+        self.assertPartition(s)
+        self.assertEqual(e2e.summarize(self.ROWS, curated=curated)[("e2e", "s")]["unattributed"], 0)
+
+    def test_the_classes_sum_to_the_failures(self):
+        rows = dict(self.ROWS)
+        rows.update({("e2e", "s", "f"): {"ok": False, "source": "?"}, ("e2e", "s", "g"): {"ok": True},
+                     ("e2e", "s", "h"): {"ok": False, "source": "rejected"}})
+        attribution = {("s", "b"): "missed", ("s", "c"): "journey", ("s", "e"): "model", ("s", "h"): "missed"}
+        s = e2e.summarize(rows, paid={("s", "d")}, curated=e2e.curated_rows(rows), attribution=attribution)[("e2e", "s")]
+        self.assertPartition(s)
+        self.assertEqual(sorted(s["missed"]), ["a", "b", "h"])
+        self.assertEqual(sorted(s["floor"]), ["c", "e", "f"])
+        self.assertEqual(s["model_dependent"], ["d"])
 
     def test_attribution_files_take_reclass_or_cls(self):
         with tempfile.TemporaryDirectory() as d:
             a = write(os.path.join(d, "a.json"), json.dumps([{"suite": "s", "check": "x", "reclass": "model"}]))
-            b = write(os.path.join(d, "b.json"), json.dumps([{"suite": "s", "check": "x", "cls": "missed"},
-                                                             {"suite": "s", "check": "y", "cls": "bogus"}]))
+            b = write(os.path.join(d, "b.json"), json.dumps([{"suite": "s", "check": "x", "cls": "missed"}]))
             self.assertEqual(e2e.load_attribution([a, b]), {("s", "x"): "missed"})
             self.assertIsNone(e2e.load_attribution([]))
+            empty = write(os.path.join(d, "empty.json"), "[]")
+            self.assertEqual(e2e.load_attribution([empty]), {})
+
+    def test_an_unknown_attribution_class_is_an_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            for x in ({"suite": "s", "check": "y", "cls": "bogus"}, {"suite": "s", "check": "y"},
+                      {"suite": "s", "check": "y", "reclass": "engine_decided"}):
+                p = write(os.path.join(d, "a.json"), json.dumps([x]))
+                with self.assertRaisesRegex(ValueError, "s/y: unknown attribution class"):
+                    e2e.load_attribution([p])
+
+
+class ReportOutputTest(unittest.TestCase):
+    def run_report(self, *extra):
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = e2e.main(["report", self.run_dir, *extra])
+        return code, out.getvalue(), err.getvalue()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.run_dir = self.tmp.name
+        rows = [{"world": "e2e", "suite": "s", "case": "a", "ok": False, "source": "llm"},
+                {"world": "e2e", "suite": "s", "case": "b", "ok": False, "source": "llm"},
+                {"world": "e2e", "suite": "s", "case": "c", "ok": False, "source": "state"},
+                {"world": "e2e", "suite": "s", "case": "d", "ok": True, "source": "state"},
+                {"world": "agent", "suite": "s", "case": "a", "ok": True, "source": "state"}]
+        write(os.path.join(self.run_dir, "e2e", "s", "server.jsonl"), "\n".join(json.dumps(r) for r in rows) + "\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_the_report_prints_one_class_per_failure(self):
+        attr = write(os.path.join(self.run_dir, "attr.json"), json.dumps([]))
+        code, out, _ = self.run_report("--attribution", attr)
+        self.assertEqual(code, 0)
+        line = next(l for l in out.splitlines() if l.startswith("s@e2e"))
+        # pass 1/4, rate 25.0, projected (1 + 1 model) / 4, floor 1 (c), missed 1 (a), model 1 (b).
+        self.assertEqual(line.split()[1:7], ["1/4", "25.0", "50.0", "1", "1", "1"])
+        self.assertIn("(1 unattributed", line)
+        self.assertNotIn("no curated", out)
+
+    def test_unattributed_is_shown_only_with_an_attribution(self):
+        _, out, _ = self.run_report()
+        self.assertNotIn("unattributed", out)
+
+    def test_a_curated_run_without_agent_rows_is_named(self):
+        other_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(other_tmp.cleanup)
+        other = other_tmp.name
+        write(os.path.join(other, "e2e", "s", "server.jsonl"),
+              json.dumps({"world": "e2e", "suite": "s", "case": "a", "ok": True}) + "\n")
+        _, out, _ = self.run_report("--curated", other)
+        self.assertIn(f"--curated {other} has no curated (agent) tier rows", out)
+        self.assertNotIn("pass --curated", out)
+
+    def test_an_unknown_attribution_class_fails_the_report(self):
+        attr = write(os.path.join(self.run_dir, "attr.json"), json.dumps([{"suite": "s", "check": "a", "cls": "eng"}]))
+        code, out, err = self.run_report("--attribution", attr)
+        self.assertEqual(code, 2)
+        self.assertIn("unknown attribution class 'eng'", err)
+        self.assertEqual(out, "")
 
 
 class FakegateE2eTest(unittest.TestCase):
