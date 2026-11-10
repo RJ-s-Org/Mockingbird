@@ -54,6 +54,8 @@ pub(super) enum Fallback {
     /// A create's record would not render into one of its type's reads, or its answer
     /// does not render: nothing is stored.
     RecordInvalid,
+    /// What the call adds would take its target past a cap (a queue's messages).
+    OverCap,
 }
 
 impl Fallback {
@@ -69,6 +71,7 @@ impl Fallback {
             Fallback::Behind => "behind",
             Fallback::RenderFailed => "render_failed",
             Fallback::RecordInvalid => "record_invalid",
+            Fallback::OverCap => "over_cap",
         }
     }
 }
@@ -76,9 +79,13 @@ impl Fallback {
 mod action;
 mod create;
 mod embedded;
+mod fields;
 mod list;
 mod patches;
+mod queue;
 mod writes;
+
+pub(super) use queue::forget as forget_queue;
 
 /// What [`run`] did with a call.
 pub(super) enum Ran {
@@ -386,6 +393,8 @@ async fn held_read(
     match kept.as_ref().and_then(|kept| held(Some(kept))).or(bare) {
         Some(mut served) => {
             write_memory::note_not_caught_up(&mut served, plan, Some(stored), &earlier);
+            // A described fields parameter narrows the record the answer holds.
+            fields::narrow_read(rt, op, call, served.body.as_mut());
             HeldRead::Served(Box::new(served))
         }
         None => HeldRead::Unrendered(Some(earlier), why(kept.as_ref())),
@@ -583,6 +592,8 @@ pub(super) async fn commit(
                     deleted::mark(state, session, (op, call), t, &id, held).await;
                 }
                 tokens::forget(state, session, t, &id).await;
+                // A queue's messages go with it.
+                queue::forget(state, session, t, &id).await;
                 id
             }
         };

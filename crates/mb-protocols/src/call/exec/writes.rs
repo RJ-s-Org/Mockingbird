@@ -532,7 +532,8 @@ pub(super) fn written(
 }
 
 /// A delete of the held target: removed, or moved to its type's soft-deleted state
-/// (removed when it is in that state already), answered with the operation's declared
+/// (removed when it is in that state already, or the request sends the soft delete's
+/// `unless` parameter), answered with the operation's declared
 /// delete answer.
 async fn delete(
     state: &mut StateAccess<'_>,
@@ -556,7 +557,7 @@ async fn delete(
     if let Some(e) = &within {
         // Removed from its parent's array, which is stored; a soft delete keeps it there
         // in its deleted state.
-        let soft = lifecycle::delete_softly(rt, t, &mut data);
+        let soft = lifecycle::delete_softly(rt, t, &mut data, &call.query);
         let Some(answer) = delete_answer(rt, plan, call, (id, &data), response_schema) else {
             fell_back(rt, plan, kind, Fallback::RenderFailed.as_str());
             return Ran::Generate(None);
@@ -572,7 +573,7 @@ async fn delete(
         answered(rt, plan, kind);
         return Ran::Answered(Box::new(answer));
     }
-    let soft = lifecycle::delete_softly(rt, t, &mut data);
+    let soft = lifecycle::delete_softly(rt, t, &mut data, &call.query);
     let Some(answer) = delete_answer(rt, plan, call, (id, &data), response_schema) else {
         fell_back(rt, plan, kind, Fallback::RenderFailed.as_str());
         return Ran::Generate(None);

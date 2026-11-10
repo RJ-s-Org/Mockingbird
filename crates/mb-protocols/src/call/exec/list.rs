@@ -30,7 +30,8 @@
 //! (a `grammar` filter's expression among them; every key bracketed below a
 //! `deep_object` one is its own),
 //! the soft delete unless its `listed_with` parameter is sent, the name-matched filters
-//! of [`lists::filters_of`] for parameters the description does not name. Then the page
+//! of [`lists::filters_of`] for parameters the description does not name (a described
+//! `fields` parameter is no filter: it narrows each item served, [`super::fields`]). Then the page
 //! is cut and rendered by [`state_lists::page`]: derived members filled, the described
 //! order, the count, a page number or offset from state, a next page of a cursor,
 //! next-URL or header cursor as a [`pages`] token (whose later pages [`pages::serve`]
@@ -67,6 +68,7 @@
 
 use std::collections::HashMap;
 
+use mb_engine::consistency::list_items_mut;
 use mb_engine::{GeneratedResponse, GenerationContext, SchemaValidator};
 use mb_mcm::world::OpKind;
 use mb_mcm::{Binding, Operation, OperationKind, StatusSelector};
@@ -115,7 +117,10 @@ pub(super) async fn run(
         .instrument(state_span())
         .await
     {
-        Ok(served) => {
+        Ok(mut served) => {
+            // A described fields parameter narrows each item.
+            let items = served.body.as_mut().and_then(list_items_mut);
+            super::fields::narrow_items(rt, plan.op, call, items);
             answered(rt, plan, OpKind::List);
             Ran::Answered(Box::new(served))
         }
@@ -163,7 +168,9 @@ async fn answer(
     let (item_parts, _) = schema_parts(bundle, Some(&shape.items));
     let size = list_query::requested_page(rt, op, call);
     let size_ref = size.as_ref().map(|(name, limit)| (name.as_str(), *limit));
-    let knows = |param: &str| q.as_ref().is_some_and(|q| q.knows(param));
+    let fields_param = super::fields::param(rt, op);
+    let knows =
+        |param: &str| q.as_ref().is_some_and(|q| q.knows(param)) || fields_param == Some(param);
     let filters: Vec<_> = lists::filters_of(
         bundle,
         op,

@@ -715,11 +715,20 @@ pub(super) async fn page(
                 .ok_or(Unserved::Render)?;
         }
         if let Some(name) = &ask.response_header {
-            let value = next.to_string();
-            if !pages::header_fits(rt, op, name, &value) {
-                return Err(Unserved::Render);
+            // A `Link` header carries the next page's URL; another the position.
+            let param = ask.request.as_deref().unwrap_or_default();
+            let base = plan
+                .page_url
+                .as_deref()
+                .filter(|_| name.eq_ignore_ascii_case("link") && !param.is_empty());
+            // With no value to write (a `Link` with no URL to make), the page is served
+            // without it.
+            if let Some(value) = pages::next_header(name, base, (call, param), &next.to_string()) {
+                if !pages::header_fits(rt, op, name, &value) {
+                    return Err(Unserved::Render);
+                }
+                header = Some((name.clone(), value));
             }
-            header = Some((name.clone(), value));
         }
         // With no described place for it, a page number or offset goes in the next
         // page's URL, where the answer has one member for it (NetBox's `next`); a

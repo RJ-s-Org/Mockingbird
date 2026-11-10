@@ -47,6 +47,12 @@ fn schema_rejects_unknown_keys_and_bad_pointers() {
         json!({"operations": {"o": {"filters": [{"param": "f", "grammar": "wiql"}]}}}),
         json!({"operations": {"o": {"filters": [{"param": "f", "grammar": "odata", "member": "m"}]}}}),
         json!({"operations": {"o": {"filters": [{"param": "f", "kind": "eq", "member_prefix": "m"}]}}}),
+        json!({"operations": {"o": {"fields": {"separator": ","}}}}),
+        json!({"operations": {"o": {"fields": {"param": "f", "separator": ""}}}}),
+        json!({"operations": {"o": {"queue": {"effect": "peek"}}}}),
+        json!({"operations": {"o": {"queue": {"effect": "take", "count": "count"}}}}),
+        json!({"operations": {"o": {"queue": {"effect": "take", "requeue": {"at": "/m"}}}}}),
+        json!({"types": {"t": {"lifecycle": {"member": "s", "soft_delete": {"state": "x", "unless": {"param": "force"}}}}}}),
     ] {
         assert!(!v.is_valid(&bad), "should be refused: {bad}");
     }
@@ -66,7 +72,11 @@ fn schema_accepts_every_serialized_field() {
                     "member": "status",
                     "states": ["open", "closed"],
                     "initial": "open",
-                    "soft_delete": {"state": "closed", "listed_with": {"param": "all", "value": true}}
+                    "soft_delete": {
+                        "state": "closed",
+                        "listed_with": {"param": "all", "value": true},
+                        "unless": {"param": "force", "value": true}
+                    }
                 },
                 "unique": [{"members": ["email"], "scope": "org_id", "conflict": 409}],
                 "concurrency": {"member": "etag", "header": "If-Match", "conflict": 412},
@@ -103,7 +113,9 @@ fn schema_accepts_every_serialized_field() {
                 "paging": {"style": "header_cursor", "request": "cursor", "response": "next", "response_header": "Link", "size": "limit"},
                 "ignores": ["version", "/ActiveList/Include"],
                 "idempotency": {"header": "Idempotency-Key"},
-                "not_found": 404
+                "not_found": 404,
+                "fields": {"param": "fields", "separator": ",", "always": ["id"], "default": []},
+                "queue": {"effect": "take", "count": "/count", "requeue": {"at": "/mode", "value": ["keep"]}, "redelivered": "redelivered"}
             }
         }
     });

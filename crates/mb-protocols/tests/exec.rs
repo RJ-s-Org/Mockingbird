@@ -486,6 +486,7 @@ paths:
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Folder"}}}}, "404": {description: missing}}
     delete:
       operationId: deleteFolder
+      parameters: [{name: force, in: query, schema: {type: boolean}}]
       responses: {"204": {description: deleted}}
   /folders/{id}/touch:
     post:
@@ -646,6 +647,123 @@ async fn a_delete_of_a_soft_deleted_record_removes_it() {
     );
     let (status, _, body) = h.send("GET", "/folders/f1", None, &[]).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+/// A delete sending the soft delete's `unless` parameter at its value removes the record
+/// at once, on the executor's path and on the generated one (a seeded delete).
+#[tokio::test]
+async fn a_delete_sending_the_soft_delete_s_unless_parameter_removes_the_record() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"types": {"folders": {"lifecycle": {
+        "member": "state", "states": ["ACTIVE", "DELETED"], "initial": "ACTIVE",
+        "soft_delete": {"state": "DELETED", "unless": {"param": "force", "value": true}}
+    }}}, "operations": {"getFolder": {"kind": "read", "type": "folders", "not_found": 404}}});
+    let h = support::harness(
+        DELETES,
+        vec![
+            json!({"id": "f1", "name": "docs", "state": "ACTIVE"}),
+            json!({"id": "f2", "name": "logs", "state": "ACTIVE"}),
+        ],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    let t = type_of(&h, "getFolder");
+    for name in ["docs", "logs"] {
+        let (status, _, body) = h
+            .send("POST", "/folders", Some(json!({"name": name})), SEEDED)
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    // Another value of the parameter soft-deletes, as a delete without it does.
+    let (status, _, body) = h.send("DELETE", "/folders/f1?force=false", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(
+        h.stored(&t, "f1").await,
+        Some(json!({"id": "f1", "name": "docs", "state": "DELETED"}))
+    );
+    let (status, headers, body) = h.send("DELETE", "/folders/f1?force=true", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(source(&headers), "state");
+    assert_eq!(h.stored(&t, "f1").await, None);
+    let (status, _, body) = h.send("GET", "/folders/f1", None, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(
+        capture
+            .of("deleteFolder")
+            .iter()
+            .all(|l| l.exec_fallback.is_none()),
+        "{:?}",
+        capture.of("deleteFolder")
+    );
+    // A seeded delete takes the generated path, which removes it too.
+    let seeded = [("x-mockingbird-seed", "7")];
+    let (status, _, body) = h
+        .send("DELETE", "/folders/f2?force=true", None, &seeded)
+        .await;
+    assert!(status.is_success(), "{body}");
+    assert_eq!(h.stored(&t, "f2").await, None);
+    assert_eq!(
+        h.provider.requests().len(),
+        2,
+        "no executed delete asked the model"
+    );
+}
+
+/// SCIM-like users whose error body says its HTTP status as free text.
+const SCIM_ERRORS: &str = r##"
+openapi: 3.0.0
+info: {title: Scim errors, version: "1"}
+paths:
+  /Users:
+    post:
+      operationId: createUser
+      requestBody: {content: {application/json: {schema: {type: object, properties: {userName: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}}
+  /Users/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getUser
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}
+        "404": {description: missing, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+    delete:
+      operationId: deleteUser
+      responses: {"204": {description: deleted}}
+components:
+  schemas:
+    User:
+      type: object
+      required: [id, userName]
+      properties: {id: {type: string}, userName: {type: string}}
+    Error:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string, description: "The HTTP status as a string."}
+        detail: {type: string}
+"##;
+
+/// A refusal from state (a read of a deleted record) says its HTTP status in its error
+/// body's free `status` text, whatever the body was drawn with.
+#[tokio::test]
+async fn a_refusal_from_state_says_its_status_in_a_free_status_member() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({"operations": {"getUser": {"kind": "read", "not_found": 404}}});
+    let h = support::harness(
+        SCIM_ERRORS,
+        vec![json!({"id": "u1", "userName": "ann"})],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    let (status, _, body) = h
+        .send("POST", "/Users", Some(json!({"userName": "ann"})), SEEDED)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, _, body) = h.send("DELETE", "/Users/u1", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, _, body) = h.send("GET", "/Users/u1", None, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["status"], json!("404"), "{body}");
 }
 
 /// The generated path agrees: a seeded delete (`seeded`, which the executor leaves to
@@ -1048,6 +1166,228 @@ async fn an_envelope_member_holds_the_record_s_id_as_the_record_holds_it() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(source(&headers), "state", "{body}");
     assert_eq!(body, json!({"success": true, "data": {"id": 7}}));
+}
+
+/// Queues a message is published to (`routed`) and got from, oldest first, `count` at a
+/// time, kept or removed by `ackmode`.
+const QUEUES: &str = r##"
+openapi: 3.0.0
+info: {title: Queues, version: "1"}
+paths:
+  /queues:
+    post:
+      operationId: createQueue
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Queue"}}}}}
+  /queues/{name}:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getQueue
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Queue"}}}}}
+    delete:
+      operationId: deleteQueue
+      responses: {"204": {description: deleted}}
+  /queues/{name}/publish:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: publish
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {payload: {type: string}, routing_key: {type: string}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {routed: {type: boolean}}}}}}
+  /queues/{name}/get:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: getMessages
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                count: {type: integer}
+                ackmode: {type: string, enum: [ack_requeue_true, ack_requeue_false]}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Message"}}}}}
+components:
+  schemas:
+    Queue:
+      type: object
+      required: [name]
+      properties: {name: {type: string}, durable: {type: boolean}}
+    Message:
+      type: object
+      properties: {payload: {type: string}, routing_key: {type: string}, redelivered: {type: boolean}}
+"##;
+
+#[tokio::test]
+async fn a_queue_hands_out_its_messages_oldest_first_kept_or_removed() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"types": {"queues": {"identity": {"member": "name"}}}, "operations": {
+        "publish": {"kind": "action", "type": "queues", "target": {"path_param": "name"},
+                    "queue": {"effect": "append"}},
+        "getMessages": {"kind": "action", "type": "queues", "target": {"path_param": "name"},
+                        "queue": {"effect": "take", "count": "/count",
+                                  "requeue": {"at": "/ackmode", "value": ["ack_requeue_true"]},
+                                  "redelivered": "redelivered"}}
+    }});
+    let h = support::harness(
+        QUEUES,
+        vec![json!({"name": "audit", "durable": true})],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    let (status, _, body) = h
+        .send("POST", "/queues", Some(json!({"name": "audit"})), SEEDED)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    for payload in ["one", "two"] {
+        let sent = json!({"payload": payload, "routing_key": "audit"});
+        let (status, headers, body) = h
+            .send("POST", "/queues/audit/publish", Some(sent), &[])
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(source(&headers), "state");
+        assert_eq!(body, json!({"routed": true}));
+    }
+    let get = |count: u64, ackmode: &str| {
+        let body = json!({"count": count, "ackmode": ackmode});
+        let h = &h;
+        async move {
+            let (status, _, body) = h.send("POST", "/queues/audit/get", Some(body), &[]).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body
+        }
+    };
+    let message = |payload: &str, redelivered: bool| json!({"payload": payload, "routing_key": "audit", "redelivered": redelivered});
+    // The oldest first, put back and then marked redelivered.
+    assert_eq!(
+        get(1, "ack_requeue_true").await,
+        json!([message("one", false)])
+    );
+    assert_eq!(
+        get(5, "ack_requeue_true").await,
+        json!([message("one", true), message("two", false)])
+    );
+    // Taken off for good.
+    assert_eq!(
+        get(1, "ack_requeue_false").await,
+        json!([message("one", true)])
+    );
+    assert_eq!(
+        get(5, "ack_requeue_false").await,
+        json!([message("two", true)])
+    );
+    assert_eq!(get(5, "ack_requeue_false").await, json!([]));
+    assert_eq!(
+        h.provider.requests().len(),
+        1,
+        "only the create asked the model"
+    );
+    let lines = capture.0.lock().unwrap().clone();
+    assert!(
+        lines
+            .iter()
+            .filter(|l| l.operation == "publish" || l.operation == "getMessages")
+            .all(|l| l.exec == "action" && l.exec_fallback.is_none()),
+        "{lines:?}"
+    );
+}
+
+/// The world [`QUEUES`] is described with.
+fn queues_world() -> serde_json::Value {
+    json!({"types": {"queues": {"identity": {"member": "name"}}}, "operations": {
+        "publish": {"kind": "action", "type": "queues", "target": {"path_param": "name"},
+                    "queue": {"effect": "append"}},
+        "getMessages": {"kind": "action", "type": "queues", "target": {"path_param": "name"},
+                        "queue": {"effect": "take", "count": "/count",
+                                  "requeue": {"at": "/ackmode", "value": ["ack_requeue_true"]},
+                                  "redelivered": "redelivered"}}
+    }})
+}
+
+/// [`QUEUES`] with the queue `audit` created.
+async fn audit_queue(script: Vec<serde_json::Value>) -> support::DescribedHarness {
+    let h = support::harness(QUEUES, script, &HarnessOptions::default(), |rt| {
+        support::with_effective(rt, queues_world(), false)
+    });
+    let (status, _, body) = h
+        .send("POST", "/queues", Some(json!({"name": "audit"})), SEEDED)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    h
+}
+
+/// The executor's reasons for `op`'s calls: `None` for one it answered.
+fn reasons(capture: &Capture, op: &str) -> Vec<Option<String>> {
+    capture
+        .of(op)
+        .into_iter()
+        .map(|l| l.exec_fallback)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_queue_action_on_an_unheld_target_or_past_its_cap_falls_back() {
+    let (capture, _guard) = Capture::install();
+    let h = audit_queue(vec![
+        json!({"name": "audit", "durable": true}),
+        json!([]),
+        json!({"routed": false}),
+    ])
+    .await;
+    // No queue `ghost` is held.
+    let get = json!({"count": 1, "ackmode": "ack_requeue_false"});
+    let (status, _, body) = h.send("POST", "/queues/ghost/get", Some(get), &[]).await;
+    assert!(status.is_success(), "{body}");
+    assert_eq!(
+        reasons(&capture, "getMessages"),
+        [Some("not_held".to_owned())]
+    );
+    // A message that takes the queue past its bytes is generated, and not kept.
+    let big = "x".repeat(600 * 1024);
+    for _ in 0..2 {
+        let sent = json!({"payload": big, "routing_key": "audit"});
+        let (status, _, body) = h
+            .send("POST", "/queues/audit/publish", Some(sent), &[])
+            .await;
+        assert!(status.is_success(), "{body}");
+    }
+    assert_eq!(
+        reasons(&capture, "publish"),
+        [None, Some("over_cap".to_owned())]
+    );
+    let get = json!({"count": 5, "ackmode": "ack_requeue_false"});
+    let (_, _, body) = h.send("POST", "/queues/audit/get", Some(get), &[]).await;
+    assert_eq!(body.as_array().map(Vec::len), Some(1), "one message kept");
+}
+
+#[tokio::test]
+async fn a_deleted_queue_s_messages_go_with_it() {
+    let (_capture, _guard) = Capture::install();
+    let h = audit_queue(vec![
+        json!({"name": "audit", "durable": true}),
+        json!({"name": "audit", "durable": true}),
+    ])
+    .await;
+    let sent = json!({"payload": "one", "routing_key": "audit"});
+    let (status, _, body) = h
+        .send("POST", "/queues/audit/publish", Some(sent), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, body) = h.send("DELETE", "/queues/audit", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    // Made again under the same name, it holds nothing.
+    let (status, _, body) = h
+        .send("POST", "/queues", Some(json!({"name": "audit"})), SEEDED)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let get = json!({"count": 5, "ackmode": "ack_requeue_false"});
+    let (status, _, body) = h.send("POST", "/queues/audit/get", Some(get), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!([]));
 }
 
 /// Items with a lifecycle, acted on by actions answering the item (`archiveItem`),

@@ -15,11 +15,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    AnswerDesc, ChangeDesc, ConcurrencyDesc, DerivedDesc, Extra, FilterDesc, FilterGrammar,
-    HeaderRef, IdentityDesc, IdentityHeader, InstructionDesc, InstructionsDesc, LifecycleDesc,
-    LongRunning, MAX_BYTES, MAX_DEPTH, OpDesc, OpKind, OrderDesc, PagingDesc, ParamValue,
-    ParentDesc, Pointer, RecordsAt, ScopeDesc, ScopeKind, SoftDelete, TargetDesc, TypeDesc,
-    UniqueDesc, VERSION, World,
+    AnswerDesc, ChangeDesc, ConcurrencyDesc, DerivedDesc, Extra, FieldsDesc, FilterDesc,
+    FilterGrammar, HeaderRef, IdentityDesc, IdentityHeader, InstructionDesc, InstructionsDesc,
+    LifecycleDesc, LongRunning, MAX_BYTES, MAX_DEPTH, OpDesc, OpKind, OrderDesc, PagingDesc,
+    ParamValue, ParentDesc, Pointer, QueueDesc, QueueEffect, RecordsAt, RequeueDesc, ScopeDesc,
+    ScopeKind, SoftDelete, TargetDesc, TypeDesc, UniqueDesc, VERSION, World,
 };
 use crate::{Binding, Bundle, Operation, RecordAt, StatusSelector};
 
@@ -1148,9 +1148,40 @@ impl<'a> Ctx<'a> {
                 None
             }
         });
+        let unless = sd.unless.as_ref().and_then(|u| {
+            let p = path.join("unless");
+            self.unknown(&p, &u.extra);
+            let deletes: Vec<_> = self
+                .ops_of(t)
+                .into_iter()
+                .filter(|o| self.op_kind(o) == Some(OpKind::Delete))
+                .collect();
+            // The delete reads it from its query only.
+            if deletes
+                .iter()
+                .any(|o| has_property(self.bundle, o.input.query.as_ref(), |k| k == u.param))
+            {
+                Some(ParamValue {
+                    param: u.param.clone(),
+                    value: u.value.clone(),
+                    extra: Extra::new(),
+                })
+            } else {
+                self.refuse(
+                    &p.join("param"),
+                    RefusalCode::Unresolved,
+                    format!(
+                        "no delete of `{t}` declares a query parameter `{}`",
+                        u.param
+                    ),
+                );
+                None
+            }
+        });
         Some(SoftDelete {
             state: sd.state.clone(),
             listed_with,
+            unless,
             extra: Extra::new(),
         })
     }
@@ -1623,7 +1654,158 @@ impl<'a> Ctx<'a> {
         out.not_found = d
             .not_found
             .filter(|c| self.check_status(op, *c, &path.join("not_found")));
+
+        if let Some(f) = &d.fields {
+            out.fields = self.fields(op, f, (record, ty), &path.join("fields"));
+        }
+        if let Some(q) = &d.queue {
+            let named = out.target.is_some();
+            out.queue = self.queue(op, (d, named), q, &path.join("queue"));
+        }
         out
+    }
+
+    /// A read's or list's `fields`: its parameter declared, a separator that is not
+    /// empty, and the members it always or by default answers members of the record
+    /// (each refused alone). An operation of another kind is refused it whole.
+    fn fields(
+        &mut self,
+        op: &'a Operation,
+        f: &FieldsDesc,
+        (record, ty): (Option<&'a Value>, Option<&str>),
+        path: &Path,
+    ) -> Option<FieldsDesc> {
+        self.unknown(path, &f.extra);
+        if !matches!(self.op_kind(op), Some(OpKind::Read | OpKind::List)) {
+            self.refuse(
+                path,
+                RefusalCode::Invalid,
+                "`fields` applies to a read or a list".to_string(),
+            );
+            return None;
+        }
+        // Read from the query only: a body member or path parameter is no fieldset.
+        if !has_property(self.bundle, op.input.query.as_ref(), |k| k == f.param) {
+            self.refuse(
+                &path.join("param"),
+                RefusalCode::Unresolved,
+                format!(
+                    "operation `{}` declares no query parameter `{}`",
+                    op.id, f.param
+                ),
+            );
+            return None;
+        }
+        if f.separator.as_deref() == Some("") {
+            self.refuse(
+                &path.join("separator"),
+                RefusalCode::Invalid,
+                "a separator may not be empty".to_string(),
+            );
+            return None;
+        }
+        let mut members = |list: &[String], key: &str| -> Vec<String> {
+            list.iter()
+                .enumerate()
+                .filter(|(i, m)| self.check_member(record, ty, m, &path.join(key).join(*i)))
+                .map(|(_, m)| m.clone())
+                .collect()
+        };
+        let always = members(&f.always, "always");
+        let default = f.default.as_ref().map(|d| members(d, "default"));
+        Some(FieldsDesc {
+            param: f.param.clone(),
+            separator: f.separator.clone(),
+            always,
+            default,
+            extra: Extra::new(),
+        })
+    }
+
+    /// An action's `queue`: `count` and `requeue.at` pointers into its request body,
+    /// and those and `redelivered` only with `take`; a target named (by the description
+    /// or the contract's identity), and no `transition` or `changes` beside it. An
+    /// operation of another kind is refused it whole.
+    fn queue(
+        &mut self,
+        op: &'a Operation,
+        (d, named_target): (&OpDesc, bool),
+        q: &QueueDesc,
+        path: &Path,
+    ) -> Option<QueueDesc> {
+        self.unknown(path, &q.extra);
+        if self.op_kind(op) != Some(OpKind::Action) {
+            self.refuse(
+                path,
+                RefusalCode::Invalid,
+                "`queue` applies to an action".to_string(),
+            );
+            return None;
+        }
+        let takes = q.effect == QueueEffect::Take;
+        if !takes && (q.count.is_some() || q.requeue.is_some() || q.redelivered.is_some()) {
+            self.refuse(
+                path,
+                RefusalCode::Invalid,
+                "`count`, `requeue` and `redelivered` apply to a `take` only".to_string(),
+            );
+            return None;
+        }
+        if d.transition.is_some() || !d.changes.is_empty() {
+            self.refuse(
+                path,
+                RefusalCode::Invalid,
+                "a `queue` sets no members of its target: it is not with `transition` or `changes`"
+                    .to_string(),
+            );
+            return None;
+        }
+        if !named_target && op.identity.is_none() {
+            self.refuse(
+                path,
+                RefusalCode::Unresolved,
+                "a `queue` acts on its target: give the operation a `target`".to_string(),
+            );
+            return None;
+        }
+        let body = op.input.body.as_ref();
+        let count = q.count.clone().filter(|ptr| {
+            self.check_pointer(
+                body,
+                ptr,
+                (false, false),
+                "request body",
+                &path.join("count"),
+            )
+        });
+        let requeue = q.requeue.as_ref().and_then(|r| {
+            let p = path.join("requeue");
+            self.unknown(&p, &r.extra);
+            self.check_pointer(body, &r.at, (false, false), "request body", &p.join("at"))
+                .then(|| RequeueDesc {
+                    at: r.at.clone(),
+                    value: r.value.clone(),
+                    extra: Extra::new(),
+                })
+        });
+        let redelivered = q.redelivered.clone().filter(|m| {
+            let ok = !m.is_empty();
+            if !ok {
+                self.refuse(
+                    &path.join("redelivered"),
+                    RefusalCode::Invalid,
+                    "a member may not be empty".to_string(),
+                );
+            }
+            ok
+        });
+        Some(QueueDesc {
+            effect: q.effect,
+            count,
+            requeue,
+            redelivered,
+            extra: Extra::new(),
+        })
     }
 }
 
@@ -2554,6 +2736,107 @@ mod tests {
         assert_eq!(get.target, None);
         assert!(get.answer.is_none());
         assert!(v.applied.operations["CreateFolder"].request.is_none());
+    }
+
+    #[test]
+    fn validate_checks_fields_queue_and_soft_delete_bypass() {
+        let mut b = folders();
+        b.operations.extend(
+            bundle(&[(
+                "DeleteFolder",
+                "DELETE",
+                "/v3/folders/{name}",
+                json!({"type": "object"}),
+            )])
+            .operations,
+        );
+        typed(&mut b, "DeleteFolder", "folder", Some("name"), "name");
+        op(&mut b, "DeleteFolder").input.query = Some(json!({"type": "object", "properties": {
+            "force": {"type": "boolean"}
+        }}));
+        op(&mut b, "GetFolder").input.query = Some(json!({"type": "object", "properties": {
+            "fields": {"type": "string"}
+        }}));
+        op(&mut b, "CreateFolder").input.body = Some(json!({"type": "object", "properties": {
+            "count": {"type": "integer"},
+            "mode": {"type": "string"}
+        }}));
+        let w = world(json!({
+            "types": {"folder": {"lifecycle": {"member": "state", "soft_delete": {
+                "state": "DELETE_REQUESTED", "unless": {"param": "force", "value": true}
+            }}}},
+            "operations": {
+                "GetFolder": {"fields": {"param": "fields", "always": ["name", "nope"], "default": []}},
+                "ListFolders": {"fields": {"param": "missing"}},
+                "CreateFolder": {"kind": "action", "target": {"member": "mode"}, "queue": {
+                    "effect": "take", "count": "/count", "requeue": {"at": "/nope", "value": "keep"},
+                    "redelivered": "redelivered"
+                }},
+                "DeleteFolder": {"queue": {"effect": "append"}}
+            }
+        }));
+        let v = validate(&w, &b);
+        assert_eq!(
+            paths(&v),
+            vec![
+                (
+                    "/operations/CreateFolder/queue/requeue/at",
+                    RefusalCode::Unresolved
+                ),
+                ("/operations/DeleteFolder/queue", RefusalCode::Invalid),
+                (
+                    "/operations/GetFolder/fields/always/1",
+                    RefusalCode::Unresolved
+                ),
+                (
+                    "/operations/ListFolders/fields/param",
+                    RefusalCode::Unresolved
+                ),
+            ]
+        );
+        let ops = &v.applied.operations;
+        let fields = ops["GetFolder"].fields.as_ref().unwrap();
+        assert_eq!(fields.always, vec!["name".to_string()]);
+        assert_eq!(fields.default, Some(Vec::new()));
+        let queue = ops["CreateFolder"].queue.as_ref().unwrap();
+        assert_eq!(queue.effect, QueueEffect::Take);
+        assert!(queue.count.is_some() && queue.requeue.is_none());
+        let soft = v.applied.types["folder"].lifecycle.as_ref().unwrap();
+        let unless = soft.soft_delete.as_ref().unwrap().unless.as_ref().unwrap();
+        assert_eq!(
+            (unless.param.as_str(), &unless.value),
+            ("force", &json!(true))
+        );
+
+        // A path parameter is no query parameter: neither the delete nor the read reads
+        // it so. A queue with no target, or one setting members, is refused.
+        let w = world(json!({
+            "types": {"folder": {"lifecycle": {"member": "state", "soft_delete": {
+                "state": "DELETE_REQUESTED", "unless": {"param": "name", "value": true}
+            }}}},
+            "operations": {
+                "GetFolder": {"fields": {"param": "name"}},
+                "CreateFolder": {"kind": "action", "queue": {"effect": "append"}},
+                "ListFolders": {"kind": "action", "changes": {"state": {"value": "ACTIVE"}},
+                                "queue": {"effect": "take"}}
+            }
+        }));
+        let v = validate(&w, &b);
+        let refused = paths(&v);
+        for wanted in [
+            (
+                "/types/folder/lifecycle/soft_delete/unless/param",
+                RefusalCode::Unresolved,
+            ),
+            (
+                "/operations/GetFolder/fields/param",
+                RefusalCode::Unresolved,
+            ),
+            ("/operations/CreateFolder/queue", RefusalCode::Unresolved),
+            ("/operations/ListFolders/queue", RefusalCode::Invalid),
+        ] {
+            assert!(refused.contains(&wanted), "{wanted:?} in {refused:?}");
+        }
     }
 
     #[test]
