@@ -156,7 +156,7 @@ pub(super) async fn run(
     let taken = repeated_key(state, plan, call, t, (&keys, &record))
         .instrument(state_span())
         .await;
-    if let Some(taken) = taken
+    if let Some(held) = taken.clone()
         && let Some(code) = [409, 422]
             .into_iter()
             .find(|code| mb_engine::guards::declares_code(op, *code))
@@ -168,7 +168,7 @@ pub(super) async fn run(
                 call,
                 code,
                 ErrorCause::Taken,
-                &RefusalFacts::taken(&[taken]),
+                &RefusalFacts::taken(&[held]),
             )
             .await
     {
@@ -177,6 +177,10 @@ pub(super) async fn run(
             .await;
         answered(rt, plan, kind);
         return Ran::Answered(Box::new(refusal));
+    }
+    // One the create declares no refusal for is no record of state's either.
+    if taken.is_some() {
+        return fall("repeated_key");
     }
 
     // The id: the one asked for, else minted in the header the answer names it in, else

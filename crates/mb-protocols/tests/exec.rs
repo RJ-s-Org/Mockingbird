@@ -4915,10 +4915,11 @@ async fn an_integer_scope_from_the_path_is_typed_and_refuses_a_repeat() {
 }
 
 /// Boards are created from their query; workspaces hold settings with a server-set
-/// `locked`, are locked by an action route past their key, hold vars, and are moved by
-/// a long-running action; employees are keyed by a plain text id another route types
-/// as an integer; apps are read by id or name; lines are created under a deal; builds
-/// carry a number besides their id.
+/// `locked`, are locked by an action route past their key and copied by a create past
+/// it, hold vars, and are moved by a long-running action; employees are keyed by a
+/// plain text id another route types as an integer; apps are read by id or name; lines
+/// are created under a deal; builds carry a number besides their id that a pipeline's
+/// route reads them by.
 const REPAIRS: &str = r##"
 openapi: 3.0.0
 info: {title: Repairs, version: "1"}
@@ -4950,6 +4951,11 @@ paths:
       operationId: lockWorkspace
       parameters: [{name: workspace_id, in: path, required: true, schema: {type: string}}]
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Workspace"}}}}}
+  /workspaces/{workspace_id}/actions/copy:
+    post:
+      operationId: copyWorkspace
+      parameters: [{name: workspace_id, in: path, required: true, schema: {type: string}}]
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Workspace"}}}}}
   /workspaces/{workspace_id}/vars:
     post:
       operationId: createVar
@@ -5030,6 +5036,13 @@ paths:
     get:
       operationId: getBuild
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Build"}}}}}
+  /pipelines/{pipeline}/builds/{number}:
+    get:
+      operationId: getPipelineBuild
+      parameters:
+        - {name: pipeline, in: path, required: true, schema: {type: string}}
+        - {name: number, in: path, required: true, schema: {type: integer}}
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Build"}}}}}
 components:
   schemas:
@@ -5306,4 +5319,113 @@ async fn a_long_running_action_answers_its_changed_record_as_done() {
         capture.of("moveWorkspace"),
         vec![action_line("moveWorkspace", None); 3]
     );
+}
+
+#[tokio::test]
+async fn a_post_past_its_own_record_s_key_answering_201_is_a_create() {
+    let (capture, _guard) = Capture::install();
+    let h = repairs(Vec::new());
+    let t = type_of(&h, "getWorkspace");
+    h.hold(&t, &[json!({"id": "w1", "name": "a"})]).await;
+    let (status, headers, body) = h
+        .send("POST", "/workspaces/w1/actions/copy", None, &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_ne!(body["id"], json!("w1"), "{body}");
+    assert_eq!(
+        capture.of("copyWorkspace"),
+        vec![create_line("copyWorkspace", None)]
+    );
+    assert_eq!(h.stored_ids(&t).await.len(), 2);
+}
+
+#[tokio::test]
+async fn a_member_a_route_reads_records_by_is_minted_unique_and_kept_when_sent() {
+    let (capture, _guard) = Capture::install();
+    // What a fill would answer for both: the same number.
+    let h = repairs(vec![json!({"number": 2}), json!({"number": 2})]);
+    let mut numbers = Vec::new();
+    for branch in ["main", "next"] {
+        let (status, _, body) = h
+            .send("POST", "/builds", Some(json!({"branch": branch})), &[])
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        numbers.push(body["number"].clone());
+    }
+    assert_eq!(numbers, vec![json!(1), json!(2)]);
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/builds",
+            Some(json!({"branch": "main", "number": 7})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["number"], json!(7), "{body}");
+    // Sent again where the create declares no conflict, state stores no second 7.
+    h.send(
+        "POST",
+        "/builds",
+        Some(json!({"branch": "next", "number": 7})),
+        &[],
+    )
+    .await;
+    let mut lines = vec![create_line("createBuild", None); 3];
+    lines.push(create_line("createBuild", Some("repeated_key")));
+    assert_eq!(capture.of("createBuild"), lines);
+}
+
+#[tokio::test]
+async fn a_body_member_wins_over_the_query_parameter_of_its_name() {
+    let h = repairs(Vec::new());
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/boards?name=query",
+            Some(json!({"name": "body"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], json!("body"), "{body}");
+}
+
+/// Mints four employees in `contract` and answers their ids.
+async fn employee_ids(contract: &str) -> Vec<String> {
+    let h = support::harness(contract, Vec::new(), &HarnessOptions::default(), |rt| rt);
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        let (status, _, body) = h
+            .send("POST", "/employees", Some(json!({"email": "a@b.c"})), &[])
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        ids.push(body["id"].as_str().unwrap_or_default().to_owned());
+    }
+    ids
+}
+
+#[tokio::test]
+async fn a_text_id_that_says_more_or_a_text_route_names_is_not_reshaped_into_digits() {
+    let digits = |ids: &[String]| ids.iter().all(|id| id.chars().all(|c| c.is_ascii_digit()));
+    let patterned = REPAIRS.replace(
+        "properties: {id: {type: string}, email: {type: string}}",
+        "properties: {id: {type: string, pattern: \"^E[0-9]{3}$\"}, email: {type: string}}",
+    );
+    assert_ne!(patterned, REPAIRS);
+    let ids = employee_ids(&patterned).await;
+    assert!(ids.iter().all(|id| id.starts_with('E')), "{ids:?}");
+    let bounded = REPAIRS.replace(
+        "properties: {id: {type: string}, email: {type: string}}",
+        "properties: {id: {type: string, maxLength: 4}, email: {type: string}}",
+    );
+    let ids = employee_ids(&bounded).await;
+    assert!(ids.iter().all(|id| id.len() <= 4), "{ids:?}");
+    let textual = REPAIRS.replace(
+        "{name: employeeId, in: path, required: true, schema: {type: integer}}",
+        "{name: employeeId, in: path, required: true, schema: {type: string}}",
+    );
+    assert_ne!(textual, REPAIRS);
+    assert!(!digits(&employee_ids(&textual).await));
 }

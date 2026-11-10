@@ -250,21 +250,27 @@ fn route_parents(
             continue;
         };
         let up_to = shape(&own[..=at]);
-        let parent = index.detail_reads.iter().find(|(of, i)| {
-            of.as_str() != t
-                && bundle.operations.get(**i).is_some_and(|read| {
-                    matches!(&read.binding, mb_mcm::Binding::Http { path: p, .. }
-                        if shape(&segments(p)) == up_to)
-                })
-        });
-        let Some((of, _)) = parent else {
+        // The one other type read there; none where two are (the index is unordered).
+        let parents: Vec<&String> = index
+            .detail_reads
+            .iter()
+            .filter(|(of, i)| {
+                of.as_str() != t
+                    && bundle.operations.get(**i).is_some_and(|read| {
+                        matches!(&read.binding, mb_mcm::Binding::Http { path: p, .. }
+                            if shape(&segments(p)) == up_to)
+                    })
+            })
+            .map(|(of, _)| of)
+            .collect();
+        let [of] = parents.as_slice() else {
             continue;
         };
         let named = members.iter().find(|m| {
             reference_prefix(m).is_some_and(|prefix| {
                 relations::reference_types(Some(index), prefix)
                     .iter()
-                    .any(|named| named == of)
+                    .any(|named| named == *of)
             })
         });
         if let Some(member) = named

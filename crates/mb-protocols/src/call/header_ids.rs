@@ -256,16 +256,23 @@ fn record_id_schema(rt: &MockRuntime, t: &str, field: &str) -> (Option<Value>, O
 }
 
 /// Whether `schema` is text and says nothing more of it: no `pattern`, `format`,
-/// `enum` or `const`.
+/// `enum`, `const` or length bound.
 fn plain_text(rt: &MockRuntime, schema: &Value) -> bool {
     let parts = super::schema_parts(rt.bundle(), Some(schema)).0;
     let says = |key: &str| parts.iter().any(|p| p.get(key).is_some());
     parts
         .iter()
         .any(|p| p.get("type").and_then(Value::as_str) == Some("string"))
-        && !["pattern", "format", "enum", "const"]
-            .iter()
-            .any(|k| says(k))
+        && ![
+            "pattern",
+            "format",
+            "enum",
+            "const",
+            "minLength",
+            "maxLength",
+        ]
+        .iter()
+        .any(|k| says(k))
 }
 
 /// Whether the path and query parameters named for type `t`'s records

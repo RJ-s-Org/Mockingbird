@@ -155,6 +155,8 @@ pub(super) fn classify(
 /// static segments only, from the route that reads that type by id
 /// (`POST /workspaces/{id}/actions/lock` beside `GET /workspaces/{id}`), and no read
 /// lists at its own path (a collection under the record, which a `POST` adds to).
+/// One answering `201`, or naming a created record's id in a header, adds a record
+/// (`POST /files/{id}/copy`).
 fn acts_on_own_record(rt: &crate::MockRuntime, op: &mb_mcm::Operation) -> bool {
     let Binding::Http {
         method: mb_mcm::HttpMethod::Post,
@@ -163,6 +165,13 @@ fn acts_on_own_record(rt: &crate::MockRuntime, op: &mb_mcm::Operation) -> bool {
     else {
         return false;
     };
+    let status = op.success_output().map_or(200, |o| match o.status {
+        mb_mcm::StatusSelector::Code(code) => code,
+        _ => 200,
+    });
+    if status == 201 || super::records::identity_header(rt, op, status).is_some() {
+        return false;
+    }
     let bundle = rt.bundle();
     let Some(read) = op
         .resource_type
