@@ -603,9 +603,13 @@ class Proxy:
             "reasoning": "".join(out.reasoning)[:4000],
             "finish_reason": out.finish_reason,
         }, ensure_ascii=False)
-        with self.dump_lock:
-            with open(self.dump_path, "a") as f:
-                f.write(redact(line) + "\n")
+        try:
+            with self.dump_lock:
+                with open(self.dump_path, "a") as f:
+                    f.write(redact(line) + "\n")
+        except OSError as e:
+            # The dump is a side record: a failed write must not cost the client its answer.
+            print(f"proxy: --dump write failed: {e}", file=sys.stderr)
 
     def __init__(self, args: argparse.Namespace):
         self.upstream = args.upstream
@@ -1210,12 +1214,14 @@ class Handler(BaseHTTPRequestHandler):
         rec["total_ms"] = round((time.monotonic() - received) * 1000.0, 1)
         if out.client_gone_after_end:
             rec["client_gone_after_end"] = True  # recorded as usual: the answer had ended
-        # The dump line is written before the answer goes out, so a client that has its
-        # answer finds the call in `--dump` (a streamed answer has already ended by now).
+        streamed = client_stream and self.stream_started
+        if streamed and out.error_kind:
+            rec["status"] = 200  # the 200 head is already sent; the error went through in-stream
+        # A plain answer's dump line is written before the answer goes out, so a client
+        # that has its answer finds the call in `--dump`. A streamed answer has already
+        # gone out by now, so its line lands just after the client's last chunk.
         dump()
-        if client_stream and self.stream_started:
-            if out.error_kind:
-                rec["status"] = 200  # the 200 head is already sent; the error went through in-stream
+        if streamed:
             return
         # A client stream that failed before its first chunk (refused, timed out) gets
         # the error as a plain answer, as a non-streamed call would.

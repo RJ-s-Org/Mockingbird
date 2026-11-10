@@ -3,9 +3,12 @@ python3 -m unittest discover -s scripts/llm-bench -p 'test_*.py'"""
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -159,6 +162,15 @@ class AuthorForTest(unittest.TestCase):
         self.assertIsNone(fakegate.author_for(self.contracts, self.cache, ["opus"]))
 
 
+def fake_git(*args, cwd=None, check=True):
+    """`git` for the cleanup tests: `worktree add` makes the directory, nothing touches a
+    real repository."""
+    if args[:2] == ("worktree", "add"):
+        os.makedirs(args[-2])
+    return ""
+
+
+@mock.patch.object(fakegate, "git", fake_git)
 class CleanupTest(unittest.TestCase):
     def test_unclaimed_worktrees_and_the_old_target_go_and_binaries_and_results_stay(self):
         with tempfile.TemporaryDirectory() as work:
@@ -177,16 +189,79 @@ class CleanupTest(unittest.TestCase):
             self.assertEqual(sorted(os.listdir(work)),
                              ["bin", "build.lock", "run-x-123", "src-bbb", "src-bbb.use", "worktree.lock"])
 
+    def test_a_checkout_is_kept_while_its_gate_runs(self):
+        with tempfile.TemporaryDirectory() as work:
+            running = []
+            tree = fakegate.checkout("a" * 40, work, running)
+            self.assertEqual(fakegate.cleanup(work, []), [])
+            self.assertTrue(os.path.isdir(tree))
+            self.assertEqual(fakegate.cleanup(work, running), ["src-" + "a" * 12])
+            self.assertFalse(os.path.exists(tree))
+
+    def test_a_tree_from_an_older_gate_is_left_until_it_is_old(self):
+        with tempfile.TemporaryDirectory() as work:
+            fresh, old = os.path.join(work, "src-fresh"), os.path.join(work, "src-old")
+            os.makedirs(fresh)
+            os.makedirs(old)
+            t = time.time() - fakegate.LEGACY_TREE_AGE_S - 60
+            os.utime(old, (t, t))
+            self.assertEqual(fakegate.cleanup(work, []), ["src-old"])
+            self.assertTrue(os.path.isdir(fresh))
+
+    def run_main(self, work, *flags):
+        def gate(a, w, claims):
+            fakegate.checkout("b" * 40, w, claims)
+            raise RuntimeError("the gate failed")
+        with mock.patch.object(fakegate, "gate", gate), \
+                mock.patch.object(sys, "argv", ["fakegate.py", "x", "--work", work, *flags]):
+            with self.assertRaises(RuntimeError):
+                fakegate.main()
+        return os.path.isdir(os.path.join(work, "src-" + "b" * 12))
+
+    def test_a_failed_gate_still_removes_its_worktrees(self):
+        with tempfile.TemporaryDirectory() as work:
+            self.assertFalse(self.run_main(work))
+
+    def test_keep_src_keeps_the_worktrees(self):
+        with tempfile.TemporaryDirectory() as work:
+            self.assertTrue(self.run_main(work, "--keep-src"))
+
     def test_builds_go_to_the_shared_lane(self):
-        old = os.environ.get("CARGO_TARGET_DIR")
-        try:
-            os.environ["CARGO_TARGET_DIR"] = "/lanes/lane-2"
+        with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": "/lanes/lane-2"}):
             self.assertEqual(fakegate.target_dir(), "/lanes/lane-2")
-            del os.environ["CARGO_TARGET_DIR"]
+        with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": "rel/lane"}):
+            self.assertEqual(fakegate.target_dir(), os.path.abspath("rel/lane"))
+        with mock.patch.dict(os.environ):
+            os.environ.pop("CARGO_TARGET_DIR", None)
             self.assertEqual(fakegate.target_dir(), os.path.expanduser("~/.cache/mb-targets/lane-1"))
-        finally:
-            if old is not None:
-                os.environ["CARGO_TARGET_DIR"] = old
+
+
+@mock.patch.object(fakegate, "git", fake_git)
+class BuildTest(unittest.TestCase):
+    def test_a_binary_another_build_linked_in_the_lane_is_not_kept(self):
+        with tempfile.TemporaryDirectory() as work, tempfile.TemporaryDirectory() as lane:
+            built = os.path.join(lane, "release", "mockingbird")
+            os.makedirs(os.path.dirname(built))
+            # Our build, then another build's binary lands in the lane before the copy; the
+            # next build relinks ours, and the one after is a no-op.
+            linked = iter([b"another commit", b"ours", None])
+
+            def cargo(cmd, cwd, env):
+                self.assertEqual(env["CARGO_TARGET_DIR"], lane)
+                data = next(linked)
+                if data is not None:
+                    with open(built, "wb") as f:
+                        f.write(data)
+                os.chmod(built, 0o755)
+                return subprocess.CompletedProcess(cmd, 0)
+
+            with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": lane}), \
+                    mock.patch.object(fakegate.subprocess, "run", cargo):
+                claims = []
+                binary = fakegate.build("c" * 40, work, claims)
+                fakegate.cleanup(work, claims)
+            with open(binary, "rb") as f:
+                self.assertEqual(f.read(), b"ours")
 
 
 class CommittedCacheTest(unittest.TestCase):

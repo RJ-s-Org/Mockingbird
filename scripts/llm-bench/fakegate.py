@@ -61,6 +61,9 @@ import world_author  # noqa: E402
 SKIP = ("journeys_blind14",)
 DEFAULT_MODELS = ("claude-sonnet-5-5", world_author.DEFAULT_AUTHOR_MODEL)
 TIERS = ("agent", "none", "e2e")
+# A worktree with no claim file was made by a fakegate from before claims: left alone while
+# it may still be in use.
+LEGACY_TREE_AGE_S = 6 * 3600
 # A deciding call answered by the engine itself (no model call) gets the same answer on a real
 # model, so a failing check with one of these sources is the executor's failure, not junk content.
 ENGINE_DECIDED = ("state", "rejected")
@@ -165,29 +168,40 @@ def load(run_dir):
 
 def target_dir():
     """The cargo target directory builds go to: a shared lane, never one per checkout."""
-    return os.environ.get("CARGO_TARGET_DIR") or os.path.expanduser("~/.cache/mb-targets/lane-1")
+    return os.path.abspath(os.environ.get("CARGO_TARGET_DIR") or os.path.expanduser("~/.cache/mb-targets/lane-1"))
 
 
 def build(sha, work, claims):
     """The release binary of `sha`, built in its own worktree into the shared lane, so a
-    second build recompiles only the crates that changed; a lock keeps two gates from
-    building into it at once, and the binary is copied out under `work` before the lock is
-    released."""
+    second build recompiles only the crates that changed, and copied out under `work`.
+    Other builds use the lane too (the lock only keeps fakegates apart), so after the copy
+    the build runs again: it is a no-op that leaves the same binary only when nothing else
+    linked there in between; otherwise the copy is taken again."""
     binary = os.path.join(work, "bin", f"mockingbird-{sha[:12]}")
     if os.access(binary, os.X_OK):
         return binary
     os.makedirs(os.path.dirname(binary), exist_ok=True)
     tree = checkout(sha, work, claims)
     target = target_dir()
+    built = os.path.join(target, "release", "mockingbird")
     env = dict(os.environ, CARGO_TARGET_DIR=target)
-    with world_author.file_lock(os.path.join(target, "fakegate-build.lock")):
-        print(f"fakegate: building {sha[:12]} into {target}", file=sys.stderr)
+
+    def cargo():
         done = subprocess.run(["cargo", "build", "--release", "-q", "-p", "mockingbird-cli"], cwd=tree, env=env)
         if done.returncode != 0:
             raise SystemExit(f"{sha[:12]}: build failed")
-        shutil.copy2(os.path.join(target, "release", "mockingbird"), binary + ".tmp")
-        os.replace(binary + ".tmp", binary)
-    return binary
+
+    with world_author.file_lock(os.path.join(target, "fakegate-build.lock")):
+        print(f"fakegate: building {sha[:12]} into {target}", file=sys.stderr)
+        cargo()
+        for _ in range(5):
+            shutil.copy2(built, binary + ".tmp")
+            cargo()
+            if world_author.sha256_file(built) == world_author.sha256_file(binary + ".tmp"):
+                os.replace(binary + ".tmp", binary)
+                return binary
+        os.remove(binary + ".tmp")
+        raise SystemExit(f"{sha[:12]}: another build kept replacing the binary in {target}")
 
 
 def checkout(sha, work, claims):
@@ -218,6 +232,8 @@ def cleanup(work, claims):
             tree = os.path.join(work, name)
             if not (name.startswith("src-") and os.path.isdir(tree)):
                 continue
+            if not os.path.exists(tree + ".use") and time.time() - os.path.getmtime(tree) < LEGACY_TREE_AGE_S:
+                continue  # an older fakegate, which takes no claims, may still be using it
             with open(tree + ".use", "a") as f:
                 try:
                     fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -439,9 +455,13 @@ def main():
             for f in claims:
                 f.close()
         else:
-            removed = cleanup(work, claims)
-            if removed:
-                print(f"fakegate: removed {', '.join(removed)} under {work}", file=sys.stderr)
+            try:
+                removed = cleanup(work, claims)
+            except (OSError, SystemExit) as e:
+                print(f"fakegate: cleaning up {work} failed: {e}", file=sys.stderr)
+            else:
+                if removed:
+                    print(f"fakegate: removed {', '.join(removed)} under {work}", file=sys.stderr)
 
 
 def gate(a, work, claims):
