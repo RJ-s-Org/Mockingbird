@@ -144,6 +144,8 @@ pub(super) async fn run(
     };
     // A record member the query names is set as the body sets it, as an update's is.
     shape.query_members(rt, op, call, &mut record);
+    // What the request sent of the record, as the record holds it.
+    let sent = Value::Object(record.clone());
     let from_path = path_set(rt, (op, t), call);
     shape.path_members(rt, call, &from_path, &mut record);
     // A value of a member that names the type's records besides their id (an
@@ -283,7 +285,7 @@ pub(super) async fn run(
     // what a read requires, then every other member nobody set, but a reference the
     // request could have sent.
     let request_schema = request_schema(rt, op);
-    let unsent = Unsent::All(request_schema.as_ref(), request);
+    let unsent = Unsent::All(request_schema.as_ref(), Some(&sent));
     let mut missing = gaps(rt, (t, &shape.schemas), &data, &owned, unsent);
     let required: Vec<String> = missing.iter().map(|(name, _)| name.clone()).collect();
     if let Value::Object(known) = &data {

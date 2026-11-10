@@ -5139,6 +5139,19 @@ async fn fill_completes_the_optional_members_of_an_object_member_sent() {
 }
 
 #[tokio::test]
+async fn an_object_sent_inside_a_wrapper_takes_its_optional_members_too() {
+    let h = repairs(vec![json!({"parent": "p0", "settings": {"locked": false}})]);
+    let sent = json!({"workspace": {"name": "w", "settings": {"color": "red"}}});
+    let (status, _, body) = h.send("POST", "/workspaces", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body["settings"],
+        json!({"color": "red", "locked": false}),
+        "{body}"
+    );
+}
+
+#[tokio::test]
 async fn an_object_only_the_server_opened_takes_no_optional_members() {
     // What a fill would answer for the entry's unpublished version.
     let world = json!({"types": {"entries": {"identity": {"member": "meta.id"}}}});
