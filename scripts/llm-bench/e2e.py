@@ -41,11 +41,11 @@ that contract is imported with the product's `mockingbird snapshot import`, its 
 renamed to the name and route prefix the journeys call (see `load_snapshots`).
 `fakegate.py --e2e-cache` adds this as the `e2e` tier.
 
-`report` prints, per suite and tier: the fake pass, the projected rate and the floor
-under the engine-decided rule (a failing check whose deciding call the engine answered,
-`source` state or rejected, counts as floor; with `--paid`, a failing check counts as
-model-dependent only if its deciding call reached the model and some paid run passed it,
-else every model-reached failure is counted as model-dependent: an upper bound).
+`report` prints, per suite and tier: the fake pass, the projected rate (passed plus
+model failures), and every failure in exactly one class (see `failure_class`): `floor`,
+`missed` or `model`. A failure is `model` only when its deciding call reached the model,
+no attribution demotes it, the curated tier does not pass it and, with `--paid`, some
+paid run passed it. The curated tier and `--attribution` judge the `e2e` tier only.
 
 Standard library only.
 """
@@ -812,21 +812,67 @@ def paid_passes(dirs):
     return seen
 
 
-def summarize(rows, paid=None):
-    """Per (tier, suite): pass, total, model-dependent and floor. A failure is model-dependent
-    only when its deciding call reached the model (MODEL_REACHED) and, with paid runs, some
-    paid run passed it; every other failure (decided by the engine, or never reached: no
-    mock, a suite error) is floor."""
+# The classes an attribution may name. It only ever demotes a check out of `model`:
+# `missed` makes it missed, and the fixable classes (`FLOOR_ATTRIBUTIONS`) make it floor.
+ATTRIBUTION_CLASSES = ("model", "missed", "engine", "inexpressible", "journey")
+FLOOR_ATTRIBUTIONS = ("engine", "inexpressible", "journey")
+# Each failed check falls in exactly one of these.
+CLASSES = ("floor", "missed", "model")
+
+
+def failure_class(suite, case, r, paid=None, curated=None, attribution=None):
+    """(class, reason) of a failed check: `missed` (a complete description decides it),
+    `floor` (no real model recovers it) or `model` (only real model content passes it).
+    In order:
+    - an attribution naming `missed` makes it missed (reason `attributed`), and one naming
+      engine, inexpressible or journey makes it floor (the reason is that class);
+    - the curated tier passing it makes it missed (reason `curated_pass`);
+    - a deciding call that never reached the model makes it floor (the reason is its
+      source: `state`, `rejected`, or `not_reached` for anything else);
+    - with paid runs, no paid run passing it makes it floor (reason `no_paid_pass`);
+    - else it is model (reason `attributed` when an attribution names it `model`, else
+      `unattributed`).
+    An attribution never promotes a check into `model`: `model` only keeps the class the
+    other rules give. `curated` and `attribution` are only given for the `e2e` tier."""
+    key = (suite, case)
+    attr = attribution.get(key) if attribution else None
+    if attr == "missed":
+        return "missed", "attributed"
+    if attr in FLOOR_ATTRIBUTIONS:
+        return "floor", attr
+    c = curated.get(key) if curated else None
+    if c and c.get("ok"):
+        return "missed", "curated_pass"
+    src = r.get("source")
+    if src not in MODEL_REACHED:
+        return "floor", src if src in ENGINE_DECIDED else "not_reached"
+    if paid is not None and key not in paid:
+        return "floor", "no_paid_pass"
+    return "model", "attributed" if attr == "model" else "unattributed"
+
+
+def summarize(rows, paid=None, curated=None, attribution=None):
+    """Per (tier, suite): passed, total, and each failure in exactly one of `floor`,
+    `missed` and `model_dependent` (see [`failure_class`]), so their lengths sum to the
+    failures; `classes` counts them and `reasons` counts the reasons. `projected` is
+    passed plus model-dependent. The curated tier and the attribution judge the `e2e`
+    tier only. With an attribution given, `unattributed` counts the e2e model failures it
+    does not name: the projection is an upper bound by that many."""
     by = {}
     for (tier, suite, case), r in rows.items():
-        s = by.setdefault((tier, suite), {"passed": 0, "total": 0, "model_dependent": [], "floor": []})
+        s = by.setdefault((tier, suite), {"passed": 0, "total": 0, "model_dependent": [], "floor": [],
+                                          "missed": [], "classes": {}, "reasons": {}, "unattributed": 0})
         s["total"] += 1
         if r.get("ok"):
             s["passed"] += 1
-        elif r.get("source") in MODEL_REACHED and (paid is None or (suite, case) in paid):
-            s["model_dependent"].append(case)
-        else:
-            s["floor"].append(case)
+            continue
+        ref, attr = (curated, attribution) if tier == "e2e" else (None, None)
+        cls, reason = failure_class(suite, case, r, paid, ref, attr)
+        s["classes"][cls] = s["classes"].get(cls, 0) + 1
+        s["reasons"][reason] = s["reasons"].get(reason, 0) + 1
+        s["model_dependent" if cls == "model" else cls].append(case)
+        if cls == "model" and attr is not None and reason == "unattributed":
+            s["unattributed"] += 1
     for s in by.values():
         n = s["total"] or 1
         s["rate"] = round(100 * s["passed"] / n, 1)
@@ -868,18 +914,59 @@ def stage1_summary(keydir):
     return rows
 
 
+def load_attribution(paths):
+    """{(suite, check): class} from classifier output files: lists of {suite, check,
+    reclass | cls}, each class one of ATTRIBUTION_CLASSES (anything else raises
+    ValueError). A later file wins. None when no file is given."""
+    if not paths:
+        return None
+    out = {}
+    for p in paths:
+        with open(p) as f:
+            for x in json.load(f):
+                cls = x.get("reclass") or x.get("cls")
+                if cls not in ATTRIBUTION_CLASSES:
+                    raise ValueError(f"{p}: {x.get('suite')}/{x.get('check')}: unknown attribution class "
+                                     f"{cls!r} (expected one of {', '.join(ATTRIBUTION_CLASSES)})")
+                out[(x.get("suite"), x.get("check"))] = cls
+    return out
+
+
+def curated_rows(rows, run=None):
+    """{(suite, case): row} of the curated (`agent`) tier: from `run` when given, else the
+    report's own run."""
+    src = run_rows(run) if run else rows
+    got = {(s, c): r for (t, s, c), r in src.items() if t == "agent"}
+    return got or None
+
+
 def report(args):
     paid = paid_passes(args.paid) if args.paid else None
-    rep = summarize(run_rows(args.run), paid)
-    print(f"{'suite@tier':30} {'pass':>9} {'rate':>6} {'proj':>6} {'floor':>6}")
+    rows = run_rows(args.run)
+    curated = curated_rows(rows, args.curated)
+    try:
+        attribution = load_attribution(args.attribution)
+    except ValueError as e:
+        print(f"e2e.py report: {e}", file=sys.stderr)
+        return 2
+    rep = summarize(rows, paid, curated, attribution)
+    print(f"{'suite@tier':30} {'pass':>9} {'rate':>6} {'proj':>6} {'floor':>6} {'missed':>6} {'model':>6}")
     tot = {}
     for (tier, suite), s in sorted(rep.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        un = f" ({s['unattributed']} unattributed)" if s["unattributed"] else ""
         print(f"{suite + '@' + tier:30} {s['passed']:>4}/{s['total']:<4} {s['rate']:>6} {s['projected']:>6} "
-              f"{len(s['floor']):>6}")
-        t = tot.setdefault(tier, [0, 0, 0, 0])
+              f"{len(s['floor']):>6} {len(s['missed']):>6} {len(s['model_dependent']):>6}{un}")
+        t = tot.setdefault(tier, [0, 0, 0, 0, 0, 0])
         t[0] += s["passed"]; t[1] += s["total"]; t[2] += len(s["model_dependent"]); t[3] += len(s["floor"])
-    for tier, (p, n, md, fl) in sorted(tot.items()):
-        print(f"{'ALL@' + tier:30} {p:>4}/{n:<4} {100 * p / max(n, 1):6.1f} {100 * (p + md) / max(n, 1):6.1f} {fl:>6}")
+        t[4] += len(s["missed"]); t[5] += s["unattributed"]
+    for tier, (p, n, md, fl, mi, un) in sorted(tot.items()):
+        print(f"{'ALL@' + tier:30} {p:>4}/{n:<4} {100 * p / max(n, 1):6.1f} {100 * (p + md) / max(n, 1):6.1f} "
+              f"{fl:>6} {mi:>6} {md:>6}" + (f" ({un} unattributed: the projection is an upper bound by them)"
+                                            if un else ""))
+    if curated is None and args.curated:
+        print(f"--curated {args.curated} has no curated (agent) tier rows: missed failures are not told apart")
+    elif curated is None:
+        print("no curated (agent) tier in this run: missed failures are not told apart; pass --curated")
     s1 = stage1_summary(args.stage1)
     if s1:
         cost = sum(float(r["cost_usd"] or 0) for r in s1)
@@ -930,6 +1017,10 @@ def main(argv=None):
     r.add_argument("run")
     r.add_argument("--stage1", help="the stage-1 key directory, for the build summary")
     r.add_argument("--paid", action="append", help="a paid run directory (repeatable)")
+    r.add_argument("--curated", help="a run with the curated (agent) tier on the same binary (default: this run's)")
+    r.add_argument("--attribution", action="append",
+                   help="classifier output, [{suite, check, reclass|cls}], naming each e2e failure's class: "
+                        "model, missed, engine, inexpressible or journey (repeatable; any other class is an error)")
     r.add_argument("--json")
     a = p.parse_args(argv)
     if a.cmd == "tasks":
