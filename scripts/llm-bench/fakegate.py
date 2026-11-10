@@ -14,6 +14,10 @@ every LLM call, so a run costs no spend:
   holds a description for every one of its contracts; a suite with none is left out of
   this tier and named in the report.
 - `none`: tier 0, no world description.
+- `e2e` (with `--e2e-cache`): each mock is what a coding agent built from one prompt,
+  loaded from a stage-1 snapshot (see e2e.py). Both sides load the same snapshots, so the
+  tier measures the engine on fixed builds; a suite with a contract that has no snapshot
+  is left out of it and named in the report.
 
 A branch or sha is checked out in its own worktree under `--work` and built there
 (`cargo build --release -p mockingbird-cli`, into one target directory under `--work`
@@ -51,7 +55,7 @@ import world_author  # noqa: E402
 # Blind sets kept unread until their headline run: never gated on.
 SKIP = ("journeys_blind14",)
 DEFAULT_MODELS = ("claude-sonnet-5-5", world_author.DEFAULT_AUTHOR_MODEL)
-TIERS = ("agent", "none")
+TIERS = ("agent", "none", "e2e")
 # A deciding call answered by the engine itself (no model call) gets the same answer on a real
 # model, so a failing check with one of these sources is the executor's failure, not junk content.
 ENGINE_DECIDED = ("state", "rejected")
@@ -116,6 +120,8 @@ def compare(base, cand, noise=1):
     for tier in TIERS:
         b = {k: v for k, v in base.items() if k[0] == tier}
         c = {k: v for k, v in cand.items() if k[0] == tier}
+        if not b and not c:
+            continue  # a tier neither side ran (e2e without --e2e-cache)
         # A check the base passed that the candidate did not run at all is lost too.
         lost = sorted(k for k, v in b.items() if v.get("ok") and not c.get(k, {}).get("ok"))
         missing = [k for k in lost if k not in c]
@@ -183,7 +189,7 @@ def checkout(sha, work):
     return tree
 
 
-def side_meta(tree, binary, suites, models, cache):
+def side_meta(tree, binary, suites, models, cache, e2e=None):
     """What a side's results depend on: the binary, the checkout whose suites ran, and for
     each suite its contracts and the description each took. Results are reused only when
     all of it is the same."""
@@ -199,8 +205,31 @@ def side_meta(tree, binary, suites, models, cache):
         inputs[s] = {os.path.relpath(c, tree): [world_author.sha256_file(c),
                      world_author.sha256_file(world_author.cache_path(cache, aid, world_author.sha256_file(c))) if aid else None]
                      for c in contracts}
-    return {"binary": world_author.sha256_file(binary), "tree": git("rev-parse", "HEAD", cwd=tree),
+    meta = {"binary": world_author.sha256_file(binary), "tree": git("rev-parse", "HEAD", cwd=tree),
             "authors": groups, "agent_uncovered": uncovered, "inputs": inputs}
+    if e2e:
+        meta["e2e"] = e2e_meta(tree, suites, e2e)
+    return meta
+
+
+def e2e_meta(tree, suites, keydir):
+    """The e2e tier's inputs: the stage-1 snapshot (a hash of its files) of every contract of
+    each suite. A suite with a contract that has no usable build is left out of the tier."""
+    if not os.path.exists(os.path.join(tree, "scripts", "llm-bench", "e2e.py")):
+        # A checkout from before the e2e tier: it cannot run it.
+        return {"cache": keydir, "suites": [], "uncovered": list(suites), "results": {},
+                "missing": "this checkout has no e2e.py"}
+    import e2e as e2e_mod
+    covered, uncovered, results = [], [], {}
+    for s in suites:
+        got = {}
+        for c in suite_contracts(tree, s):
+            d = e2e_mod.find_result(keydir, world_author.sha256_file(c))
+            ok = d and e2e_mod.cached_result(d)
+            got[os.path.relpath(c, tree)] = e2e_mod.tree_sha256(os.path.join(d, "snapshot")) if ok else None
+        (covered if all(got.values()) else uncovered).append(s)
+        results[s] = got
+    return {"cache": keydir, "suites": covered, "uncovered": uncovered, "results": results}
 
 
 def reusable(done, meta):
@@ -235,13 +264,14 @@ def incomplete(rows, meta):
     """The (tier, suite) pairs a side should have run but has no rows for."""
     have = {(t, s) for t, s, _ in rows}
     want = [("agent", s) for ss in meta["authors"].values() for s in ss] + [("none", s) for s in meta["inputs"]]
+    want += [("e2e", s) for s in (meta.get("e2e") or {}).get("suites", [])]
     return sorted(set(want) - have)
 
 
-def run_side(name, tree, binary, work, suites, models, jobs, cache):
+def run_side(name, tree, binary, work, suites, models, jobs, cache, e2e=None):
     """Every suite at both tiers on fake_llm.py; results under `run_dir`, reused when the
     run there finished. A lock keeps two gates from running the same side at once."""
-    meta = side_meta(tree, binary, suites, models, cache)
+    meta = side_meta(tree, binary, suites, models, cache, e2e)
     out = run_dir(work, name, meta)
     with world_author.file_lock(out + ".lock"):
         done = os.path.join(out, "done")
@@ -273,6 +303,14 @@ def run_fresh(out, done, meta, name, tree, binary, suites, jobs, cache):
                             "--author-model", model] + [f"--suite={s}" for s in ss]
             logs.append(open(os.path.join(d, "run.log"), "w"))
             procs.append(subprocess.Popen(cmd, cwd=tree, env=env, stdout=logs[-1], stderr=subprocess.STDOUT))
+        e2e = meta.get("e2e") or {}
+        if e2e.get("suites"):
+            d = os.path.join(out, "e2e")
+            os.makedirs(d)
+            cmd = common + ["--out", d, "--world", "e2e", "--e2e-cache", e2e["cache"]] + \
+                [f"--suite={s}" for s in e2e["suites"]]
+            logs.append(open(os.path.join(d, "run.log"), "w"))
+            procs.append(subprocess.Popen(cmd, cwd=tree, env=env, stdout=logs[-1], stderr=subprocess.STDOUT))
         d = os.path.join(out, "none")
         os.makedirs(d)
         cmd = common + ["--out", d, "--world", "none"] + [f"--suite={s}" for s in suites]
@@ -302,6 +340,12 @@ def print_report(report, cand_name, base_sha, meta, bmeta, noise):
     print(f"agent tier authors: {meta['authors']}; not on the agent tier (no cached descriptions): {meta['agent_uncovered']}")
     if (bmeta["authors"], bmeta["agent_uncovered"]) != (meta["authors"], meta["agent_uncovered"]):
         print(f"WARNING: the base took other descriptions: {bmeta['authors']}; uncovered {bmeta['agent_uncovered']}")
+    e2e = meta.get("e2e")
+    if e2e:
+        print(f"e2e tier: snapshots from {e2e['cache']}; not on the e2e tier: {e2e['uncovered']}"
+              + (f" ({e2e['missing']})" if e2e.get("missing") else ""))
+        if (bmeta.get("e2e") or {}).get("suites") != e2e["suites"]:
+            print(f"WARNING: the base ran the e2e tier on other suites: {(bmeta.get('e2e') or {}).get('suites')}")
     for tier, r in report.items():
         print(f"\n[{tier}] {r['base']} -> {r['cand']} of {r['checks']}  (+{len(r['gained'])} / -{len(r['lost'])}, net {r['net']:+d})")
         for k in r["lost"]:
@@ -328,6 +372,8 @@ def main():
                    help="world-cache author models to take descriptions from, in order of preference")
     p.add_argument("--world-cache", default=os.path.join(REPO, world_author.DEFAULT_CACHE),
                    help="world descriptions for the agent tier, used by both sides")
+    p.add_argument("--e2e-cache", help="the e2e tier: a stage-1 key directory (e2e.py build prints it); both "
+                                        "sides load the same snapshots, so the tier measures the engine")
     p.add_argument("--noise", type=int, default=1, help="net checks lost per tier still counted as noise (default 1)")
     p.add_argument("--jobs", type=int, default=4)
     p.add_argument("--json", help="also write the comparison here")
@@ -342,7 +388,11 @@ def main():
         suites = a.suite or all_suites(base_tree)
         models = [m for m in a.author_models.split(",") if m]
         cache = os.path.abspath(a.world_cache)
-        base_out, meta = run_side(base_sha[:12], base_tree, build(base_sha, work), work, suites, models, a.jobs, cache)
+        e2e = os.path.abspath(a.e2e_cache) if a.e2e_cache else None
+        if e2e and not os.path.isdir(e2e):
+            raise SystemExit(f"--e2e-cache {e2e} is not a directory")
+        base_out, meta = run_side(base_sha[:12], base_tree, build(base_sha, work), work, suites, models, a.jobs, cache,
+                                  e2e)
         if os.path.isfile(a.candidate) and os.access(a.candidate, os.X_OK):
             binary = os.path.abspath(a.candidate)
             name = "bin-" + world_author.sha256_file(binary)[:12]
@@ -352,7 +402,7 @@ def main():
             print(f"fakegate: candidate {a.candidate} = {sha[:12]} (a branch resolves to origin/<branch> first)",
                   file=sys.stderr)
             name, tree, binary = sha[:12], checkout(sha, work), build(sha, work)
-        cand_out, cmeta = run_side(name, tree, binary, work, suites, models, a.jobs, cache)
+        cand_out, cmeta = run_side(name, tree, binary, work, suites, models, a.jobs, cache, e2e)
     except SystemExit as e:
         print(f"fakegate: {e}", file=sys.stderr)
         return 2

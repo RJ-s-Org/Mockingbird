@@ -63,7 +63,7 @@ from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
-WORLDS = ("none", "derived", "agent")
+WORLDS = ("none", "derived", "agent", "e2e")
 AUTHORS = ("claude", "stub")
 # Bump when the prompt or the agent's tool set changes: it is part of the cache key.
 PROMPT_VERSION = 1

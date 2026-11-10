@@ -135,14 +135,16 @@ directory and free ports; so does one process per (model, suite), which is safe
 too: ports are picked under a lock file in the temp directory and held until the
 server is ready.
 
-World descriptions: `--world none|derived|agent` (default none) sets the description
+World descriptions: `--world none|derived|agent|e2e` (default none) sets the description
 each suite's mocks run with. `derived` writes Mockingbird's heuristic description back
 as a revision; `agent` has a coding agent write one per contract, blind, before the
 suites run (cached per contract hash; `--author stub` is free). Rows of a run with a
 world carry `world`, its proxy label and server log end in `@<world>`, and each write
 is recorded in `<out>/world-applied.jsonl`. `--world-cache-only` reads every description
 from the cache and never authors (replay.py's agent tier). See world_author.py and the
-README.
+README. `--world e2e --e2e-cache <dir>` runs each suite on what a coding agent built from
+one prompt (stage 2 of the end-to-end eval): the server starts with no mocks and each is
+loaded from its stage-1 snapshot with `mockingbird snapshot import` (see e2e.py).
 
 Journeys are tagged by default (`--no-tag-journeys` turns it off): each mock's LLM calls
 carry `x-bench-journey`, each journey rep is marked at the proxy, so the proxy's `--dump`
@@ -502,10 +504,11 @@ class Sink:
             print(f"  [{mark}] {self.suite}/{case} #{rep}: {lat} {source}", file=sys.stderr)
 
 
-def write_config(directory, model, base_url, ports, mocks, suite, tag_journeys=False):
+def write_config(directory, model, base_url, ports, mocks, suite, tag_journeys=False, profile_names=None):
     """`tag_journeys` (replay.py's record and replay): each mock gets its own copy of the
     profile that sends `x-bench-journey: <mock>`, so the proxy can tell the journeys'
-    calls apart, and a fixed `faker_seed`, so a fallback answers the same each run."""
+    calls apart, and a fixed `faker_seed`, so a fallback answers the same each run.
+    `profile_names` writes those profiles for mocks created later (`--world e2e`)."""
     lines = [
         "llm:\n  default_profile: bench\n  profiles:\n    bench:\n",
         "      api_key: env:OPENROUTER_API_KEY\n",
@@ -513,7 +516,7 @@ def write_config(directory, model, base_url, ports, mocks, suite, tag_journeys=F
         f"      model: {json.dumps(model)}\n",
     ]
     if tag_journeys:
-        for name in mocks:
+        for name in list(mocks) + [n for n in profile_names or [] if n not in mocks]:
             lines += [
                 f"    bench_{name}:\n",
                 "      api_key: env:OPENROUTER_API_KEY\n",
@@ -672,8 +675,9 @@ class Server:
     # by a process outside the bench between picking and binding it).
     START_ATTEMPTS = 3
 
-    def __init__(self, args, suite, mocks):
+    def __init__(self, args, suite, mocks, profile_names=None):
         self.args, self.suite, self.mocks = args, suite, mocks
+        self.profile_names = profile_names
         self.dir = tempfile.mkdtemp(prefix=f"mb-bench-{suite}-")
         self.base_url = f"{args.proxy_base.rstrip('/')}/r/{run_label(args.model, suite, args)}/api/v1"
         logs = os.path.join(args.out, "server-logs")
@@ -685,7 +689,8 @@ class Server:
     def use_ports(self, ports):
         self.ports = ports
         self.config = write_config(self.dir, self.args.model, self.base_url, ports, self.mocks, self.suite,
-                                   tag_journeys=getattr(self.args, "tag_journeys", False))
+                                   tag_journeys=getattr(self.args, "tag_journeys", False),
+                                   profile_names=self.profile_names)
         self.data = f"http://127.0.0.1:{ports[0]}"
         self.admin = f"http://127.0.0.1:{ports[1]}"
         self.api = f"{self.admin}/api/v1/workspaces/default"
@@ -10491,7 +10496,9 @@ def build_parser():
                    help="the world description each mock runs with: none (no revision; the default), "
                         "derived (Mockingbird's heuristic description written back as a revision) or agent "
                         "(a coding agent's, authored blind from the contract and cached per contract hash; "
-                        "see world_author.py)")
+                        "see world_author.py), or e2e (each mock is what a coding agent built from one prompt, "
+                        "loaded from --e2e-cache with `mockingbird snapshot import`; see e2e.py)")
+    p.add_argument("--e2e-cache", help="--world e2e: the stage-1 key directory (e2e.py build prints it)")
     p.add_argument("--tag-journeys", action=argparse.BooleanOptionalAction, default=True,
                    help="each mock's LLM calls carry x-bench-journey, each journey rep is marked at the proxy, "
                         "a journey's reps run one after another, and fallbacks are seeded, so the proxy's "
@@ -10517,6 +10524,8 @@ def main():
     if not os.path.exists(args.binary):
         sys.exit(f"{args.binary} not found: cargo build --release -p mockingbird-cli")
     os.makedirs(args.out, exist_ok=True)
+    if args.world == "e2e" and not (args.e2e_cache and os.path.isdir(args.e2e_cache)):
+        p.error("--world e2e needs --e2e-cache, the stage-1 key directory e2e.py build prints")
     if not args.no_provider_check:
         # Before anything spends: a degraded pinned endpoint would be scored as the model's failures.
         pins = bench_proxy.load_provider_pins(args.provider_pins or None)
@@ -10569,9 +10578,19 @@ def run_suite(suite, args):
     refused_before = budget_refusals(proxy_stats(args), label)
     failed = False
     try:
-        with Server(args, suite, mocks) as srv:
-            apply_worlds(srv, args, suite, mocks)
-            runner(srv, sink, args)
+        if world == "e2e":
+            # The server starts with none of the suite's mocks: each is what the agent built,
+            # imported from its stage-1 snapshot under the name the journeys call.
+            import e2e
+            wanted = suite_mocks(suite, args)
+            with Server(args, suite, {}, profile_names=list(wanted)) as srv:
+                e2e.load_snapshots(srv, args.binary, args.e2e_cache, suite, wanted, args.out,
+                                   tag_journeys=getattr(args, "tag_journeys", False))
+                runner(srv, sink, args)
+        else:
+            with Server(args, suite, mocks) as srv:
+                apply_worlds(srv, args, suite, mocks)
+                runner(srv, sink, args)
     except Stopped:
         if not BUDGET_TRIPPED.is_set():
             raise
