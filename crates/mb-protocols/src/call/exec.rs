@@ -613,9 +613,11 @@ pub(super) async fn commit(
             feature = "grpc",
             feature = "soap"
         ))]
-        // A write within a parent is one of the child, named by its own id.
-        let target = written.as_deref().unwrap_or(&id);
-        crate::webhooks::emit::emit(rt, &plan.engine, op, call, &answer, Some(target), session);
+        {
+            // A write within a parent is one of the child, named by its own id.
+            let target = written.as_deref().unwrap_or(&id);
+            crate::webhooks::emit::emit(rt, &plan.engine, op, call, &answer, Some(target), session);
+        }
         answer
     }
     .instrument(state_span())
