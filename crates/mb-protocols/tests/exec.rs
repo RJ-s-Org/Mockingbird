@@ -2749,11 +2749,11 @@ components:
 #[tokio::test]
 async fn a_create_fills_what_an_object_member_it_sent_lacks() {
     let (capture, _guard) = Capture::install();
-    // The fill's answer: the `status` the read requires inside `fields`, and a
-    // `summary` it never takes (the request sent one).
+    // The fill's answer: the `status` the read requires inside `fields`, the optional
+    // `notes` nobody set, and a `summary` it never takes (the request sent one).
     let h = support::harness(
         NESTED,
-        vec![json!({"fields": {"status": "open", "summary": "not sent"}})],
+        vec![json!({"fields": {"status": "open", "notes": "n", "summary": "not sent"}})],
         &HarnessOptions::default(),
         |rt| rt,
     );
@@ -2767,7 +2767,7 @@ async fn a_create_fills_what_an_object_member_it_sent_lacks() {
     assert_eq!(source(&headers), "state", "{read}");
     assert_eq!(
         read,
-        json!({"id": id, "fields": {"summary": "printer jam", "status": "open"}})
+        json!({"id": id, "fields": {"summary": "printer jam", "status": "open", "notes": "n"}})
     );
     assert_eq!(
         capture.of("getTicket"),
@@ -4912,4 +4912,520 @@ async fn an_integer_scope_from_the_path_is_typed_and_refuses_a_repeat() {
         )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{other}");
+}
+
+/// Boards are created from their query; workspaces hold settings with a server-set
+/// `locked`, are locked by an action route past their key and copied by a create past
+/// it, hold vars, and are moved by a long-running action; employees are keyed by a
+/// plain text id another route types as an integer; apps are read by id or name; lines
+/// are created under a deal; builds carry a number besides their id that a pipeline's
+/// route reads them by.
+const REPAIRS: &str = r##"
+openapi: 3.0.0
+info: {title: Repairs, version: "1"}
+paths:
+  /boards:
+    post:
+      operationId: createBoard
+      parameters:
+        - {name: name, in: query, schema: {type: string}}
+        - {name: desc, in: query, schema: {type: string}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Board"}}}}}
+  /boards/{id}:
+    get:
+      operationId: getBoard
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Board"}}}}}
+  /workspaces:
+    post:
+      operationId: createWorkspace
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}, settings: {type: object, properties: {color: {type: string}}}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Workspace"}}}}}
+  /workspaces/{workspace_id}:
+    get:
+      operationId: getWorkspace
+      parameters: [{name: workspace_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Workspace"}}}}}
+  /workspaces/{workspace_id}/actions/lock:
+    post:
+      operationId: lockWorkspace
+      parameters: [{name: workspace_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Workspace"}}}}}
+  /workspaces/{workspace_id}/actions/copy:
+    post:
+      operationId: copyWorkspace
+      parameters: [{name: workspace_id, in: path, required: true, schema: {type: string}}]
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Workspace"}}}}}
+  /workspaces/{workspace_id}/vars:
+    post:
+      operationId: createVar
+      parameters: [{name: workspace_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {key: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Var"}}}}}
+  /vars/{id}:
+    get:
+      operationId: getVar
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Var"}}}}}
+  /workspaces/{workspace_id}/move:
+    post:
+      operationId: moveWorkspace
+      parameters: [{name: workspace_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {parent: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Operation"}}}}}
+  /employees:
+    post:
+      operationId: createEmployee
+      requestBody: {content: {application/json: {schema: {type: object, properties: {email: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Employee"}}}}}
+  /employees/{id}:
+    get:
+      operationId: getEmployee
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Employee"}}}}}
+  /employees/{employeeId}/notes:
+    put:
+      operationId: setEmployeeNotes
+      parameters: [{name: employeeId, in: path, required: true, schema: {type: integer}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {text: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {text: {type: string}}}}}}}
+  /apps:
+    post:
+      operationId: createApp
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/App"}}}}
+        "422": {description: invalid, content: {application/json: {schema: {$ref: "#/components/schemas/Problem"}}}}
+  /apps/{app_id_or_name}:
+    get:
+      operationId: getApp
+      parameters: [{name: app_id_or_name, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/App"}}}}}
+  /deals/{id}:
+    get:
+      operationId: getDeal
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Deal"}}}}}
+  /deals/{id}/lines:
+    post:
+      operationId: createLine
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {sku: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Line"}}}}}
+  /lines/{id}:
+    get:
+      operationId: getLine
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Line"}}}}}
+  /entries:
+    post:
+      operationId: createEntry
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Entry"}}}}}
+  /entries/{id}:
+    get:
+      operationId: getEntry
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Entry"}}}}}
+  /builds:
+    post:
+      operationId: createBuild
+      requestBody: {content: {application/json: {schema: {type: object, properties: {branch: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Build"}}}}}
+  /builds/{id}:
+    get:
+      operationId: getBuild
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Build"}}}}}
+  /pipelines/{pipeline}/builds/{number}:
+    get:
+      operationId: getPipelineBuild
+      parameters:
+        - {name: pipeline, in: path, required: true, schema: {type: string}}
+        - {name: number, in: path, required: true, schema: {type: integer}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Build"}}}}}
+components:
+  schemas:
+    Board:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}, desc: {type: string}}
+    Workspace:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        parent: {type: string}
+        settings:
+          type: object
+          properties: {color: {type: string}, locked: {type: boolean, readOnly: true}}
+    Var:
+      type: object
+      required: [id, key]
+      properties: {id: {type: string}, key: {type: string}}
+    Operation:
+      type: object
+      required: [name, done]
+      properties: {name: {type: string}, done: {type: boolean}, response: {$ref: "#/components/schemas/Workspace"}}
+    Employee:
+      type: object
+      required: [id]
+      properties: {id: {type: string}, email: {type: string}}
+    App:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
+    Problem:
+      type: object
+      properties: {id: {type: string}, message: {type: string}}
+    Deal:
+      type: object
+      required: [id]
+      properties: {id: {type: integer}, title: {type: string}}
+    Line:
+      type: object
+      required: [id, sku]
+      properties: {id: {type: integer}, deal_id: {type: integer}, sku: {type: string}}
+    Entry:
+      type: object
+      required: [meta, title]
+      properties:
+        title: {type: string}
+        meta: {type: object, required: [id], properties: {id: {type: string}, published: {type: integer}}}
+    Build:
+      type: object
+      required: [id, number, branch]
+      properties: {id: {type: string}, number: {type: integer}, branch: {type: string}}
+"##;
+
+/// A [`REPAIRS`] harness with no description, whose LLM answers `script`.
+fn repairs(script: Vec<serde_json::Value>) -> support::DescribedHarness {
+    support::harness(REPAIRS, script, &HarnessOptions::default(), |rt| rt)
+}
+
+#[tokio::test]
+async fn a_create_takes_the_record_members_its_query_names() {
+    let (capture, _guard) = Capture::install();
+    let h = repairs(Vec::new());
+    let (status, headers, body) = h
+        .send("POST", "/boards?name=alpha&desc=first", None, &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body["name"], json!("alpha"), "{body}");
+    assert_eq!(body["desc"], json!("first"), "{body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+    let t = type_of(&h, "getBoard");
+    assert_eq!(
+        h.stored(&t, &id).await,
+        Some(json!({"id": id, "name": "alpha", "desc": "first"}))
+    );
+    assert_eq!(
+        capture.of("createBoard"),
+        vec![create_line("createBoard", None)]
+    );
+}
+
+#[tokio::test]
+async fn fill_completes_the_optional_members_of_an_object_member_sent() {
+    let (capture, _guard) = Capture::install();
+    let h = repairs(vec![json!({"parent": "p0", "settings": {"locked": false}})]);
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/workspaces",
+            Some(json!({"name": "w", "settings": {"color": "red"}})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body["settings"],
+        json!({"color": "red", "locked": false}),
+        "{body}"
+    );
+    assert_eq!(
+        capture.of("createWorkspace"),
+        vec![create_line("createWorkspace", None)]
+    );
+}
+
+#[tokio::test]
+async fn an_object_sent_inside_a_wrapper_takes_its_optional_members_too() {
+    let h = repairs(vec![json!({"parent": "p0", "settings": {"locked": false}})]);
+    let sent = json!({"workspace": {"name": "w", "settings": {"color": "red"}}});
+    let (status, _, body) = h.send("POST", "/workspaces", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body["settings"],
+        json!({"color": "red", "locked": false}),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn an_object_only_the_server_opened_takes_no_optional_members() {
+    // What a fill would answer for the entry's unpublished version.
+    let world = json!({"types": {"entries": {"identity": {"member": "meta.id"}}}});
+    let h = support::described(REPAIRS, world, vec![json!({"meta": {"published": 1}})]);
+    let (status, _, body) = h
+        .send("POST", "/entries", Some(json!({"title": "t"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let meta = body["meta"].as_object().unwrap();
+    assert_eq!(meta.keys().collect::<Vec<_>>(), vec!["id"], "{body}");
+}
+
+#[tokio::test]
+async fn a_post_past_its_own_record_s_key_is_an_action_never_a_create() {
+    let (capture, _guard) = Capture::install();
+    let h = repairs(Vec::new());
+    let t = type_of(&h, "getWorkspace");
+    h.hold(&t, &[json!({"id": "w1", "name": "a"})]).await;
+    h.send("POST", "/workspaces/w1/actions/lock", None, &[])
+        .await;
+    let lines = capture.of("lockWorkspace");
+    assert!(
+        !lines.is_empty() && lines.iter().all(|l| l.exec == "action"),
+        "{lines:?}"
+    );
+    // A child collection under the same record still creates.
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/workspaces/w1/vars",
+            Some(json!({"key": "k"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        capture.of("createVar"),
+        vec![create_line("createVar", None)]
+    );
+}
+
+#[tokio::test]
+async fn a_described_alternate_is_minted_unique_never_filled() {
+    let (capture, _guard) = Capture::install();
+    let world =
+        json!({"types": {"builds": {"identity": {"member": "id", "alternates": ["number"]}}}});
+    // What a fill would answer for both: the same number.
+    let h = support::described(
+        REPAIRS,
+        world,
+        vec![json!({"number": 2}), json!({"number": 2})],
+    );
+    let mut numbers = Vec::new();
+    for branch in ["main", "next"] {
+        let (status, _, body) = h
+            .send("POST", "/builds", Some(json!({"branch": branch})), &[])
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        numbers.push(body["number"].clone());
+    }
+    assert_eq!(numbers, vec![json!(1), json!(2)]);
+    assert!(h.provider.requests().is_empty(), "no fill wrote a number");
+    assert_eq!(
+        capture.of("createBuild"),
+        vec![create_line("createBuild", None); 2]
+    );
+}
+
+#[tokio::test]
+async fn a_minted_text_id_takes_the_digits_another_route_types_it_by() {
+    let h = repairs(Vec::new());
+    for _ in 0..4 {
+        let (status, _, body) = h
+            .send("POST", "/employees", Some(json!({"email": "a@b.c"})), &[])
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let id = body["id"].as_str().unwrap_or_default().to_owned();
+        assert!(
+            !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()),
+            "{body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_create_repeating_the_name_its_read_route_names_a_record_by_is_refused() {
+    let h = repairs(Vec::new());
+    let (status, _, made) = h
+        .send("POST", "/apps", Some(json!({"name": "alpha"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+    let (status, _, body) = h
+        .send("POST", "/apps", Some(json!({"name": "alpha"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let t = type_of(&h, "getApp");
+    assert_eq!(h.stored_ids(&t).await.len(), 1);
+    let (status, _, other) = h
+        .send("POST", "/apps", Some(json!({"name": "beta"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{other}");
+}
+
+#[tokio::test]
+async fn an_undescribed_child_create_names_the_parent_its_path_names() {
+    let (capture, _guard) = Capture::install();
+    // What a fill would answer for the parent's id.
+    let h = repairs(vec![json!({"deal_id": 99})]);
+    let (status, _, body) = h
+        .send("POST", "/deals/7/lines", Some(json!({"sku": "s1"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["deal_id"], json!(7), "{body}");
+    assert_eq!(
+        capture.of("createLine"),
+        vec![create_line("createLine", None)]
+    );
+}
+
+#[tokio::test]
+async fn a_long_running_action_answers_its_changed_record_as_done() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"moveWorkspace": {
+        "kind": "action",
+        "target": {"path_param": "workspace_id"},
+        "changes": {"parent": {"from_request": "/parent"}},
+        "answer": {"long_running": {"done": "done", "result": "response"}}
+    }}});
+    let h = support::described(REPAIRS, world, Vec::new());
+    let t = type_of(&h, "getWorkspace");
+    h.hold(&t, &[json!({"id": "w1", "name": "a", "parent": "p1"})])
+        .await;
+    for _ in 0..3 {
+        let (status, headers, body) = h
+            .send(
+                "POST",
+                "/workspaces/w1/move",
+                Some(json!({"parent": "p2"})),
+                &[],
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(source(&headers), "state", "{body}");
+        assert_eq!(body["done"], json!(true), "{body}");
+        assert_eq!(
+            body["response"],
+            json!({"id": "w1", "name": "a", "parent": "p2"}),
+            "{body}"
+        );
+    }
+    assert_eq!(
+        capture.of("moveWorkspace"),
+        vec![action_line("moveWorkspace", None); 3]
+    );
+}
+
+#[tokio::test]
+async fn a_post_past_its_own_record_s_key_answering_201_is_a_create() {
+    let (capture, _guard) = Capture::install();
+    let h = repairs(Vec::new());
+    let t = type_of(&h, "getWorkspace");
+    h.hold(&t, &[json!({"id": "w1", "name": "a"})]).await;
+    let (status, headers, body) = h
+        .send("POST", "/workspaces/w1/actions/copy", None, &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_ne!(body["id"], json!("w1"), "{body}");
+    assert_eq!(
+        capture.of("copyWorkspace"),
+        vec![create_line("copyWorkspace", None)]
+    );
+    assert_eq!(h.stored_ids(&t).await.len(), 2);
+}
+
+#[tokio::test]
+async fn a_member_a_route_reads_records_by_is_minted_unique_and_kept_when_sent() {
+    let (capture, _guard) = Capture::install();
+    // What a fill would answer for both: the same number.
+    let h = repairs(vec![json!({"number": 2}), json!({"number": 2})]);
+    let mut numbers = Vec::new();
+    for branch in ["main", "next"] {
+        let (status, _, body) = h
+            .send("POST", "/builds", Some(json!({"branch": branch})), &[])
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        numbers.push(body["number"].clone());
+    }
+    assert_eq!(numbers, vec![json!(1), json!(2)]);
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/builds",
+            Some(json!({"branch": "main", "number": 7})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["number"], json!(7), "{body}");
+    // Sent again where the create declares no conflict, state stores no second 7.
+    h.send(
+        "POST",
+        "/builds",
+        Some(json!({"branch": "next", "number": 7})),
+        &[],
+    )
+    .await;
+    let mut lines = vec![create_line("createBuild", None); 3];
+    lines.push(create_line("createBuild", Some("repeated_key")));
+    assert_eq!(capture.of("createBuild"), lines);
+}
+
+#[tokio::test]
+async fn a_body_member_wins_over_the_query_parameter_of_its_name() {
+    let h = repairs(Vec::new());
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/boards?name=query",
+            Some(json!({"name": "body"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], json!("body"), "{body}");
+}
+
+/// Mints four employees in `contract` and answers their ids.
+async fn employee_ids(contract: &str) -> Vec<String> {
+    let h = support::harness(contract, Vec::new(), &HarnessOptions::default(), |rt| rt);
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        let (status, _, body) = h
+            .send("POST", "/employees", Some(json!({"email": "a@b.c"})), &[])
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        ids.push(body["id"].as_str().unwrap_or_default().to_owned());
+    }
+    ids
+}
+
+#[tokio::test]
+async fn a_text_id_that_says_more_or_a_text_route_names_is_not_reshaped_into_digits() {
+    let digits = |ids: &[String]| ids.iter().all(|id| id.chars().all(|c| c.is_ascii_digit()));
+    let patterned = REPAIRS.replace(
+        "properties: {id: {type: string}, email: {type: string}}",
+        "properties: {id: {type: string, pattern: \"^E[0-9]{3}$\"}, email: {type: string}}",
+    );
+    assert_ne!(patterned, REPAIRS);
+    let ids = employee_ids(&patterned).await;
+    assert!(ids.iter().all(|id| id.starts_with('E')), "{ids:?}");
+    let bounded = REPAIRS.replace(
+        "properties: {id: {type: string}, email: {type: string}}",
+        "properties: {id: {type: string, maxLength: 4}, email: {type: string}}",
+    );
+    let ids = employee_ids(&bounded).await;
+    assert!(ids.iter().all(|id| id.len() <= 4), "{ids:?}");
+    let textual = REPAIRS.replace(
+        "{name: employeeId, in: path, required: true, schema: {type: integer}}",
+        "{name: employeeId, in: path, required: true, schema: {type: string}}",
+    );
+    assert_ne!(textual, REPAIRS);
+    assert!(!digits(&employee_ids(&textual).await));
 }

@@ -466,7 +466,10 @@ async fn rpc_literal_state_round_trip() {
             "createdAt": "2024-01-01T00:00:00Z",
         })
     };
+    // The create's fill of the optional member its account leaves out, then the
+    // answers of the read.
     let provider = scripted(vec![
+        json!({"account": {"email": "ada@example.com"}}),
         json!({"id": "a-1", "account": account("Ada")}),
         json!({"id": "a-1", "account": account("Someone else")}),
     ]);

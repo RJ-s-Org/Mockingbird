@@ -4,8 +4,10 @@
 //! - The record is what the request holds at the described `request.record`, else the
 //!   body: the members the type's records declare (all of them when it declares none),
 //!   with those of an object member the type does not declare itself (an input wrapper,
-//!   GraphQL's `input: {...}`) one level down, and the path values naming its parent or
-//!   a member it declares. A path value is set at its member's dotted path
+//!   GraphQL's `input: {...}`) one level down, the members a declared query parameter
+//!   names (`POST /boards?name=…`), and the path values naming its parent or a member
+//!   it declares (undescribed, a member named for the type whose read by id the route
+//!   runs through: `deal_id` under `/deals/{id}/lines`). A path value is set at its member's dotted path
 //!   ([`super::super::path_set`]): one naming an object member goes into the member the
 //!   description names below it, and wins over anything fill would write.
 //! - Its id is the one the request asks for (a client-chosen id, a path value naming the
@@ -21,14 +23,21 @@
 //!   the request's) takes that value, at any depth the record holds ([`preset`]),
 //!   optional members included. An array item declaring the type's id-shaped identity
 //!   member, and not another type's record, gets a minted id ([`mint_items`]).
+//! - A member a path may name the record by besides its id (a described alternate, a
+//!   member its routes read it by, a compound parameter's later key: `name` of
+//!   `{app_id_or_name}`, [`Shape::key_members`]) is unique among the type's records: a
+//!   create sending a value another record of its collection holds is refused with the
+//!   `409` or `422` it declares; one not sent is minted when it is an integer (one past
+//!   the highest held), else filled and drawn again where a record holds the value.
 //! - Then fill writes ([`gaps`]) what the type's reads (its read by id and every list of
 //!   it) and the create's answer, when that is the record, require and nothing above
 //!   gives (a member, or what an object member the request sent lacks), and every other
-//!   member they declare that nothing set, optional ones too, but the server's own (the
-//!   id, the lifecycle member a described `initial` sets, the derived members, the
-//!   described concurrency token), a `writeOnly` member, and a reference to another
-//!   record the request could have sent ([`unsent_reference`]); and what an array item
-//!   or a nullable object the request sent lacks, item by item ([`lacking`]). What fill
+//!   member they declare that nothing set, optional ones too, at the top and below it
+//!   ([`Unsent::All`]), but the server's own (the id, the lifecycle member a described
+//!   `initial` sets, the derived members, the described concurrency token), a
+//!   `writeOnly` member, and a reference to another record the request could have sent
+//!   ([`unsent_reference`]); and what an array item or a nullable object the request
+//!   sent lacks, item by item ([`lacking`]). What fill
 //!   leaves is settled ([`settle_filled`]). The lifecycle's `initial` (where it fits
 //!   the member, [`initial`]) and the tokens' first values ([`initial_token`]) are set
 //!   before fill, and a member named for a path parameter is the record it names
@@ -50,6 +59,7 @@
 //! to generation too.
 
 use mb_engine::consistency::{property_schema, required_members};
+use mb_engine::error_body::{ErrorCause, RefusalFacts};
 use mb_engine::{FillContext, GeneratedResponse};
 use mb_mcm::Operation;
 use mb_mcm::world::OpKind;
@@ -60,11 +70,12 @@ use super::writes::written;
 use super::{Fallback, Held, Ran, Write, answered, commit, fell_back};
 use crate::call::bundle_index::record_schema_of;
 use crate::call::entities::type_check;
-use crate::call::owners::schema_members;
+use crate::call::owners::{Compound, schema_members};
 use crate::call::writes::type_members;
 use crate::call::{
-    CallPlan, OperationCall, StateAccess, derived, header_ids, id_string, path_set, records,
-    repeats, request_values, serve_held, state_lists, state_span, target_id, value_index,
+    CallPlan, MAX_SCAN, OperationCall, StateAccess, derived, header_ids, id_string,
+    in_create_collection, lifecycle, path_set, records, repeats, replays, request_values,
+    serve_held, state_lists, state_span, target_id, value_index,
 };
 
 /// Whether the executor takes these calls.
@@ -131,12 +142,49 @@ pub(super) async fn run(
     let Some(mut record) = shape.request_record(rt, request) else {
         return fall("no_record");
     };
-    let from_path = path_set(rt, t, call);
+    // A record member the query names is set as the body sets it, as an update's is.
+    shape.query_members(rt, op, call, &mut record);
+    // What the request sent of the record, as the record holds it.
+    let sent = Value::Object(record.clone());
+    let from_path = path_set(rt, (op, t), call);
     shape.path_members(rt, call, &from_path, &mut record);
+    // A value of a member that names the type's records besides their id (an
+    // alternate key), held by another record of the create's collection, is refused
+    // with the conflict the create declares: two records a path names alike are none.
+    let field = identity_member(rt, op, t);
+    let keys = shape.key_members(rt, t, field);
+    let taken = repeated_key(state, plan, call, t, (&keys, &record))
+        .instrument(state_span())
+        .await;
+    if let Some(held) = taken.clone()
+        && let Some(code) = [409, 422]
+            .into_iter()
+            .find(|code| mb_engine::guards::declares_code(op, *code))
+        && let Some(refusal) = plan
+            .engine
+            .refuse_held(
+                rt.bundle(),
+                op,
+                call,
+                code,
+                ErrorCause::Taken,
+                &RefusalFacts::taken(&[held]),
+            )
+            .await
+    {
+        replays::keep(state, plan, call, &refusal)
+            .instrument(state_span())
+            .await;
+        answered(rt, plan, kind);
+        return Ran::Answered(Box::new(refusal));
+    }
+    // One the create declares no refusal for is no record of state's either.
+    if taken.is_some() {
+        return fall("repeated_key");
+    }
 
     // The id: the one asked for, else minted in the header the answer names it in, else
     // drawn as the type declares it.
-    let field = identity_member(rt, op, t);
     let status = op.success_output().map_or(200, |o| match o.status {
         mb_mcm::StatusSelector::Code(code) => code,
         _ => 200,
@@ -224,6 +272,12 @@ pub(super) async fn run(
             mint_items(rt, (t, schema), &mut data, &leaf, GAP_DEPTH);
         }
     }
+    // A member naming the record besides its id (an alternate key) nobody set is unique
+    // among the type's records, as an id is: an integer is minted, never filled; what
+    // fill writes for another is drawn again where a record holds it.
+    let filled_keys = mint_keys(state, (&plan.session, t), &keys, &mut data, &mut owned)
+        .instrument(state_span())
+        .await;
     // A member referring to the record a path parameter names (a comment's
     // `pullrequest` under `/pullrequests/{pull_request_id}`) is that record.
     if let Value::Object(known) = &mut data {
@@ -231,11 +285,14 @@ pub(super) async fn run(
             .instrument(state_span())
             .await;
     }
-    let mut missing = gaps(rt, (t, &shape.schemas), &data, &owned);
+    // Below its top, every member nobody set is filled ([`Unsent::All`]); at its top,
+    // what a read requires, then every other member nobody set, but a reference the
+    // request could have sent.
+    let request_schema = request_schema(rt, op);
+    let unsent = Unsent::All(request_schema.as_ref(), Some(&sent));
+    let mut missing = gaps(rt, (t, &shape.schemas), &data, &owned, unsent);
     let required: Vec<String> = missing.iter().map(|(name, _)| name.clone()).collect();
-    // And every other member nobody set, but a reference the request could have sent.
     if let Value::Object(known) = &data {
-        let request_schema = request_schema(rt, op);
         for (name, member) in &shape.members {
             if !known.contains_key(name)
                 && !owned.contains(name)
@@ -267,6 +324,9 @@ pub(super) async fn run(
         fill_into(known, filled.members);
         settle_filled(rt, (field, &shape.schemas), (&missing, &required), known);
     }
+    unique_keys(state, (&plan.session, t), &filled_keys, &mut data)
+        .instrument(state_span())
+        .await;
 
     // Its derived members are answered from what state holds (its children, if any),
     // never stored; the record as stored is answered when the filled one does not render.
@@ -317,6 +377,122 @@ pub(super) async fn run(
     let answer = commit(state, plan, call, (t, None), write, answer).await;
     answered(rt, plan, kind);
     Ran::Answered(Box::new(answer))
+}
+
+/// The first of `keys` (a type's alternate keys, [`Shape::key_members`]) whose value
+/// `record`, a create's, sends that another record of type `t` in the create's
+/// collection holds (one not soft-deleted), with that value.
+async fn repeated_key(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    t: &str,
+    (keys, record): (&[(String, Value)], &Map<String, Value>),
+) -> Option<(String, Value)> {
+    let sent: Vec<(&String, &Value)> = keys
+        .iter()
+        .filter_map(|(name, _)| Some((name, record.get(name)?)))
+        .filter(|(_, value)| value.is_string() || value.is_number())
+        .collect();
+    if sent.is_empty() {
+        return None;
+    }
+    let rt = state.rt;
+    let gone = lifecycle::exclusion(rt, t);
+    let listed = state.list(&plan.session, t, MAX_SCAN).await;
+    for (name, value) in sent {
+        let text = id_string(value);
+        let holds = |r: &mb_state::StoredResource| {
+            r.data.get(name).and_then(id_string) == text
+                && gone.as_ref().is_none_or(|g| !g.excludes(&r.data))
+                && in_create_collection(rt, &plan.session, plan.op, call, r)
+        };
+        if listed.iter().any(holds) {
+            return Some((name.clone(), value.clone()));
+        }
+    }
+    None
+}
+
+/// A member's name with its schema.
+type Member = (String, Value);
+
+/// Mints on `data`, a created record of type `t`, each of `keys` (its alternate keys,
+/// [`Shape::key_members`]) it holds no value for and that `owned` leaves to nobody: an
+/// integer member is one past the highest the type's records hold, added to `owned`, so
+/// fill never writes it; any other is left for fill, which [`unique_keys`] keeps
+/// unique. Returns the members left for fill.
+async fn mint_keys(
+    state: &mut StateAccess<'_>,
+    (session, t): (&mb_state::SessionKey, &str),
+    keys: &[(String, Value)],
+    data: &mut Value,
+    owned: &mut Vec<String>,
+) -> Vec<(String, Value)> {
+    let rt = state.rt;
+    let bundle = rt.bundle();
+    let (integers, others): (Vec<&Member>, Vec<&Member>) = keys
+        .iter()
+        .filter(|(name, _)| !owned.contains(name) && data.get(name).is_none_or(Value::is_null))
+        .partition(|(_, member)| {
+            admitted_types(bundle, member)
+                .iter()
+                .any(|a| a == "integer")
+        });
+    if !integers.is_empty() {
+        let listed = state.list(session, t, MAX_SCAN).await;
+        for (name, member) in integers {
+            let top = listed
+                .iter()
+                .filter_map(|r| r.data.get(name)?.as_i64())
+                .max()
+                .unwrap_or(0);
+            let value = Value::from(top.saturating_add(1));
+            if fits(rt, member, &value)
+                && let Some(record) = data.as_object_mut()
+            {
+                record.insert(name.clone(), value);
+                owned.push(name.clone());
+            }
+        }
+    }
+    others.into_iter().cloned().collect()
+}
+
+/// Keeps each of `filled` (alternate keys of type `t` fill wrote on `data`,
+/// [`mint_keys`]) unique: a value another record of the type holds is drawn again as
+/// its schema declares it ([`crate::call::header_ids::draw_id_as`]), until no record
+/// holds the draw; one no draw frees is left as filled.
+async fn unique_keys(
+    state: &mut StateAccess<'_>,
+    (session, t): (&mb_state::SessionKey, &str),
+    filled: &[(String, Value)],
+    data: &mut Value,
+) {
+    if filled.is_empty() {
+        return;
+    }
+    let rt = state.rt;
+    let listed = state.list(session, t, MAX_SCAN).await;
+    for (name, member) in filled {
+        let held: Vec<Option<String>> = listed
+            .iter()
+            .filter_map(|r| r.data.get(name))
+            .map(id_string)
+            .collect();
+        let taken = |v: &Value| held.contains(&id_string(v));
+        if !data.get(name).is_some_and(taken) {
+            continue;
+        }
+        let drawn = (0..MINT_ITEM_ATTEMPTS)
+            .filter_map(|_| crate::call::header_ids::draw_id_as(rt, member))
+            .find(|drawn| !taken(drawn) && fits(rt, member, drawn));
+        if let Some(value) = drawn
+            && let Some(record) = data.as_object_mut()
+        {
+            record.insert(name.clone(), value);
+        }
+    }
 }
 
 /// Whether the generated path refuses `call`, a create of type `t`, for a value the
@@ -690,6 +866,62 @@ impl Shape {
         Some(record)
     }
 
+    /// The top-level members besides identity `field` that a path may name a record
+    /// of type `t` by, each with its schema: the described alternates, the members its
+    /// routes read it by ([`crate::call::BundleIndex::identity_fields`]), and the later
+    /// keys of a compound parameter its read by id takes (`name` of
+    /// `{app_id_or_name}`), where the type declares them.
+    fn key_members(&self, rt: &crate::MockRuntime, t: &str, field: &str) -> Vec<(String, Value)> {
+        let index = rt.index();
+        let mut names: Vec<String> = records::alternates(rt, t);
+        names.extend(index.identity_fields(t).iter().cloned());
+        let param = index
+            .detail_reads
+            .get(t)
+            .and_then(|i| rt.bundle().operations.get(*i))
+            .and_then(|read| read.identity.as_ref()?.path_param.clone());
+        if let Some(compound) = param.as_deref().and_then(Compound::of) {
+            let stem = format!("{}_", compound.stem);
+            for key in compound.keys.iter().skip(1) {
+                names.extend(key.strip_prefix(&stem).map(str::to_owned));
+            }
+        }
+        let mut out: Vec<(String, Value)> = Vec::new();
+        for name in names {
+            if name == field || out.iter().any(|(n, _)| *n == name) {
+                continue;
+            }
+            if let Some((_, member)) = self.members.iter().find(|(m, _)| *m == name) {
+                out.push((name, member.clone()));
+            }
+        }
+        out
+    }
+
+    /// Sets on `record` each member the type declares that a query parameter `op`
+    /// declares names (`POST /boards?name=…`), typed as the member is, when the
+    /// request's record holds no value for it.
+    fn query_members(
+        &self,
+        rt: &crate::MockRuntime,
+        op: &Operation,
+        call: &OperationCall,
+        record: &mut Map<String, Value>,
+    ) {
+        let bundle = rt.bundle();
+        let Some(params) = op.input.query.as_ref() else {
+            return;
+        };
+        for (name, value) in &call.query {
+            if record.contains_key(name) || property_schema(bundle, params, name).is_none() {
+                continue;
+            }
+            if let Some((_, member)) = self.members.iter().find(|(m, _)| m == name) {
+                record.insert(name.clone(), typed_as(bundle, member, value));
+            }
+        }
+    }
+
     /// Sets on `record` a member the type declares under a path parameter's own name,
     /// from that parameter, and the top-level members of what the path says of it
     /// (`from_path`, [`path_set`]: the described parent member, a list scope's member),
@@ -865,26 +1097,47 @@ pub(super) fn unread(
     record: &Value,
 ) -> Vec<(String, Value)> {
     let owned = server_owned(rt, t, field, Some(record));
-    gaps(rt, (t, &read_schemas(rt, t)), record, &owned)
+    gaps(
+        rt,
+        (t, &read_schemas(rt, t)),
+        record,
+        &owned,
+        Unsent::Required,
+    )
 }
 
 /// The deepest an object member's own requirements are followed.
 const GAP_DEPTH: usize = 6;
 
+/// Which members below a record's top [`gaps`] takes.
+#[derive(Clone, Copy)]
+pub(super) enum Unsent<'r> {
+    /// Only those a schema requires (what a replace's reads need).
+    Required,
+    /// Every declared one nothing set (a create's), optional ones too, of an object
+    /// the request sent, but a `writeOnly` member and a reference the request could
+    /// have sent ([`unsent_reference`]): with the request's schema and the request's
+    /// value at that level, when it has them. An object the request did not send (one
+    /// the server's own members opened, such as a `sys` holding the id) is completed
+    /// with what it requires only.
+    All(Option<&'r Value>, Option<&'r Value>),
+}
+
 /// What `schemas` require that `record` does not hold, each top member with the schema
 /// fill writes it by: a member it lacks (but those in `owned`), with its own schema;
-/// an object member it holds lacking members its schema requires, with an object
-/// schema of those alone, at any depth (to [`GAP_DEPTH`]). Merged into the record by
-/// [`fill_into`].
+/// an object member it holds lacking members its schema requires (with [`Unsent::All`],
+/// any member it declares), with an object schema of those alone, at any depth (to
+/// [`GAP_DEPTH`]). Merged into the record by [`fill_into`].
 pub(super) fn gaps(
     rt: &crate::MockRuntime,
     (t, schemas): (&str, &[Value]),
     record: &Value,
     owned: &[String],
+    unsent: Unsent<'_>,
 ) -> Vec<(String, Value)> {
     let mut out: Vec<(String, Value)> = Vec::new();
     for schema in schemas {
-        let Some(Value::Object(properties)) = lacking((rt, t), schema, record, GAP_DEPTH)
+        let Some(Value::Object(properties)) = lacking((rt, t), schema, record, GAP_DEPTH, unsent)
             .as_ref()
             .and_then(|s| s.get("properties"))
             .cloned()
@@ -900,13 +1153,15 @@ pub(super) fn gaps(
     out
 }
 
-/// An object schema of what `schema` requires that `value` does not hold (see
-/// [`gaps`]); `None` when it holds all of it.
+/// An object schema of what `schema` requires that `value` does not hold, and below
+/// the top, with [`Unsent::All`], what else it declares that `value` does not hold
+/// (see [`gaps`]); `None` when it holds all of it.
 fn lacking(
     (rt, t): (&crate::MockRuntime, &str),
     schema: &Value,
     value: &Value,
     depth: usize,
+    unsent: Unsent<'_>,
 ) -> Option<Value> {
     let bundle = rt.bundle();
     // A record embedded below the top (of another type, or this one: a folder's
@@ -921,20 +1176,57 @@ fn lacking(
     let schema = non_null(bundle, schema);
     match value {
         Value::Object(held) => {
+            let required = required_members(bundle, &schema);
+            // A create's every declared member, the required first: one it lacks is
+            // taken below the top only (the create takes those of its top itself), and
+            // what an object it holds lacks at any depth.
+            let mut names = required.clone();
+            let (request, sent) = match unsent {
+                Unsent::All(request, sent) => (request, sent),
+                Unsent::Required => (None, None),
+            };
+            if matches!(unsent, Unsent::All(..)) {
+                for part in whole_parts(bundle, &schema) {
+                    let Some(Value::Object(declared)) = part.get("properties") else {
+                        continue;
+                    };
+                    for name in declared.keys() {
+                        if !names.contains(name) {
+                            names.push(name.clone());
+                        }
+                    }
+                }
+            }
             let mut properties = Map::new();
-            for name in required_members(bundle, &schema) {
+            for name in names {
                 if foreign.contains(&name) {
                     continue;
                 }
                 let Some(member) = property_schema(bundle, &schema, &name) else {
                     continue;
                 };
+                // The request's schema of this member, for what lies below it.
+                let request_below = request.and_then(|r| property_schema(bundle, r, &name));
+                let below = match unsent {
+                    Unsent::All(..) => {
+                        Unsent::All(request_below.as_ref(), sent.and_then(|v| v.get(&name)))
+                    }
+                    Unsent::Required => Unsent::Required,
+                };
                 match held.get(&name) {
-                    None => {
+                    None if required.contains(&name) => {
                         properties.insert(name, member);
                     }
+                    None if depth == GAP_DEPTH || !sent.is_some_and(Value::is_object) => {}
+                    None => {
+                        let left = write_only(bundle, &member)
+                            || unsent_reference(rt, request, &name, &member);
+                        if !left {
+                            properties.insert(name, member);
+                        }
+                    }
                     Some(inner @ (Value::Object(_) | Value::Array(_))) if depth > 1 => {
-                        if let Some(below) = lacking((rt, t), &member, inner, depth - 1) {
+                        if let Some(below) = lacking((rt, t), &member, inner, depth - 1, below) {
                             properties.insert(name, below);
                         }
                     }
@@ -952,9 +1244,26 @@ fn lacking(
             let item = whole_parts(bundle, &schema)
                 .iter()
                 .find_map(|p| p.get("items").cloned())?;
+            let (item_request, sent) = match unsent {
+                Unsent::All(request, sent) => (
+                    request.and_then(|r| {
+                        whole_parts(bundle, r)
+                            .iter()
+                            .find_map(|p| p.get("items").cloned())
+                    }),
+                    sent.and_then(Value::as_array),
+                ),
+                Unsent::Required => (None, None),
+            };
             let mut properties = Map::new();
-            for held in items {
-                let Some(Value::Object(below)) = lacking((rt, t), &item, held, depth)
+            for (at, held) in items.iter().enumerate() {
+                let below = match unsent {
+                    Unsent::All(..) => {
+                        Unsent::All(item_request.as_ref(), sent.and_then(|s| s.get(at)))
+                    }
+                    Unsent::Required => Unsent::Required,
+                };
+                let Some(Value::Object(below)) = lacking((rt, t), &item, held, depth, below)
                     .as_ref()
                     .and_then(|s| s.get("properties"))
                     .cloned()

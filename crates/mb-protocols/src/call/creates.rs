@@ -136,9 +136,17 @@ pub(super) fn fresh_record(
 ///   with `id` or with the dotted member's own name (`team.slug` under `{team}`,
 ///   `owner.id` under `{owner_id_or_key}`).
 ///
+/// - With no described parent, a member named for another type (`deal_id`) whose read
+///   by id is the create's route up to a path parameter (`/deals/{id}` of
+///   `POST /deals/{id}/lines`), from that parameter ([`route_parents`]).
+///
 /// A member is set at its dotted path, never as a literal `a.b` key, and the values are
 /// as the path holds them: the create types them as its record declares.
-pub(super) fn path_set(rt: &MockRuntime, t: &str, call: &OperationCall) -> Vec<(String, Value)> {
+pub(super) fn path_set(
+    rt: &MockRuntime,
+    (op, t): (&Operation, &str),
+    call: &OperationCall,
+) -> Vec<(String, Value)> {
     let described = rt.described();
     let desc = described.type_desc(t);
     let mut out: Vec<(String, Value)> = Vec::new();
@@ -164,6 +172,11 @@ pub(super) fn path_set(rt: &MockRuntime, t: &str, call: &OperationCall) -> Vec<(
     for scope in &scopes {
         if let Some(value) = call.path_params.get(&scope.param) {
             add(&scope.member, value.clone(), &mut out);
+        }
+    }
+    if parent.is_none() {
+        for (member, value) in route_parents(rt, (op, t), call) {
+            add(&member, value, &mut out);
         }
     }
     // The dotted members the description names, each under an object member a path
@@ -192,6 +205,78 @@ pub(super) fn path_set(rt: &MockRuntime, t: &str, call: &OperationCall) -> Vec<(
         {
             used.push(param.as_str());
             add(member, value.clone(), &mut out);
+        }
+    }
+    out
+}
+
+/// The members of a record of type `t` that `op`'s route names the parent of: for
+/// each path parameter of the route, another type whose read by id is the route up to
+/// that parameter (`GET /deals/{id}` for `POST /deals/{id}/lines`), and the member of
+/// `t`'s records named for that type as a reference (`deal_id`, `dealId`), with the
+/// parameter's value.
+fn route_parents(
+    rt: &MockRuntime,
+    (op, t): (&Operation, &str),
+    call: &OperationCall,
+) -> Vec<(String, Value)> {
+    let mb_mcm::Binding::Http { path, .. } = &op.binding else {
+        return Vec::new();
+    };
+    let segments = |p: &str| -> Vec<String> {
+        p.split('/')
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let shape = |segs: &[String]| -> Vec<String> {
+        segs.iter()
+            .map(|s| match s.starts_with('{') {
+                true => "{}".to_owned(),
+                false => s.clone(),
+            })
+            .collect()
+    };
+    let own = segments(path);
+    let index = rt.index();
+    let bundle = rt.bundle();
+    let members = super::writes::type_members(rt, t);
+    let mut out: Vec<(String, Value)> = Vec::new();
+    for (at, segment) in own.iter().enumerate() {
+        let Some(param) = segment.strip_prefix('{').and_then(|s| s.strip_suffix('}')) else {
+            continue;
+        };
+        let Some(value) = call.path_params.get(param) else {
+            continue;
+        };
+        let up_to = shape(&own[..=at]);
+        // The one other type read there; none where two are (the index is unordered).
+        let parents: Vec<&String> = index
+            .detail_reads
+            .iter()
+            .filter(|(of, i)| {
+                of.as_str() != t
+                    && bundle.operations.get(**i).is_some_and(|read| {
+                        matches!(&read.binding, mb_mcm::Binding::Http { path: p, .. }
+                            if shape(&segments(p)) == up_to)
+                    })
+            })
+            .map(|(of, _)| of)
+            .collect();
+        let [of] = parents.as_slice() else {
+            continue;
+        };
+        let named = members.iter().find(|m| {
+            reference_prefix(m).is_some_and(|prefix| {
+                relations::reference_types(Some(index), prefix)
+                    .iter()
+                    .any(|named| named == *of)
+            })
+        });
+        if let Some(member) = named
+            && !out.iter().any(|(m, _)| m == member)
+        {
+            out.push((member.clone(), value.clone()));
         }
     }
     out

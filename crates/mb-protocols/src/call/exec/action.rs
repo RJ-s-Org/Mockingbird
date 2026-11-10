@@ -8,7 +8,8 @@ use mb_mcm::world::OpKind;
 use serde_json::Value;
 use tracing::Instrument;
 
-use super::{Fallback, Held, Ran, Write, answered, commit, fell_back, render};
+use super::writes::written;
+use super::{Fallback, Held, Ran, Write, answered, commit, fell_back};
 use crate::call::{
     CallPlan, OperationCall, StateAccess, derived, state_span, transitions, write_memory,
 };
@@ -19,8 +20,9 @@ pub(super) const EXECUTES: bool = true;
 /// Executes the call: the members the description says the action sets are set on the
 /// held target (a value that does not fit its member is dropped; nothing is set when
 /// the record would not fit its type), which is stored and answered as the operation
-/// answers a write of it ([`render`]: with the members the description derives, when
-/// that answer suits the schema, else as stored).
+/// answers a write of it ([`written`], as a create's and an update's are: with the
+/// members the description derives, when that answer suits the schema, else as stored;
+/// a described long-running answer holds it as its result, and is done).
 pub(super) async fn run(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
@@ -60,8 +62,8 @@ pub(super) async fn run(
         .instrument(state_span())
         .await;
     let answer = derived
-        .and_then(|shown| render(rt, plan, call, (id, &shown.data), response_schema))
-        .or_else(|| render(rt, plan, call, (id, &changed.data), response_schema));
+        .and_then(|shown| written(rt, plan, call, (id, &shown.data), response_schema))
+        .or_else(|| written(rt, plan, call, (id, &changed.data), response_schema));
     let Some(answer) = answer else {
         fell_back(rt, plan, kind, Fallback::RenderFailed.as_str());
         return Ran::Generate(None);
