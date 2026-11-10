@@ -895,6 +895,27 @@ pub fn names_page_size(name: &str) -> bool {
     PAGE_SIZE_WORDS.contains(&normalized(name).as_str())
 }
 
+/// Whether query parameter `name` can ask for the page size, as [`requested_page`] reads
+/// one from a request: declared as one that may be an integer, and either its `maximum`
+/// is the `maxItems` of an array `doc()` holds outside any array, or it is named as a
+/// page size ([`names_page_size`]).
+#[must_use]
+pub fn sizes_page<'a>(query: Option<&Value>, doc: impl Fn() -> &'a Value, name: &str) -> bool {
+    let param = query
+        .and_then(|q| q.get("properties"))
+        .and_then(|d| d.get(name));
+    if !may_be_integer(param) {
+        return false;
+    }
+    let maximum = param.and_then(|p| p.get("maximum")).and_then(Value::as_u64);
+    if let Some(maximum) = maximum
+        && arrays_up_to(doc(), maximum).is_some_and(|at| !at.is_empty())
+    {
+        return true;
+    }
+    names_page_size(name)
+}
+
 /// Lower case, with only letters and digits.
 fn normalized(name: &str) -> String {
     name.chars()

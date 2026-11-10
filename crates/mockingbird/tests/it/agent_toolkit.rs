@@ -582,6 +582,18 @@ fn mcp_drives_a_background_server() {
             json!({ "mock": "hello", "content": "type Query { hello: String }\n", "filename": "schema.graphql" }),
         );
         assert_eq!(imported["status"], "active", "{imported}");
+        // An import that makes a version says what to do next: review the world.
+        let steps = imported["next_steps"].as_array().expect("next_steps");
+        assert!(
+            steps[0].as_str().unwrap().contains("mockingbird-world"),
+            "{imported}"
+        );
+        let gaps = imported["world_gaps"].as_array().expect("world_gaps");
+        assert_eq!(
+            imported["world_gaps_total"].as_u64(),
+            Some(gaps.len() as u64),
+            "{imported}"
+        );
         // The import is stored at once; the data plane mounts the new mock
         // when its registry watcher has rebuilt it, so wait for that.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

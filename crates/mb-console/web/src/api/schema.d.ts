@@ -2383,6 +2383,12 @@ export interface components {
          *     the description leaves open.
          */
         WorldGap: {
+            /**
+             * @description Whether it is a check, not something missing: behaviour the contract hints at,
+             *     to describe only when the docs state it. Absent when false.
+             * @default false
+             */
+            advisory: boolean | null;
             code: components["schemas"]["WorldGapCode"];
             /** @description What is missing, for a person or an assistant to fix. */
             message: string;
@@ -2395,7 +2401,7 @@ export interface components {
          * @description The OpenAPI schema of [`GapCode`] (which lives in `mb-protocols`).
          * @enum {string}
          */
-        WorldGapCode: "no_identity" | "no_target" | "no_record" | "skipped_route" | "refused";
+        WorldGapCode: "no_identity" | "no_target" | "no_record" | "skipped_route" | "refused" | "no_effect" | "undescribed_param" | "no_unique" | "no_soft_delete";
         /**
          * @description Where a world write stands on this node's running mock when the write
          *     returns.

@@ -637,6 +637,88 @@ fn bracketed(mut rest: &str) -> Option<Vec<String>> {
     Some(keys)
 }
 
+/// The query parameters of list `op` that the executor reads nothing for under
+/// `world`, in declared order: a request that sends one with a value that asks
+/// something (not blank, not its declared `default`, not the first page of a page
+/// position) falls back with `undescribed_param` (see `exec::list`). A parameter is
+/// read when it is one of the description's `ignores`, filter, scope, `recursive`,
+/// paging or `fields` parameters, a key bracketed under a `deep_object` filter's, the
+/// item type's soft-delete `listed_with` parameter, a name-matched filter on a member
+/// of the items ([`lists::filters_of`]), or, with no described paging, a page size
+/// ([`mb_engine::budget::sizes_page`]).
+pub(crate) fn undescribed_params(
+    bundle: &mb_mcm::Bundle,
+    world: &mb_mcm::world::World,
+    op: &Operation,
+) -> Vec<String> {
+    let none = mb_mcm::world::OpDesc::default();
+    let d = world.operations.get(&op.id).unwrap_or(&none);
+    let query = op.input.query.as_ref();
+    let mut known: Vec<&str> = d.ignores.iter().map(String::as_str).collect();
+    known.extend(d.filters.iter().map(|f| f.param.as_str()));
+    let deep_roots: Vec<&str> = d
+        .filters
+        .iter()
+        .filter(|f| f.grammar == Some(FilterGrammar::DeepObject))
+        .map(|f| f.param.as_str())
+        .collect();
+    if let Some(s) = &d.scope {
+        known.push(&s.param);
+        known.extend(s.recursive.as_deref());
+    }
+    if let Some(p) = &d.paging {
+        known.extend(p.request.as_deref());
+        known.extend(p.size.as_deref());
+    }
+    known.extend(d.fields.as_ref().map(|f| f.param.as_str()));
+    let ty = d.r#type.as_deref().or(op.resource_type.as_deref());
+    let listed_with = ty
+        .and_then(|t| world.types.get(t))
+        .and_then(|t| t.lifecycle.as_ref())
+        .and_then(|l| l.soft_delete.as_ref())
+        .and_then(|s| s.listed_with.as_ref())
+        .map(|lw| lw.param.as_str());
+    known.extend(listed_with);
+    let item = item_schema(bundle, op);
+    let (item_parts, _) = schema_parts(bundle, item.as_ref());
+    let doc = std::cell::OnceCell::new();
+    let answer = op.success_output().and_then(|o| o.schema.as_ref());
+    let sizes = |param: &str| {
+        d.paging.is_none()
+            && answer.is_some_and(|schema| {
+                mb_engine::budget::sizes_page(
+                    query,
+                    || doc.get_or_init(|| bundle.with_reachable_defs(schema)),
+                    param,
+                )
+            })
+    };
+    let paging = runs::Paging::of(bundle, op, None);
+    let filters = |param: &str| {
+        lists::filtered_member(bundle, query, &item_parts, param).is_some()
+            || lists::array_filter_member(bundle, query, &item_parts, param).is_some()
+            || (!paging.pages_list(param)
+                && lists::nested_filtered_member(bundle, query, &item_parts, param).is_some())
+    };
+    query
+        .and_then(|q| q.get("properties"))
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|props| props.keys())
+        .filter(|param| {
+            !known.contains(&param.as_str())
+                && !deep_roots.iter().any(|root| {
+                    param
+                        .strip_prefix(root)
+                        .is_some_and(|rest| rest.starts_with('['))
+                })
+                && !sizes(param)
+                && !filters(param)
+        })
+        .cloned()
+        .collect()
+}
+
 /// The page size list `op`'s request `call` asks for, with its parameter: the
 /// described paging's when the description sets one (none without a size), else as
 /// [`mb_engine::budget::requested_page`] finds it.

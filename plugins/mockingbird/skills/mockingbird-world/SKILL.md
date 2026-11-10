@@ -17,6 +17,13 @@ The format is the JSON Schema `get_world_schema` answers (`mockingbird world sch
    - `no_record`: a create or update answer in which the record could not be found; say where with `answer.record` (or `answer.records`).
    - `skipped_route`: an HTTP route that is not served. It is reported, not fixable in the description; mention it to the user.
    - `refused`: an entry of the newest revision that did not validate (often after a contract change).
+
+   The next four point at behaviour the contract signals that the description does not state yet. Read the docs for each and write the entry they describe; when they say nothing, leave it:
+   - `undescribed_param`: list query parameters the executor reads nothing for. A request that sends one is answered by the model, not from the records. Describe each as the docs define it (a filter, the scope, the `paging` parameter or `fields`), or list it in `ignores` when it asks nothing of the items. A sort parameter has no description yet: leave it.
+   - The advisory gaps (`advisory: true`) are checks. Write an entry only when the docs state the behaviour; otherwise leave the gap.
+     - `no_effect`: an action that the description gives nothing to change. If the docs say what it does to the record, write its `changes` (members it sets, from the request or a value) or a `transition` of the type's lifecycle. An action the docs say changes nothing (a send, a test) needs neither.
+     - `no_unique`: a create can answer 409 and the type has no `unique`.
+     - `no_soft_delete`: the deleted type's records have a member such as `deleted`, `is_trashed` or `deleted_at`. If the docs say a delete only marks the record, write `lifecycle.soft_delete`.
 2. **Write what the contract or its docs state.** For each gap, read that part of the contract and its documentation, then write the entries with `patch_world {mock, version, patch, author: "agent"}` (the same `version` as in step 1; a JSON merge patch onto the current overlay; `null` removes a key, arrays are replaced whole). `put_world {mock, world, author: "agent"}` replaces the whole overlay instead. Record only what the contract or the documentation says. Do not guess a lifecycle, a uniqueness rule or a paging style from a field name; leave the key out and the heuristics keep deciding.
 3. **Read `refused` in the answer and fix those entries.** A write that is accepted answers `{revision, applied, refused}`: the entries in `applied` are stored as the new revision, and each entry in `refused` is left out, with its JSON pointer and a code:
    - `unknown_key`: the format has no such key there (a typo such as `path_parm`). Check `get_world_schema`.

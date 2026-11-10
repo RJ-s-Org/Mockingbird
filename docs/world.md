@@ -36,7 +36,7 @@ The MCP tool is `get_world {mock, version?}`, and `get_world_schema` answers the
 | `refused` | Entries of the newest revision that did not validate; each falls back to tier 0. |
 | `gaps` | What the description leaves open. |
 
-Gaps (the same codes mark the recorded calls of each operation they concern, see [Gaps in the request log](#gaps-in-the-request-log)):
+Gaps. The first three codes also mark the recorded calls of each operation they concern (see [Gaps in the request log](#gaps-in-the-request-log)). The last four point at behaviour the contract signals and the description does not state yet. `undescribed_param` is something the executor cannot answer from the records; the three marked `advisory: true` are checks: read the docs for each, and write an entry only when they state the behaviour, otherwise leave the gap.
 
 | Code | Meaning |
 | --- | --- |
@@ -45,6 +45,10 @@ Gaps (the same codes mark the recorded calls of each operation they concern, see
 | `no_record` | A create or update answer in which no member fits the type, and no `answer.record` says where it is. |
 | `skipped_route` | An HTTP route of the contract that is not served (it matches the same requests as an earlier one, or is not a valid route pattern). |
 | `refused` | An entry refused at validation. |
+| `undescribed_param` | A list's query parameters the executor reads nothing for: no described filter, scope, paging, `fields` or `ignores` parameter, no key bracketed under a `deep_object` filter, no soft delete's `listed_with`, no name-matched filter on a member of the items and, with no described paging, no page size. A request that sends one with a value that asks something is answered by the model, not from the records. A sort parameter has no description yet. |
+| `no_effect` (advisory) | An operation of kind `action` with no `changes`, `transition` or `queue`. An update whose route only looks like an action is merged as an update and is not one. |
+| `no_unique` (advisory) | A type whose create can answer `409` and that has no `unique`. |
+| `no_soft_delete` (advisory) | A type a delete removes whose record has a member such as `deleted`, `is_trashed` or `deleted_at`, with no `lifecycle.soft_delete`. |
 
 ## Writing it
 
