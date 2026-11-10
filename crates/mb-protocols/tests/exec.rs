@@ -4569,3 +4569,258 @@ async fn a_lifecycle_state_is_matched_to_its_member_s_enum_spelling() {
     let stored = h.stored("folders", &id).await.unwrap();
     assert_eq!(stored["item_status"], json!("active"), "{stored}");
 }
+
+/// Records placed by their path: items under a space, held at a dotted `meta.space`;
+/// cards under a board, whose `board` member is an object; tags under an owner the
+/// path names as `owner_id_or_key`; repos created at their own URI under a group.
+const PLACED: &str = r##"
+openapi: 3.0.0
+info: {title: Placed, version: "1"}
+paths:
+  /spaces/{space}:
+    parameters: [{name: space, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getSpace
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {id: {type: string}}}}}}}
+  /boards/{board}:
+    parameters: [{name: board, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getBoard
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {slug: {type: string}}}}}}}
+  /spaces/{space}/items:
+    parameters: [{name: space, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listItems
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Item"}}}}}}
+    post:
+      operationId: createItem
+      requestBody: {content: {application/json: {schema: {type: object, properties: {meta: {type: object, properties: {name: {type: string}}}}}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+        "409": {description: taken, content: {application/json: {schema: {$ref: "#/components/schemas/Problem"}}}}
+  /boards/{board}/cards:
+    parameters: [{name: board, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listCards
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Card"}}}}}}
+    post:
+      operationId: createCard
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Card"}}}}}
+  /owners/{owner_id_or_key}/tags:
+    parameters: [{name: owner_id_or_key, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: createTag
+      requestBody: {content: {application/json: {schema: {type: object, properties: {label: {type: string}}}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Tag"}}}}
+        "409": {description: taken, content: {application/json: {schema: {$ref: "#/components/schemas/Problem"}}}}
+  /groups/{group}/repos/{repo_key}:
+    parameters:
+      - {name: group, in: path, required: true, schema: {type: string}}
+      - {name: repo_key, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: createRepo
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Repo"}}}}
+        "400": {description: invalid, content: {application/json: {schema: {$ref: "#/components/schemas/Problem"}}}}
+    get:
+      operationId: getRepo
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Repo"}}}}}
+components:
+  schemas:
+    Item:
+      type: object
+      required: [id, meta]
+      properties:
+        id: {type: string}
+        meta: {type: object, required: [name, space], properties: {name: {type: string}, space: {type: string}}}
+    Card:
+      type: object
+      required: [id, title, board]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        board: {type: object, required: [slug, name], properties: {slug: {type: string}, name: {type: string}}}
+    Tag:
+      type: object
+      required: [id, label, owner]
+      properties:
+        id: {type: string}
+        label: {type: string}
+        owner: {type: object, required: [id, title], properties: {id: {type: string}, title: {type: string}}}
+    Repo:
+      type: object
+      required: [key, title, group]
+      properties:
+        key: {type: string}
+        title: {type: string}
+        group: {type: object, required: [slug], properties: {slug: {type: string}, name: {type: string}}}
+    Problem:
+      type: object
+      properties: {message: {type: string}}
+"##;
+
+fn placed_world() -> serde_json::Value {
+    json!({
+        "types": {
+            "items": {
+                "parent": {"type": "spaces", "member": "meta.space", "path_param": "space"},
+                "unique": [{"members": ["meta.name"], "scope": "meta.space", "conflict": 409}]
+            },
+            "cards": {"parent": {"type": "boards", "path_param": "board"}},
+            "tags": {"unique": [{"members": ["label"], "scope": "owner.id", "conflict": 409}]},
+            "repos": {
+                "identity": {"member": "key"},
+                "unique": [{"members": ["key"], "scope": "group.slug", "conflict": 400}]
+            }
+        },
+        "operations": {
+            "listItems": {"kind": "list", "type": "items", "scope": {"param": "space", "member": "meta.space"}},
+            "getSpace": {"kind": "read", "type": "spaces", "target": {"path_param": "space"}},
+            "getBoard": {"kind": "read", "type": "boards", "target": {"path_param": "board"}},
+            "createItem": {"kind": "create", "type": "items"},
+            "listCards": {"kind": "list", "type": "cards", "scope": {"param": "board", "member": "board.slug"}},
+            "createCard": {"kind": "create", "type": "cards"},
+            "createTag": {"kind": "create", "type": "tags"},
+            "createRepo": {"kind": "create", "type": "repos", "target": {"path_param": "repo_key"}},
+            "getRepo": {"kind": "read", "type": "repos", "target": {"path_param": "repo_key"}}
+        }
+    })
+}
+
+#[tokio::test]
+async fn a_dotted_parent_member_is_set_nested_and_scopes_its_list_and_unique_set() {
+    let (capture, _guard) = Capture::install();
+    let h = support::described(PLACED, placed_world(), Vec::new());
+    let mut made = Vec::new();
+    for (space, name) in [("s1", "a"), ("s1", "b"), ("s2", "a")] {
+        let sent = json!({"meta": {"name": name}});
+        let uri = format!("/spaces/{space}/items");
+        let (status, headers, body) = h.send("POST", &uri, Some(sent), &[]).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(source(&headers), "state", "{body}");
+        assert_eq!(
+            body["meta"],
+            json!({"name": name, "space": space}),
+            "{body}"
+        );
+        assert!(
+            body.get("meta.space").is_none(),
+            "no literal dotted key: {body}"
+        );
+        made.push(body);
+    }
+    let id = made[0]["id"].as_str().unwrap().to_owned();
+    let stored = h.stored("items", &id).await.unwrap();
+    assert!(stored.get("meta.space").is_none(), "{stored}");
+    assert_eq!(stored["meta"]["space"], json!("s1"), "{stored}");
+    assert_eq!(
+        read_from_state(&h, "/spaces/s1/items").await,
+        json!([made[0], made[1]])
+    );
+    assert_eq!(
+        read_from_state(&h, "/spaces/s2/items").await,
+        json!([made[2]])
+    );
+    // A repeat within the same space is refused; the space is the path's.
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/spaces/s1/items",
+            Some(json!({"meta": {"name": "a"}})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        capture.of("createItem"),
+        vec![create_line("createItem", None); 3]
+    );
+}
+
+#[tokio::test]
+async fn a_path_value_goes_into_the_described_member_of_an_object_member() {
+    let (capture, _guard) = Capture::install();
+    let h = support::described(PLACED, placed_world(), Vec::new());
+    let (status, headers, card) = h
+        .send("POST", "/boards/b1/cards", Some(json!({"title": "x"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{card}");
+    assert_eq!(source(&headers), "state", "{card}");
+    // The path's value, never the faker's, and the board's other members filled.
+    assert_eq!(card["board"]["slug"], json!("b1"), "{card}");
+    assert!(card["board"]["name"].is_string(), "{card}");
+    assert_eq!(read_from_state(&h, "/boards/b1/cards").await, json!([card]));
+    assert_eq!(read_from_state(&h, "/boards/b2/cards").await, json!([]));
+    assert_eq!(
+        capture.of("createCard"),
+        vec![create_line("createCard", None)]
+    );
+}
+
+#[tokio::test]
+async fn a_unique_scope_under_a_member_the_path_names_refuses_a_repeat_there() {
+    let h = support::described(PLACED, placed_world(), Vec::new());
+    let (status, _, tag) = h
+        .send(
+            "POST",
+            "/owners/o1/tags",
+            Some(json!({"label": "red"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{tag}");
+    assert_eq!(
+        tag["owner"]["id"],
+        json!("o1"),
+        "the path's, not the faker's: {tag}"
+    );
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/owners/o1/tags",
+            Some(json!({"label": "red"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let (status, _, other) = h
+        .send(
+            "POST",
+            "/owners/o2/tags",
+            Some(json!({"label": "red"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{other}");
+    assert_eq!(other["owner"]["id"], json!("o2"), "{other}");
+}
+
+#[tokio::test]
+async fn a_create_at_its_own_uri_takes_its_id_and_scope_from_the_path() {
+    let h = support::described(PLACED, placed_world(), Vec::new());
+    let (status, headers, repo) = h
+        .send(
+            "POST",
+            "/groups/g1/repos/r1",
+            Some(json!({"title": "t"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{repo}");
+    assert_eq!(source(&headers), "state", "{repo}");
+    assert_eq!(repo["key"], json!("r1"), "{repo}");
+    assert_eq!(repo["group"]["slug"], json!("g1"), "{repo}");
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/groups/g1/repos/r1",
+            Some(json!({"title": "t"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(read_from_state(&h, "/groups/g1/repos/r1").await, repo);
+}
