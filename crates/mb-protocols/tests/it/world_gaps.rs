@@ -374,7 +374,11 @@ fn gaps_point_at_behaviour_the_contract_signals() {
     // at a soft delete.
     let soft = codes(&all, GapCode::NoSoftDelete);
     assert_eq!(soft.len(), 1, "{all:?}");
-    assert!(soft[0].message.contains("`deleted_at`"), "{}", soft[0].message);
+    assert!(
+        soft[0].message.contains("`deleted_at`"),
+        "{}",
+        soft[0].message
+    );
     assert!(soft[0].advisory);
     // An update the route only looks like an action on (`/settings`, and
     // `/archive` that tier 0 reads as an update) is merged by the executor.

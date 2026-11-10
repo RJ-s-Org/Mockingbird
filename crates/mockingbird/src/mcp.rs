@@ -2521,7 +2521,9 @@ fn next_steps(answer: &mut Value, mock: &str, version: u64, gaps: Result<Vec<Val
         Err(e) => {
             obj.insert(
                 "world_gaps_error".into(),
-                json!(format!("the world gaps could not be read ({e}); call get_world for them")),
+                json!(format!(
+                    "the world gaps could not be read ({e}); call get_world for them"
+                )),
             );
         }
     }
@@ -2553,9 +2555,11 @@ mod tests {
         let listed = answer["world_gaps"].as_array().cloned().unwrap_or_default();
         assert_eq!(listed.len(), IMPORT_GAPS);
         assert_eq!(listed[0]["code"], "no_target", "{listed:?}");
-        assert!(answer["next_steps"][0]
-            .as_str()
-            .is_some_and(|s| s.contains("mockingbird-world") && s.contains("version: 2")));
+        assert!(
+            answer["next_steps"][0]
+                .as_str()
+                .is_some_and(|s| s.contains("mockingbird-world") && s.contains("version: 2"))
+        );
         assert!(answer.get("world_gaps_error").is_none());
     }
 
@@ -2565,9 +2569,11 @@ mod tests {
         next_steps(&mut answer, "shop", 2, Err("timed out".into()));
         assert!(answer.get("world_gaps").is_none(), "{answer}");
         assert!(answer.get("world_gaps_total").is_none(), "{answer}");
-        assert!(answer["world_gaps_error"]
-            .as_str()
-            .is_some_and(|s| s.contains("timed out")));
+        assert!(
+            answer["world_gaps_error"]
+                .as_str()
+                .is_some_and(|s| s.contains("timed out"))
+        );
         assert!(answer["next_steps"].is_array());
     }
 
