@@ -242,11 +242,65 @@ fn record_id_schema(rt: &MockRuntime, t: &str, field: &str) -> (Option<Value>, O
         }
     }
     let declared = declared.or_else(|| all.first().cloned());
+    // A plain text id the contract types as an integer where a route names it is its
+    // digits.
+    if !all.is_empty() && all.iter().all(|s| plain_text(rt, s)) && named_as_integer(rt, t) {
+        let digits = json!({"type": "string", "pattern": "^[1-9][0-9]{0,8}$"});
+        return (Some(digits.clone()), Some(digits));
+    }
     let held = match all.len() {
         0 | 1 => declared.clone(),
         _ => Some(json!({"allOf": all})),
     };
     (declared, held)
+}
+
+/// Whether `schema` is text and says nothing more of it: no `pattern`, `format`,
+/// `enum` or `const`.
+fn plain_text(rt: &MockRuntime, schema: &Value) -> bool {
+    let parts = super::schema_parts(rt.bundle(), Some(schema)).0;
+    let says = |key: &str| parts.iter().any(|p| p.get(key).is_some());
+    parts
+        .iter()
+        .any(|p| p.get("type").and_then(Value::as_str) == Some("string"))
+        && !["pattern", "format", "enum", "const"]
+            .iter()
+            .any(|k| says(k))
+}
+
+/// Whether the path and query parameters named for type `t`'s records
+/// (`employeeId` for `employees`) are integers wherever the contract declares one: at
+/// least one, and none of another type.
+fn named_as_integer(rt: &MockRuntime, t: &str) -> bool {
+    let bundle = rt.bundle();
+    let mut integers = 0;
+    for op in &bundle.operations {
+        for params in [&op.input.path, &op.input.query].into_iter().flatten() {
+            let Some(declared) = params.get("properties").and_then(Value::as_object) else {
+                continue;
+            };
+            for (name, schema) in declared {
+                let named = super::reference_prefix(name).is_some_and(|prefix| {
+                    super::relations::reference_types(Some(rt.index()), prefix)
+                        .iter()
+                        .any(|named| named == t)
+                });
+                if !named {
+                    continue;
+                }
+                let types: Vec<&str> = super::schema_parts(bundle, Some(schema))
+                    .0
+                    .iter()
+                    .filter_map(|p| p.get("type").and_then(Value::as_str))
+                    .collect();
+                match types.as_slice() {
+                    ["integer"] => integers += 1,
+                    _ => return false,
+                }
+            }
+        }
+    }
+    integers > 0
 }
 
 /// The checks a minted id passes: as the header serves it, and as the record holds it.

@@ -114,7 +114,13 @@ pub(super) fn classify(
 ) -> Option<Result<OpKind, (OpKind, Fallback)>> {
     let op = plan.op;
     let desc = rt.described().op(&op.id);
-    let kind = desc.and_then(|d| d.kind).or_else(|| OpKind::of(op))?;
+    let kind = match desc.and_then(|d| d.kind) {
+        Some(kind) => kind,
+        None => match OpKind::of(op)? {
+            OpKind::Create if acts_on_own_record(rt, op) => OpKind::Action,
+            kind => kind,
+        },
+    };
     if !executes(kind) {
         return None;
     }
@@ -142,6 +148,55 @@ pub(super) fn classify(
         Some(reason) => Err((kind, reason)),
         None => Ok(kind),
     })
+}
+
+/// Whether `op`, an HTTP `POST` the contract gives no kind but a create's, acts on a
+/// record of its own answer's type rather than adding one: its path goes on, past
+/// static segments only, from the route that reads that type by id
+/// (`POST /workspaces/{id}/actions/lock` beside `GET /workspaces/{id}`), and no read
+/// lists at its own path (a collection under the record, which a `POST` adds to).
+fn acts_on_own_record(rt: &crate::MockRuntime, op: &mb_mcm::Operation) -> bool {
+    let Binding::Http {
+        method: mb_mcm::HttpMethod::Post,
+        path,
+    } = &op.binding
+    else {
+        return false;
+    };
+    let bundle = rt.bundle();
+    let Some(read) = op
+        .resource_type
+        .as_deref()
+        .and_then(|t| rt.index().detail_reads.get(t))
+        .and_then(|i| bundle.operations.get(*i))
+    else {
+        return false;
+    };
+    let Binding::Http {
+        path: read_path, ..
+    } = &read.binding
+    else {
+        return false;
+    };
+    let segments = |p: &str| -> Vec<String> {
+        p.split('/')
+            .filter(|s| !s.is_empty())
+            .map(|s| match s.starts_with('{') {
+                true => "{}".to_owned(),
+                false => s.to_owned(),
+            })
+            .collect()
+    };
+    let (own, keyed) = (segments(path), segments(read_path));
+    let past = match own.strip_prefix(keyed.as_slice()) {
+        Some(rest) if keyed.last().is_some_and(|s| s == "{}") => rest,
+        _ => return false,
+    };
+    let listed_here = bundle.operations.iter().any(|other| {
+        matches!(other.kind, OperationKind::Query)
+            && matches!(&other.binding, Binding::Http { path: p, .. } if segments(p) == own)
+    });
+    !past.is_empty() && past.iter().all(|s| s != "{}") && !listed_here
 }
 
 /// Whether records of type `t` have an identity: `op`'s own (where its answer holds
