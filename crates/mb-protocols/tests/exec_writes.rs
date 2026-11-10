@@ -2002,7 +2002,7 @@ components:
   schemas:
     Thing:
       type: object
-      required: [id, name]
+      required: [name]
       properties:
         id: {type: string}
         code: {type: string}
@@ -2143,4 +2143,206 @@ async fn a_body_target_may_name_the_record_by_an_identity_alternate() {
         capture.of("fetchThing"),
         vec![line("fetchThing", "read", None)]
     );
+}
+
+#[tokio::test]
+async fn a_create_carrying_an_existing_alternate_names_no_record() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"things": {"identity": {"member": "id", "alternates": ["code"]}}},
+        "operations": {"createThing": {"kind": "create", "type": "things", "target": {"member": "id"}}}
+    });
+    let h = with_thing(world, vec![thing(), decoy()]).await;
+    let (status, headers, body) = h
+        .send(
+            "POST",
+            "/things",
+            Some(json!({"code": "c-1", "name": "other"})),
+            &[],
+        )
+        .await;
+    // The body names no record: t1 is neither answered nor changed. Its alternate
+    // being another record's, the create is generated, never stored twice.
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "llm", "{body}");
+    assert_ne!(body["id"], json!("t1"), "a new record: {body}");
+    assert_eq!(body["name"], json!("other"), "{body}");
+    assert_eq!(
+        capture.of("createThing").last(),
+        Some(&line("createThing", "create", Some("repeated_key")))
+    );
+    assert_eq!(h.stored("things", "t1").await.unwrap(), thing());
+}
+
+#[tokio::test]
+async fn an_update_names_its_record_by_an_alternate_beside_a_nested_target() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"things": {"identity": {"member": "id", "alternates": ["code"]}}},
+        "operations": {"reviseThing": {
+            "kind": "update", "type": "things",
+            "target": {"member": "Thing.id"}, "request": {"record": "/Thing"}, "answer": {"record": ""}
+        }}
+    });
+    let h = with_thing(world, vec![thing(), decoy()]).await;
+    let (status, headers, body) = h
+        .send(
+            "POST",
+            "/revise",
+            Some(json!({"Thing": {"code": "c-1", "name": "z"}})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body["id"], json!("t1"), "{body}");
+    assert_eq!(body["name"], json!("z"), "{body}");
+    assert_eq!(
+        capture.of("reviseThing"),
+        vec![line("reviseThing", "update", None)]
+    );
+    assert_eq!(h.stored("things", "t1").await.unwrap()["name"], json!("z"));
+    assert!(h.stored("things", "c-1").await.is_none());
+}
+
+#[tokio::test]
+async fn a_nested_body_token_is_minted_on_the_generated_path_too() {
+    let (_capture, _guard) = Capture::install();
+    // A seeded replace takes the generated path.
+    let world =
+        json!({"types": {"things": {"concurrency": {"member": "meta.rev", "conflict": 409}}}});
+    let answered =
+        json!({"id": "t1", "code": "c-1", "name": "b", "meta": {"rev": "abc", "version": 1}});
+    let h = with_thing(
+        world,
+        vec![thing(), answered.clone(), json!({"message": "stale"})],
+    )
+    .await;
+    let (status, headers, body) = h
+        .send("PUT", "/things/t1", Some(answered.clone()), SEEDED)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_ne!(source(&headers), "state", "{body}");
+    let rev = body["meta"]["rev"].as_str().unwrap().to_owned();
+    assert_ne!(rev, "abc", "a new token: {body}");
+    assert_eq!(
+        h.stored("things", "t1").await.unwrap()["meta"]["rev"],
+        json!(rev)
+    );
+    let (status, _, body) = h.send("PUT", "/things/t1", Some(answered), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "the old token is stale: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_nested_token_sent_in_the_query_is_checked() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"things": {"concurrency": {"member": "meta.rev", "conflict": 409}}},
+        "operations": {"replaceThing": {"kind": "replace"}}
+    });
+    let h = with_thing(world, vec![thing(), json!({"message": "stale"})]).await;
+    let sent = json!({"id": "t1", "name": "b"});
+    let (status, _, body) = h
+        .send("PUT", "/things/t1?meta.rev=old", Some(sent.clone()), &[])
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "a stale token: {body}");
+    let (status, _, body) = h
+        .send("PUT", "/things/t1?meta.rev=abc", Some(sent), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], json!("b"), "{body}");
+}
+
+/// [`NESTED`]'s things, their nested `meta.rev` server-set, guarded by `If-Match` and
+/// read with an `ETag` and `If-None-Match`.
+const TAGGED: &str = r##"
+openapi: 3.0.0
+info: {title: Tagged, version: "1"}
+paths:
+  /things:
+    post:
+      operationId: createThing
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}}
+  /things/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getThing
+      parameters: [{name: If-None-Match, in: header, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          headers: {ETag: {schema: {type: string}}}
+          content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}
+        "304": {description: not modified}
+        "404": {description: missing}
+    put:
+      operationId: replaceThing
+      parameters: [{name: If-Match, in: header, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+        "412": {description: stale, content: {application/json: {schema: {type: object, properties: {message: {type: string}}}}}}
+components:
+  schemas:
+    Thing:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        meta:
+          type: object
+          readOnly: true
+          properties: {rev: {type: string, readOnly: true}}
+"##;
+
+#[tokio::test]
+async fn a_nested_if_match_token_is_paired_and_served_as_the_entity_tag() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"things": {"concurrency": {"member": "meta.rev", "header": "If-Match", "conflict": 412}}},
+        "operations": {"replaceThing": {"kind": "replace"}}
+    });
+    let made = json!({"id": "t1", "name": "a", "meta": {"rev": "abc"}});
+    let h = support::harness(
+        TAGGED,
+        vec![made.clone(), json!({"message": "stale"})],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    let (status, _, body) = h.send("POST", "/things", Some(made), SEEDED).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, _, body) = h
+        .send(
+            "PUT",
+            "/things/t1",
+            Some(json!({"id": "t1", "name": "b"})),
+            &[("If-Match", "\"abc\"")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rev = body["meta"]["rev"].as_str().unwrap().to_owned();
+    assert_ne!(rev, "abc", "a new token: {body}");
+    let tag = format!("\"{rev}\"");
+    let (status, headers, body) = h.send("GET", "/things/t1", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        headers.get("etag").and_then(|v| v.to_str().ok()),
+        Some(tag.as_str()),
+        "{body}"
+    );
+    let (status, _, body) = h
+        .send(
+            "GET",
+            "/things/t1",
+            None,
+            &[("If-None-Match", tag.as_str())],
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED, "{body}");
 }

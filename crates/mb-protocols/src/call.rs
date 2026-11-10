@@ -163,7 +163,8 @@ pub(crate) fn target_id(op: &Operation, call: &OperationCall) -> Option<String> 
 /// [`target_id`], else, where the request body names the record by its input field and
 /// leaves that out, the first identity alternate the description gives the operation's
 /// type ([`records::alternates`]) that the body holds, beside where the input field would
-/// be (`Item.SKU` for `Item.ItemID`), as a path value may name it by one.
+/// be (`Item.SKU` for `Item.ItemID`), as a path value may name it by one. A create names
+/// no record by an alternate: its body's values are the new record's.
 pub(crate) fn named_target(
     rt: &MockRuntime,
     op: &Operation,
@@ -171,6 +172,9 @@ pub(crate) fn named_target(
 ) -> Option<String> {
     if let Some(id) = target_id(op, call) {
         return Some(id);
+    }
+    if op.kind == OperationKind::Command(Effect::Create) {
+        return None;
     }
     let field = op.identity.as_ref()?.input_field.as_deref()?;
     let body = call.body.as_ref().filter(|b| b.is_object())?;

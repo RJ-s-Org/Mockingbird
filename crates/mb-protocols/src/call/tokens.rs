@@ -757,7 +757,7 @@ pub(super) async fn check(
         let set_anew = |member: &str| {
             call.body
                 .as_ref()
-                .filter(|_| body.is_some())
+                .filter(|b| b.is_object())
                 .and_then(|b| member_at(b, member))
                 .or_else(|| call.query.get(member))
                 .is_some_and(|s| compared(s) != current(member).and_then(compared))
@@ -789,7 +789,7 @@ pub(super) async fn check(
                 let learned = pairs
                     .get(IF_MATCH)
                     .and_then(Value::as_str)
-                    .filter(|m| held.contains_key(*m) && fits(m))
+                    .filter(|m| current(m).is_some() && fits(m))
                     .map(str::to_string);
                 let Some(member) = learned.or_else(|| only_match(header, values, &fits)) else {
                     continue;
@@ -800,7 +800,7 @@ pub(super) async fn check(
                 }
                 continue;
             }
-            let fits = |m: &str| held.contains_key(m) && header_member(rt, op, t, m);
+            let fits = |m: &str| current(m).is_some() && header_member(rt, op, t, m);
             // A pairing seen tracked.
             if let Some(member) = pairs.get(header).and_then(Value::as_str) {
                 if fits(member) && current(member).is_some_and(|now| holds(header, values, now)) {
@@ -1104,14 +1104,11 @@ pub(super) async fn entity_tag(
         .get(IF_MATCH)?
         .as_str()?
         .to_string();
-    let value = match record.and_then(|r| r.get(&member)).and_then(as_text) {
+    let value = match record.and_then(|r| member_at(r, &member)).and_then(as_text) {
         Some(value) => value,
-        None => state
-            .get(&plan.session, t, &id)
-            .await?
-            .data
-            .get(&member)
-            .and_then(as_text)?,
+        None => {
+            member_at(&state.get(&plan.session, t, &id).await?.data, &member).and_then(as_text)?
+        }
     };
     Some((name, as_entity_tag(value)))
 }
@@ -1218,7 +1215,20 @@ pub(super) async fn after_answer(
         .unwrap_or_default();
     let is_read = matches!(op.kind, OperationKind::Query);
     let mut now = Map::new();
-    for (member, value) in held {
+    // The top-level members, and a described token nested deeper (`meta.rev`).
+    let nested = described(rt, t)
+        .and_then(|(member, _, _)| member)
+        .filter(|member| member.contains('.'))
+        .and_then(|member| {
+            let value = member_at(&record.data, &member)?;
+            Some((member, value))
+        });
+    let members = held.iter().map(|(m, v)| (m.as_str(), v)).chain(
+        nested
+            .as_ref()
+            .map(|(member, value)| (member.as_str(), *value)),
+    );
+    for (member, value) in members {
         let Some(text) = as_text(value).filter(|_| etag_member(rt, t, member)) else {
             continue;
         };
@@ -1235,7 +1245,7 @@ pub(super) async fn after_answer(
             Some(Some(_)) => None,
         };
         now.insert(
-            member.clone(),
+            member.to_string(),
             serde_json::json!({"value": text, "digest": stands_for}),
         );
     }
@@ -1302,7 +1312,7 @@ async fn current_etag(
         })
         .filter(|member| fits(member));
     if let Some(member) = paired {
-        let value = held.get(&member).and_then(as_text)?;
+        let value = member_at(&target.data, &member).and_then(as_text)?;
         return Some((member, value));
     }
     let mut found = held.iter().filter(|(member, value)| {
