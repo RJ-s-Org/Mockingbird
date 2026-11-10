@@ -815,6 +815,14 @@ fn size_cap() {
         .unwrap_err();
         assert!(e.message.contains("budget"), "{src}: {e}");
     }
+    // A big literal in the expression itself is charged each time it is copied.
+    let big = "q".repeat(64 * 1024);
+    let e = eval_body(
+        &format!("request.body.items.map(x, '{big}')"),
+        json!({"items": vec![0; 200]}),
+    )
+    .unwrap_err();
+    assert!(e.message.contains("budget"), "{e}");
     // An ordinary amount of data is well within the budget.
     assert_eq!(
         eval_body(

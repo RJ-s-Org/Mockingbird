@@ -149,7 +149,7 @@ impl<'p> Eval<'p, '_, '_> {
         self.step(n.pos)?;
         let pos = n.pos;
         match &n.kind {
-            Kind::Lit(v) => Ok(v.clone()),
+            Kind::Lit(v) => self.copy_ref(v, pos),
             Kind::Ident(name) => {
                 let v = self.lookup(name, pos)?;
                 self.copy_ref(v, pos)
