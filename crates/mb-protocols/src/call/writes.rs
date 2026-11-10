@@ -301,8 +301,8 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
                 && let Some(held) = state.get(session, resource_type, &id).await
             {
                 let mut data = held.data;
-                let sent = query.cloned().unwrap_or_default();
-                if lifecycle::delete_softly(rt, resource_type, &mut data, &sent) {
+                let none = Map::new();
+                if lifecycle::delete_softly(rt, resource_type, &mut data, query.unwrap_or(&none)) {
                     let place = (collection, None, true);
                     store_one(state, session, (op, resource_type), (id, data), place).await;
                     return WriteOutcome::default();
@@ -337,6 +337,8 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
             if let Some(gone) = gone {
                 rt.collections().forget(session, &gone);
             }
+            // A queue's messages go with it.
+            exec::forget_queue(state, session, resource_type, &id).await;
             WriteOutcome::default()
         }
     }

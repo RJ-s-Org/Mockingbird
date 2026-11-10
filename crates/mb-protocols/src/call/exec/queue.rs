@@ -14,9 +14,10 @@
 //!
 //! The messages are kept per session, beside the target, in one document under the
 //! store's reserved type ([`mb_state::INTERNAL_TYPE`]); a target holds at most
-//! [`MAX_MESSAGES`]. Either falls back, and the action is generated, on an unheld target
-//! (`not_held`), an append past the cap (`over_cap`), or an answer that does not render
-//! (`render_failed`); nothing is kept then.
+//! [`MAX_MESSAGES`], of [`MAX_BYTES`] at most, and they go when the target is deleted
+//! ([`forget`]). Either falls back, and the action is generated, on an unheld target
+//! (`not_held`), an append past either cap (`over_cap`), or an answer that does not
+//! render (`render_failed`); nothing is kept then.
 
 use mb_mcm::world::{OpKind, QueueDesc, QueueEffect};
 use mb_state::{INTERNAL_TYPE, StoredResource};
@@ -24,10 +25,14 @@ use serde_json::{Map, Value, json};
 use tracing::Instrument;
 
 use super::{Fallback, Held, Ran, answered, fell_back, render};
-use crate::call::{CallPlan, OperationCall, StateAccess, records, replays, state_span};
+use crate::call::{CallPlan, OperationCall, StateAccess, lifecycle, records, replays, state_span};
+use mb_state::SessionKey;
 
 /// Messages a target holds, at most.
 pub(super) const MAX_MESSAGES: usize = 1000;
+
+/// Bytes a target's messages take, as stored JSON, at most (1 MiB).
+pub(super) const MAX_BYTES: usize = 1 << 20;
 
 /// The prefix of a target's messages document.
 const PREFIX: &str = "#queue/";
@@ -47,17 +52,18 @@ pub(super) async fn run(
         fell_back(rt, plan, kind, Fallback::NotHeld.as_str());
         return Ran::Generate(None);
     };
-    let key = format!("{PREFIX}{}/{id}", stored.resource_type);
+    let key = key(&stored.resource_type, id);
     let mut messages = read(state, plan, &key).await;
     let answer = match queue.effect {
         QueueEffect::Append => {
-            if messages.len() >= MAX_MESSAGES {
-                fell_back(rt, plan, kind, "over_cap");
-                return Ran::Generate(None);
-            }
             let body = call.body.clone().unwrap_or(Value::Object(Map::new()));
             let record = records::request_record(rt, plan.op, &body).clone();
             messages.push(json!({"record": record, "taken": false}));
+            let bytes = serde_json::to_vec(&messages).map_or(usize::MAX, |b| b.len());
+            if messages.len() > MAX_MESSAGES || bytes > MAX_BYTES {
+                fell_back(rt, plan, kind, Fallback::OverCap.as_str());
+                return Ran::Generate(None);
+            }
             render(rt, plan, call, (id, &stored.data), response_schema)
         }
         QueueEffect::Take => {
@@ -95,6 +101,25 @@ pub(super) async fn run(
     .await;
     answered(rt, plan, kind);
     Ran::Answered(Box::new(answer))
+}
+
+/// The document holding the messages of record `id` of type `t`.
+fn key(t: &str, id: &str) -> String {
+    format!("{PREFIX}{t}/{id}")
+}
+
+/// Forgets the messages record `id` of type `t` held: it was deleted, so a record made
+/// again under its id starts with none.
+pub(in crate::call) async fn forget(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    t: &str,
+    id: &str,
+) {
+    if state.rt.world().is_none() {
+        return;
+    }
+    state.delete(session, INTERNAL_TYPE, &key(t, id)).await;
 }
 
 /// The messages the document `key` holds, oldest first.
@@ -138,8 +163,8 @@ fn requeues(queue: &QueueDesc, call: &OperationCall) -> bool {
         return false;
     };
     match &requeue.value {
-        Value::Array(values) => values.contains(sent),
-        one => one == sent,
+        Value::Array(values) => values.iter().any(|v| lifecycle::sends_value(sent, v)),
+        one => lifecycle::sends_value(sent, one),
     }
 }
 

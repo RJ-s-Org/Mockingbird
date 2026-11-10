@@ -1184,6 +1184,9 @@ paths:
     get:
       operationId: getQueue
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Queue"}}}}}
+    delete:
+      operationId: deleteQueue
+      responses: {"204": {description: deleted}}
   /queues/{name}/publish:
     parameters: [{name: name, in: path, required: true, schema: {type: string}}]
     post:
@@ -1291,6 +1294,100 @@ async fn a_queue_hands_out_its_messages_oldest_first_kept_or_removed() {
             .all(|l| l.exec == "action" && l.exec_fallback.is_none()),
         "{lines:?}"
     );
+}
+
+/// The world [`QUEUES`] is described with.
+fn queues_world() -> serde_json::Value {
+    json!({"types": {"queues": {"identity": {"member": "name"}}}, "operations": {
+        "publish": {"kind": "action", "type": "queues", "target": {"path_param": "name"},
+                    "queue": {"effect": "append"}},
+        "getMessages": {"kind": "action", "type": "queues", "target": {"path_param": "name"},
+                        "queue": {"effect": "take", "count": "/count",
+                                  "requeue": {"at": "/ackmode", "value": ["ack_requeue_true"]},
+                                  "redelivered": "redelivered"}}
+    }})
+}
+
+/// [`QUEUES`] with the queue `audit` created.
+async fn audit_queue(script: Vec<serde_json::Value>) -> support::DescribedHarness {
+    let h = support::harness(QUEUES, script, &HarnessOptions::default(), |rt| {
+        support::with_effective(rt, queues_world(), false)
+    });
+    let (status, _, body) = h
+        .send("POST", "/queues", Some(json!({"name": "audit"})), SEEDED)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    h
+}
+
+/// The executor's reasons for `op`'s calls: `None` for one it answered.
+fn reasons(capture: &Capture, op: &str) -> Vec<Option<String>> {
+    capture
+        .of(op)
+        .into_iter()
+        .map(|l| l.exec_fallback)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_queue_action_on_an_unheld_target_or_past_its_cap_falls_back() {
+    let (capture, _guard) = Capture::install();
+    let h = audit_queue(vec![
+        json!({"name": "audit", "durable": true}),
+        json!([]),
+        json!({"routed": false}),
+    ])
+    .await;
+    // No queue `ghost` is held.
+    let get = json!({"count": 1, "ackmode": "ack_requeue_false"});
+    let (status, _, body) = h.send("POST", "/queues/ghost/get", Some(get), &[]).await;
+    assert!(status.is_success(), "{body}");
+    assert_eq!(
+        reasons(&capture, "getMessages"),
+        [Some("not_held".to_owned())]
+    );
+    // A message that takes the queue past its bytes is generated, and not kept.
+    let big = "x".repeat(600 * 1024);
+    for _ in 0..2 {
+        let sent = json!({"payload": big, "routing_key": "audit"});
+        let (status, _, body) = h
+            .send("POST", "/queues/audit/publish", Some(sent), &[])
+            .await;
+        assert!(status.is_success(), "{body}");
+    }
+    assert_eq!(
+        reasons(&capture, "publish"),
+        [None, Some("over_cap".to_owned())]
+    );
+    let get = json!({"count": 5, "ackmode": "ack_requeue_false"});
+    let (_, _, body) = h.send("POST", "/queues/audit/get", Some(get), &[]).await;
+    assert_eq!(body.as_array().map(Vec::len), Some(1), "one message kept");
+}
+
+#[tokio::test]
+async fn a_deleted_queue_s_messages_go_with_it() {
+    let (_capture, _guard) = Capture::install();
+    let h = audit_queue(vec![
+        json!({"name": "audit", "durable": true}),
+        json!({"name": "audit", "durable": true}),
+    ])
+    .await;
+    let sent = json!({"payload": "one", "routing_key": "audit"});
+    let (status, _, body) = h
+        .send("POST", "/queues/audit/publish", Some(sent), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, body) = h.send("DELETE", "/queues/audit", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    // Made again under the same name, it holds nothing.
+    let (status, _, body) = h
+        .send("POST", "/queues", Some(json!({"name": "audit"})), SEEDED)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let get = json!({"count": 5, "ackmode": "ack_requeue_false"});
+    let (status, _, body) = h.send("POST", "/queues/audit/get", Some(get), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!([]));
 }
 
 /// Items with a lifecycle, acted on by actions answering the item (`archiveItem`),

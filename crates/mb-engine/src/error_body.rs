@@ -36,8 +36,9 @@
 //!   shown values are 3-digit codes, or its pattern takes the status and no word), says
 //!   the response's status ([`with_status_text`]), at the top level or in the items of
 //!   an array of error objects. So does a string member named `status` whose schema
-//!   leaves it wholly free (no `const`, `enum`, `format`, `pattern` or shown value), as
-//!   SCIM's error says its HTTP status as text.
+//!   leaves it free (no `const`, `enum`, `format`, `pattern` or shown value) and whose
+//!   description or title calls it the HTTP status or status code, with no integer code
+//!   member beside it, as SCIM's error says its HTTP status as text.
 //! - Since a written body serves every later call, it is checked before it is kept
 //!   (`body_flaw`): it validates against the declared error schema; each code-like
 //!   string is a short token (at most `64` characters, no unit repeated back to back
@@ -412,13 +413,26 @@ fn holds_status_text(parts: &[&Value], status: u16) -> bool {
 
 /// Whether member `name`, declared by `parts`, holds the HTTP status as text: by its
 /// schema ([`holds_status_text`]), or, named `status` (in any case), a string the schema
-/// leaves wholly free: no `const`, `enum`, `format` or `pattern`, and no value shown.
-/// An error body's free `status` text (SCIM's, RFC 7644 §3.12) says its own status.
-fn says_status(name: &str, parts: &[&Value], status: u16) -> bool {
+/// leaves wholly free (no `const`, `enum`, `format`, `pattern` or value shown) whose
+/// description or title says it is the HTTP status (`HTTP status`, `status code`), with
+/// no integer code beside it (`code_beside`): SCIM's error (RFC 7644 §3.12) says its
+/// status so, while Kubernetes' `{status: "Failure", code: 404}` and JSend's
+/// `{status: "error"}` hold a word there.
+fn says_status(name: &str, parts: &[&Value], status: u16, code_beside: bool) -> bool {
     if holds_status_text(parts, status) {
         return true;
     }
+    let told = parts.iter().any(|b| {
+        ["description", "title"].iter().any(|k| {
+            b.get(*k).and_then(Value::as_str).is_some_and(|text| {
+                let text = text.to_ascii_lowercase();
+                text.contains("http status") || text.contains("status code")
+            })
+        })
+    });
     name.eq_ignore_ascii_case("status")
+        && !code_beside
+        && told
         && types(parts).contains(&"string")
         && shown_values(parts).next().is_none()
         && !parts.iter().any(|b| {
@@ -428,6 +442,23 @@ fn says_status(name: &str, parts: &[&Value], status: u16) -> bool {
             .iter()
             .any(|k| b.get(*k).is_some())
         })
+}
+
+/// Whether `members`, an object's declared members, hold an integer one named as a code
+/// (`code`, `status_code`, `errorCode`) besides `name`: the object says its HTTP status
+/// there, not in a `status` text.
+fn code_beside<'a>(
+    members: impl IntoIterator<Item = (&'a str, &'a Value)>,
+    name: &str,
+    defs: &Map<String, Value>,
+) -> bool {
+    members.into_iter().any(|(other, prop)| {
+        other != name
+            && folded(other).ends_with("code")
+            && types(&branches(prop, defs))
+                .iter()
+                .any(|t| *t == "integer" || *t == "number")
+    })
 }
 
 /// Whether `schema` declares a free text member, at any depth, that nothing but the
@@ -482,7 +513,12 @@ pub fn writes_text(
                 && !prop_parts.iter().any(|b| {
                     b.get("const").is_some() || b.get("enum").is_some() || b.get("format").is_some()
                 })
-                && !says_status(name, &prop_parts, ctx.status)
+                && !says_status(
+                    name,
+                    &prop_parts,
+                    ctx.status,
+                    code_beside(members.iter().map(|(n, p)| (n.as_str(), *p)), name, defs),
+                )
                 && !ctx.named.contains(&path(name))
         };
         members
@@ -507,7 +543,7 @@ pub fn writes_text(
 
 /// `body`, an error body declared by `schema` (its definitions in `defs`), with each
 /// string member that holds the HTTP status as text (`says_status`: by its schema, or
-/// a wholly free `status`) saying
+/// a free `status` described as the HTTP status) saying
 /// `status`: at the top level, or in each item of an array member (JSON:API's
 /// `errors[].status`). Each change is kept only while the body still validates
 /// against `validator`.
@@ -529,22 +565,25 @@ pub fn with_status_text(
     let escaped = |name: &str| name.replace('~', "~0").replace('/', "~1");
     // Each place as (the object's pointer, the member's name).
     let mut places: Vec<(String, String)> = Vec::new();
-    for (name, prop) in members(schema) {
-        if says_status(&name, &branches(&prop, defs), status) {
-            places.push((String::new(), name));
+    let top = members(schema);
+    let beside = |list: &[(String, Value)], name: &str| {
+        code_beside(list.iter().map(|(n, p)| (n.as_str(), p)), name, defs)
+    };
+    for (name, prop) in &top {
+        if says_status(name, &branches(prop, defs), status, beside(&top, name)) {
+            places.push((String::new(), name.clone()));
             continue;
         }
-        let Some(items) = items_schema(Some(&prop), defs) else {
+        let Some(items) = items_schema(Some(prop), defs) else {
             continue;
         };
-        let held = body
-            .get(&name)
-            .and_then(Value::as_array)
-            .map_or(0, Vec::len);
-        for (item_name, item_prop) in members(items) {
-            if says_status(&item_name, &branches(&item_prop, defs), status) {
+        let held = body.get(name).and_then(Value::as_array).map_or(0, Vec::len);
+        let item_members = members(items);
+        for (item_name, item_prop) in &item_members {
+            let code = beside(&item_members, item_name);
+            if says_status(item_name, &branches(item_prop, defs), status, code) {
                 for i in 0..held {
-                    places.push((format!("/{}/{i}", escaped(&name)), item_name.clone()));
+                    places.push((format!("/{}/{i}", escaped(name)), item_name.clone()));
                 }
             }
         }
@@ -1996,7 +2035,7 @@ mod tests {
             "detail": {"type": "string"},
             "error": {"type": "object", "properties": {"status": {"type": "string"}}},
             "errors": {"type": "array", "items": {"type": "object", "properties": {
-                "Status": {"type": "string"}
+                "Status": {"type": "string", "title": "Status code"}
             }}}
         }});
         let validator = SchemaValidator::new(&schema).unwrap();
@@ -2014,11 +2053,14 @@ mod tests {
                 "errors": [{"Status": "404"}]
             })
         );
-        // A status the schema shows as a word, or an enum of words, is the API's own.
+        // A status the schema shows as a word, or an enum of words, or that its
+        // description does not call the HTTP status, is the API's own.
         for status in [
             json!({"type": "string", "example": "error"}),
             json!({"type": "string", "enum": ["error", "fail"]}),
             json!({"type": "string", "pattern": "^[a-z]+$"}),
+            json!({"type": "string", "description": "Whether the call succeeded."}),
+            json!({"type": "string"}),
         ] {
             let schema = json!({"type": "object", "properties": {"status": status}});
             let validator = SchemaValidator::new(&schema).unwrap();
@@ -2026,6 +2068,30 @@ mod tests {
             let out = with_status_text(&validator, (&schema, &Map::new()), body.clone(), 404);
             assert_eq!(out, body, "{schema}");
         }
+    }
+
+    #[test]
+    fn a_kubernetes_or_jsend_status_word_is_left() {
+        // Kubernetes' Status: the word in `status`, the HTTP status in the integer `code`.
+        let k8s = json!({"type": "object", "properties": {
+            "kind": {"type": "string"},
+            "status": {"type": "string", "description": "Status of the operation; not the HTTP status code."},
+            "message": {"type": "string"},
+            "code": {"type": "integer", "description": "Suggested HTTP return code."}
+        }});
+        let validator = SchemaValidator::new(&k8s).unwrap();
+        let body = json!({"kind": "Status", "status": "Failure", "message": "gone", "code": 404});
+        let out = with_status_text(&validator, (&k8s, &Map::new()), body.clone(), 404);
+        assert_eq!(out, body);
+        // JSend: `status` is `error` or `fail`, described as such.
+        let jsend = json!({"type": "object", "properties": {
+            "status": {"type": "string", "description": "Either fail or error."},
+            "message": {"type": "string"}
+        }});
+        let validator = SchemaValidator::new(&jsend).unwrap();
+        let body = json!({"status": "error", "message": "gone"});
+        let out = with_status_text(&validator, (&jsend, &Map::new()), body.clone(), 404);
+        assert_eq!(out, body);
     }
 
     #[test]

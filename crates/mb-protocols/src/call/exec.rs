@@ -54,6 +54,8 @@ pub(super) enum Fallback {
     /// A create's record would not render into one of its type's reads, or its answer
     /// does not render: nothing is stored.
     RecordInvalid,
+    /// What the call adds would take its target past a cap (a queue's messages).
+    OverCap,
 }
 
 impl Fallback {
@@ -69,6 +71,7 @@ impl Fallback {
             Fallback::Behind => "behind",
             Fallback::RenderFailed => "render_failed",
             Fallback::RecordInvalid => "record_invalid",
+            Fallback::OverCap => "over_cap",
         }
     }
 }
@@ -81,6 +84,8 @@ mod list;
 mod patches;
 mod queue;
 mod writes;
+
+pub(super) use queue::forget as forget_queue;
 
 /// What [`run`] did with a call.
 pub(super) enum Ran {
@@ -587,6 +592,8 @@ pub(super) async fn commit(
                     deleted::mark(state, session, (op, call), t, &id, held).await;
                 }
                 tokens::forget(state, session, t, &id).await;
+                // A queue's messages go with it.
+                queue::forget(state, session, t, &id).await;
                 id
             }
         };

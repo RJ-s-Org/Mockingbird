@@ -1156,9 +1156,10 @@ impl<'a> Ctx<'a> {
                 .into_iter()
                 .filter(|o| self.op_kind(o) == Some(OpKind::Delete))
                 .collect();
+            // The delete reads it from its query only.
             if deletes
                 .iter()
-                .any(|o| declares_param(self.bundle, o, &u.param))
+                .any(|o| has_property(self.bundle, o.input.query.as_ref(), |k| k == u.param))
             {
                 Some(ParamValue {
                     param: u.param.clone(),
@@ -1169,7 +1170,10 @@ impl<'a> Ctx<'a> {
                 self.refuse(
                     &p.join("param"),
                     RefusalCode::Unresolved,
-                    format!("no delete of `{t}` declares a parameter `{}`", u.param),
+                    format!(
+                        "no delete of `{t}` declares a query parameter `{}`",
+                        u.param
+                    ),
                 );
                 None
             }
@@ -1655,7 +1659,8 @@ impl<'a> Ctx<'a> {
             out.fields = self.fields(op, f, (record, ty), &path.join("fields"));
         }
         if let Some(q) = &d.queue {
-            out.queue = self.queue(op, d, q, &path.join("queue"));
+            let named = out.target.is_some();
+            out.queue = self.queue(op, (d, named), q, &path.join("queue"));
         }
         out
     }
@@ -1679,7 +1684,16 @@ impl<'a> Ctx<'a> {
             );
             return None;
         }
-        if !self.check_param(op, &f.param, &path.join("param")) {
+        // Read from the query only: a body member or path parameter is no fieldset.
+        if !has_property(self.bundle, op.input.query.as_ref(), |k| k == f.param) {
+            self.refuse(
+                &path.join("param"),
+                RefusalCode::Unresolved,
+                format!(
+                    "operation `{}` declares no query parameter `{}`",
+                    op.id, f.param
+                ),
+            );
             return None;
         }
         if f.separator.as_deref() == Some("") {
@@ -1709,12 +1723,13 @@ impl<'a> Ctx<'a> {
     }
 
     /// An action's `queue`: `count` and `requeue.at` pointers into its request body,
-    /// and those and `redelivered` only with `take`. An operation of another kind is
-    /// refused it whole.
+    /// and those and `redelivered` only with `take`; a target named (by the description
+    /// or the contract's identity), and no `transition` or `changes` beside it. An
+    /// operation of another kind is refused it whole.
     fn queue(
         &mut self,
         op: &'a Operation,
-        d: &OpDesc,
+        (d, named_target): (&OpDesc, bool),
         q: &QueueDesc,
         path: &Path,
     ) -> Option<QueueDesc> {
@@ -1736,11 +1751,20 @@ impl<'a> Ctx<'a> {
             );
             return None;
         }
-        if !takes && d.transition.is_some() {
+        if d.transition.is_some() || !d.changes.is_empty() {
             self.refuse(
                 path,
                 RefusalCode::Invalid,
-                "an `append` sets no members: it is not with a `transition`".to_string(),
+                "a `queue` sets no members of its target: it is not with `transition` or `changes`"
+                    .to_string(),
+            );
+            return None;
+        }
+        if !named_target && op.identity.is_none() {
+            self.refuse(
+                path,
+                RefusalCode::Unresolved,
+                "a `queue` acts on its target: give the operation a `target`".to_string(),
             );
             return None;
         }
@@ -2744,7 +2768,7 @@ mod tests {
             "operations": {
                 "GetFolder": {"fields": {"param": "fields", "always": ["name", "nope"], "default": []}},
                 "ListFolders": {"fields": {"param": "missing"}},
-                "CreateFolder": {"kind": "action", "queue": {
+                "CreateFolder": {"kind": "action", "target": {"member": "mode"}, "queue": {
                     "effect": "take", "count": "/count", "requeue": {"at": "/nope", "value": "keep"},
                     "redelivered": "redelivered"
                 }},
@@ -2784,20 +2808,35 @@ mod tests {
             ("force", &json!(true))
         );
 
-        // No delete of the type declares the parameter.
+        // A path parameter is no query parameter: neither the delete nor the read reads
+        // it so. A queue with no target, or one setting members, is refused.
         let w = world(json!({
             "types": {"folder": {"lifecycle": {"member": "state", "soft_delete": {
-                "state": "DELETE_REQUESTED", "unless": {"param": "purge", "value": true}
-            }}}}
+                "state": "DELETE_REQUESTED", "unless": {"param": "name", "value": true}
+            }}}},
+            "operations": {
+                "GetFolder": {"fields": {"param": "name"}},
+                "CreateFolder": {"kind": "action", "queue": {"effect": "append"}},
+                "ListFolders": {"kind": "action", "changes": {"state": {"value": "ACTIVE"}},
+                                "queue": {"effect": "take"}}
+            }
         }));
         let v = validate(&w, &b);
-        assert_eq!(
-            paths(&v),
-            vec![(
+        let refused = paths(&v);
+        for wanted in [
+            (
                 "/types/folder/lifecycle/soft_delete/unless/param",
-                RefusalCode::Unresolved
-            )]
-        );
+                RefusalCode::Unresolved,
+            ),
+            (
+                "/operations/GetFolder/fields/param",
+                RefusalCode::Unresolved,
+            ),
+            ("/operations/CreateFolder/queue", RefusalCode::Unresolved),
+            ("/operations/ListFolders/queue", RefusalCode::Invalid),
+        ] {
+            assert!(refused.contains(&wanted), "{wanted:?} in {refused:?}");
+        }
     }
 
     #[test]

@@ -639,7 +639,9 @@ fn is_link(name: &str) -> bool {
 /// position under `param` is `token`: with `base`, the URL the call reached
 /// ([`CallPlan::page_url`]), that page's URL ([`page_url`]), as an RFC 8288 link of
 /// relation `next` in a `Link` header (`<…?max_id=…>; rel="next"`); with none, the
-/// token itself. `None` when the URL cannot be made.
+/// token itself, but for a `Link` header, which only a URL fills. `None` when there is
+/// no value: the header is then left off (a URL is not made of a query holding an
+/// object, a `deep_object` filter's), and the page still served.
 pub(super) fn next_header(
     name: &str,
     base: Option<&str>,
@@ -647,7 +649,7 @@ pub(super) fn next_header(
     token: &str,
 ) -> Option<String> {
     let Some(base) = base else {
-        return Some(token.to_string());
+        return (!is_link(name)).then(|| token.to_string());
     };
     let url = page_url(base, call, param, token)?;
     Some(match is_link(name) {
@@ -1744,13 +1746,12 @@ fn tokened(
     let (nonce, place) = new_cut(&plan.session, op);
     let first = token(&nonce, place, 0);
     let header = match &slot.header {
-        Some(name) => {
-            let value = next_header(name, slot.url.as_deref(), (call, &slot.param), &first)?;
-            if !header_fits(rt, op, name, &value) {
-                return None;
-            }
-            Some((name.clone(), value))
-        }
+        Some(name) => match next_header(name, slot.url.as_deref(), (call, &slot.param), &first) {
+            Some(value) if !header_fits(rt, op, name, &value) => return None,
+            Some(value) => Some((name.clone(), value)),
+            // No value to write (no URL to make): the page is served without it.
+            None => None,
+        },
         None => None,
     };
     let valid = |candidate: &Value| {
@@ -1857,11 +1858,13 @@ pub(super) async fn serve(
             .find_map(valid)?;
         if let Some(name) = &cut.slot.header {
             let slot = &cut.slot;
-            let value = next_header(name, slot.url.as_deref(), (call, &slot.param), &token)?;
-            if !header_fits(rt, op, name, &value) {
-                return None;
+            if let Some(value) = next_header(name, slot.url.as_deref(), (call, &slot.param), &token)
+            {
+                if !header_fits(rt, op, name, &value) {
+                    return None;
+                }
+                served.headers.push((name.clone(), value));
             }
-            served.headers.push((name.clone(), value));
         }
         served
     } else if let Some(then) = cut

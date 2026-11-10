@@ -890,11 +890,13 @@ paths:
       parameters:
         - {name: limit, in: query, schema: {type: integer, minimum: 1}}
         - {name: max_id, in: query, schema: {type: string}}
+        - {name: page, in: query, schema: {type: integer, minimum: 1}}
       responses:
         "200":
           description: ok
           headers:
             Link: {schema: {type: string}}
+            X-Next-Page: {schema: {type: string}}
           content:
             application/json:
               schema: {type: array, items: {$ref: "#/components/schemas/Mark"}}
@@ -951,6 +953,67 @@ async fn a_link_header_names_the_next_page_s_url() {
     assert!(h.provider.requests().is_empty());
 }
 
+/// Two marks held under [`LINK_HEADED`], its list paged as `paging` says.
+async fn two_marks(paging: Value) -> DescribedHarness {
+    let world = json!({"operations": {"listMarks": {"paging": paging}}});
+    let h = support::described(LINK_HEADED, world, Vec::new());
+    let held: Vec<Value> = (1..=2).map(|i| json!({"id": format!("m{i}")})).collect();
+    h.hold("marks", &held).await;
+    h
+}
+
+/// The route-relative part of `url`.
+fn on_route(url: &str) -> &str {
+    url.find("/v1/marks").map_or(url, |at| &url[at..])
+}
+
+#[tokio::test]
+async fn a_link_header_names_the_next_page_number_s_url() {
+    let (capture, _guard) = Capture::install();
+    let h = two_marks(json!({
+        "style": "page", "request": "page", "response_header": "Link", "size": "limit"
+    }))
+    .await;
+    let (status, headers, first) = h.send("GET", "/v1/marks?limit=1", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(ids(&first), [json!("m1")]);
+    let next = link_next(&headers).unwrap_or_else(|| panic!("a Link next: {headers:?}"));
+    let next = on_route(&next).to_owned();
+    assert!(
+        next.contains("page=2") && next.contains("limit=1"),
+        "{next}"
+    );
+    let (status, headers, last) = h.send("GET", &next, None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{last}");
+    assert_eq!(ids(&last), [json!("m2")]);
+    assert_eq!(link_next(&headers), None, "{headers:?}");
+    assert_eq!(capture.of("listMarks"), [None, None]);
+}
+
+/// Another header of a next-URL paging carries the next page's URL itself.
+#[tokio::test]
+async fn another_header_of_a_next_url_paging_carries_the_next_page_s_url() {
+    let h = two_marks(json!({
+        "style": "next_url", "request": "max_id", "response_header": "X-Next-Page", "size": "limit"
+    }))
+    .await;
+    let (status, headers, first) = h.send("GET", "/v1/marks?limit=1", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(ids(&first), [json!("m1")]);
+    let next = headers
+        .get("x-next-page")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        next.contains("/v1/marks?") && next.contains("max_id="),
+        "{next}"
+    );
+    let (status, _, last) = h.send("GET", on_route(&next), None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{last}");
+    assert_eq!(ids(&last), [json!("m2")]);
+}
+
 /// Products whose read and list take a sparse fieldset (`fields=id,name`).
 const FIELDED: &str = r##"
 openapi: 3.0.0
@@ -969,6 +1032,18 @@ paths:
                 type: object
                 required: [data]
                 properties: {data: {type: array, items: {$ref: "#/components/schemas/Product"}}}
+  /wrapped/{id}:
+    get:
+      operationId: getWrapped
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: fields, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: object, required: [data], properties: {data: {$ref: "#/components/schemas/Product"}}}
   /products/{id}:
     get:
       operationId: getProduct
@@ -1024,6 +1099,23 @@ async fn a_fields_parameter_narrows_a_read_and_each_listed_item() {
     assert_eq!(all["data"], json!(held));
     assert_eq!(capture.of("listProducts"), [None, None]);
     assert!(h.provider.requests().is_empty());
+}
+
+/// A record answered in an envelope is narrowed where the envelope holds it.
+#[tokio::test]
+async fn a_fields_parameter_narrows_the_record_inside_its_envelope() {
+    let world = json!({"operations": {"getWrapped": {
+        "kind": "read", "type": "products", "target": {"path_param": "id"},
+        "answer": {"record": "/data"}, "fields": {"param": "fields"}
+    }}});
+    let h = support::described(FIELDED, world, Vec::new());
+    let held = json!({"id": "p1", "name": "lamp", "sku": "L1"});
+    h.hold("products", std::slice::from_ref(&held)).await;
+    let (source, read) = get(&h, "/wrapped/p1?fields=id,sku").await;
+    assert_eq!(source, "state", "{read}");
+    assert_eq!(read, json!({"data": {"id": "p1", "sku": "L1"}}));
+    let (_, whole) = get(&h, "/wrapped/p1").await;
+    assert_eq!(whole, json!({"data": held}));
 }
 
 /// Twilio's messages: a next-page URL beside the list, a page size and a page token

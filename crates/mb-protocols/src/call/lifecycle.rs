@@ -56,9 +56,14 @@ impl Exclusion {
 /// Whether query `query` sends `param` at `wanted` (`"true"` is `true`; an array sends
 /// it when any of its values does).
 fn sends(query: &serde_json::Map<String, Value>, param: &str, wanted: &Value) -> bool {
-    let Some(sent) = query.get(param) else {
-        return false;
-    };
+    query
+        .get(param)
+        .is_some_and(|sent| sends_value(sent, wanted))
+}
+
+/// Whether `sent`, a request value, is `wanted` (`"true"` is `true`); an array sends it
+/// when any of its values does.
+pub(super) fn sends_value(sent: &Value, wanted: &Value) -> bool {
     let same = |v: &Value| match (v, wanted) {
         (Value::String(text), Value::String(w)) => text == w,
         (Value::String(text), other) => {
