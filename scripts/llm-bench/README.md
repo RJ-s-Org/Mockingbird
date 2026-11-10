@@ -126,10 +126,13 @@ Results are cached in `<cache>/<key>/<task>/`. The key hashes the skills, the MC
 
 `fakegate.py --e2e-cache <cache>/<key>` adds this as the `e2e` tier. Both sides load the same snapshots, so the tier gates the engine on fixed builds.
 
-**The report: `e2e.py report RUN --stage1 <cache>/<key> [--paid DIR ...]`.** For each suite and tier it prints:
-- the fake pass rate;
-- the floor: failing checks whose deciding call the engine answered (`source` state or rejected);
-- the projected rate: the pass rate plus the failures whose deciding call reached the model. It is an upper bound unless `--paid` runs show that some model passed them.
+**The report: `e2e.py report RUN --stage1 <cache>/<key> [--paid DIR ...] [--curated RUN] [--attribution FILE ...]`.** For each suite and tier it prints the fake pass rate, the projected rate, the floor, and the missed and model-dependent counts. A failed check counts as model-dependent, so recoverable by a real model, only when every one of these allows it, in order:
+- the classifier agents' attribution of its deciding call (`--attribution`: `[{suite, check, reclass|cls}]`);
+- the deciding call reached the model (`source` llm, fallback, repaired or patched);
+- the curated tier (`agent`, the run's own or `--curated`, on the same binary) did not pass it (a pass makes it missed) and did not decide it from state;
+- some `--paid` run passed it.
+
+Every other failure is floor. Model-dependent failures that no attribution names are counted as unattributed, an upper bound on the projection. A baseline's attribution comes from classifier agents reading each model-reached failure's deciding call: its executor fallback and the curated diff.
 
 ## Budget
 

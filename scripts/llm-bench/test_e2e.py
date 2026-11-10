@@ -363,6 +363,44 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(sorted(s["floor"]), ["engine", "error", "never", "refused", "unmocked"])
 
 
+class AttributionTest(unittest.TestCase):
+    ROWS = {("e2e", "s", "a"): {"ok": False, "source": "llm"},
+            ("e2e", "s", "b"): {"ok": False, "source": "llm"},
+            ("e2e", "s", "c"): {"ok": False, "source": "llm"},
+            ("e2e", "s", "d"): {"ok": False, "source": "llm"},
+            ("e2e", "s", "e"): {"ok": False, "source": "state"},
+            ("agent", "s", "a"): {"ok": True, "source": "state"},
+            ("agent", "s", "b"): {"ok": False, "source": "state"},
+            ("agent", "s", "c"): {"ok": False, "source": "llm"},
+            ("agent", "s", "d"): {"ok": False, "source": "llm"},
+            ("agent", "s", "e"): {"ok": False, "source": "state"}}
+
+    def test_the_curated_tier_tells_missed_and_engine_decided_from_model(self):
+        curated = e2e.curated_rows(self.ROWS)
+        s = e2e.summarize(self.ROWS, curated=curated)[("e2e", "s")]
+        self.assertEqual(s["missed"], ["a"])
+        self.assertEqual(sorted(s["model_dependent"]), ["c", "d"])
+        self.assertEqual(s["classes"], {"missed": 1, "engine_decided": 2, "model": 2})
+        # The curated tier is not judged against itself.
+        self.assertEqual(sorted(e2e.summarize(self.ROWS, curated=curated)[("agent", "s")]["model_dependent"]),
+                         ["c", "d"])
+
+    def test_an_attribution_overrides_and_the_rest_is_marked_unattributed(self):
+        curated = e2e.curated_rows(self.ROWS)
+        s = e2e.summarize(self.ROWS, curated=curated, attribution={("s", "c"): "inexpressible"})[("e2e", "s")]
+        self.assertEqual(s["model_dependent"], ["d"])
+        self.assertEqual(s["unattributed"], 1)
+        self.assertIn("c", s["floor"])
+
+    def test_attribution_files_take_reclass_or_cls(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = write(os.path.join(d, "a.json"), json.dumps([{"suite": "s", "check": "x", "reclass": "model"}]))
+            b = write(os.path.join(d, "b.json"), json.dumps([{"suite": "s", "check": "x", "cls": "missed"},
+                                                             {"suite": "s", "check": "y", "cls": "bogus"}]))
+            self.assertEqual(e2e.load_attribution([a, b]), {("s", "x"): "missed"})
+            self.assertIsNone(e2e.load_attribution([]))
+
+
 class FakegateE2eTest(unittest.TestCase):
     def test_a_tier_neither_side_ran_is_left_out(self):
         base = {("none", "s", "a"): {"ok": True}}
