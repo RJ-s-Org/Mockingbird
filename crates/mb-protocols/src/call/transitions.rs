@@ -9,9 +9,9 @@
 //!   the record it stores, whatever the model answered: its `transition` (states of the
 //!   type's lifecycle member), then its `set` expressions ([`super::exprs`]), which hold
 //!   its `changes` too (`from_request` as the request member's expression, `value` as a
-//!   literal). Each value is written as its member's schema declares it
-//!   ([`super::exprs::written_back`]), checked against that schema and dropped, with an
-//!   info log, when it does not fit.
+//!   literal). Each `set` value is written as its member's schema declares it
+//!   ([`super::exprs::written_back`]); every value is checked against that schema and
+//!   dropped, with an info log, when it does not fit.
 //! - [`replaces`]: an update the description calls a `replace`, which stores what its
 //!   request sends instead of merging it (see `write_memory::onto_record`).
 //!
@@ -42,7 +42,8 @@ pub(super) fn sets_members(rt: &MockRuntime, op: &Operation) -> bool {
 /// description says the operation sets: its `transition` members (a state is written
 /// as the member's type declares it), then its `set` values ([`exprs::set_values`],
 /// evaluated once per call against `before`, the target as stored before it; `changes`
-/// among them), each written as its member declares it ([`exprs::written_back`]). A
+/// among them), each `set` value written as its member declares it
+/// ([`exprs::written_back`]) and each `changes` value as it is. A
 /// value that does not fit its member's schema is dropped, and so is the whole set
 /// when it adds a violation of the type's schema to the record (see
 /// [`added_violation`]): it breaks a record that fit, or a record already not fitting
@@ -95,7 +96,11 @@ async fn applied(
         if creating && from_changes {
             continue;
         }
-        let value = value.map(|v| exprs::written_back(rt, t, &member, v));
+        // A `changes` value is set as it is, as `changes` always set it.
+        let value = match from_changes {
+            true => value,
+            false => value.map(|v| exprs::written_back(rt, t, &member, v)),
+        };
         wanted.push((member, value));
     }
     if wanted.is_empty() {

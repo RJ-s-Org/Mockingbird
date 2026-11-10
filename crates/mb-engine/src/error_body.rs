@@ -814,7 +814,8 @@ pub fn place_code(
     }
 }
 
-/// Words (lower case, letters and digits only) a code naming each cause holds.
+/// Words (lower case, letters and digits only) a code naming each cause holds, the
+/// most specific first.
 fn cause_words(cause: ErrorCause) -> &'static [&'static str] {
     match cause {
         ErrorCause::Invalid => &["invalid", "validation", "badrequest", "malformed"],
@@ -843,7 +844,9 @@ fn cause_words(cause: ErrorCause) -> &'static [&'static str] {
 
 /// The code the error `schema` itself gives for `cause`: a value of its code member
 /// ([`code_path`]) its `const` or `enum` declares, whose letters and digits name the
-/// cause (`not_found` for a missing record, `ALREADY_EXISTS` for a taken value). `None`
+/// cause (`not_found` for a missing record, `ALREADY_EXISTS` for a taken value), the
+/// one naming it most closely ([`cause_words`] lists the words most specific first)
+/// when several do. `None`
 /// when it declares none: a code is never made up. An example is no such value: a
 /// schema shared by several statuses shows one that speaks for none of them.
 #[must_use]
@@ -867,6 +870,9 @@ pub fn declared_code(
             .flatten();
         one.into_iter().chain(many)
     });
+    // The value naming the cause most closely: by the first of `words` (the most
+    // specific) it holds, the first such value on a tie.
+    let mut best: Option<(usize, &Value)> = None;
     for value in shown {
         let Some(text) = value.as_str() else {
             continue;
@@ -876,11 +882,13 @@ pub fn declared_code(
             .filter(char::is_ascii_alphanumeric)
             .flat_map(|c| c.to_lowercase())
             .collect();
-        if words.iter().any(|w| squeezed.contains(w)) {
-            return Some(value.clone());
+        if let Some(rank) = words.iter().position(|w| squeezed.contains(w))
+            && best.is_none_or(|(b, _)| rank < b)
+        {
+            best = Some((rank, value));
         }
     }
-    None
+    best.map(|(_, v)| v.clone())
 }
 
 /// Writes `message` into the first message-like string property of `schema` (see
@@ -2254,6 +2262,12 @@ mod tests {
         // An example names no code: a shared schema's speaks for no one status.
         let shown = json!({"type": "object", "properties": {"code": {"type": "string", "examples": ["not_found"]}}});
         assert_eq!(declared_code(&shown, &defs, ErrorCause::Missing), None);
+        // The value naming the cause most closely wins, wherever it is listed.
+        let ranked = json!({"type": "object", "properties": {"code": {"type": "string", "enum": ["UNKNOWN_ERROR", "MISSING_FIELD", "NOT_FOUND"]}}});
+        assert_eq!(
+            declared_code(&ranked, &defs, ErrorCause::Missing),
+            Some(json!("NOT_FOUND"))
+        );
     }
 
     #[test]

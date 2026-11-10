@@ -1750,7 +1750,7 @@ impl Engine {
             };
         }
         // The code: the one the refusal says, else one the schema itself gives for
-        // the cause (an `enum`, `const` or example value naming it).
+        // the cause (an `enum` or `const` value naming it; never an example).
         let code = match facts.code() {
             Some(code) => Some(Value::String(code.to_string())),
             None => error_body::declared_code(schema, &bundle.defs, cause),

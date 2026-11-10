@@ -157,24 +157,8 @@ pub(super) async fn run(
         .instrument(state_span())
         .await;
     if let Some(held) = taken.clone()
-        && let Some(code) = [409, 422]
-            .into_iter()
-            .find(|code| mb_engine::guards::declares_code(op, *code))
-        && let Some(refusal) = plan
-            .engine
-            .refuse_held(
-                rt.bundle(),
-                op,
-                call,
-                code,
-                ErrorCause::Taken,
-                &RefusalFacts::taken(&[held]),
-            )
-            .await
+        && let Some(refusal) = refuse_taken(state, plan, call, held).await
     {
-        replays::keep(state, plan, call, &refusal)
-            .instrument(state_span())
-            .await;
         answered(rt, plan, kind);
         return Ran::Answered(Box::new(refusal));
     }
@@ -269,6 +253,21 @@ pub(super) async fn run(
         if !member.contains('.') && !owned.contains(member) {
             owned.push(member.clone());
         }
+    }
+    // An alternate key the description sets is checked as one the request sent is.
+    if set.iter().any(|m| keys.iter().any(|(k, _)| k == m))
+        && let Value::Object(now) = &data
+        && let Some(held) = repeated_key(state, plan, call, t, (&keys, now))
+            .instrument(state_span())
+            .await
+    {
+        return match refuse_taken(state, plan, call, held).await {
+            Some(refusal) => {
+                answered(rt, plan, kind);
+                Ran::Answered(Box::new(refusal))
+            }
+            None => fall("repeated_key"),
+        };
     }
     if set.iter().any(|m| m == field) {
         let Some(named) = mb_mcm::member_at(&data, field).and_then(id_string) else {
@@ -406,6 +405,36 @@ pub(super) async fn run(
     let answer = commit(state, plan, call, (t, None), write, answer).await;
     answered(rt, plan, kind);
     Ran::Answered(Box::new(answer))
+}
+
+/// The conflict `plan`'s create declares (`409`, else `422`) for `held`, a value of an
+/// alternate key another record holds, kept for a replay of the call. `None` when it
+/// declares neither.
+async fn refuse_taken(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    held: (String, Value),
+) -> Option<GeneratedResponse> {
+    let op = plan.op;
+    let code = [409, 422]
+        .into_iter()
+        .find(|code| mb_engine::guards::declares_code(op, *code))?;
+    let refusal = plan
+        .engine
+        .refuse_held(
+            state.rt.bundle(),
+            op,
+            call,
+            code,
+            ErrorCause::Taken,
+            &RefusalFacts::taken(&[held]),
+        )
+        .await?;
+    replays::keep(state, plan, call, &refusal)
+        .instrument(state_span())
+        .await;
+    Some(refusal)
 }
 
 /// The first of `keys` (a type's alternate keys, [`Shape::key_members`]) whose value

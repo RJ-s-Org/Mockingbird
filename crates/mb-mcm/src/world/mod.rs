@@ -36,7 +36,6 @@ mod validate;
 pub use apply::{apply, record_at};
 pub use compiled::{
     Expressions, OpExpressions, RefuseEntry, SetEntry, SetValue, TextValue, changes_as_set,
-    pointer_expression,
 };
 pub use effective::{effective, effective_validated};
 pub use tier0::{record_pointer, tier0};

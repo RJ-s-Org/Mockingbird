@@ -1288,6 +1288,12 @@ pub(crate) async fn complete(
                     .as_ref()
                     .map(|b| records::request_record(rt, op, b));
                 lifecycle::initial(rt, t, body, request);
+                // What the description sets on a created record holds on one the
+                // executor left to generation too: in the answer, and so in what is
+                // stored from it.
+                transitions::apply_on_create(&mut state, (plan, call), body)
+                    .instrument(state_span())
+                    .await;
             }
             // What the description says an update or action sets on its target shows
             // in the answer's record too.

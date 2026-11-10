@@ -7,9 +7,10 @@
 //!   the request time as RFC 3339 text: the seeded time ([`mb_engine::seed::SEEDED_NOW`])
 //!   when the call's draws are seeded, as the engine's dates are, else the clock.
 //! - The session ([`SessionHost`]): `held(type, id)` finds a held record by its key
-//!   (in its identity pattern's forms too), else by its identity member, else by a
-//!   described alternate (one record only); `count` and `exists` read the type's held
-//!   records, at most [`MAX_SCAN`]; `seq(scope)` is a per-session counter
+//!   (in its identity pattern's forms too), looked up in the store whatever the type
+//!   holds ([`resolve_held`]), else by its identity member, else by a described
+//!   alternate (one record only), among the type's first [`MAX_SCAN`]; `count` and
+//!   `exists` read the type's held records, at most [`MAX_SCAN`]; `seq(scope)` is a per-session counter
 //!   ([`SeqCounters`]); `mint(pattern)` draws an id matching the pattern from the
 //!   seeded minting ([`super::header_ids::draw_id_as`]). The records of the types an
 //!   operation's expressions name are read once, before they are evaluated.
@@ -67,7 +68,8 @@ impl SeqCounters {
 }
 
 /// A call's `set` values: each member, its value (`None` when its expression failed
-/// or gave `null`), and whether it is a `changes` entry.
+/// or gave `null`, or its `from_request` pointer reads nothing), and whether it is a
+/// `changes` entry.
 type SetValues = Vec<(String, Option<Value>, bool)>;
 
 /// What one call's world expressions decided, and what the executor noted of the call
@@ -151,6 +153,52 @@ pub(super) struct SessionHost<'r> {
     session: &'r SessionKey,
     call: &'r OperationCall,
     records: HashMap<String, Vec<StoredResource>>,
+    /// The records `held` looked up by key, by type and id (`None`: none held).
+    resolved: HashMap<(String, String), Option<Value>>,
+    /// While [`resolve_held`] probes what `held` asks for: `seq` and `mint` draw
+    /// nothing.
+    probing: bool,
+    /// What `held` asked for while probing that is not looked up yet.
+    asked: Vec<(String, String)>,
+}
+
+/// Rounds of [`resolve_held`] at most: a `held` whose id is another's answer needs
+/// one more.
+const MAX_HELD_ROUNDS: usize = 4;
+/// Records [`resolve_held`] looks up by key per evaluation at most.
+const MAX_HELD_LOOKUPS: usize = 64;
+
+/// Looks up by key, in the store, each record `programs` ask `held` for, so `held`
+/// finds a record whatever the type holds (not only among the records [`SessionHost`]
+/// read). The programs are evaluated first with `seq` and `mint` drawing nothing, to
+/// learn what they ask for, again for a `held` whose id another `held` gave.
+async fn resolve_held(
+    state: &mut StateAccess<'_>,
+    host: &mut SessionHost<'_>,
+    programs: &[&Program],
+    bound: &Bound,
+) {
+    for _ in 0..MAX_HELD_ROUNDS {
+        host.probing = true;
+        for program in programs {
+            // A failure is noted when the program is evaluated for real.
+            let _ = program.eval(&bound.bindings(), host);
+        }
+        host.probing = false;
+        let asked = std::mem::take(&mut host.asked);
+        if asked.is_empty() {
+            return;
+        }
+        for (t, id) in asked {
+            if host.resolved.len() >= MAX_HELD_LOOKUPS {
+                return;
+            }
+            let found = records::held_by_key(state, host.session, &t, &id)
+                .await
+                .map(|r| r.data);
+            host.resolved.insert((t, id), found);
+        }
+    }
 }
 
 impl<'r> SessionHost<'r> {
@@ -170,6 +218,9 @@ impl<'r> SessionHost<'r> {
             session,
             call,
             records,
+            resolved: HashMap::new(),
+            probing: false,
+            asked: Vec::new(),
         }
     }
 
@@ -192,6 +243,13 @@ impl<'r> SessionHost<'r> {
 impl Host for SessionHost<'_> {
     fn held(&mut self, t: &str, id: &Value) -> Option<Value> {
         let id = id_string(id)?;
+        let key = (t.to_string(), id.clone());
+        match self.resolved.get(&key) {
+            Some(Some(found)) => return Some(found.clone()),
+            Some(None) => {}
+            None if self.probing && !self.asked.contains(&key) => self.asked.push(key),
+            None => {}
+        }
         let held = self.records.get(t)?;
         if let Some(r) = held.iter().find(|r| r.id == id) {
             return Some(r.data.clone());
@@ -227,10 +285,16 @@ impl Host for SessionHost<'_> {
     }
 
     fn seq(&mut self, scope: &str) -> i64 {
+        if self.probing {
+            return 0;
+        }
         self.rt.seq_counters().next(self.session, scope)
     }
 
     fn mint(&mut self, pattern: &str) -> Option<String> {
+        if self.probing {
+            return None;
+        }
         let seed = MintSeed::new(self.rt, self.session, self.call);
         let schema = json!({"type": "string", "pattern": pattern});
         draw_id_as(self.rt, (seed, "expr", pattern), &schema)
@@ -353,6 +417,20 @@ pub(super) async fn refusal(
     }
     let mut host = host(state, rt, (plan, call), ops).await;
     let bound = Bound::new(rt, call, target.map(|t| &t.data));
+    if ops.reads_held {
+        let programs: Vec<&Program> = ops
+            .refuse
+            .iter()
+            .flat_map(|r| {
+                let texts = [&r.code, &r.message].into_iter().filter_map(|t| match t {
+                    Some(TextValue::Expr(p)) => Some(p),
+                    _ => None,
+                });
+                std::iter::once(&r.when).chain(texts)
+            })
+            .collect();
+        resolve_held(state, &mut host, &programs, &bound).await;
+    }
     for entry in &ops.refuse {
         let when = format!("{}/when", entry.pointer);
         let fires = match eval(plan, rt, (&entry.when, &when), &bound, &mut host) {
@@ -433,12 +511,30 @@ pub(super) async fn set_values(
     };
     let mut host = host(state, rt, (plan, call), ops).await;
     let bound = Bound::new(rt, call, before);
+    if ops.reads_held {
+        let programs: Vec<&Program> = ops
+            .set
+            .iter()
+            .filter_map(|e| match &e.value {
+                SetValue::Expr(p) => Some(p),
+                SetValue::Literal(_) | SetValue::Pointer(_) => None,
+            })
+            .collect();
+        resolve_held(state, &mut host, &programs, &bound).await;
+    }
     let values: SetValues =
         ops.set
             .iter()
             .map(|entry| {
                 let value = match &entry.value {
                     SetValue::Literal(v) => Some(v.clone()),
+                    // As `changes` always read it: a JSON pointer, an explicit `null`
+                    // sent included.
+                    SetValue::Pointer(p) => call
+                        .body
+                        .as_ref()
+                        .and_then(|b| b.pointer(p.as_str()))
+                        .cloned(),
                     SetValue::Expr(p) => eval(plan, rt, (p, &entry.pointer), &bound, &mut host)
                         .filter(|v| !v.is_null()),
                 };

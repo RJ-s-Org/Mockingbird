@@ -5,8 +5,8 @@
 //! evaluates the [`Program`]s per call. An entry that does not compile is left out
 //! (validation refuses it before it reaches an effective world).
 //!
-//! `changes` is read as `set`: `{from_request: /a/0/b}` is the expression
-//! `request.body.a[0].b` ([`pointer_expression`]) and `{value: v}` the literal `v`.
+//! `changes` is read as `set`: `{from_request: /a/0/b}` reads the request body at
+//! that JSON pointer, as `changes` always did, and `{value: v}` is the literal `v`.
 //! A `set` entry for the same member replaces the `changes` one.
 
 use std::collections::{BTreeMap, HashMap};
@@ -33,6 +33,8 @@ pub struct OpExpressions {
     /// The resource types its expressions read records of (`held`, `count`,
     /// `exists`).
     pub types: Vec<String>,
+    /// Whether an expression of it calls `held`.
+    pub reads_held: bool,
 }
 
 /// One member an operation sets.
@@ -55,6 +57,11 @@ pub struct SetEntry {
 pub enum SetValue {
     /// A fixed value (`changes.<member>.value`).
     Literal(Value),
+    /// The request body at a JSON pointer (`changes.<member>.from_request`), read as
+    /// a JSON pointer reads (RFC 6901): a token of digits names an object's member
+    /// as well as an array's item, a leading zero is no index, and an explicit `null`
+    /// is a value.
+    Pointer(Pointer),
     /// An expression's value.
     Expr(Program),
 }
@@ -164,6 +171,7 @@ impl OpExpressions {
             set: set.into_values().collect(),
             refuse,
             types: Vec::new(),
+            reads_held: false,
         };
         let mut types: Vec<String> = Vec::new();
         for program in out.programs() {
@@ -174,6 +182,10 @@ impl OpExpressions {
             }
         }
         out.types = types;
+        let reads_held = out
+            .programs()
+            .any(|p| p.check().functions.iter().any(|f| f.name == "held"));
+        out.reads_held = reads_held;
         out
     }
 
@@ -181,7 +193,7 @@ impl OpExpressions {
     fn programs(&self) -> impl Iterator<Item = &Program> {
         let set = self.set.iter().filter_map(|e| match &e.value {
             SetValue::Expr(p) => Some(p),
-            SetValue::Literal(_) => None,
+            SetValue::Literal(_) | SetValue::Pointer(_) => None,
         });
         let refuse = self.refuse.iter().flat_map(|r| {
             let texts = [&r.code, &r.message].into_iter().filter_map(|t| match t {
@@ -206,87 +218,20 @@ impl OpExpressions {
     }
 }
 
-/// `changes` as `set` entries, by member: `from_request` as the expression reading
-/// the request body's member at its pointer ([`pointer_expression`]), `value` as
-/// that literal. An entry whose expression does not compile is left out.
+/// `changes` as `set` entries, by member: `from_request` as the request body at its
+/// pointer, `value` as that literal.
 #[must_use]
 pub fn changes_as_set(changes: &BTreeMap<String, ChangeDesc>) -> Vec<(&str, SetValue)> {
     changes
         .iter()
-        .filter_map(|(member, change)| {
+        .map(|(member, change)| {
             let value = match change {
                 ChangeDesc::Value(v) => SetValue::Literal(v.clone()),
-                ChangeDesc::FromRequest(p) => {
-                    SetValue::Expr(Program::compile(&pointer_expression(p)).ok()?)
-                }
+                ChangeDesc::FromRequest(p) => SetValue::Pointer(p.clone()),
             };
-            Some((member.as_str(), value))
+            (member.as_str(), value)
         })
         .collect()
-}
-
-/// The expression reading the request body at `pointer`: each token a member
-/// (`.name`, or `['na-me']` when it is no identifier), a token of digits an index
-/// (`[0]`). `""` is `request.body`.
-#[must_use]
-pub fn pointer_expression(pointer: &Pointer) -> String {
-    let mut out = String::from("request.body");
-    for token in pointer.tokens() {
-        if !token.is_empty() && token.bytes().all(|b| b.is_ascii_digit()) && token.len() < 19 {
-            out.push('[');
-            out.push_str(&token);
-            out.push(']');
-        } else if identifier(&token) {
-            out.push('.');
-            out.push_str(&token);
-        } else {
-            out.push_str("['");
-            for c in token.chars() {
-                match c {
-                    '\'' => out.push_str("\\'"),
-                    '\\' => out.push_str("\\\\"),
-                    c if c.is_control() => out.push_str(&format!("\\U{:08x}", u32::from(c))),
-                    c => out.push(c),
-                }
-            }
-            out.push_str("']");
-        }
-    }
-    out
-}
-
-/// Words CEL reserves, which a member written `.name` cannot be.
-const RESERVED: [&str; 21] = [
-    "as",
-    "break",
-    "const",
-    "continue",
-    "else",
-    "false",
-    "for",
-    "function",
-    "if",
-    "import",
-    "in",
-    "let",
-    "loop",
-    "package",
-    "namespace",
-    "null",
-    "return",
-    "true",
-    "var",
-    "void",
-    "while",
-];
-
-fn identifier(token: &str) -> bool {
-    let mut chars = token.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && !RESERVED.contains(&token)
 }
 
 /// `token` as one step of a JSON pointer.
@@ -297,52 +242,7 @@ fn escape(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::expr::{Bindings, Host};
     use serde_json::json;
-
-    struct NoSession;
-    impl Host for NoSession {
-        fn held(&mut self, _: &str, _: &Value) -> Option<Value> {
-            None
-        }
-        fn all(&mut self, _: &str) -> Vec<Value> {
-            Vec::new()
-        }
-        fn seq(&mut self, _: &str) -> i64 {
-            1
-        }
-        fn mint(&mut self, _: &str) -> Option<String> {
-            None
-        }
-    }
-
-    fn read(pointer: &str, body: Value) -> Value {
-        let p = Pointer::parse(pointer).unwrap();
-        let source = pointer_expression(&p);
-        let program = Program::compile(&source).unwrap_or_else(|e| panic!("{source}: {e}"));
-        let request = json!({"body": body});
-        let b = Bindings {
-            request: &request,
-            record: &Value::Null,
-            now: &Value::Null,
-            it: None,
-        };
-        program.eval(&b, &mut NoSession).unwrap()
-    }
-
-    #[test]
-    fn a_pointer_reads_as_its_member_path() {
-        let p = |s: &str| pointer_expression(&Pointer::parse(s).unwrap());
-        assert_eq!(p("/a/b"), "request.body.a.b");
-        assert_eq!(p("/items/0/name"), "request.body.items[0].name");
-        assert_eq!(p("/x-y/in"), "request.body['x-y']['in']");
-        assert_eq!(p("/a~1b/it's"), "request.body['a/b']['it\\'s']");
-        let body = json!({"a/b": {"it's": 1}, "items": [{"name": "n"}], "x-y": {"in": true}});
-        assert_eq!(read("/a~1b/it's", body.clone()), json!(1));
-        assert_eq!(read("/items/0/name", body.clone()), json!("n"));
-        assert_eq!(read("/x-y/in", body.clone()), json!(true));
-        assert_eq!(read("/missing/deep", body), Value::Null);
-    }
 
     #[test]
     fn changes_are_set_entries_a_set_entry_replaces() {
@@ -367,10 +267,12 @@ mod tests {
                 ("d", "/operations/op/set/d")
             ]
         );
+        assert!(matches!(op.set[0].value, SetValue::Pointer(ref p) if p.as_str() == "/x"));
         assert_eq!(op.refuse.len(), 1);
         assert!(matches!(op.refuse[0].code, Some(TextValue::Text(ref t)) if t == "taken"));
         assert!(matches!(op.refuse[0].message, Some(TextValue::Expr(_))));
         assert!(!op.reads_session());
+        assert!(!op.reads_held);
         assert!(compiled.op("other").is_none());
     }
 }

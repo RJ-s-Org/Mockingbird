@@ -269,9 +269,9 @@ pub(super) async fn run(
 ) -> Ran {
     let classified = classify(state.rt, plan, call);
     // A described refusal answers first, before anything is stored or generated: on
-    // every kind the executor takes, and where only the description's identity or
-    // target is missing.
-    if let Some(Ok(kind) | Err((kind, Fallback::NoIdentity | Fallback::NoTarget))) = classified
+    // every call but one a scenario or a forced status answers, whether the executor
+    // takes it or it generates (seeded, consistency off, a kind it does not take).
+    if plain(plan)
         && let Some(refusal) = super::exprs::refusal(state, plan, call, held.target)
             .instrument(state_span())
             .await
@@ -279,7 +279,9 @@ pub(super) async fn run(
         replays::keep(state, plan, call, &refusal)
             .instrument(state_span())
             .await;
-        answered(state.rt, plan, kind);
+        if let Some(Ok(kind) | Err((kind, _))) = classified {
+            answered(state.rt, plan, kind);
+        }
         return Ran::Answered(Box::new(refusal));
     }
     match classified {

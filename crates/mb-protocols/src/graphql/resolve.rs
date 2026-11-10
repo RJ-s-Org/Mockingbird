@@ -488,10 +488,12 @@ async fn generate_in(
                             Err(Failure::new(404, detail))
                         }
                         Ok(mut generated) => {
-                            call::seed_notes(&plan, &mut generated);
                             reconcile_money(rt, &plan, &call, &mut generated).await;
                             store_answer(rt, &plan, op, selection, &call, &generated).await;
                             write_by_id(rt, &plan, op, &call, &generated).await;
+                            // After the writes, which note what their expressions did;
+                            // the notes replace any seeded before.
+                            call::seed_notes(&plan, &mut generated);
                             Ok(generated)
                         }
                         Err(e) => Err(e),

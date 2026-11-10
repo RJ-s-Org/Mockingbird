@@ -33,7 +33,7 @@ paths:
     post:
       operationId: renameMember
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
-      requestBody: {content: {application/json: {schema: {type: object, properties: {new_name: {type: string}, label: {type: string}}}}}}
+      requestBody: {content: {application/json: {schema: {type: object, properties: {new_name: {type: string}, label: {type: string}, meta: {type: object, properties: {"0": {type: string}}}, tags: {type: array, items: {type: string}}, note: {type: string, nullable: true}}}}}}
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Member"}}}}}
   /lists/{id}:
     get:
@@ -55,6 +55,7 @@ components:
         tier: {type: string}
         number: {type: integer}
         code: {type: string}
+        note: {}
     List:
       type: object
       required: [id, currency]
@@ -74,7 +75,7 @@ components:
 fn fill_decoys() -> Value {
     json!({
         "list_id": "decoy", "currency": "XXX", "label": "decoy", "tier": "decoy",
-        "number": 999, "code": "decoy"
+        "number": 999, "code": "decoy", "note": "decoy"
     })
 }
 
@@ -95,6 +96,20 @@ fn record_of(h: &DescribedHarness, operation: &str) -> Value {
         .collect();
     assert_eq!(mine.len(), 1, "{records:?}");
     mine[0].request.clone()
+}
+
+/// That the provider was asked for no member: only, at most, a refusal's error body.
+fn assert_no_record_generated(h: &DescribedHarness) {
+    let asked: Vec<String> = h
+        .provider
+        .requests()
+        .iter()
+        .map(|r| format!("{:?}", r.response_format))
+        .collect();
+    assert!(
+        asked.iter().all(|a| !a.contains("email")),
+        "a refusal generates no record: {asked:#?}"
+    );
 }
 
 #[tokio::test]
@@ -270,6 +285,7 @@ async fn refusals_answer_in_order_with_code_and_message_in_a_nested_error() {
         "{body}"
     );
     assert_eq!(h.stored_ids("members").await, vec!["m1".to_string()]);
+    assert_no_record_generated(&h);
     // Neither holds: the create goes on.
     let (status, _, body) = h
         .send(
@@ -345,4 +361,159 @@ async fn a_create_s_changes_set_nothing_as_before() {
         body["tier"], "decoy",
         "changes never applied to a create: {body}"
     );
+}
+
+#[tokio::test]
+async fn a_changes_world_keeps_its_pointer_and_value_semantics() {
+    let world = json!({"operations": {"renameMember": {
+        "kind": "action",
+        "target": {"path_param": "id"},
+        "changes": {
+            // A digit token names an object's member as well as an array's item.
+            "name": {"from_request": "/meta/0"},
+            // `01` is no array index: it reads nothing.
+            "label": {"from_request": "/tags/01"},
+            // An explicit `null` sent is set.
+            "note": {"from_request": "/note"},
+            // A fixed value is never converted to its member's type.
+            "number": {"value": "5"}
+        }
+    }}});
+    let h = members(world, vec![]);
+    let held = json!({"id": "m1", "email": "a@x.io", "name": "Ada", "label": "kept", "note": "n"});
+    h.hold("members", std::slice::from_ref(&held)).await;
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members/m1/rename",
+            Some(json!({"meta": {"0": "Grace"}, "tags": ["t0", "t1"], "note": null})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let want =
+        json!({"id": "m1", "email": "a@x.io", "name": "Grace", "label": "kept", "note": null});
+    assert_eq!(body, want);
+    assert_eq!(h.stored("members", "m1").await, Some(want));
+    assert!(record_of(&h, "renameMember").get("expr_failed").is_none());
+}
+
+#[tokio::test]
+async fn a_refusal_holds_on_a_call_the_executor_does_not_take() {
+    let world = json!({"operations": {"addMember": {"kind": "create", "refuse": [
+        {"when": "request.body.amount > 1000", "status": 422, "code": "amount_too_large"}
+    ]}}});
+    let h = members(world, vec![]);
+    // A seeded call generates rather than executing.
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "a@x.io", "name": "A", "amount": 5000})),
+            &[("x-mockingbird-seed", "7")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"]["code"], "amount_too_large", "{body}");
+    assert!(h.stored_ids("members").await.is_empty());
+    assert_no_record_generated(&h);
+}
+
+#[tokio::test]
+async fn a_create_that_generates_still_applies_set() {
+    let h = members(
+        add_member(json!({"id": "md5(lower(request.body.email))", "tier": "'gold'"})),
+        vec![json!({"id": "gen1", "email": "a@x.io", "name": "A", "tier": "basic"})],
+    );
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "A@x.io", "name": "A"})),
+            &[("x-mockingbird-seed", "7")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = "a43c564056190dca51f9f4a6fae36c30";
+    assert_eq!(body["id"], id, "{body}");
+    assert_eq!(body["tier"], "gold", "{body}");
+    let stored = h
+        .stored("members", id)
+        .await
+        .expect("stored under the set id");
+    assert_eq!(stored["tier"], "gold");
+}
+
+#[tokio::test]
+async fn held_finds_a_record_past_the_first_page_of_the_type() {
+    let h = members(
+        add_member(json!({
+            "currency": "held('lists', 'l0').currency",
+            "label": "held('lists', 'l599').currency"
+        })),
+        vec![fill_decoys()],
+    );
+    let lists: Vec<Value> = (0..600)
+        .map(|i| json!({"id": format!("l{i}"), "currency": format!("C{i}")}))
+        .collect();
+    h.hold("lists", &lists).await;
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "a@x.io", "name": "A"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["currency"], "C0", "{body}");
+    assert_eq!(body["label"], "C599", "{body}");
+}
+
+#[tokio::test]
+async fn a_refusal_whose_when_fails_does_not_fire_and_is_on_the_request_record() {
+    let world = json!({"operations": {"addMember": {"kind": "create", "refuse": [
+        {"when": "request.body.name > 5", "status": 422, "code": "bad"}
+    ]}}});
+    let h = members(world, vec![fill_decoys()]);
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "a@x.io", "name": "A"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let request = record_of(&h, "addMember");
+    let failed = request["expr_failed"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(failed.len(), 1, "{request}");
+    assert_eq!(failed[0]["pointer"], "/operations/addMember/refuse/0/when");
+}
+
+#[tokio::test]
+async fn an_alternate_key_set_writes_is_refused_when_another_record_holds_it() {
+    let world = json!({
+        "types": {"members": {"identity": {"member": "id", "alternates": ["code"]}}},
+        "operations": {"addMember": {"kind": "create", "set": {"code": "lower(request.body.name)"}}}
+    });
+    let h = members(world, vec![fill_decoys()]);
+    h.hold(
+        "members",
+        &[json!({"id": "m1", "email": "ada@x.io", "name": "Ada", "code": "ada"})],
+    )
+    .await;
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "other@x.io", "name": "ADA"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(h.stored_ids("members").await, vec!["m1".to_string()]);
 }
