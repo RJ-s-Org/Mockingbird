@@ -755,7 +755,7 @@ def drop_harness_rejected(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, An
     return kept, len(rows) - len(kept)
 
 
-WORLD_TIERS = ("none", "derived", "agent")
+WORLD_TIERS = ("none", "derived", "agent", "e2e")
 
 
 def world_of(row: Dict[str, Any]) -> str:
@@ -1477,9 +1477,10 @@ def world_tables(results: Dict[str, Any]) -> List[str]:
         return lines
     lines.append("World descriptions (`--world`): ok rate of every check per tier. none = no description "
                  "revision; derived = Mockingbird's heuristic description written back as a revision; "
-                 "agent = a coding agent's description, written blind from the contract.")
+                 "agent = a coding agent's description, written blind from the contract; e2e = the mock a "
+                 "coding agent built from one prompt (e2e.py).")
     lines.append("")
-    lines += md_table(["Model", "suite", "none", "derived", "agent"], rows or [["—", "—", "—", "—", "—"]])
+    lines += md_table(["Model", "suite"] + list(WORLD_TIERS), rows or [["—"] * (2 + len(WORLD_TIERS))])
     lines.append("")
     if contracts:
         lines.append(f"World authoring ({len(contracts)} contracts, {world.get('authoring_runs') or 0} "

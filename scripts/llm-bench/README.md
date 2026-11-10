@@ -95,6 +95,42 @@ Then run `server_suites.py ... --binary <out>/bin/mb-<sha>` for each build, with
 
 `python3 scripts/llm-bench/fakegate.py <branch|sha|binary> [--base origin/main]` runs every journeys suite and `consistency` (not the undiagnosed blind sets) on `fake_llm.py` for a candidate and a base. It runs them at the `agent` tier, with the committed world-cache's descriptions and cache only, and at tier 0. It costs no spend. Before an engine pull request is marked ready, run it on the branch. It lists every check that went from pass to fail (LOST) or the other way (gained), tier by tier, and exits 1 when a tier lost more than `--noise` checks net. The default noise is 1, because the engine is not entirely deterministic. A check that passes on the fake LLM is one the engine decides, so a loss here is a regression whatever model runs later. Checks that need a real model's answers are not judged. Worktrees, binaries and both sides' results stay under `--work` (default `$TMPDIR/mb-fakegate`). A side's results are kept in a directory named by a hash of its binary, checkout, suites, contracts and descriptions, and reused only from there, so a gate with other inputs never replaces results another gate is reading; a side with no rows for a suite it should have run stops the gate (exit 2) instead of being compared, so gating several branches against one main builds and runs main once; locks let gates share `--work`. A check the base passed that the candidate did not run counts as lost. Each tier also reports its executor-decided failures apart from the net (`executor-decided: N -> M fail (+x/-y)`, with each new one listed as EXEC-FAIL): failing checks whose deciding call the engine answered itself (`source` state or rejected), which fail the same way on a real model, so a junk-LLM gain elsewhere cannot hide an executor regression. They are reported, not part of the verdict. A branch candidate runs with its own scripts and contracts, so a pull request that changes checks moves its own yardstick; to compare engines only, pass a binary, which runs with the base's. A branch name resolves to `origin/<branch>` first, and the gate prints the commit it took. `test_fakegate.py` tests the comparison and the choice of descriptions, and checks that the committed cache covers every suite the gate runs: Sonnet-authored descriptions (`claude-code~claude-sonnet-5-5~p1`) for blind1-10, held-out, journeys and consistency, and Opus ones for blind11-13.
 
+### The end-to-end eval (`e2e.py`)
+
+The product as a user meets it: a coding agent gets one prompt and an API's contract, builds a mock with Mockingbird's plugin, and the app's hidden journeys then run against what it built.
+
+**Stage 1: `e2e.py build --binary B --cache DIR`.** It makes one task per contract of the dev suites (every journeys suite and `consistency`, minus blind14 and blind15). The task directory holds:
+- `contract.<ext>`;
+- `docs/`, when doc excerpts sit next to the contract as `<stem>.docs/`;
+- `PROMPT.md`, one fixed line: "My app integrates with the <Vendor> API. The contract is in ./contract.<ext>. Set up a Mockingbird mock so I can develop and test the app against it."
+
+There are no journeys, checks or hints. `e2e.py tasks --out DIR` writes the task directories on their own.
+
+The agent is a headless Claude Code (`claude -p`, Sonnet by default), set up as follows:
+- **Plugin:** the Mockingbird plugin built from the binary under test, its skills loaded through the Skill tool.
+- **MCP:** that binary's `mockingbird mcp` is its only MCP server.
+- **Files:** Read, Grep and Glob, confined by `--restricted` to the task directory and the plugin.
+- **Server:** an empty `mockingbird serve` with no LLM profile, already running for it.
+- **Tools:** every MCP tool, except those that start, stop or reconfigure servers, open a browser or test a provider.
+- **Caps:** `--budget` (default $1) and `--max-turns` (default 60) per task, and `--cap` dollars for the whole run.
+
+When the agent stops, the product's `mockingbird snapshot export --include scenarios,chaos,limits,world` saves what it built. Each task's `result.json` records:
+- every tool's calls and errors, and the retries;
+- the skill pages read and the refused world entries;
+- turns, cost and wall time;
+- the mocks it built.
+
+Results are cached in `<cache>/<key>/<task>/`. The key hashes the skills, the MCP tool schemas, the prompt version, the model and the caps. The binary's hash is recorded with each result, and joins the key only with `--key-binary`, so an engine change reuses the snapshots. The transcripts in the cache are never committed.
+
+**Stage 2: `server_suites.py --world e2e --e2e-cache <cache>/<key>`.** Each suite's server starts with no mocks. Each mock its journeys call is loaded from the stage-1 snapshot of its contract with `mockingbird snapshot import`, renamed to the mock name and route prefix the journeys use. A contract whose agent built nothing stays unmocked, so its journeys fail.
+
+`fakegate.py --e2e-cache <cache>/<key>` adds this as the `e2e` tier. Both sides load the same snapshots, so the tier gates the engine on fixed builds.
+
+**The report: `e2e.py report RUN --stage1 <cache>/<key> [--paid DIR ...]`.** For each suite and tier it prints:
+- the fake pass rate;
+- the floor: failing checks whose deciding call the engine answered (`source` state or rejected);
+- the projected rate: the pass rate plus the failures whose deciding call reached the model. It is an upper bound unless `--paid` runs show that some model passed them.
+
 ## Budget
 
 The proxy stops spending. Before each call it reserves an estimate of the call's cost and holds it while the call is in flight. It refuses the call with 402 (`bench budget exhausted`) when the following would reach `--budget-usd` (default 9.0):
