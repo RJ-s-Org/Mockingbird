@@ -230,3 +230,38 @@ impl WrittenTypes {
             .unwrap_or_default()
     }
 }
+
+/// Sessions [`MintCounts`] holds at most; it is emptied when full.
+const MAX_MINTING_SESSIONS: usize = 4096;
+
+/// How many ids each session has drawn through this runtime, by type and member: the
+/// count seeds the next draw ([`header_ids::MintSeed`]), so successive mints in one
+/// session differ, a retry after a collision draws anew, and the same calls in the same
+/// order in a fresh runtime draw the same ids.
+#[derive(Debug, Default)]
+pub(crate) struct MintCounts(std::sync::Mutex<HashMap<SessionKey, MemberCounts>>);
+
+/// One session's mints, by type and member.
+type MemberCounts = HashMap<(String, String), u64>;
+
+impl MintCounts {
+    /// The number of ids of type `t`'s member `field` `session` drew before this one,
+    /// counted.
+    pub(super) fn next(&self, session: &SessionKey, t: &str, field: &str) -> u64 {
+        let mut counts = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if counts.len() >= MAX_MINTING_SESSIONS && !counts.contains_key(session) {
+            counts.clear();
+        }
+        let count = counts
+            .entry(session.clone())
+            .or_default()
+            .entry((t.to_string(), field.to_string()))
+            .or_default();
+        let n = *count;
+        *count = count.saturating_add(1);
+        n
+    }
+}

@@ -234,7 +234,9 @@ pub(super) async fn mint_created(
             return Vec::new();
         };
         for record in records.iter_mut().filter(|r| r.is_object() && lacks(r)) {
-            if let Some(id) = mint_one(state, session, (t, field), &carried, &mut given).await {
+            if let Some(id) =
+                mint_one(state, (session, call), (t, field), &carried, &mut given).await
+            {
                 mb_mcm::set_member_at(record, field, id);
             }
         }
@@ -248,7 +250,9 @@ pub(super) async fn mint_created(
     );
     if !sent.is_empty() {
         for record in sent.iter_mut().filter(|r| lacks(r)) {
-            if let Some(id) = mint_one(state, session, (t, field), &carried, &mut given).await {
+            if let Some(id) =
+                mint_one(state, (session, call), (t, field), &carried, &mut given).await
+            {
                 mb_mcm::set_member_at(record, field, id);
             }
         }
@@ -264,7 +268,7 @@ pub(super) async fn mint_created(
         .and_then(|body| mb_mcm::member_at(body, &lr.result))
         .is_some_and(|r| r.is_object() && lacks(r));
     if lacking
-        && let Some(id) = mint_one(state, session, (t, field), &carried, &mut given).await
+        && let Some(id) = mint_one(state, (session, call), (t, field), &carried, &mut given).await
         && let Some(result) = generated
             .body
             .as_mut()
@@ -279,13 +283,14 @@ pub(super) async fn mint_created(
 /// `given`; `None` when none could be drawn.
 pub(super) async fn mint_one(
     state: &mut StateAccess<'_>,
-    session: &SessionKey,
+    (session, call): (&SessionKey, &OperationCall),
     (t, field): (&str, &str),
     carried: &HashSet<String>,
     given: &mut Vec<String>,
 ) -> Option<Value> {
+    let seed = header_ids::MintSeed::new(state.rt, session, call);
     for _ in 0..MINT_ATTEMPTS {
-        let Some(id) = header_ids::draw_record_id(state.rt, t, field) else {
+        let Some(id) = header_ids::draw_record_id(state.rt, seed, t, field) else {
             continue;
         };
         let Some(text) = id_string(&id) else {

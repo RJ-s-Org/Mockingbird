@@ -21,6 +21,10 @@
 //! with identical LLM answers then answer alike. Request bodies kept as
 //! context are scrubbed at random.
 //!
+//! The ids a mock mints for the records it stores (see `mb-protocols`) are
+//! drawn from the same seed, mixed with the contract, the type, the member,
+//! the session and how many the session drew before.
+//!
 //! Generated dates and times are drawn back from [`SEEDED_NOW`] instead of
 //! the clock, so a seeded answer does not change from one day to the next.
 //! The values are reproducible with the same Mockingbird version: a new
@@ -90,7 +94,8 @@ impl Draws {
 
 /// `seed` mixed with `labels` and `parts`, hashed with a fixed function so
 /// that the result does not vary between processes.
-pub(crate) fn derive(seed: u64, labels: &[&str], parts: &[&Value]) -> u64 {
+#[must_use]
+pub fn derive(seed: u64, labels: &[&str], parts: &[&Value]) -> u64 {
     let mut h = Fnv::new();
     h.bytes(&seed.to_le_bytes());
     for label in labels {

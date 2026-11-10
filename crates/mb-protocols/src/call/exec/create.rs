@@ -214,10 +214,15 @@ pub(super) async fn run(
                 }
                 None => {
                     let carried = request_values(op, call);
-                    let drawn =
-                        records::mint_one(state, session, (t, field), &carried, &mut Vec::new())
-                            .instrument(state_span())
-                            .await;
+                    let drawn = records::mint_one(
+                        state,
+                        (session, call),
+                        (t, field),
+                        &carried,
+                        &mut Vec::new(),
+                    )
+                    .instrument(state_span())
+                    .await;
                     match drawn {
                         Some(id) => id,
                         None => return fall("no_id"),
@@ -240,7 +245,8 @@ pub(super) async fn run(
         mb_mcm::set_member_at(&mut data, &member, value);
     }
     // Its tokens' first values; a token none can be minted for is filled as any member.
-    initial_token(rt, t, &mut data);
+    let seed = crate::call::header_ids::MintSeed::new(rt, &plan.session, call);
+    initial_token(rt, (seed, t), &mut data);
     let tokens = token_members(rt, t);
     owned.retain(|m| !tokens.contains(m) || mb_mcm::member_at(&data, m).is_some());
     // A request member that does not fit the record's is never stored as sent: the
@@ -269,7 +275,7 @@ pub(super) async fn run(
     let leaf = mb_mcm::leaf_member(field).to_owned();
     if id_shaped(&leaf) {
         for schema in &shape.schemas {
-            mint_items(rt, (t, schema), &mut data, &leaf, GAP_DEPTH);
+            mint_items(rt, (seed, t, schema), &mut data, &leaf, GAP_DEPTH);
         }
     }
     // A member naming the record besides its id (an alternate key) nobody set is unique
@@ -324,7 +330,7 @@ pub(super) async fn run(
         fill_into(known, filled.members);
         settle_filled(rt, (field, &shape.schemas), (&missing, &required), known);
     }
-    unique_keys(state, (&plan.session, t), &filled_keys, &mut data)
+    unique_keys(state, (seed, t), &filled_keys, &mut data)
         .instrument(state_span())
         .await;
 
@@ -465,7 +471,7 @@ async fn mint_keys(
 /// holds the draw; one no draw frees is left as filled.
 async fn unique_keys(
     state: &mut StateAccess<'_>,
-    (session, t): (&mb_state::SessionKey, &str),
+    (seed, t): (crate::call::header_ids::MintSeed<'_>, &str),
     filled: &[(String, Value)],
     data: &mut Value,
 ) {
@@ -473,7 +479,7 @@ async fn unique_keys(
         return;
     }
     let rt = state.rt;
-    let listed = state.list(session, t, MAX_SCAN).await;
+    let listed = state.list(seed.session(), t, MAX_SCAN).await;
     for (name, member) in filled {
         let held: Vec<Option<String>> = listed
             .iter()
@@ -485,7 +491,7 @@ async fn unique_keys(
             continue;
         }
         let drawn = (0..MINT_ITEM_ATTEMPTS)
-            .filter_map(|_| crate::call::header_ids::draw_id_as(rt, member))
+            .filter_map(|_| crate::call::header_ids::draw_id_as(rt, (seed, t, name), member))
             .find(|drawn| !taken(drawn) && fits(rt, member, drawn));
         if let Some(value) = drawn
             && let Some(record) = data.as_object_mut()
@@ -619,7 +625,11 @@ fn token_members(rt: &crate::MockRuntime, t: &str) -> Vec<String> {
 /// when the request sent none and a read declares the member: an integer's `1` (its
 /// `minimum`, if higher), else a value drawn as the member declares it, as a minted id
 /// is.
-fn initial_token(rt: &crate::MockRuntime, t: &str, record: &mut Value) {
+fn initial_token(
+    rt: &crate::MockRuntime,
+    (seed, t): (crate::call::header_ids::MintSeed<'_>, &str),
+    record: &mut Value,
+) {
     let bundle = rt.bundle();
     for member in token_members(rt, t) {
         if mb_mcm::member_at(record, &member).is_some() {
@@ -641,7 +651,7 @@ fn initial_token(rt: &crate::MockRuntime, t: &str, record: &mut Value) {
                     .unwrap_or(1);
                 Some(Value::from(floor.max(1)))
             }
-            false => crate::call::header_ids::draw_id_as(rt, &schema),
+            false => crate::call::header_ids::draw_id_as(rt, (seed, t, &member), &schema),
         };
         if let Some(value) = value.filter(|v| fits(rt, &schema, v)) {
             mb_mcm::set_member_at(record, &member, value);
@@ -1821,7 +1831,7 @@ fn fits(rt: &crate::MockRuntime, schema: &Value, value: &Value) -> bool {
 /// unique among the items of its array.
 fn mint_items(
     rt: &crate::MockRuntime,
-    (t, schema): (&str, &Value),
+    (seed, t, schema): (crate::call::header_ids::MintSeed<'_>, &str, &Value),
     value: &mut Value,
     field: &str,
     depth: usize,
@@ -1839,7 +1849,7 @@ fn mint_items(
                 };
                 for (name, member) in properties {
                     if let Some(inner) = held.get_mut(name) {
-                        mint_items(rt, (t, member), inner, field, depth - 1);
+                        mint_items(rt, (seed, t, member), inner, field, depth - 1);
                     }
                 }
             }
@@ -1858,13 +1868,15 @@ fn mint_items(
                     if let (Some(declared), Value::Object(members)) = (&declared, &mut *held)
                         && !members.contains_key(field)
                         && let Some(id) = (0..MINT_ITEM_ATTEMPTS)
-                            .filter_map(|_| crate::call::header_ids::draw_id_as(rt, declared))
+                            .filter_map(|_| {
+                                crate::call::header_ids::draw_id_as(rt, (seed, t, field), declared)
+                            })
                             .find(|id| !given.contains(id))
                     {
                         given.push(id.clone());
                         members.insert(field.to_owned(), id);
                     }
-                    mint_items(rt, (t, item), held, field, depth - 1);
+                    mint_items(rt, (seed, t, item), held, field, depth - 1);
                 }
             }
         }

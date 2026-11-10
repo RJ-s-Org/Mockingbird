@@ -12,6 +12,8 @@ use mb_engine::headers::IdentityHeaderKind;
 use mb_engine::{Faker, GeneratedResponse, OperationCall, SchemaValidator};
 use mb_mcm::{Binding, Operation};
 use mb_state::SessionKey;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use serde_json::{Map, Value, json};
 
 use super::{StateAccess, id_string, records, request_values, type_members};
@@ -19,6 +21,54 @@ use crate::MockRuntime;
 
 /// How many ids are drawn before giving up on one the session does not hold.
 const ATTEMPTS: u32 = 8;
+
+/// What seeds the ids a call mints: the call's [`mb_engine::SEED_HEADER`], else the
+/// engine's faker seed, and the session the call is in. With a seed, each draw is
+/// seeded by it mixed with the contract, the type, the member, the session and how many
+/// ids of that member the session drew before ([`crate::call::MintCounts`]): the same
+/// seed and the same calls in the same order mint the same ids, and every draw in a
+/// session (a retry after a collision too) differs. Without one the draws are random,
+/// as the engine's are.
+#[derive(Clone, Copy)]
+pub(super) struct MintSeed<'a> {
+    seed: Option<u64>,
+    session: &'a SessionKey,
+}
+
+impl<'a> MintSeed<'a> {
+    pub(super) fn new(rt: &MockRuntime, session: &'a SessionKey, call: &OperationCall) -> Self {
+        Self {
+            seed: mb_engine::seed::request_seed(call).or(rt.engine.faker_seed()),
+            session,
+        }
+    }
+
+    /// The session the ids are minted in.
+    pub(super) fn session(self) -> &'a SessionKey {
+        self.session
+    }
+
+    /// The generator and faker of the next draw of an id of type `t`'s member `field`.
+    fn draws(self, rt: &MockRuntime, (t, field): (&str, &str)) -> (StdRng, Faker) {
+        let Some(seed) = self.seed else {
+            return (rand::make_rng::<StdRng>(), Faker::default());
+        };
+        let drawn = rt.mint_counts().next(self.session, t, field);
+        let s = self.session;
+        let labels = [
+            rt.bundle().source_digest.as_str(),
+            "mint",
+            t,
+            field,
+            &s.workspace,
+            &s.mock,
+            &s.session,
+        ];
+        let derived = mb_engine::seed::derive(seed, &labels, &[&Value::from(drawn)]);
+        let faker = Faker::default().with_now(mb_engine::seed::SEEDED_NOW);
+        (StdRng::seed_from_u64(derived), faker)
+    }
+}
 
 /// Mints the id of the record `op`'s create (of type `t`) answered in a header, when
 /// its answer names it only there; serves it in `generated.headers` and returns it, to
@@ -73,9 +123,11 @@ pub(super) async fn mint(
         == Some("string");
     let checks = IdChecks::new(rt, held.as_ref(), &header.schema, !location)?;
     let carried = request_values(op, call);
+    let seed = MintSeed::new(rt, session, call);
     for _ in 0..ATTEMPTS {
         let Some(id) = draw(
             rt,
+            (seed, t, field),
             (held.as_ref(), declared.as_ref()),
             &header.schema,
             string_identity,
@@ -372,6 +424,7 @@ impl IdChecks {
 /// by the id the header serves finds the record.
 fn draw(
     rt: &MockRuntime,
+    (seed, t, field): (MintSeed<'_>, &str, &str),
     (strict, declared): (Option<&Value>, Option<&Value>),
     header: &Value,
     string_identity: bool,
@@ -381,8 +434,7 @@ fn draw(
     // The strictest first: what every read declares together, when that is more.
     let strict = strict.filter(|s| Some(*s) != declared);
     let schemas = [strict, declared, Some(header), Some(&string)];
-    let mut rng = rand::rng();
-    let faker = Faker::default();
+    let (mut rng, faker) = seed.draws(rt, (t, field));
     schemas
         .into_iter()
         .flatten()
@@ -403,7 +455,12 @@ fn draw(
 /// plain string where they do not), in the type's identity pattern where it has one.
 /// `None` when the draw is not one the records hold (a pattern past the member's
 /// `maxLength`). Whether the session holds it already is the caller's to check.
-pub(super) fn draw_record_id(rt: &MockRuntime, t: &str, field: &str) -> Option<Value> {
+pub(super) fn draw_record_id(
+    rt: &MockRuntime,
+    seed: MintSeed<'_>,
+    t: &str,
+    field: &str,
+) -> Option<Value> {
     let (declared, held) = record_id_schema(rt, t, field);
     let string = json!({"type": "string"});
     let string_identity = declared
@@ -414,6 +471,7 @@ pub(super) fn draw_record_id(rt: &MockRuntime, t: &str, field: &str) -> Option<V
     let checks = IdChecks::new(rt, held.as_ref(), &string, false)?;
     let id = draw(
         rt,
+        (seed, t, field),
         (held.as_ref(), declared.as_ref()),
         &string,
         string_identity,
@@ -430,13 +488,18 @@ pub(super) fn draw_record_id(rt: &MockRuntime, t: &str, field: &str) -> Option<V
 
 /// An id for a nested item whose identity member's schema is `declared` (a line item's
 /// `id`), drawn as [`draw_record_id`] draws one: as declared, else a plain string, and
-/// valid as declared. `None` when no draw is.
-pub(super) fn draw_id_as(rt: &MockRuntime, declared: &Value) -> Option<Value> {
+/// valid as declared. `None` when no draw is. Seeded as type `t`'s member `field`.
+pub(super) fn draw_id_as(
+    rt: &MockRuntime,
+    (seed, t, field): (MintSeed<'_>, &str, &str),
+    declared: &Value,
+) -> Option<Value> {
     let string = json!({"type": "string"});
     let string_identity = declared.get("type").and_then(Value::as_str) == Some("string");
     let checks = IdChecks::new(rt, Some(declared), &string, false)?;
     draw(
         rt,
+        (seed, t, field),
         (None, Some(declared)),
         &string,
         string_identity,
