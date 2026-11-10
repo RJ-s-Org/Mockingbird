@@ -28,6 +28,7 @@ use serde_json::Value;
 
 mod apply;
 mod effective;
+pub mod expr;
 mod tier0;
 mod validate;
 
