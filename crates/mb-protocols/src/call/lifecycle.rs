@@ -9,7 +9,8 @@
 //!   deleted marker ([`deleted`]). A list leaves it out ([`Exclusion`], applied by
 //!   [`list_query::keeps`] on every list path) unless the request sends the
 //!   `listed_with` parameter at its value; a unique set no longer counts it
-//!   ([`repeats::described_conflict`]).
+//!   ([`repeats::described_conflict`]). A delete sending its `unless` parameter at its
+//!   value (`?force=true`) removes the record instead ([`delete_softly`]).
 //!
 //! An operation's `not_found` is the status a read of a missing record answers
 //! ([`not_found`]), instead of the one the engine would pick.
@@ -44,25 +45,30 @@ impl Exclusion {
     }
 
     /// Whether the request's query `query` sends the `unless` parameter at its value
-    /// (`"true"` is `true`; an array sends it when any of its values does).
+    /// ([`sends`]).
     pub(super) fn lifted_by(&self, query: &serde_json::Map<String, Value>) -> bool {
-        let Some((param, wanted)) = &self.unless else {
-            return false;
-        };
-        let Some(sent) = query.get(param) else {
-            return false;
-        };
-        let same = |v: &Value| match (v, wanted) {
-            (Value::String(text), Value::String(w)) => text == w,
-            (Value::String(text), other) => {
-                serde_json::from_str::<Value>(text.trim()).is_ok_and(|v| v == *other)
-            }
-            (v, w) => v == w,
-        };
-        match sent {
-            Value::Array(values) => values.iter().any(same),
-            one => same(one),
+        self.unless
+            .as_ref()
+            .is_some_and(|(param, wanted)| sends(query, param, wanted))
+    }
+}
+
+/// Whether query `query` sends `param` at `wanted` (`"true"` is `true`; an array sends
+/// it when any of its values does).
+fn sends(query: &serde_json::Map<String, Value>, param: &str, wanted: &Value) -> bool {
+    let Some(sent) = query.get(param) else {
+        return false;
+    };
+    let same = |v: &Value| match (v, wanted) {
+        (Value::String(text), Value::String(w)) => text == w,
+        (Value::String(text), other) => {
+            serde_json::from_str::<Value>(text.trim()).is_ok_and(|v| v == *other)
         }
+        (v, w) => v == w,
+    };
+    match sent {
+        Value::Array(values) => values.iter().any(same),
+        one => same(one),
     }
 }
 
@@ -114,14 +120,31 @@ pub(super) fn soft_delete(rt: &MockRuntime, t: &str, record: &mut Value) -> bool
 }
 
 /// Moves `record`, a held record of type `t`, to the described soft-delete state as a
-/// delete of it does; answers whether it did. A record already in that state has
-/// nowhere further to move, so a delete of it removes it (`false`), as a second delete
-/// does where a first one deactivates or trashes.
-pub(super) fn delete_softly(rt: &MockRuntime, t: &str, record: &mut Value) -> bool {
-    if exclusion(rt, t).is_some_and(|gone| gone.excludes(record)) {
+/// delete of it whose query is `query` does; answers whether it did. A record already
+/// in that state has nowhere further to move, so a delete of it removes it (`false`),
+/// as a second delete does where a first one deactivates or trashes; so does a delete
+/// sending the soft delete's `unless` parameter at its value (`?force=true`).
+pub(super) fn delete_softly(
+    rt: &MockRuntime,
+    t: &str,
+    record: &mut Value,
+    query: &serde_json::Map<String, Value>,
+) -> bool {
+    if exclusion(rt, t).is_some_and(|gone| gone.excludes(record)) || forced(rt, t, query) {
         return false;
     }
     soft_delete(rt, t, record)
+}
+
+/// Whether a delete of a record of type `t` whose query is `query` sends its soft
+/// delete's `unless` parameter at its value, which removes the record instead.
+pub(super) fn forced(rt: &MockRuntime, t: &str, query: &serde_json::Map<String, Value>) -> bool {
+    rt.described()
+        .type_desc(t)
+        .and_then(|d| d.lifecycle.as_ref())
+        .and_then(|l| l.soft_delete.as_ref())
+        .and_then(|sd| sd.unless.as_ref())
+        .is_some_and(|u| sends(query, &u.param, &u.value))
 }
 
 /// Sets `member` of `record` to `value`, unless that leaves a record type `t`'s schema

@@ -267,6 +267,9 @@
         },
         "listed_with": {
           "$ref": "#/$defs/param_value"
+        },
+        "unless": {
+          "$ref": "#/$defs/param_value"
         }
       },
       "required": [
@@ -659,6 +662,69 @@
         },
         "not_found": {
           "$ref": "#/$defs/status"
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "param": {
+              "$ref": "#/$defs/param"
+            },
+            "separator": {
+              "type": "string",
+              "minLength": 1
+            },
+            "always": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/member"
+              }
+            },
+            "default": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/member"
+              }
+            }
+          },
+          "required": [
+            "param"
+          ]
+        },
+        "queue": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effect": {
+              "enum": [
+                "append",
+                "take"
+              ]
+            },
+            "count": {
+              "$ref": "#/$defs/pointer"
+            },
+            "requeue": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "at": {
+                  "$ref": "#/$defs/pointer"
+                },
+                "value": true
+              },
+              "required": [
+                "at",
+                "value"
+              ]
+            },
+            "redelivered": {
+              "$ref": "#/$defs/member"
+            }
+          },
+          "required": [
+            "effect"
+          ]
         }
       }
     }

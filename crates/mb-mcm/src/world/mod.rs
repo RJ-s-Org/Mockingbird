@@ -188,6 +188,10 @@ pub struct SoftDelete {
     /// The list parameter and value that include deleted records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listed_with: Option<ParamValue>,
+    /// The delete parameter and value that remove the record instead, e.g.
+    /// `{param: force, value: true}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unless: Option<ParamValue>,
     /// Unknown keys.
     #[serde(flatten)]
     pub extra: Extra,
@@ -311,6 +315,80 @@ pub struct OpDesc {
     /// The declared status of a missing record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_found: Option<u16>,
+    /// The query parameter that names the members a read or list answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<FieldsDesc>,
+    /// The messages an action puts on its target or takes from it, first in
+    /// first out (a message queue's publish and get).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<QueueDesc>,
+    /// Unknown keys.
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// The query parameter naming the members a read's record, or each of a list's
+/// items, answers (a sparse fieldset: `fields=id,name`, `$select=name`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct FieldsDesc {
+    /// The query parameter.
+    pub param: String,
+    /// What separates its members; `,` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separator: Option<String>,
+    /// Members answered whatever it names, e.g. the identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub always: Vec<String>,
+    /// The members answered when the request does not send it (besides
+    /// `always`); every member when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<Vec<String>>,
+    /// Unknown keys.
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// The messages an action puts on its target record, or takes from it, first in
+/// first out.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct QueueDesc {
+    /// Whether it puts a message on or takes messages off.
+    pub effect: QueueEffect,
+    /// With `take`: the request body member saying how many it takes; one when
+    /// absent or not sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<Pointer>,
+    /// With `take`: the request body member and value(s) that leave the messages
+    /// taken on the queue, at its head, e.g. `{at: /ackmode, value: [requeue]}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requeue: Option<RequeueDesc>,
+    /// With `take`: the message member set `true` on a message taken before and
+    /// left on the queue, `false` on one never taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redelivered: Option<String>,
+    /// Unknown keys.
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// What a queue action does with its target's messages.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueEffect {
+    /// Puts the request's record (its body, or at `request.record`) last.
+    Append,
+    /// Answers the first messages, oldest first, and removes them.
+    Take,
+}
+
+/// The request body member, and the value or values of it, that leave taken
+/// messages on their queue.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct RequeueDesc {
+    /// The request body member.
+    pub at: Pointer,
+    /// Its value, or an array of the values that requeue.
+    pub value: Value,
     /// Unknown keys.
     #[serde(flatten)]
     pub extra: Extra,
@@ -930,6 +1008,8 @@ fn overlay_op(mut b: OpDesc, t: &OpDesc) -> OpDesc {
     set_vec(&mut b.ignores, &t.ignores);
     set(&mut b.idempotency, &t.idempotency);
     set(&mut b.not_found, &t.not_found);
+    set(&mut b.fields, &t.fields);
+    set(&mut b.queue, &t.queue);
     merge_extra(&mut b.extra, &t.extra);
     b
 }

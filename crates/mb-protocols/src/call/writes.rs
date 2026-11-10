@@ -301,7 +301,8 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
                 && let Some(held) = state.get(session, resource_type, &id).await
             {
                 let mut data = held.data;
-                if lifecycle::delete_softly(rt, resource_type, &mut data) {
+                let sent = query.cloned().unwrap_or_default();
+                if lifecycle::delete_softly(rt, resource_type, &mut data, &sent) {
                     let place = (collection, None, true);
                     store_one(state, session, (op, resource_type), (id, data), place).await;
                     return WriteOutcome::default();

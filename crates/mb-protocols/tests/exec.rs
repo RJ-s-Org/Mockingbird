@@ -486,6 +486,7 @@ paths:
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Folder"}}}}, "404": {description: missing}}
     delete:
       operationId: deleteFolder
+      parameters: [{name: force, in: query, schema: {type: boolean}}]
       responses: {"204": {description: deleted}}
   /folders/{id}/touch:
     post:
@@ -646,6 +647,66 @@ async fn a_delete_of_a_soft_deleted_record_removes_it() {
     );
     let (status, _, body) = h.send("GET", "/folders/f1", None, &[]).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+/// A delete sending the soft delete's `unless` parameter at its value removes the record
+/// at once, on the executor's path and on the generated one (a seeded delete).
+#[tokio::test]
+async fn a_delete_sending_the_soft_delete_s_unless_parameter_removes_the_record() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"types": {"folders": {"lifecycle": {
+        "member": "state", "states": ["ACTIVE", "DELETED"], "initial": "ACTIVE",
+        "soft_delete": {"state": "DELETED", "unless": {"param": "force", "value": true}}
+    }}}, "operations": {"getFolder": {"kind": "read", "type": "folders", "not_found": 404}}});
+    let h = support::harness(
+        DELETES,
+        vec![
+            json!({"id": "f1", "name": "docs", "state": "ACTIVE"}),
+            json!({"id": "f2", "name": "logs", "state": "ACTIVE"}),
+        ],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    let t = type_of(&h, "getFolder");
+    for name in ["docs", "logs"] {
+        let (status, _, body) = h
+            .send("POST", "/folders", Some(json!({"name": name})), SEEDED)
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    // Another value of the parameter soft-deletes, as a delete without it does.
+    let (status, _, body) = h.send("DELETE", "/folders/f1?force=false", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(
+        h.stored(&t, "f1").await,
+        Some(json!({"id": "f1", "name": "docs", "state": "DELETED"}))
+    );
+    let (status, headers, body) = h.send("DELETE", "/folders/f1?force=true", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(source(&headers), "state");
+    assert_eq!(h.stored(&t, "f1").await, None);
+    let (status, _, body) = h.send("GET", "/folders/f1", None, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(
+        capture
+            .of("deleteFolder")
+            .iter()
+            .all(|l| l.exec_fallback.is_none()),
+        "{:?}",
+        capture.of("deleteFolder")
+    );
+    // A seeded delete takes the generated path, which removes it too.
+    let seeded = [("x-mockingbird-seed", "7")];
+    let (status, _, body) = h
+        .send("DELETE", "/folders/f2?force=true", None, &seeded)
+        .await;
+    assert!(status.is_success(), "{body}");
+    assert_eq!(h.stored(&t, "f2").await, None);
+    assert_eq!(
+        h.provider.requests().len(),
+        2,
+        "no executed delete asked the model"
+    );
 }
 
 /// The generated path agrees: a seeded delete (`seeded`, which the executor leaves to
