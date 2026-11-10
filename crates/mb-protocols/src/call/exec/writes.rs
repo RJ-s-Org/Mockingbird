@@ -103,7 +103,7 @@ async fn update(
             return Ran::Generate(None);
         }
     };
-    transitions::apply(rt, op, call.body.as_ref(), &mut data);
+    transitions::apply(state, (plan, call), Some(&stored.data), &mut data).await;
     // What a replace leaves out that a read requires is filled below, once nothing
     // falls back: until then the held values stand in for it.
     let missing = match kind {

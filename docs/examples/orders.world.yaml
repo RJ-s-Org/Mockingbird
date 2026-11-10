@@ -3,6 +3,15 @@
 # heuristics fill in the rest. See docs/world.md.
 version: 1
 operations:
+  createOrder:
+    # Expressions (docs/world.md#expressions): a new order starts pending,
+    # and one over the limit is refused with the declared 400.
+    set:
+      status: "'pending'"
+    refuse:
+      - when: "request.body.total > 10000"
+        status: 400
+        message: {expr: "'an order total is at most 10000, not ' + string(request.body.total)"}
   getOrder:
     not_found: 404
   deleteOrder:

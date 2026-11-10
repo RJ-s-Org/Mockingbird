@@ -1380,6 +1380,7 @@ pub(super) async fn not_modified(
         patched: None,
         headers: Vec::new(),
         world_gaps: Vec::new(),
+        exec_notes: serde_json::Map::new(),
     })
 }
 

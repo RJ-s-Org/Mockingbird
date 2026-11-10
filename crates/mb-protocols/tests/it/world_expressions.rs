@@ -1,0 +1,324 @@
+//! World expressions at runtime: an operation's `set` (and `changes`, read as `set`)
+//! on the record a create, update or action stores, and its `refuse` before anything is
+//! stored or generated; what failed, and why the executor went on to generation, on the
+//! request record.
+#![cfg(feature = "http-rest")]
+
+use axum::http::StatusCode;
+use serde_json::{Value, json};
+
+use crate::support::{self, DescribedHarness};
+
+/// Members added to `/members` and read by id, renamed by an action; lists read by id.
+/// A refusal's body nests its code and message under `error`.
+const MEMBERS: &str = r##"
+openapi: 3.0.0
+info: {title: Members, version: "1"}
+paths:
+  /members:
+    post:
+      operationId: addMember
+      parameters: [{name: X-Actor, in: header, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {email: {type: string}, name: {type: string}, list_id: {type: string}, amount: {type: integer}}}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Member"}}}}
+        "409": {description: taken, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+        "422": {description: invalid, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+  /members/{id}:
+    get:
+      operationId: getMember
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Member"}}}}}
+  /members/{id}/rename:
+    post:
+      operationId: renameMember
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {new_name: {type: string}, label: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Member"}}}}}
+  /lists/{id}:
+    get:
+      operationId: getList
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/List"}}}}}
+components:
+  schemas:
+    Member:
+      type: object
+      required: [id, email, name]
+      properties:
+        id: {type: string}
+        email: {type: string}
+        name: {type: string}
+        list_id: {type: string}
+        currency: {type: string}
+        label: {type: string}
+        tier: {type: string}
+        number: {type: integer}
+        code: {type: string}
+    List:
+      type: object
+      required: [id, currency]
+      properties: {id: {type: string}, currency: {type: string}}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties: {code: {type: string}, message: {type: string}}
+"##;
+
+/// What fill answers for a member's missing members: a value for every member, so
+/// one the description sets would show if fill wrote it.
+fn fill_decoys() -> Value {
+    json!({
+        "list_id": "decoy", "currency": "XXX", "label": "decoy", "tier": "decoy",
+        "number": 999, "code": "decoy"
+    })
+}
+
+fn members(world: Value, script: Vec<Value>) -> DescribedHarness {
+    support::described(MEMBERS, world, script)
+}
+
+fn add_member(set: Value) -> Value {
+    json!({"operations": {"addMember": {"kind": "create", "set": set}}})
+}
+
+/// The one request record of `operation`.
+fn record_of(h: &DescribedHarness, operation: &str) -> Value {
+    let records = h.records();
+    let mine: Vec<_> = records
+        .iter()
+        .filter(|r| r.operation_id.as_deref() == Some(operation))
+        .collect();
+    assert_eq!(mine.len(), 1, "{records:?}");
+    mine[0].request.clone()
+}
+
+#[tokio::test]
+async fn set_writes_members_from_the_request_a_held_record_a_template_a_hash_and_a_condition() {
+    let h = members(
+        add_member(json!({
+            "id": "md5(lower(request.body.email))",
+            "currency": "held('lists', request.body.list_id).currency",
+            "label": "'member:' + request.body.name + '@' + request.headers['x-actor']",
+            "tier": "request.body.amount > 100 ? 'gold' : 'basic'",
+            "number": "request.body.amount * 2.0",
+            "code": "request.body.amount"
+        })),
+        vec![fill_decoys()],
+    );
+    h.hold("lists", &[json!({"id": "l1", "currency": "EUR"})])
+        .await;
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(
+                json!({"email": "Ada@Example.com", "name": "Ada", "list_id": "l1", "amount": 150}),
+            ),
+            &[("x-actor", "ops")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = "3e3417d7ef77d5932a6734b916515ed5";
+    let want = json!({
+        "id": id,
+        "email": "Ada@Example.com",
+        "name": "Ada",
+        "list_id": "l1",
+        "amount": null,
+        "currency": "EUR",
+        "label": "member:Ada@ops",
+        "tier": "gold",
+        // An integral double into an integer member is an integer; an integer into a
+        // string member is its text.
+        "number": 300,
+        "code": "150"
+    });
+    for (member, value) in want.as_object().unwrap() {
+        if value.is_null() {
+            continue;
+        }
+        assert_eq!(&body[member], value, "{member}: {body}");
+    }
+    let stored = h
+        .stored("members", id)
+        .await
+        .expect("stored under the set id");
+    assert_eq!(stored["currency"], "EUR");
+    assert_eq!(stored["number"], 300);
+    assert!(record_of(&h, "addMember").get("expr_failed").is_none());
+}
+
+#[tokio::test]
+async fn a_member_set_names_is_never_filled() {
+    let h = members(
+        add_member(json!({"tier": "request.body.amount > 100 ? 'gold' : 'basic'"})),
+        vec![fill_decoys()],
+    );
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "a@x.io", "name": "A", "amount": 5})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["tier"], "basic", "{body}");
+    // What fill wrote stands where nothing is set.
+    assert_eq!(body["label"], "decoy", "{body}");
+    let asked: Vec<String> = h
+        .provider
+        .requests()
+        .iter()
+        .map(|r| format!("{:?}", r.response_format))
+        .collect();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(
+        !asked[0].contains("\"tier\""),
+        "fill was asked for a set member: {asked:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_expression_leaves_the_member_to_fill_and_is_on_the_request_record() {
+    let h = members(
+        add_member(json!({"number": "int(request.body.name)", "tier": "'basic'"})),
+        vec![fill_decoys()],
+    );
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "a@x.io", "name": "Ada"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["number"], 999, "fill's value stands: {body}");
+    assert_eq!(body["tier"], "basic", "{body}");
+    let request = record_of(&h, "addMember");
+    let failed = request["expr_failed"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(failed.len(), 1, "{request}");
+    assert_eq!(failed[0]["pointer"], "/operations/addMember/set/number");
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("line 1, column"),
+        "{request}"
+    );
+}
+
+#[tokio::test]
+async fn refusals_answer_in_order_with_code_and_message_in_a_nested_error() {
+    let world = json!({"operations": {"addMember": {"kind": "create", "refuse": [
+        {
+            "when": "request.body.amount > 1000",
+            "status": 422,
+            "code": "amount_too_large",
+            "message": {"expr": "'amount ' + string(request.body.amount) + ' is over 1000'"}
+        },
+        {
+            "when": "exists('members', lower(it.email) == lower(request.body.email))",
+            "status": 409,
+            "code": "member_exists",
+            "message": "this email is a member already"
+        }
+    ]}}});
+    // No script: the error body is the faker's, with the refusal's facts over it.
+    let h = members(world, vec![]);
+    h.hold(
+        "members",
+        &[json!({"id": "m1", "email": "ada@x.io", "name": "Ada"})],
+    )
+    .await;
+    // Both hold: the first in order answers.
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "ADA@x.io", "name": "A", "amount": 5000})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"]["code"], "amount_too_large", "{body}");
+    assert_eq!(
+        body["error"]["message"], "amount 5000 is over 1000",
+        "{body}"
+    );
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "ADA@x.io", "name": "A", "amount": 5})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"]["code"], "member_exists", "{body}");
+    assert_eq!(
+        body["error"]["message"], "this email is a member already",
+        "{body}"
+    );
+    assert_eq!(h.stored_ids("members").await, vec!["m1".to_string()]);
+    // Neither holds: the create goes on.
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "bob@x.io", "name": "Bob", "amount": 5})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+#[tokio::test]
+async fn a_changes_world_sets_as_before_through_set() {
+    let world = json!({"operations": {"renameMember": {
+        "kind": "action",
+        "target": {"path_param": "id"},
+        "changes": {"name": {"from_request": "/new_name"}, "tier": {"value": "gold"}, "label": {"from_request": "/label"}}
+    }}});
+    let h = members(world, vec![]);
+    let held = json!({"id": "m1", "email": "a@x.io", "name": "Ada", "label": "kept"});
+    h.hold("members", std::slice::from_ref(&held)).await;
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members/m1/rename",
+            Some(json!({"new_name": "Grace"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let want =
+        json!({"id": "m1", "email": "a@x.io", "name": "Grace", "label": "kept", "tier": "gold"});
+    assert_eq!(body, want);
+    assert_eq!(h.stored("members", "m1").await, Some(want));
+    assert!(h.provider.requests().is_empty());
+    // A missing request member sets nothing, and is no failure.
+    assert!(record_of(&h, "renameMember").get("expr_failed").is_none());
+}
+
+#[tokio::test]
+async fn why_the_executor_generated_is_on_the_request_record() {
+    let h = members(
+        json!({}),
+        vec![json!({"id": "m9", "email": "a@x.io", "name": "A"})],
+    );
+    let (status, _, body) = h.send("GET", "/members/m9", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let request = record_of(&h, "getMember");
+    assert_eq!(request["exec_fallback"], "not_held", "{request}");
+    assert!(request.get("exec_fallback_on").is_none(), "{request}");
+}

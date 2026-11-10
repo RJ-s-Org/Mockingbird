@@ -368,6 +368,7 @@ fn repeat_body(bundle: &Bundle, status: u16, member: &str) -> Value {
         patched: None,
         headers: Vec::new(),
         world_gaps: Vec::new(),
+        exec_notes: serde_json::Map::new(),
     };
     let out = offline()
         .refuse_repeated_value(

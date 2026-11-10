@@ -145,6 +145,9 @@ pub enum ErrorCause {
     /// The request's concurrency token or precondition does not match the record's
     /// current version.
     Stale,
+    /// A refusal the world description states (`refuse`): a rule the API documents
+    /// for the operation, which the request breaks.
+    Refused,
 }
 
 impl ErrorCause {
@@ -163,6 +166,9 @@ another record"
                 "the request's concurrency token or precondition does not match the record's \
 current version"
             }
+            ErrorCause::Refused => {
+                "the request breaks a rule the API documents for this operation, so it is refused"
+            }
         }
     }
 }
@@ -173,6 +179,7 @@ current version"
 pub struct RefusalFacts {
     message: String,
     members: Vec<String>,
+    code: Option<String>,
 }
 
 impl RefusalFacts {
@@ -191,6 +198,7 @@ impl RefusalFacts {
         Self {
             message: format!("{} is already in use", named.join(" with ")),
             members: taken.iter().map(|(m, _)| m.clone()).collect(),
+            code: None,
         }
     }
 
@@ -206,7 +214,26 @@ impl RefusalFacts {
         Self {
             message: message.to_string(),
             members: Vec::new(),
+            code: None,
         }
+    }
+
+    /// A refusal the world description states: its `code` and `message`, each
+    /// placed where the error schema has a member for it, when given (an empty
+    /// message says nothing).
+    #[must_use]
+    pub fn stated(code: Option<String>, message: Option<String>) -> Self {
+        Self {
+            message: message.unwrap_or_default(),
+            members: Vec::new(),
+            code,
+        }
+    }
+
+    /// The code the refusal says, when it says one.
+    #[must_use]
+    pub fn code(&self) -> Option<&str> {
+        self.code.as_deref()
     }
 
     /// The message-like member's text.
@@ -604,6 +631,256 @@ pub fn with_status_text(
         }
     }
     out
+}
+
+/// One step of a path into an error body: a member, or the first item of an array.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Step {
+    Key(String),
+    First,
+}
+
+/// How strongly a member name says it holds an error's code: `code` first, then
+/// `error_code` (any case and separator), then any other name ending in `code`, then
+/// `type`; `None` for a name that is not code-like ([`code_like`]).
+fn code_rank(name: &str) -> Option<u8> {
+    let folded = folded(name);
+    match folded.as_str() {
+        "code" => Some(0),
+        "errorcode" => Some(1),
+        "type" => Some(3),
+        f if f.ends_with("code") => Some(2),
+        _ => None,
+    }
+}
+
+/// Whether member `name`, declared by `prop`, can hold an error's code: a code-like
+/// scalar ([`code_like`]) that holds no URI (problem+json's `type`) nor an integer
+/// HTTP status (`status_code`).
+fn code_member(name: &str, prop: &Value, defs: &Map<String, Value>) -> bool {
+    if !code_like(name) {
+        return false;
+    }
+    let parts = branches(prop, defs);
+    let kinds = types(&parts);
+    let scalar = kinds
+        .iter()
+        .any(|t| matches!(*t, "string" | "integer" | "number"));
+    let uri = uri_format(&parts) || shown_values(&parts).any(|v| v.contains("://"));
+    let http_status = folded(name).ends_with("statuscode") && !kinds.contains(&"string");
+    scalar && !uri && !http_status
+}
+
+/// The path to the member of an error `schema` that holds its code, and that
+/// member's schema: the best-named code member ([`code_rank`]) at the top level, else
+/// in a nested object (`error.code`), else in the first item of an array of error
+/// objects (`errors[0].code`), shallower first.
+fn code_path<'a>(
+    schema: &'a Value,
+    defs: &'a Map<String, Value>,
+    depth: usize,
+) -> Option<(Vec<Step>, &'a Value)> {
+    let parts = branches(schema, defs);
+    let props: Vec<(&String, &Value)> = parts
+        .iter()
+        .filter_map(|b| b.get("properties").and_then(Value::as_object))
+        .flat_map(|p| p.iter())
+        .collect();
+    let best = props
+        .iter()
+        .filter(|(name, prop)| code_member(name, prop, defs))
+        .filter_map(|(name, prop)| Some((code_rank(name)?, *name, *prop)))
+        .min_by_key(|(rank, _, _)| *rank);
+    if let Some((_, name, prop)) = best {
+        return Some((vec![Step::Key(name.clone())], prop));
+    }
+    if depth + 1 >= MAX_MESSAGE_DEPTH {
+        return None;
+    }
+    let nested = props.iter().find_map(|(name, prop)| {
+        let (mut path, member) = code_path(prop, defs, depth + 1)?;
+        path.insert(0, Step::Key((*name).clone()));
+        Some((path, member))
+    });
+    if nested.is_some() {
+        return nested;
+    }
+    props.iter().find_map(|(name, prop)| {
+        let item = items_schema(Some(prop), defs)?;
+        let (mut path, member) = code_path(item, defs, depth + 1)?;
+        path.insert(0, Step::First);
+        path.insert(0, Step::Key((*name).clone()));
+        Some((path, member))
+    })
+}
+
+/// Sets `value` at `path` in `body`, making the objects (and the first item of an
+/// empty array) on the way; whether it could.
+fn set_at(body: &mut Value, path: &[Step], value: Value) -> bool {
+    let Some((last, before)) = path.split_last() else {
+        return false;
+    };
+    let mut at = body;
+    for (i, step) in before.iter().enumerate() {
+        let next_is_item = before.get(i + 1) == Some(&Step::First)
+            || (i + 1 == before.len() && *last == Step::First);
+        at = match step {
+            Step::Key(key) => {
+                let Value::Object(obj) = at else {
+                    return false;
+                };
+                let slot = obj.entry(key.clone()).or_insert(Value::Null);
+                if slot.is_null() {
+                    *slot = match next_is_item {
+                        true => Value::Array(Vec::new()),
+                        false => Value::Object(Map::new()),
+                    };
+                }
+                slot
+            }
+            Step::First => {
+                let Value::Array(items) = at else {
+                    return false;
+                };
+                if items.is_empty() {
+                    items.push(Value::Object(Map::new()));
+                }
+                match items.first_mut() {
+                    Some(item) => item,
+                    None => return false,
+                }
+            }
+        };
+    }
+    match (last, at) {
+        (Step::Key(key), Value::Object(obj)) => {
+            obj.insert(key.clone(), value);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// `code` as the member `prop` declares it: text for a string member, a number for an
+/// integer or number one when it reads as one; `None` when it cannot be.
+fn typed_code(code: &Value, prop: &Value, defs: &Map<String, Value>) -> Option<Value> {
+    let parts = branches(prop, defs);
+    let kinds = types(&parts);
+    let string = kinds.contains(&"string") || kinds.is_empty();
+    match code {
+        Value::String(_) if string => Some(code.clone()),
+        Value::String(text) => text
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .map(Value::from)
+            .filter(|_| kinds.iter().any(|k| matches!(*k, "integer" | "number"))),
+        Value::Number(n) if string && !kinds.iter().any(|k| matches!(*k, "integer" | "number")) => {
+            Some(Value::String(n.to_string()))
+        }
+        Value::Number(_) => Some(code.clone()),
+        _ => None,
+    }
+}
+
+/// `body`, valid against `validator`, with `code` in the member of the error `schema`
+/// that holds its code ([`code_path`]: `code`, `error_code`, `type`, at the top
+/// level, under an `error` object or in the first of an `errors` array), as that
+/// member declares it ([`typed_code`]). The change is kept only while the body still
+/// validates; with no such member, or a body not valid to begin with, it is left as it
+/// is.
+#[must_use]
+pub fn place_code(
+    validator: &SchemaValidator,
+    body: Value,
+    schema: &Value,
+    defs: &Map<String, Value>,
+    code: &Value,
+) -> Value {
+    let Some((path, prop)) = code_path(schema, defs, 0) else {
+        return body;
+    };
+    let Some(code) = typed_code(code, prop, defs) else {
+        return body;
+    };
+    if !validator.is_valid(&body) {
+        return body;
+    }
+    let mut candidate = body.clone();
+    if set_at(&mut candidate, &path, code) && validator.is_valid(&candidate) {
+        candidate
+    } else {
+        body
+    }
+}
+
+/// Words (lower case, letters and digits only) a code naming each cause holds.
+fn cause_words(cause: ErrorCause) -> &'static [&'static str] {
+    match cause {
+        ErrorCause::Invalid => &["invalid", "validation", "badrequest", "malformed"],
+        ErrorCause::Missing => &["notfound", "missing", "nosuch", "doesnotexist", "unknown"],
+        ErrorCause::Taken => &[
+            "alreadyexist",
+            "exists",
+            "conflict",
+            "taken",
+            "duplicate",
+            "inuse",
+            "unique",
+        ],
+        ErrorCause::Stale => &[
+            "precondition",
+            "stale",
+            "mismatch",
+            "conflict",
+            "version",
+            "etag",
+            "modified",
+        ],
+        ErrorCause::Refused => &[],
+    }
+}
+
+/// The code the error `schema` itself gives for `cause`: a value of its code member
+/// ([`code_path`]) its `const` or `enum` declares, whose letters and digits name the
+/// cause (`not_found` for a missing record, `ALREADY_EXISTS` for a taken value). `None`
+/// when it declares none: a code is never made up. An example is no such value: a
+/// schema shared by several statuses shows one that speaks for none of them.
+#[must_use]
+pub fn declared_code(
+    schema: &Value,
+    defs: &Map<String, Value>,
+    cause: ErrorCause,
+) -> Option<Value> {
+    let words = cause_words(cause);
+    if words.is_empty() {
+        return None;
+    }
+    let (_, prop) = code_path(schema, defs, 0)?;
+    let parts = branches(prop, defs);
+    let shown = parts.iter().flat_map(|b| {
+        let one = b.get("const");
+        let many = b
+            .get("enum")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        one.into_iter().chain(many)
+    });
+    for value in shown {
+        let Some(text) = value.as_str() else {
+            continue;
+        };
+        let squeezed: String = text
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .flat_map(|c| c.to_lowercase())
+            .collect();
+        if words.iter().any(|w| squeezed.contains(w)) {
+            return Some(value.clone());
+        }
+    }
+    None
 }
 
 /// Writes `message` into the first message-like string property of `schema` (see
@@ -1714,7 +1991,7 @@ impl Engine {
         // member the faker alone would fill is the model's to write too.
         let from_state = matches!(
             cause,
-            ErrorCause::Taken | ErrorCause::Stale | ErrorCause::Missing
+            ErrorCause::Taken | ErrorCause::Stale | ErrorCause::Missing | ErrorCause::Refused
         );
         if !writes_code(schema, &bundle.defs) {
             if !from_state {
@@ -1891,6 +2168,7 @@ impl Engine {
             patched: None,
             headers: Vec::new(),
             world_gaps: Vec::new(),
+            exec_notes: serde_json::Map::new(),
         })
     }
 }
@@ -1910,6 +2188,72 @@ mod tests {
             pointer: pointer.into(),
             reason: reason.into(),
         }
+    }
+
+    #[test]
+    fn a_code_goes_into_the_code_member_wherever_the_error_schema_has_it() {
+        let defs = Map::new();
+        let place = |schema: Value, body: Value, code: Value| {
+            let validator = SchemaValidator::new(&schema).unwrap();
+            place_code(&validator, body, &schema, &defs, &code)
+        };
+        let nested = json!({"type": "object", "properties": {"error": {"type": "object",
+            "properties": {"code": {"type": "string"}, "message": {"type": "string"}}}}});
+        assert_eq!(
+            place(nested, json!({"error": {"message": "m"}}), json!("taken")),
+            json!({"error": {"message": "m", "code": "taken"}})
+        );
+        let listed = json!({"type": "object", "properties": {"errors": {"type": "array",
+            "items": {"type": "object", "properties": {"errorCode": {"type": "integer"}, "detail": {"type": "string"}}}}}});
+        assert_eq!(
+            place(listed.clone(), json!({"errors": []}), json!("42")),
+            json!({"errors": [{"errorCode": 42}]})
+        );
+        // Text that is no integer leaves an integer code as it was.
+        assert_eq!(
+            place(
+                listed,
+                json!({"errors": [{"errorCode": 1}]}),
+                json!("taken")
+            ),
+            json!({"errors": [{"errorCode": 1}]})
+        );
+        // `code` before `type`; a problem+json `type` holding a URI is no code.
+        let both = json!({"type": "object", "properties": {"type": {"type": "string"}, "code": {"type": "string"}}});
+        assert_eq!(place(both, json!({}), json!("x")), json!({"code": "x"}));
+        let problem =
+            json!({"type": "object", "properties": {"type": {"type": "string", "format": "uri"}}});
+        assert_eq!(place(problem, json!({}), json!("x")), json!({}));
+        // A value the schema refuses is not placed.
+        let closed = json!({"type": "object", "properties": {"code": {"enum": ["a", "b"], "type": "string"}}});
+        assert_eq!(
+            place(closed, json!({"code": "a"}), json!("x")),
+            json!({"code": "a"})
+        );
+    }
+
+    #[test]
+    fn a_declared_code_is_the_enum_value_naming_the_cause() {
+        let defs = Map::new();
+        let schema = json!({"type": "object", "properties": {"error": {"type": "object", "properties": {
+            "code": {"type": "string", "enum": ["INVALID_ARGUMENT", "NOT_FOUND", "ALREADY_EXISTS", "FAILED_PRECONDITION"]}
+        }}}});
+        assert_eq!(
+            declared_code(&schema, &defs, ErrorCause::Missing),
+            Some(json!("NOT_FOUND"))
+        );
+        assert_eq!(
+            declared_code(&schema, &defs, ErrorCause::Taken),
+            Some(json!("ALREADY_EXISTS"))
+        );
+        assert_eq!(
+            declared_code(&schema, &defs, ErrorCause::Stale),
+            Some(json!("FAILED_PRECONDITION"))
+        );
+        assert_eq!(declared_code(&schema, &defs, ErrorCause::Refused), None);
+        // An example names no code: a shared schema's speaks for no one status.
+        let shown = json!({"type": "object", "properties": {"code": {"type": "string", "examples": ["not_found"]}}});
+        assert_eq!(declared_code(&shown, &defs, ErrorCause::Missing), None);
     }
 
     #[test]

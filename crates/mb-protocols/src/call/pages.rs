@@ -1651,6 +1651,7 @@ pub(super) async fn mint(
                 generated: &seeding,
                 request_body: None,
                 call_body: None,
+                called: None,
                 query: None,
                 collection: collection_of(op, call),
                 origin: WriteOrigin::Seeded,

@@ -116,6 +116,7 @@ pub(super) async fn replayed(
         patched: None,
         headers,
         world_gaps: Vec::new(),
+        exec_notes: serde_json::Map::new(),
     })
 }
 

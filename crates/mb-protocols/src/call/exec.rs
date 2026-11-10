@@ -267,7 +267,22 @@ pub(super) async fn run(
     held: Held<'_>,
     response_schema: Option<&Value>,
 ) -> Ran {
-    match classify(state.rt, plan, call) {
+    let classified = classify(state.rt, plan, call);
+    // A described refusal answers first, before anything is stored or generated: on
+    // every kind the executor takes, and where only the description's identity or
+    // target is missing.
+    if let Some(Ok(kind) | Err((kind, Fallback::NoIdentity | Fallback::NoTarget))) = classified
+        && let Some(refusal) = super::exprs::refusal(state, plan, call, held.target)
+            .instrument(state_span())
+            .await
+    {
+        replays::keep(state, plan, call, &refusal)
+            .instrument(state_span())
+            .await;
+        answered(state.rt, plan, kind);
+        return Ran::Answered(Box::new(refusal));
+    }
+    match classified {
         Some(Ok(kind)) => match kind {
             OpKind::Read if matches!(plan.op.kind, OperationKind::Query) => {
                 read(state, plan, call, held, response_schema, kind).await
@@ -325,6 +340,7 @@ async fn read(
             Ran::Generate(Some(earlier))
         }
         HeldRead::Unrendered(earlier, why) => {
+            plan.exprs.fell_back(Fallback::RenderFailed.as_str(), None);
             tracing::info!(
                 mock = %rt.name,
                 operation = %plan.op.id,
@@ -535,6 +551,7 @@ impl<'r> Stop<'r> {
 
 /// [`fell_back`] for `stop`, naming what caused it (`exec_fallback_on`) when it says.
 fn fell_back_on(rt: &crate::MockRuntime, plan: &CallPlan<'_>, kind: OpKind, stop: &Stop<'_>) {
+    plan.exprs.fell_back(stop.reason, stop.on.as_deref());
     match &stop.on {
         Some(on) => tracing::info!(
             mock = %rt.name,
@@ -806,6 +823,7 @@ pub(super) fn bodiless(op: &mb_mcm::Operation) -> Option<GeneratedResponse> {
         patched: None,
         headers: Vec::new(),
         world_gaps: Vec::new(),
+        exec_notes: serde_json::Map::new(),
     })
 }
 

@@ -369,6 +369,12 @@ pub struct GeneratedResponse {
     /// one member admits (`ambiguous_choice`), or that one does but whose object cannot
     /// be told whole (`unapplied_choice`). A gap never changes the answer.
     pub world_gaps: Vec<String>,
+    /// What the state-first executor noted of the call, for the request log, each
+    /// under its own name: why it went on to generation (`exec_fallback`, with
+    /// `exec_fallback_on` naming the parameter or member that caused it) and the
+    /// world expressions that failed (`expr_failed`). Filled by the caller, like
+    /// [`GeneratedResponse::world_gaps`]; it never changes the answer.
+    pub exec_notes: serde_json::Map<String, Value>,
 }
 
 /// The top-level members of an answer a local patch touched, against the model's own
@@ -907,6 +913,7 @@ impl Engine {
                 patched: None,
                 headers: Vec::new(),
                 world_gaps: Vec::new(),
+                exec_notes: serde_json::Map::new(),
             });
         };
         if let Some(answer) = media::answer(op, variant, schema) {
@@ -1067,6 +1074,7 @@ impl Engine {
                         patched: answer.patched,
                         headers: Vec::new(),
                         world_gaps: Vec::new(),
+                        exec_notes: serde_json::Map::new(),
                     },
                     Err(reason) => {
                         tracing::warn!(operation = %op.id, %reason, "LLM generation fell back to faker");
@@ -1214,6 +1222,7 @@ impl Engine {
                 patched: None,
                 headers: Vec::new(),
                 world_gaps: Vec::new(),
+                exec_notes: serde_json::Map::new(),
             };
             let schema = part
                 .ctx
@@ -1260,6 +1269,7 @@ impl Engine {
                 patched: None,
                 headers: Vec::new(),
                 world_gaps: Vec::new(),
+                exec_notes: serde_json::Map::new(),
             };
         };
         if let Some(answer) = media::answer(op, variant, schema) {
@@ -1347,6 +1357,7 @@ impl Engine {
             patched: None,
             headers: Vec::new(),
             world_gaps: Vec::new(),
+            exec_notes: serde_json::Map::new(),
         })
     }
 
@@ -1553,7 +1564,10 @@ impl Engine {
                 bundle,
                 op,
                 response,
-                &error_body::RefusalFacts::message(detail),
+                (
+                    &error_body::RefusalFacts::message(detail),
+                    error_body::ErrorCause::Missing,
+                ),
             );
             self.with_own_status(bundle, op, response)
         });
@@ -1576,6 +1590,7 @@ impl Engine {
             patched: None,
             headers: Vec::new(),
             world_gaps: Vec::new(),
+            exec_notes: serde_json::Map::new(),
         });
         response.source = Source::State;
         response.fallback_reason = None;
@@ -1660,7 +1675,7 @@ impl Engine {
         let response = self
             .error_answer_repeating(bundle, op, call, (code, cause), facts.members())
             .await?;
-        let response = self.with_facts(bundle, op, response, facts);
+        let response = self.with_facts(bundle, op, response, (facts, cause));
         let mut response = self.with_own_status(bundle, op, response);
         tracing::info!(operation = %op.id, status = code, cause = ?cause, "the call was refused from state with a declared error");
         response.source = if response.fallback_reason.is_some() {
@@ -1707,7 +1722,7 @@ impl Engine {
         bundle: &Bundle,
         op: &Operation,
         mut response: GeneratedResponse,
-        facts: &error_body::RefusalFacts,
+        (facts, cause): (&error_body::RefusalFacts, error_body::ErrorCause),
     ) -> GeneratedResponse {
         let schema = op
             .output_for_status(response.status)
@@ -1717,20 +1732,32 @@ impl Engine {
             return response;
         };
         let mut body = body;
-        let unchanged = body.clone();
+        let validator = self.error_validator(bundle, op, response.status);
         let message = facts.text();
-        error_body::set_message(&mut body, schema, &bundle.defs, message);
-        let reasons = [message.to_string()];
-        let violations = facts.violations();
-        let body = match self.error_validator(bundle, op, response.status) {
-            Some(validator) if validator.is_valid(&body) => {
-                error_body::with_reasons(&validator, body, &reasons, &violations)
-            }
-            Some(validator) => {
-                error_body::with_reasons(&validator, unchanged, &reasons, &violations)
-            }
-            None => body,
+        if !message.is_empty() {
+            let unchanged = body.clone();
+            error_body::set_message(&mut body, schema, &bundle.defs, message);
+            let reasons = [message.to_string()];
+            let violations = facts.violations();
+            body = match &validator {
+                Some(validator) if validator.is_valid(&body) => {
+                    error_body::with_reasons(validator, body, &reasons, &violations)
+                }
+                Some(validator) => {
+                    error_body::with_reasons(validator, unchanged, &reasons, &violations)
+                }
+                None => body,
+            };
+        }
+        // The code: the one the refusal says, else one the schema itself gives for
+        // the cause (an `enum`, `const` or example value naming it).
+        let code = match facts.code() {
+            Some(code) => Some(Value::String(code.to_string())),
+            None => error_body::declared_code(schema, &bundle.defs, cause),
         };
+        if let (Some(code), Some(validator)) = (code, &validator) {
+            body = error_body::place_code(validator, body, schema, &bundle.defs, &code);
+        }
         response.body = Some(body);
         response
     }
@@ -1786,6 +1813,7 @@ impl Engine {
                 patched: None,
                 headers: Vec::new(),
                 world_gaps: Vec::new(),
+                exec_notes: serde_json::Map::new(),
             },
         };
         tracing::info!(operation = %op.id, status = code, "the call was refused with a declared error");
@@ -1834,6 +1862,7 @@ impl Engine {
             patched: None,
             headers: Vec::new(),
             world_gaps: Vec::new(),
+            exec_notes: serde_json::Map::new(),
         })
     }
 
@@ -2152,6 +2181,7 @@ impl Engine {
             patched: None,
             headers: Vec::new(),
             world_gaps: Vec::new(),
+            exec_notes: serde_json::Map::new(),
         }
     }
 
@@ -2203,6 +2233,7 @@ impl Engine {
             patched: None,
             headers: Vec::new(),
             world_gaps: Vec::new(),
+            exec_notes: serde_json::Map::new(),
         }
     }
 

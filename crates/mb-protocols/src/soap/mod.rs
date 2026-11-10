@@ -421,7 +421,11 @@ async fn serve_call(
     report.latency = started.elapsed();
     if rt.recorder.is_some() {
         let effects = report.request["effects"].take();
-        let world_gap = report.request["world_gap"].take();
+        let notes: Vec<(&str, Value)> = call::RECORD_NOTES
+            .iter()
+            .map(|name| (*name, report.request[*name].take()))
+            .filter(|(_, note)| !note.is_null())
+            .collect();
         report.request = json!({
             "headers": recorded_headers(rt, &headers),
             "body": decoded.unwrap_or_else(|| Value::String(UNDECODABLE.into())),
@@ -429,8 +433,8 @@ async fn serve_call(
         if !effects.is_null() {
             report.request["effects"] = effects;
         }
-        if !world_gap.is_null() {
-            report.request["world_gap"] = world_gap;
+        for (name, note) in notes {
+            report.request[name] = note;
         }
         report.response = Some(answer.record);
     }

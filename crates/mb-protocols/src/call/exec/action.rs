@@ -57,7 +57,7 @@ pub(super) async fn run(
         return Ran::Generate(Some(earlier));
     }
     let mut changed = stored.clone();
-    transitions::apply(rt, op, call.body.as_ref(), &mut changed.data);
+    transitions::apply(state, (plan, call), Some(&stored.data), &mut changed.data).await;
     let derived = derived::filled(state, &plan.session, &changed)
         .instrument(state_span())
         .await;

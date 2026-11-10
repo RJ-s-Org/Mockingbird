@@ -77,11 +77,22 @@ pub(super) async fn apply_effects(
 }
 
 /// Adds what became of `generated`'s effects to a request record's `request`
-/// (nothing when it listed none), under `effects`, and what the world description
+/// (nothing when it listed none), under `effects`, what the world description
 /// leaves open about its operation ([`GeneratedResponse::world_gaps`]), under
-/// `world_gap`, each name once.
+/// `world_gap`, each name once, and what the executor noted of the call
+/// ([`GeneratedResponse::exec_notes`]) under their own names.
 pub(crate) fn record_effects(request: &mut Value, generated: &GeneratedResponse) {
     record_world_gaps(request, &generated.world_gaps);
+    if !generated.exec_notes.is_empty() {
+        if request.is_null() {
+            *request = serde_json::json!({});
+        }
+        if let Value::Object(request) = request {
+            for (name, note) in &generated.exec_notes {
+                request.insert(name.clone(), note.clone());
+            }
+        }
+    }
     if generated.effect_outcomes.is_empty() {
         return;
     }
@@ -109,6 +120,16 @@ pub(crate) fn record_effects(request: &mut Value, generated: &GeneratedResponse)
         }
     }
 }
+
+/// What a request record's `request` notes of the call beside its body: the world's
+/// gaps (`world_gap`) and what the executor noted ([`GeneratedResponse::exec_notes`]).
+#[cfg(any(feature = "http-rest", feature = "soap"))]
+pub(crate) const RECORD_NOTES: [&str; 4] = [
+    "world_gap",
+    "exec_fallback",
+    "exec_fallback_on",
+    "expr_failed",
+];
 
 /// Adds `gaps` to a request record's `request` under `world_gap`, each name once.
 fn record_world_gaps(request: &mut Value, gaps: &[String]) {

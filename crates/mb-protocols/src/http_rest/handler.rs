@@ -128,9 +128,11 @@ struct CallLog {
     /// What became of the answer's effects, as the record's `request` keeps
     /// them; `null` when it listed none.
     effects: Value,
-    /// What the world description leaves open about the answer's operation, as the
-    /// record's `request` keeps it (`world_gap`); `null` when nothing.
-    world_gap: Value,
+    /// What the record's `request` notes of the call beside its body: what the world
+    /// description leaves open about the answer's operation (`world_gap`) and what the
+    /// executor noted (`exec_fallback`, `exec_fallback_on`, `expr_failed`; see
+    /// [`call::RECORD_NOTES`]).
+    notes: serde_json::Map<String, Value>,
     /// The response is an event stream, which reports the call itself when
     /// its body is dropped and sleeps any latency before its first event.
     streaming: bool,
@@ -153,7 +155,7 @@ impl CallLog {
             declared_body_type: None,
             validation: Vec::new(),
             effects: Value::Null,
-            world_gap: Value::Null,
+            notes: serde_json::Map::new(),
             streaming: false,
         }
     }
@@ -192,7 +194,13 @@ impl CallLog {
             let mut recorded = Value::Null;
             call::record_effects(&mut recorded, &generated);
             self.effects = recorded["effects"].take();
-            self.world_gap = recorded["world_gap"].take();
+            self.notes = call::RECORD_NOTES
+                .iter()
+                .filter_map(|name| {
+                    let note = recorded.get_mut(*name)?.take();
+                    (!note.is_null()).then(|| ((*name).to_string(), note))
+                })
+                .collect();
             self.response = generated.body;
         }
         resp
@@ -729,8 +737,8 @@ async fn report(
         if !log.effects.is_null() {
             request["effects"] = log.effects;
         }
-        if !log.world_gap.is_null() {
-            request["world_gap"] = log.world_gap;
+        for (name, note) in log.notes {
+            request[name] = note;
         }
         request
     } else {
@@ -1494,6 +1502,7 @@ mod tests {
             patched: None,
             headers: Vec::new(),
             world_gaps: Vec::new(),
+            exec_notes: serde_json::Map::new(),
         }
     }
 

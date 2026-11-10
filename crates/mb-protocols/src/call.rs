@@ -43,6 +43,7 @@ mod effects;
 mod entities;
 mod envelopes;
 mod exec;
+mod exprs;
 mod header_ids;
 mod lifecycle;
 mod list_query;
@@ -80,6 +81,9 @@ use creates::*;
 pub(crate) use described::Described;
 pub(crate) use effects::*;
 use entities::*;
+#[cfg(feature = "graphql")]
+pub(crate) use exprs::seed_notes;
+pub(crate) use exprs::{CallExprs, SeqCounters};
 pub(crate) use list_query::undescribed_params;
 use lookup::*;
 use owners::*;
@@ -303,15 +307,17 @@ pub(crate) async fn generate_narrowed(
     call: &OperationCall,
     response_schema: Option<&Value>,
 ) -> Result<GeneratedResponse, EngineError> {
-    match prepare(rt, plan, call, response_schema).await {
+    let mut answer = match prepare(rt, plan, call, response_schema).await {
         Prepared::Answered(mut answer) => {
             seed_world_gaps(rt, plan.op, &mut answer);
-            Ok(*answer)
+            *answer
         }
         Prepared::Pending(pending) => {
-            generate_pending(rt, plan, call, *pending, response_schema).await
+            generate_pending(rt, plan, call, *pending, response_schema).await?
         }
-    }
+    };
+    exprs::seed_notes(plan, &mut answer);
+    Ok(answer)
 }
 
 /// Generates the answer of a [`prepare`]d call, then [`complete`]s it.
@@ -740,6 +746,7 @@ pub(crate) async fn prepare<'a>(
             patched: None,
             headers: Vec::new(),
             world_gaps: Vec::new(),
+            exec_notes: serde_json::Map::new(),
         };
         // The answer's items were seeded when it was generated; writes and
         // resets that could remove them also clear the cache.
@@ -1285,13 +1292,15 @@ pub(crate) async fn complete(
             // What the description says an update or action sets on its target shows
             // in the answer's record too.
             if !generated.new_record {
+                let before = target.as_ref().map(|t| &t.data);
                 transitions::onto_answer(
-                    rt,
-                    op,
-                    call.body.as_ref(),
-                    target_id.as_deref(),
+                    &mut state,
+                    (plan, call),
+                    (before, target_id.as_deref()),
                     &mut generated,
-                );
+                )
+                .instrument(state_span())
+                .await;
             }
             // A faker list standing in for a failed LLM call seeds nothing,
             // or its items would join the session's later LLM lists.
@@ -1348,6 +1357,7 @@ pub(crate) async fn complete(
                         generated: &generated,
                         request_body: state_call.body.as_ref(),
                         call_body: call.body.as_ref(),
+                        called: Some((plan, call)),
                         query: Some(&call.query),
                         collection: collection.clone(),
                         origin,

@@ -413,6 +413,8 @@ pub struct MockRuntime {
     written_types: call::WrittenTypes,
     /// How many ids each session minted (see [`call::MintCounts`]).
     mint_counts: call::MintCounts,
+    /// Each session's `seq()` counters (see [`call::SeqCounters`]).
+    seq_counters: call::SeqCounters,
     /// Which stored resources are a plain read's own answer (see
     /// [`call::OwnReads`]).
     own_reads: call::OwnReads,
@@ -544,6 +546,7 @@ impl MockRuntime {
             _value_feed: value_feed,
             written_types: call::WrittenTypes::default(),
             mint_counts: call::MintCounts::default(),
+            seq_counters: call::SeqCounters::default(),
             own_reads: call::OwnReads::default(),
             collections: call::Collections::default(),
             described: call::Described::default(),
@@ -666,6 +669,11 @@ impl MockRuntime {
     /// How many ids each session minted.
     pub(crate) fn mint_counts(&self) -> &call::MintCounts {
         &self.mint_counts
+    }
+
+    /// Each session's `seq()` counters.
+    pub(crate) fn seq_counters(&self) -> &call::SeqCounters {
+        &self.seq_counters
     }
 
     /// Which stored resources are a plain read's own answer.
