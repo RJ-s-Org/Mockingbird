@@ -7,12 +7,14 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:12:49Z",
+  "authored_at": "2026-11-10T17:35:53Z",
   "authors": {
+    "/operations/dns-records-for-a-zone-create-dns-record/request": "agent",
     "/operations/dns-records-for-a-zone-delete-dns-record/answer": "agent",
     "/operations/dns-records-for-a-zone-delete-dns-record/not_found": "agent",
     "/operations/dns-records-for-a-zone-delete-dns-record/target": "agent",
     "/operations/dns-records-for-a-zone-dns-record-details/not_found": "agent",
+    "/operations/dns-records-for-a-zone-list-dns-records/answer": "agent",
     "/operations/dns-records-for-a-zone-list-dns-records/filters": "agent",
     "/operations/dns-records-for-a-zone-list-dns-records/paging": "agent",
     "/operations/dns-records-for-a-zone-list-dns-records/scope": "agent",
@@ -23,8 +25,10 @@
     "/operations/zones-0-delete/not_found": "agent",
     "/operations/zones-0-delete/target": "agent",
     "/operations/zones-0-get/not_found": "agent",
+    "/operations/zones-get/answer": "agent",
     "/operations/zones-get/filters": "agent",
     "/operations/zones-get/paging": "agent",
+    "/operations/zones-post/request": "agent",
     "/types/dns_records/parent": "agent",
     "/types/dns_records/unique": "agent",
     "/types/zones/unique": "agent"
@@ -36,9 +40,14 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind7/cloudflare.openapi.yaml",
   "contract_sha256": "62d1a26c6d236dc0774b3e46269ddaca6de6c0ea1ffb72cd0adc451e64e23a60",
-  "cost_usd": 0.1401449,
+  "cost_usd": 0.14493060000000002,
   "document": {
     "operations": {
+      "dns-records-for-a-zone-create-dns-record": {
+        "request": {
+          "record": ""
+        }
+      },
       "dns-records-for-a-zone-delete-dns-record": {
         "answer": {
           "record": "/result"
@@ -52,6 +61,9 @@
         "not_found": 404
       },
       "dns-records-for-a-zone-list-dns-records": {
+        "answer": {
+          "records": "/result"
+        },
         "filters": [
           {
             "kind": "eq",
@@ -99,6 +111,9 @@
         "not_found": 404
       },
       "zones-get": {
+        "answer": {
+          "records": "/result"
+        },
         "filters": [
           {
             "kind": "eq",
@@ -115,6 +130,11 @@
           "request": "page",
           "size": "per_page",
           "style": "page"
+        }
+      },
+      "zones-post": {
+        "request": {
+          "record": ""
         }
       }
     },
@@ -150,7 +170,7 @@
     },
     "version": 1
   },
-  "duration_ms": 31020,
+  "duration_ms": 25031,
   "error": null,
   "exit_code": 0,
   "gaps": [
@@ -180,36 +200,36 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "cloudflare",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 22207,
+      "cacheCreationEphemeral1hInputTokens": 25699,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 22207,
-      "cacheReadInputTokens": 187909,
+      "cacheCreationInputTokens": 25699,
+      "cacheReadInputTokens": 155666,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1401449,
-      "inputTokens": 18,
+      "costUSD": 0.14493060000000002,
+      "inputTokens": 14,
       "maxOutputTokens": 128000,
-      "outputTokens": 3249,
+      "outputTokens": 2654,
       "provider": "firstParty",
-      "thinkingTokens": 497,
+      "thinkingTokens": 385,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 12,
+  "num_turns": 9,
   "refused": [],
   "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:12:34.295293Z",
+      "created_at": "2026-11-10T17:35:40.654556Z",
       "revision": 1
     }
   ],
@@ -257,6 +277,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -285,30 +306,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 22207,
+      "ephemeral_1h_input_tokens": 25699,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 22207,
-    "cache_read_input_tokens": 187909,
+    "cache_creation_input_tokens": 25699,
+    "cache_read_input_tokens": 155666,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 18,
+    "input_tokens": 14,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 938,
+          "ephemeral_1h_input_tokens": 507,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 938,
-        "cache_read_input_tokens": 28855,
+        "cache_creation_input_tokens": 507,
+        "cache_read_input_tokens": 32778,
         "input_tokens": 2,
-        "output_tokens": 889,
+        "output_tokens": 766,
         "type": "message"
       }
     ],
-    "output_tokens": 3249,
+    "output_tokens": 2654,
     "output_tokens_details": {
-      "thinking_tokens": 497
+      "thinking_tokens": 385
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -317,7 +338,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 31579,
+  "wall_ms": 25720,
   "world": {
     "operations": {
       "dns-records-for-a-zone-batch-dns-records": {
@@ -329,6 +350,9 @@
           "record": "/result"
         },
         "kind": "create",
+        "request": {
+          "record": ""
+        },
         "type": "dns_records"
       },
       "dns-records-for-a-zone-delete-dns-record": {
@@ -354,6 +378,9 @@
         "type": "dns_records"
       },
       "dns-records-for-a-zone-list-dns-records": {
+        "answer": {
+          "records": "/result"
+        },
         "filters": [
           {
             "kind": "eq",
@@ -428,6 +455,9 @@
         "type": "zones"
       },
       "zones-get": {
+        "answer": {
+          "records": "/result"
+        },
         "filters": [
           {
             "kind": "eq",
@@ -453,6 +483,9 @@
           "record": "/result"
         },
         "kind": "create",
+        "request": {
+          "record": ""
+        },
         "type": "zones"
       }
     },

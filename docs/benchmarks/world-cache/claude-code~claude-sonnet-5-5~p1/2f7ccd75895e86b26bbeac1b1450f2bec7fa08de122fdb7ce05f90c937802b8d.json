@@ -7,9 +7,10 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:14:08Z",
+  "authored_at": "2026-11-10T17:37:52Z",
   "authors": {
     "/operations/getResource/not_found": "agent",
+    "/operations/listResourcesByTag/answer": "agent",
     "/operations/listResourcesByTag/order": "agent",
     "/operations/listResourcesByTag/paging": "agent",
     "/operations/listResourcesByTag/scope": "agent",
@@ -19,8 +20,13 @@
     "/operations/renameImage/not_found": "agent",
     "/operations/renameImage/target": "agent",
     "/operations/renameImage/type": "agent",
+    "/operations/searchResources/answer": "agent",
+    "/operations/searchResources/ignores": "agent",
     "/operations/searchResources/paging": "agent",
+    "/operations/updateResource/answer": "agent",
+    "/operations/updateResource/kind": "agent",
     "/operations/updateResource/not_found": "agent",
+    "/operations/updateResource/request": "agent",
     "/operations/uploadImage/answer": "agent"
   },
   "builtin_plugins": [
@@ -30,13 +36,16 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind9/cloudinary.openapi.yaml",
   "contract_sha256": "2f7ccd75895e86b26bbeac1b1450f2bec7fa08de122fdb7ce05f90c937802b8d",
-  "cost_usd": 0.0981521,
+  "cost_usd": 0.1276722,
   "document": {
     "operations": {
       "getResource": {
         "not_found": 404
       },
       "listResourcesByTag": {
+        "answer": {
+          "records": "/resources"
+        },
         "order": {
           "descending": true,
           "member": "created_at"
@@ -69,15 +78,28 @@
         "type": "upload"
       },
       "searchResources": {
+        "answer": {
+          "records": "/resources"
+        },
+        "ignores": [
+          "/with_field"
+        ],
         "paging": {
-          "request": "next_cursor",
+          "request": "/next_cursor",
           "response": "next_cursor",
-          "size": "max_results",
+          "size": "/max_results",
           "style": "cursor"
         }
       },
       "updateResource": {
-        "not_found": 404
+        "answer": {
+          "record": ""
+        },
+        "kind": "update",
+        "not_found": 404,
+        "request": {
+          "record": ""
+        }
       },
       "uploadImage": {
         "answer": {
@@ -87,7 +109,7 @@
     },
     "version": 1
   },
-  "duration_ms": 18728,
+  "duration_ms": 27429,
   "error": null,
   "exit_code": 0,
   "gaps": [
@@ -117,36 +139,36 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "cloudinary",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 17792,
+      "cacheCreationEphemeral1hInputTokens": 21539,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 17792,
-      "cacheReadInputTokens": 76841,
+      "cacheCreationInputTokens": 21539,
+      "cacheReadInputTokens": 114222,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.0981521,
-      "inputTokens": 10,
+      "costUSD": 0.1276722,
+      "inputTokens": 12,
       "maxOutputTokens": 128000,
-      "outputTokens": 1928,
+      "outputTokens": 3007,
       "provider": "firstParty",
-      "thinkingTokens": 459,
+      "thinkingTokens": 796,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 7,
+  "num_turns": 8,
   "refused": [],
   "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:14:00.872388Z",
+      "created_at": "2026-11-10T17:37:40.609823Z",
       "revision": 1
     }
   ],
@@ -194,6 +216,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -222,30 +245,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 17792,
+      "ephemeral_1h_input_tokens": 21539,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 17792,
-    "cache_read_input_tokens": 76841,
+    "cache_creation_input_tokens": 21539,
+    "cache_read_input_tokens": 114222,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 10,
+    "input_tokens": 12,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 1232,
+          "ephemeral_1h_input_tokens": 396,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 1232,
-        "cache_read_input_tokens": 24146,
+        "cache_creation_input_tokens": 396,
+        "cache_read_input_tokens": 28729,
         "input_tokens": 2,
-        "output_tokens": 549,
+        "output_tokens": 980,
         "type": "message"
       }
     ],
-    "output_tokens": 1928,
+    "output_tokens": 3007,
     "output_tokens_details": {
-      "thinking_tokens": 459
+      "thinking_tokens": 796
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -254,7 +277,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 19297,
+  "wall_ms": 28078,
   "world": {
     "operations": {
       "deleteResources": {
@@ -270,6 +293,9 @@
         "type": "upload"
       },
       "listResourcesByTag": {
+        "answer": {
+          "records": "/resources"
+        },
         "kind": "list",
         "order": {
           "descending": true,
@@ -308,18 +334,30 @@
         "type": "restore"
       },
       "searchResources": {
+        "answer": {
+          "records": "/resources"
+        },
+        "ignores": [
+          "/with_field"
+        ],
         "kind": "list",
         "paging": {
-          "request": "next_cursor",
+          "request": "/next_cursor",
           "response": "next_cursor",
-          "size": "max_results",
+          "size": "/max_results",
           "style": "cursor"
         },
         "type": "upload"
       },
       "updateResource": {
-        "kind": "action",
+        "answer": {
+          "record": ""
+        },
+        "kind": "update",
         "not_found": 404,
+        "request": {
+          "record": ""
+        },
         "target": {
           "path_param": "public_id"
         },
@@ -346,6 +384,11 @@
     {
       "ok": true,
       "refused": [
+        {
+          "code": "unresolved",
+          "message": "`public_id` is not a member of a `restore` record",
+          "path": "/types/restore/identity/member"
+        },
         {
           "code": "unresolved",
           "message": "operation `deleteResources` declares no path parameter `public_ids[]`",

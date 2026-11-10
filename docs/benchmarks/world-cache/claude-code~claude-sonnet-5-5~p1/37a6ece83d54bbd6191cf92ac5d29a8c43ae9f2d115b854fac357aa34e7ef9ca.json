@@ -1,0 +1,622 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-10T17:43:09Z",
+  "authors": {
+    "/operations/deleteTimeEntry/not_found": "agent",
+    "/operations/deleteTimeEntry/target": "agent",
+    "/operations/listClients/filters": "agent",
+    "/operations/listClients/paging": "agent",
+    "/operations/listTaskAssignmentsForSpecificProject/filters": "agent",
+    "/operations/listTaskAssignmentsForSpecificProject/paging": "agent",
+    "/operations/listTaskAssignmentsForSpecificProject/scope": "agent",
+    "/operations/listTimeEntries/filters": "agent",
+    "/operations/listTimeEntries/order": "agent",
+    "/operations/listTimeEntries/paging": "agent",
+    "/operations/restartTimeEntry/changes": "agent",
+    "/operations/restartTimeEntry/kind": "agent",
+    "/operations/restartTimeEntry/not_found": "agent",
+    "/operations/restartTimeEntry/target": "agent",
+    "/operations/restartTimeEntry/type": "agent",
+    "/operations/retrieveClient/not_found": "agent",
+    "/operations/retrieveProject/not_found": "agent",
+    "/operations/retrieveTimeEntry/not_found": "agent",
+    "/operations/stopTimeEntry/changes": "agent",
+    "/operations/stopTimeEntry/kind": "agent",
+    "/operations/stopTimeEntry/not_found": "agent",
+    "/operations/stopTimeEntry/target": "agent",
+    "/operations/stopTimeEntry/type": "agent",
+    "/operations/updateClient/not_found": "agent",
+    "/operations/updateTimeEntry/not_found": "agent",
+    "/types/task_assignments/parent": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind12/harvest.openapi.yaml",
+  "contract_sha256": "37a6ece83d54bbd6191cf92ac5d29a8c43ae9f2d115b854fac357aa34e7ef9ca",
+  "cost_usd": 0.16132629999999998,
+  "document": {
+    "operations": {
+      "deleteTimeEntry": {
+        "not_found": 404,
+        "target": {
+          "path_param": "time_entry_id"
+        }
+      },
+      "listClients": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "is_active",
+            "param": "is_active"
+          },
+          {
+            "kind": "gte",
+            "member": "updated_at",
+            "param": "updated_since"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "listTaskAssignmentsForSpecificProject": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "is_active",
+            "param": "is_active"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "scope": {
+          "member": "project.id",
+          "param": "project_id"
+        }
+      },
+      "listTimeEntries": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "user.id",
+            "param": "user_id"
+          },
+          {
+            "kind": "eq",
+            "member": "client.id",
+            "param": "client_id"
+          },
+          {
+            "kind": "eq",
+            "member": "project.id",
+            "param": "project_id"
+          },
+          {
+            "kind": "eq",
+            "member": "task.id",
+            "param": "task_id"
+          },
+          {
+            "kind": "eq",
+            "member": "is_billed",
+            "param": "is_billed"
+          },
+          {
+            "kind": "eq",
+            "member": "is_running",
+            "param": "is_running"
+          },
+          {
+            "kind": "gte",
+            "member": "updated_at",
+            "param": "updated_since"
+          },
+          {
+            "kind": "gte",
+            "member": "spent_date",
+            "param": "from"
+          },
+          {
+            "kind": "lte",
+            "member": "spent_date",
+            "param": "to"
+          }
+        ],
+        "order": {
+          "descending": true,
+          "member": "spent_date"
+        },
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "restartTimeEntry": {
+        "changes": {
+          "is_running": {
+            "value": true
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "time_entry_id"
+        },
+        "type": "time_entries"
+      },
+      "retrieveClient": {
+        "not_found": 404
+      },
+      "retrieveProject": {
+        "not_found": 404
+      },
+      "retrieveTimeEntry": {
+        "not_found": 404
+      },
+      "stopTimeEntry": {
+        "changes": {
+          "is_running": {
+            "value": false
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "time_entry_id"
+        },
+        "type": "time_entries"
+      },
+      "updateClient": {
+        "not_found": 404
+      },
+      "updateTimeEntry": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "task_assignments": {
+        "parent": {
+          "member": "project.id",
+          "path_param": "project_id",
+          "type": "projects"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 31870,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `deleteTimeEntry` (Delete) acts on one `time_entries` record but no target says where the request names it",
+      "operation": "deleteTimeEntry",
+      "type": "time_entries"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `restartTimeEntry` (Update) acts on one `restart` record but no target says where the request names it",
+      "operation": "restartTimeEntry",
+      "type": "restart"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `stopTimeEntry` (Update) acts on one `stop` record but no target says where the request names it",
+      "operation": "stopTimeEntry",
+      "type": "stop"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
+  },
+  "is_error": false,
+  "mock": "harvest",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 27516,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 27516,
+      "cacheReadInputTokens": 131883,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.16132629999999998,
+      "inputTokens": 12,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3805,
+      "provider": "firstParty",
+      "thinkingTokens": 635,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 8,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:42:56.646840Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "send-to-project",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 27516,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 27516,
+    "cache_read_input_tokens": 131883,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 12,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1915,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1915,
+        "cache_read_input_tokens": 33187,
+        "input_tokens": 2,
+        "output_tokens": 904,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3805,
+    "output_tokens_details": {
+      "thinking_tokens": 635
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 32442,
+  "world": {
+    "operations": {
+      "createClient": {
+        "kind": "create",
+        "type": "clients"
+      },
+      "createProject": {
+        "kind": "create",
+        "type": "projects"
+      },
+      "createTask": {
+        "kind": "create",
+        "type": "tasks"
+      },
+      "createTaskAssignment": {
+        "kind": "create",
+        "type": "task_assignments"
+      },
+      "createTimeEntryViaDuration": {
+        "kind": "create",
+        "type": "time_entries"
+      },
+      "deleteTimeEntry": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "time_entry_id"
+        },
+        "type": "time_entries"
+      },
+      "listClients": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "is_active",
+            "param": "is_active"
+          },
+          {
+            "kind": "gte",
+            "member": "updated_at",
+            "param": "updated_since"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "clients"
+      },
+      "listTaskAssignmentsForSpecificProject": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "is_active",
+            "param": "is_active"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "scope": {
+          "member": "project.id",
+          "param": "project_id"
+        },
+        "type": "task_assignments"
+      },
+      "listTimeEntries": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "user.id",
+            "param": "user_id"
+          },
+          {
+            "kind": "eq",
+            "member": "client.id",
+            "param": "client_id"
+          },
+          {
+            "kind": "eq",
+            "member": "project.id",
+            "param": "project_id"
+          },
+          {
+            "kind": "eq",
+            "member": "task.id",
+            "param": "task_id"
+          },
+          {
+            "kind": "eq",
+            "member": "is_billed",
+            "param": "is_billed"
+          },
+          {
+            "kind": "eq",
+            "member": "is_running",
+            "param": "is_running"
+          },
+          {
+            "kind": "gte",
+            "member": "updated_at",
+            "param": "updated_since"
+          },
+          {
+            "kind": "gte",
+            "member": "spent_date",
+            "param": "from"
+          },
+          {
+            "kind": "lte",
+            "member": "spent_date",
+            "param": "to"
+          }
+        ],
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "spent_date"
+        },
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "time_entries"
+      },
+      "restartTimeEntry": {
+        "changes": {
+          "is_running": {
+            "value": true
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "time_entry_id"
+        },
+        "type": "time_entries"
+      },
+      "retrieveClient": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "client_id"
+        },
+        "type": "clients"
+      },
+      "retrieveProject": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "project_id"
+        },
+        "type": "projects"
+      },
+      "retrieveTimeEntry": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "time_entry_id"
+        },
+        "type": "time_entries"
+      },
+      "stopTimeEntry": {
+        "changes": {
+          "is_running": {
+            "value": false
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "time_entry_id"
+        },
+        "type": "time_entries"
+      },
+      "updateClient": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "client_id"
+        },
+        "type": "clients"
+      },
+      "updateTimeEntry": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "time_entry_id"
+        },
+        "type": "time_entries"
+      }
+    },
+    "types": {
+      "clients": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "projects": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "restart": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "stop": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "task_assignments": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "member": "project.id",
+          "path_param": "project_id",
+          "type": "projects"
+        }
+      },
+      "tasks": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "time_entries": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": false,
+      "problem": "Admin API answered 422 Unprocessable Entity: {\"code\":\"invalid\",\"detail\":\"not a world description entry: invalid value: map, expected map with a single key\",\"path\":\"/operations/stopTimeEntry/changes/timer_started_at\",\"status\":422,\"title\":\"Invalid world description\",\"type\":\"about:blank\"}",
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

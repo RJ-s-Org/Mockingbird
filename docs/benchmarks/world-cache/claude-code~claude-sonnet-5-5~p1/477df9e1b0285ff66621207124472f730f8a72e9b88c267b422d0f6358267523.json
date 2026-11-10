@@ -7,11 +7,9 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:08:02Z",
+  "authored_at": "2026-11-10T17:30:39Z",
   "authors": {
-    "/operations/geocodeZip/not_found": "agent",
-    "/operations/getCurrentWeather/not_found": "agent",
-    "/operations/getForecast5/not_found": "agent"
+    "/operations/getCurrentWeather/not_found": "agent"
   },
   "builtin_plugins": [
     "cc-plugin-agents-md",
@@ -20,22 +18,16 @@
   ],
   "contract": "examples/apis/openweathermap/openweathermap.openapi.yaml",
   "contract_sha256": "477df9e1b0285ff66621207124472f730f8a72e9b88c267b422d0f6358267523",
-  "cost_usd": 0.06798040000000001,
+  "cost_usd": 0.0954971,
   "document": {
     "operations": {
-      "geocodeZip": {
-        "not_found": 404
-      },
       "getCurrentWeather": {
-        "not_found": 404
-      },
-      "getForecast5": {
         "not_found": 404
       }
     },
     "version": 1
   },
-  "duration_ms": 14345,
+  "duration_ms": 18865,
   "error": null,
   "exit_code": 0,
   "gaps": [
@@ -55,37 +47,42 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "openweathermap",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 12108,
+      "cacheCreationEphemeral1hInputTokens": 16582,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 12108,
-      "cacheReadInputTokens": 71984,
+      "cacheCreationInputTokens": 16582,
+      "cacheReadInputTokens": 128411,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.06798040000000001,
-      "inputTokens": 10,
+      "costUSD": 0.0954971,
+      "inputTokens": 14,
       "maxOutputTokens": 128000,
-      "outputTokens": 1233,
+      "outputTokens": 1630,
       "provider": "firstParty",
-      "thinkingTokens": 100,
+      "thinkingTokens": 195,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 7,
+  "num_turns": 9,
   "refused": [],
-  "revision": 1,
+  "revision": 2,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:07:54.015595Z",
+      "created_at": "2026-11-10T17:30:27.981728Z",
       "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:30:29.939301Z",
+      "revision": 2
     }
   ],
   "session": {
@@ -132,6 +129,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -160,30 +158,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 12108,
+      "ephemeral_1h_input_tokens": 16582,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 12108,
-    "cache_read_input_tokens": 71984,
+    "cache_creation_input_tokens": 16582,
+    "cache_read_input_tokens": 128411,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 10,
+    "input_tokens": 14,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 528,
+          "ephemeral_1h_input_tokens": 579,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 528,
-        "cache_read_input_tokens": 19166,
+        "cache_creation_input_tokens": 579,
+        "cache_read_input_tokens": 23589,
         "input_tokens": 2,
-        "output_tokens": 421,
+        "output_tokens": 484,
         "type": "message"
       }
     ],
-    "output_tokens": 1233,
+    "output_tokens": 1630,
     "output_tokens_details": {
-      "thinking_tokens": 100
+      "thinking_tokens": 195
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -192,7 +190,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 15000,
+  "wall_ms": 19492,
   "world": {
     "operations": {
       "geocodeDirect": {
@@ -205,7 +203,6 @@
       },
       "geocodeZip": {
         "kind": "list",
-        "not_found": 404,
         "type": "zip"
       },
       "getAirPollution": {
@@ -219,7 +216,6 @@
       },
       "getForecast5": {
         "kind": "list",
-        "not_found": 404,
         "type": "forecast"
       },
       "getOneCall": {
@@ -247,6 +243,18 @@
         }
       ],
       "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "`id` is not a member of operation `getCurrentWeather`'s request body",
+          "path": "/operations/getCurrentWeather/target/member"
+        }
+      ],
+      "revision": 2,
       "tool": "patch_world"
     }
   ]

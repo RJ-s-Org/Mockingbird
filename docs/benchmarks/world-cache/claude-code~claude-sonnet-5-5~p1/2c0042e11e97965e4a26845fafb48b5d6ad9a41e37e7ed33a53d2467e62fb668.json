@@ -7,9 +7,8 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:06:39Z",
+  "authored_at": "2026-11-10T17:29:27Z",
   "authors": {
-    "/operations/create_message/answer": "agent",
     "/operations/delete_message/not_found": "agent",
     "/operations/delete_message/target": "agent",
     "/operations/get_guild/not_found": "agent",
@@ -28,14 +27,9 @@
   ],
   "contract": "examples/apis/discord/discord.openapi.yaml",
   "contract_sha256": "2c0042e11e97965e4a26845fafb48b5d6ad9a41e37e7ed33a53d2467e62fb668",
-  "cost_usd": 0.1450664,
+  "cost_usd": 0.1333301,
   "document": {
     "operations": {
-      "create_message": {
-        "answer": {
-          "record": ""
-        }
-      },
       "delete_message": {
         "not_found": 404,
         "target": {
@@ -86,7 +80,7 @@
     },
     "version": 1
   },
-  "duration_ms": 20714,
+  "duration_ms": 22595,
   "error": null,
   "exit_code": 0,
   "gaps": [
@@ -122,36 +116,36 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "discord",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 27834,
+      "cacheCreationEphemeral1hInputTokens": 24289,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 27834,
-      "cacheReadInputTokens": 126924,
+      "cacheCreationInputTokens": 24289,
+      "cacheReadInputTokens": 147661,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1450664,
+      "costUSD": 0.1333301,
       "inputTokens": 14,
       "maxOutputTokens": 128000,
-      "outputTokens": 2101,
+      "outputTokens": 2138,
       "provider": "firstParty",
-      "thinkingTokens": 310,
+      "thinkingTokens": 393,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 9,
+  "num_turns": 10,
   "refused": [],
   "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:06:29.461007Z",
+      "created_at": "2026-11-10T17:29:17.189912Z",
       "revision": 1
     }
   ],
@@ -199,6 +193,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -227,30 +222,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 27834,
+      "ephemeral_1h_input_tokens": 24289,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 27834,
-    "cache_read_input_tokens": 126924,
+    "cache_creation_input_tokens": 24289,
+    "cache_read_input_tokens": 147661,
     "fallback_credit": null,
     "inference_geo": "global",
     "input_tokens": 14,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 633,
+          "ephemeral_1h_input_tokens": 1311,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 633,
-        "cache_read_input_tokens": 27201,
+        "cache_creation_input_tokens": 1311,
+        "cache_read_input_tokens": 30564,
         "input_tokens": 2,
-        "output_tokens": 607,
+        "output_tokens": 609,
         "type": "message"
       }
     ],
-    "output_tokens": 2101,
+    "output_tokens": 2138,
     "output_tokens_details": {
-      "thinking_tokens": 310
+      "thinking_tokens": 393
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -259,7 +254,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 21462,
+  "wall_ms": 23203,
   "world": {
     "operations": {
       "create_interaction_response": {
@@ -267,9 +262,6 @@
         "type": "callback"
       },
       "create_message": {
-        "answer": {
-          "record": ""
-        },
         "kind": "create",
         "type": "messages"
       },

@@ -7,7 +7,7 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:16:21Z",
+  "authored_at": "2026-11-10T17:40:02Z",
   "authors": {
     "/operations/CompletePayment/kind": "agent",
     "/operations/CompletePayment/not_found": "agent",
@@ -25,7 +25,9 @@
     "/operations/RetrieveCustomer/not_found": "agent",
     "/types/catalog/identity": "agent",
     "/types/locations/identity": "agent",
+    "/types/payments/concurrency": "agent",
     "/types/payments/lifecycle": "agent",
+    "/types/refunds/lifecycle": "agent",
     "/types/refunds/parent": "agent"
   },
   "builtin_plugins": [
@@ -35,7 +37,7 @@
   ],
   "contract": "examples/apis/square/square.openapi.yaml",
   "contract_sha256": "3f323ad02ec3361b945cabf7267111a53d95d570dd14c8b94a1f9ea1b1f8d861",
-  "cost_usd": 0.1264849,
+  "cost_usd": 0.1315774,
   "document": {
     "operations": {
       "CompletePayment": {
@@ -83,16 +85,6 @@
             "kind": "eq",
             "member": "location_id",
             "param": "location_id"
-          },
-          {
-            "kind": "gte",
-            "member": "created_at",
-            "param": "begin_time"
-          },
-          {
-            "kind": "lte",
-            "member": "created_at",
-            "param": "end_time"
           }
         ],
         "order": {
@@ -122,6 +114,9 @@
         }
       },
       "payments": {
+        "concurrency": {
+          "member": "version_token"
+        },
         "lifecycle": {
           "member": "status",
           "states": [
@@ -134,6 +129,15 @@
         }
       },
       "refunds": {
+        "lifecycle": {
+          "member": "status",
+          "states": [
+            "PENDING",
+            "COMPLETED",
+            "REJECTED",
+            "FAILED"
+          ]
+        },
         "parent": {
           "member": "payment_id",
           "type": "payments"
@@ -142,48 +146,43 @@
     },
     "version": 1
   },
-  "duration_ms": 24291,
+  "duration_ms": 20161,
   "error": null,
   "exit_code": 0,
   "gaps": [],
   "heuristic_gaps": [],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "square",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 22786,
+      "cacheCreationEphemeral1hInputTokens": 25255,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 22786,
-      "cacheReadInputTokens": 91609,
+      "cacheCreationInputTokens": 25255,
+      "cacheReadInputTokens": 68214,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1264849,
-      "inputTokens": 10,
+      "costUSD": 0.1315774,
+      "inputTokens": 8,
       "maxOutputTokens": 128000,
-      "outputTokens": 2616,
+      "outputTokens": 2372,
       "provider": "firstParty",
-      "thinkingTokens": 625,
+      "thinkingTokens": 724,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 7,
+  "num_turns": 6,
   "refused": [],
-  "revision": 2,
+  "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:16:08.473131Z",
+      "created_at": "2026-11-10T17:39:54.384660Z",
       "revision": 1
-    },
-    {
-      "author": "agent",
-      "created_at": "2026-11-07T02:16:10.751334Z",
-      "revision": 2
     }
   ],
   "session": {
@@ -230,6 +229,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -258,30 +258,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 22786,
+      "ephemeral_1h_input_tokens": 25255,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 22786,
-    "cache_read_input_tokens": 91609,
+    "cache_creation_input_tokens": 25255,
+    "cache_read_input_tokens": 68214,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 10,
+    "input_tokens": 8,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 849,
+          "ephemeral_1h_input_tokens": 1966,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 849,
-        "cache_read_input_tokens": 29523,
+        "cache_creation_input_tokens": 1966,
+        "cache_read_input_tokens": 30875,
         "input_tokens": 2,
-        "output_tokens": 877,
+        "output_tokens": 696,
         "type": "message"
       }
     ],
-    "output_tokens": 2616,
+    "output_tokens": 2372,
     "output_tokens_details": {
-      "thinking_tokens": 625
+      "thinking_tokens": 724
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -290,7 +290,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 24951,
+  "wall_ms": 20787,
   "world": {
     "operations": {
       "CompletePayment": {
@@ -373,16 +373,6 @@
             "kind": "eq",
             "member": "location_id",
             "param": "location_id"
-          },
-          {
-            "kind": "gte",
-            "member": "created_at",
-            "param": "begin_time"
-          },
-          {
-            "kind": "lte",
-            "member": "created_at",
-            "param": "end_time"
           }
         ],
         "kind": "list",
@@ -434,6 +424,9 @@
         }
       },
       "payments": {
+        "concurrency": {
+          "member": "version_token"
+        },
         "identity": {
           "member": "id"
         },
@@ -452,6 +445,15 @@
         "identity": {
           "member": "id"
         },
+        "lifecycle": {
+          "member": "status",
+          "states": [
+            "PENDING",
+            "COMPLETED",
+            "REJECTED",
+            "FAILED"
+          ]
+        },
         "parent": {
           "member": "payment_id",
           "type": "payments"
@@ -463,25 +465,8 @@
   "writes": [
     {
       "ok": true,
-      "refused": [
-        {
-          "code": "unresolved",
-          "message": "`id` is not a member of a `catalog` record",
-          "path": "/types/catalog/identity/member"
-        },
-        {
-          "code": "unresolved",
-          "message": "`id` is not a member of a `locations` record",
-          "path": "/types/locations/identity/member"
-        }
-      ],
-      "revision": 1,
-      "tool": "patch_world"
-    },
-    {
-      "ok": true,
       "refused": [],
-      "revision": 2,
+      "revision": 1,
       "tool": "patch_world"
     }
   ]

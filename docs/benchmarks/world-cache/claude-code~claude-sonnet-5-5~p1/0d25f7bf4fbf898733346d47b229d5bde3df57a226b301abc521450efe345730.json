@@ -7,15 +7,19 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:16:43Z",
+  "authored_at": "2026-11-10T17:40:22Z",
   "authors": {
     "/operations/cancelBooking/transition": "agent",
     "/operations/createBooking/answer": "agent",
+    "/operations/createBooking/request": "agent",
     "/operations/getBooking/not_found": "agent",
     "/operations/getOffer/not_found": "agent",
     "/operations/listHotels/answer": "agent",
+    "/operations/listHotels/ignores": "agent",
     "/operations/listHotels/paging": "agent",
+    "/operations/listHotels/type": "agent",
     "/operations/searchFlights/answer": "agent",
+    "/operations/searchFlights/ignores": "agent",
     "/types/bookings/lifecycle": "agent",
     "/types/hotels/identity": "agent"
   },
@@ -26,7 +30,7 @@
   ],
   "contract": "docs/benchmarks/contracts/travel.openapi.yaml",
   "contract_sha256": "0d25f7bf4fbf898733346d47b229d5bde3df57a226b301abc521450efe345730",
-  "cost_usd": 0.10438439999999999,
+  "cost_usd": 0.1173002,
   "document": {
     "operations": {
       "cancelBooking": {
@@ -36,6 +40,9 @@
       },
       "createBooking": {
         "answer": {
+          "record": ""
+        },
+        "request": {
           "record": ""
         }
       },
@@ -49,16 +56,31 @@
         "answer": {
           "records": "/data"
         },
+        "ignores": [
+          "checkIn",
+          "checkOut",
+          "guests"
+        ],
         "paging": {
           "request": "page",
           "size": "pageSize",
           "style": "page"
-        }
+        },
+        "type": "hotels"
       },
       "searchFlights": {
         "answer": {
           "records": "/offers"
-        }
+        },
+        "ignores": [
+          "/origin",
+          "/destination",
+          "/departureDate",
+          "/returnDate",
+          "/passengers",
+          "/maxStops",
+          "/currency"
+        ]
       }
     },
     "types": {
@@ -82,42 +104,42 @@
     },
     "version": 1
   },
-  "duration_ms": 17285,
+  "duration_ms": 18443,
   "error": null,
   "exit_code": 0,
   "gaps": [],
   "heuristic_gaps": [],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "travel",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 19973,
+      "cacheCreationEphemeral1hInputTokens": 23053,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 19973,
-      "cacheReadInputTokens": 60764,
+      "cacheCreationInputTokens": 23053,
+      "cacheReadInputTokens": 45962,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.10438439999999999,
-      "inputTokens": 8,
+      "costUSD": 0.1173002,
+      "inputTokens": 6,
       "maxOutputTokens": 128000,
-      "outputTokens": 1840,
+      "outputTokens": 2048,
       "provider": "firstParty",
-      "thinkingTokens": 491,
+      "thinkingTokens": 625,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 7,
+  "num_turns": 6,
   "refused": [],
   "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:16:36.686568Z",
+      "created_at": "2026-11-10T17:40:14.477886Z",
       "revision": 1
     }
   ],
@@ -165,6 +187,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -193,30 +216,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 19973,
+      "ephemeral_1h_input_tokens": 23053,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 19973,
-    "cache_read_input_tokens": 60764,
+    "cache_creation_input_tokens": 23053,
+    "cache_read_input_tokens": 45962,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 8,
+    "input_tokens": 6,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 1143,
+          "ephemeral_1h_input_tokens": 1446,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 1143,
-        "cache_read_input_tokens": 26416,
+        "cache_creation_input_tokens": 1446,
+        "cache_read_input_tokens": 29193,
         "input_tokens": 2,
-        "output_tokens": 575,
+        "output_tokens": 681,
         "type": "message"
       }
     ],
-    "output_tokens": 1840,
+    "output_tokens": 2048,
     "output_tokens_details": {
-      "thinking_tokens": 491
+      "thinking_tokens": 625
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -225,7 +248,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 17867,
+  "wall_ms": 19028,
   "world": {
     "operations": {
       "cancelBooking": {
@@ -243,6 +266,9 @@
           "record": ""
         },
         "kind": "create",
+        "request": {
+          "record": ""
+        },
         "type": "bookings"
       },
       "getBooking": {
@@ -265,6 +291,11 @@
         "answer": {
           "records": "/data"
         },
+        "ignores": [
+          "checkIn",
+          "checkOut",
+          "guests"
+        ],
         "kind": "list",
         "paging": {
           "request": "page",
@@ -277,6 +308,15 @@
         "answer": {
           "records": "/offers"
         },
+        "ignores": [
+          "/origin",
+          "/destination",
+          "/departureDate",
+          "/returnDate",
+          "/passengers",
+          "/maxStops",
+          "/currency"
+        ],
         "kind": "list",
         "type": "offers"
       }

@@ -1,0 +1,487 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-10T17:43:54Z",
+  "authors": {
+    "/operations/employee_get/fields": "agent",
+    "/operations/employee_get/not_found": "agent",
+    "/operations/employee_update/kind": "agent",
+    "/operations/employee_update/not_found": "agent",
+    "/operations/time_off_request_create/answer": "agent",
+    "/operations/time_off_request_create/kind": "agent",
+    "/operations/time_off_request_create/not_found": "agent",
+    "/operations/time_off_request_create/request": "agent",
+    "/operations/time_off_request_create/type": "agent",
+    "/operations/time_off_request_status/changes": "agent",
+    "/operations/time_off_request_status/kind": "agent",
+    "/operations/time_off_request_status/not_found": "agent",
+    "/operations/time_off_request_status/target": "agent",
+    "/operations/time_off_request_status/type": "agent",
+    "/operations/time_off_requests_list/filters": "agent",
+    "/operations/time_off_requests_list/ignores": "agent",
+    "/operations/time_off_requests_list/kind": "agent",
+    "/operations/time_off_requests_list/type": "agent",
+    "/operations/time_off_types/answer": "agent",
+    "/operations/time_off_types/ignores": "agent",
+    "/types/request/identity": "agent",
+    "/types/request/lifecycle": "agent",
+    "/types/request/parent": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind13/bamboohr.openapi.yaml",
+  "contract_sha256": "332f4ab4d8a58c6c094f782f6ded59d1efa5448b68c75ccbc3e96859784713c0",
+  "cost_usd": 0.1509725,
+  "document": {
+    "operations": {
+      "employee_get": {
+        "fields": {
+          "always": [
+            "id"
+          ],
+          "default": [],
+          "param": "fields",
+          "separator": ","
+        },
+        "not_found": 404
+      },
+      "employee_update": {
+        "kind": "update",
+        "not_found": 404
+      },
+      "time_off_request_create": {
+        "answer": {
+          "identity_header": "Location",
+          "record": ""
+        },
+        "kind": "create",
+        "not_found": 404,
+        "request": {
+          "record": ""
+        },
+        "type": "request"
+      },
+      "time_off_request_status": {
+        "changes": {
+          "status.status": {
+            "from_request": "/status"
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "requestId"
+        },
+        "type": "request"
+      },
+      "time_off_requests_list": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "id",
+            "param": "id"
+          },
+          {
+            "kind": "eq",
+            "member": "employeeId",
+            "param": "employeeId"
+          },
+          {
+            "kind": "eq",
+            "member": "type.id",
+            "param": "type"
+          },
+          {
+            "kind": "eq",
+            "member": "status.status",
+            "param": "status"
+          },
+          {
+            "kind": "gte",
+            "member": "end",
+            "param": "start"
+          },
+          {
+            "kind": "lte",
+            "member": "start",
+            "param": "end"
+          }
+        ],
+        "ignores": [
+          "action",
+          "excludeNote"
+        ],
+        "kind": "list",
+        "type": "request"
+      },
+      "time_off_types": {
+        "answer": {
+          "records": "/timeOffTypes"
+        },
+        "ignores": [
+          "mode"
+        ]
+      }
+    },
+    "types": {
+      "request": {
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "member": "status.status",
+          "states": [
+            "approved",
+            "denied",
+            "declined",
+            "superceded",
+            "requested",
+            "canceled"
+          ]
+        },
+        "parent": {
+          "member": "employeeId",
+          "path_param": "employeeId",
+          "type": "employees"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 43608,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `status` is written by `time_off_request_status` but has no identity: no member is known to name a record",
+      "type": "status"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `time_off_request_create` (Update) acts on one `request` record but no target says where the request names it",
+      "operation": "time_off_request_create",
+      "type": "request"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `time_off_request_status` (Update) acts on one `status` record but no target says where the request names it",
+      "operation": "time_off_request_status",
+      "type": "status"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
+  },
+  "is_error": false,
+  "mock": "bamboohr",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 24146,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 24146,
+      "cacheReadInputTokens": 199525,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1509725,
+      "inputTokens": 18,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3440,
+      "provider": "firstParty",
+      "thinkingTokens": 523,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 13,
+  "refused": [],
+  "revision": 2,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:43:29.775076Z",
+      "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:43:39.234867Z",
+      "revision": 2
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "send-to-project",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 24146,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 24146,
+    "cache_read_input_tokens": 199525,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 18,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1716,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1716,
+        "cache_read_input_tokens": 30016,
+        "input_tokens": 2,
+        "output_tokens": 980,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3440,
+    "output_tokens_details": {
+      "thinking_tokens": 523
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 44121,
+  "world": {
+    "operations": {
+      "employee_create": {
+        "answer": {
+          "identity_header": "Location"
+        },
+        "kind": "create",
+        "type": "employees"
+      },
+      "employee_get": {
+        "fields": {
+          "always": [
+            "id"
+          ],
+          "default": [],
+          "param": "fields",
+          "separator": ","
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "employees"
+      },
+      "employee_update": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "employees"
+      },
+      "time_off_request_create": {
+        "answer": {
+          "identity_header": "Location",
+          "record": ""
+        },
+        "kind": "create",
+        "not_found": 404,
+        "request": {
+          "record": ""
+        },
+        "type": "request"
+      },
+      "time_off_request_status": {
+        "changes": {
+          "status.status": {
+            "from_request": "/status"
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "requestId"
+        },
+        "type": "request"
+      },
+      "time_off_requests_list": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "id",
+            "param": "id"
+          },
+          {
+            "kind": "eq",
+            "member": "employeeId",
+            "param": "employeeId"
+          },
+          {
+            "kind": "eq",
+            "member": "type.id",
+            "param": "type"
+          },
+          {
+            "kind": "eq",
+            "member": "status.status",
+            "param": "status"
+          },
+          {
+            "kind": "gte",
+            "member": "end",
+            "param": "start"
+          },
+          {
+            "kind": "lte",
+            "member": "start",
+            "param": "end"
+          }
+        ],
+        "ignores": [
+          "action",
+          "excludeNote"
+        ],
+        "kind": "list",
+        "type": "request"
+      },
+      "time_off_types": {
+        "answer": {
+          "records": "/timeOffTypes"
+        },
+        "ignores": [
+          "mode"
+        ],
+        "kind": "list",
+        "type": "types"
+      }
+    },
+    "types": {
+      "employees": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "request": {
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "member": "status.status",
+          "states": [
+            "approved",
+            "denied",
+            "declined",
+            "superceded",
+            "requested",
+            "canceled"
+          ]
+        },
+        "parent": {
+          "member": "employeeId",
+          "path_param": "employeeId",
+          "type": "employees"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "no operation has resource type `time_off_type` and no definition is named so",
+          "path": "/operations/time_off_types/type"
+        }
+      ],
+      "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 2,
+      "tool": "patch_world"
+    }
+  ]
+}

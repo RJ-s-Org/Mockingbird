@@ -7,18 +7,19 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:11:49Z",
+  "authored_at": "2026-11-10T17:34:52Z",
   "authors": {
-    "/operations/addInvoiceComment/target": "agent",
     "/operations/deleteInvoice/not_found": "agent",
     "/operations/deleteInvoice/target": "agent",
     "/operations/getContact/not_found": "agent",
     "/operations/getCustomerPayment/not_found": "agent",
     "/operations/getInvoice/not_found": "agent",
+    "/operations/listContacts/answer": "agent",
+    "/operations/listContacts/filters": "agent",
     "/operations/listContacts/paging": "agent",
-    "/operations/listInvoiceComments/not_found": "agent",
+    "/operations/listInvoiceComments/answer": "agent",
     "/operations/listInvoiceComments/scope": "agent",
-    "/operations/listInvoicePayments/not_found": "agent",
+    "/operations/listInvoices/answer": "agent",
     "/operations/listInvoices/filters": "agent",
     "/operations/listInvoices/paging": "agent",
     "/operations/markInvoiceDraft/kind": "agent",
@@ -49,14 +50,9 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind6/zohobooks.openapi.yaml",
   "contract_sha256": "3e89b8eac387f811bbf2ed397d945049c9fd468ea846ce423c67db918bb401b6",
-  "cost_usd": 0.1516934,
+  "cost_usd": 0.1735796,
   "document": {
     "operations": {
-      "addInvoiceComment": {
-        "target": {
-          "path_param": "invoice_id"
-        }
-      },
       "deleteInvoice": {
         "not_found": 404,
         "target": {
@@ -73,6 +69,16 @@
         "not_found": 404
       },
       "listContacts": {
+        "answer": {
+          "records": "/contacts"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "contact_name",
+            "param": "contact_name"
+          }
+        ],
         "paging": {
           "request": "page",
           "response": "page_context.has_more_page",
@@ -81,16 +87,18 @@
         }
       },
       "listInvoiceComments": {
-        "not_found": 404,
+        "answer": {
+          "records": "/comments"
+        },
         "scope": {
           "member": "invoice_id",
           "param": "invoice_id"
         }
       },
-      "listInvoicePayments": {
-        "not_found": 404
-      },
       "listInvoices": {
+        "answer": {
+          "records": "/invoices"
+        },
         "filters": [
           {
             "kind": "eq",
@@ -212,7 +220,7 @@
     },
     "version": 1
   },
-  "duration_ms": 25906,
+  "duration_ms": 29088,
   "error": null,
   "exit_code": 0,
   "gaps": [],
@@ -240,37 +248,42 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "zohobooks",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 26795,
+      "cacheCreationEphemeral1hInputTokens": 30783,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 26795,
-      "cacheReadInputTokens": 115194,
+      "cacheCreationInputTokens": 30783,
+      "cacheReadInputTokens": 163896,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1516934,
-      "inputTokens": 12,
+      "costUSD": 0.1735796,
+      "inputTokens": 14,
       "maxOutputTokens": 128000,
-      "outputTokens": 3297,
+      "outputTokens": 3403,
       "provider": "firstParty",
-      "thinkingTokens": 649,
+      "thinkingTokens": 794,
       "webSearchRequests": 0
     }
   },
   "num_turns": 9,
   "refused": [],
-  "revision": 1,
+  "revision": 2,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:11:38.114646Z",
+      "created_at": "2026-11-10T17:34:39.270450Z",
       "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:34:40.718641Z",
+      "revision": 2
     }
   ],
   "session": {
@@ -317,6 +330,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -345,30 +359,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 26795,
+      "ephemeral_1h_input_tokens": 30783,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 26795,
-    "cache_read_input_tokens": 115194,
+    "cache_creation_input_tokens": 30783,
+    "cache_read_input_tokens": 163896,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 12,
+    "input_tokens": 14,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 2383,
+          "ephemeral_1h_input_tokens": 2129,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 2383,
-        "cache_read_input_tokens": 31998,
+        "cache_creation_input_tokens": 2129,
+        "cache_read_input_tokens": 36240,
         "input_tokens": 2,
-        "output_tokens": 936,
+        "output_tokens": 943,
         "type": "message"
       }
     ],
-    "output_tokens": 3297,
+    "output_tokens": 3403,
     "output_tokens_details": {
-      "thinking_tokens": 649
+      "thinking_tokens": 794
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -377,7 +391,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 26489,
+  "wall_ms": 29664,
   "world": {
     "operations": {
       "addInvoiceComment": {
@@ -385,9 +399,6 @@
           "record": "/comment"
         },
         "kind": "create",
-        "target": {
-          "path_param": "invoice_id"
-        },
         "type": "comments"
       },
       "createContact": {
@@ -453,6 +464,16 @@
         "type": "invoices"
       },
       "listContacts": {
+        "answer": {
+          "records": "/contacts"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "contact_name",
+            "param": "contact_name"
+          }
+        ],
         "kind": "list",
         "paging": {
           "request": "page",
@@ -463,8 +484,10 @@
         "type": "contacts"
       },
       "listInvoiceComments": {
+        "answer": {
+          "records": "/comments"
+        },
         "kind": "list",
-        "not_found": 404,
         "scope": {
           "member": "invoice_id",
           "param": "invoice_id"
@@ -473,10 +496,12 @@
       },
       "listInvoicePayments": {
         "kind": "list",
-        "not_found": 404,
         "type": "payments"
       },
       "listInvoices": {
+        "answer": {
+          "records": "/invoices"
+        },
         "filters": [
           {
             "kind": "eq",
@@ -628,11 +653,17 @@
       "refused": [
         {
           "code": "unresolved",
-          "message": "`invoice_id` is not a member of a `payments` record",
-          "path": "/operations/listInvoicePayments/scope/member"
+          "message": "`invoice_id` is not a member of operation `addInvoiceComment`'s request body",
+          "path": "/operations/addInvoiceComment/target/member"
         }
       ],
       "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 2,
       "tool": "patch_world"
     }
   ]

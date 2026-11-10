@@ -7,22 +7,35 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:15:12Z",
+  "authored_at": "2026-11-10T17:38:43Z",
   "authors": {
+    "/operations/groups.create/answer": "agent",
+    "/operations/groups.create/request": "agent",
     "/operations/groups.delete/not_found": "agent",
     "/operations/groups.delete/target": "agent",
     "/operations/groups.get/not_found": "agent",
     "/operations/groups.list/answer": "agent",
+    "/operations/groups.list/fields": "agent",
+    "/operations/groups.list/filters": "agent",
+    "/operations/groups.list/paging": "agent",
     "/operations/groups.patch/not_found": "agent",
     "/operations/groups.patch/target": "agent",
+    "/operations/users.create/answer": "agent",
+    "/operations/users.create/request": "agent",
     "/operations/users.delete/not_found": "agent",
     "/operations/users.delete/target": "agent",
+    "/operations/users.get/fields": "agent",
     "/operations/users.get/not_found": "agent",
     "/operations/users.list/answer": "agent",
+    "/operations/users.list/fields": "agent",
+    "/operations/users.list/filters": "agent",
+    "/operations/users.list/paging": "agent",
     "/operations/users.patch/not_found": "agent",
     "/operations/users.patch/target": "agent",
+    "/operations/users.update/kind": "agent",
     "/operations/users.update/not_found": "agent",
     "/operations/users.update/target": "agent",
+    "/operations/users.update/type": "agent",
     "/types/Groups/unique": "agent",
     "/types/Users/unique": "agent"
   },
@@ -33,9 +46,17 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind10/databricks.openapi.yaml",
   "contract_sha256": "addcc98c4a1005fa18c74d5335b44d023818d5cc78d034c0b7175b9bd9e82d23",
-  "cost_usd": 0.1164155,
+  "cost_usd": 0.1324648,
   "document": {
     "operations": {
+      "groups.create": {
+        "answer": {
+          "record": ""
+        },
+        "request": {
+          "record": ""
+        }
+      },
       "groups.delete": {
         "not_found": 404,
         "target": {
@@ -48,12 +69,39 @@
       "groups.list": {
         "answer": {
           "records": "/Resources"
+        },
+        "fields": {
+          "always": [
+            "id",
+            "schemas"
+          ],
+          "param": "attributes",
+          "separator": ","
+        },
+        "filters": [
+          {
+            "grammar": "scim",
+            "param": "filter"
+          }
+        ],
+        "paging": {
+          "request": "startIndex",
+          "size": "count",
+          "style": "offset"
         }
       },
       "groups.patch": {
         "not_found": 404,
         "target": {
           "path_param": "id"
+        }
+      },
+      "users.create": {
+        "answer": {
+          "record": ""
+        },
+        "request": {
+          "record": ""
         }
       },
       "users.delete": {
@@ -63,11 +111,38 @@
         }
       },
       "users.get": {
+        "fields": {
+          "always": [
+            "id",
+            "schemas"
+          ],
+          "param": "attributes",
+          "separator": ","
+        },
         "not_found": 404
       },
       "users.list": {
         "answer": {
           "records": "/Resources"
+        },
+        "fields": {
+          "always": [
+            "id",
+            "schemas"
+          ],
+          "param": "attributes",
+          "separator": ","
+        },
+        "filters": [
+          {
+            "grammar": "scim",
+            "param": "filter"
+          }
+        ],
+        "paging": {
+          "request": "startIndex",
+          "size": "count",
+          "style": "offset"
         }
       },
       "users.patch": {
@@ -77,10 +152,12 @@
         }
       },
       "users.update": {
+        "kind": "replace",
         "not_found": 404,
         "target": {
           "path_param": "id"
-        }
+        },
+        "type": "Users"
       }
     },
     "types": {
@@ -107,7 +184,7 @@
     },
     "version": 1
   },
-  "duration_ms": 27429,
+  "duration_ms": 23586,
   "error": null,
   "exit_code": 0,
   "gaps": [],
@@ -144,36 +221,36 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "databricks",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 18296,
+      "cacheCreationEphemeral1hInputTokens": 23800,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 18296,
-      "cacheReadInputTokens": 175855,
+      "cacheCreationInputTokens": 23800,
+      "cacheReadInputTokens": 117308,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1164155,
-      "inputTokens": 18,
+      "costUSD": 0.1324648,
+      "inputTokens": 12,
       "maxOutputTokens": 128000,
-      "outputTokens": 2561,
+      "outputTokens": 2551,
       "provider": "firstParty",
-      "thinkingTokens": 349,
+      "thinkingTokens": 224,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 12,
+  "num_turns": 10,
   "refused": [],
   "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:14:56.764779Z",
+      "created_at": "2026-11-10T17:38:31.743013Z",
       "revision": 1
     }
   ],
@@ -221,6 +298,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -249,30 +327,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 18296,
+      "ephemeral_1h_input_tokens": 23800,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 18296,
-    "cache_read_input_tokens": 175855,
+    "cache_creation_input_tokens": 23800,
+    "cache_read_input_tokens": 117308,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 18,
+    "input_tokens": 12,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 493,
+          "ephemeral_1h_input_tokens": 1674,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 493,
-        "cache_read_input_tokens": 25389,
+        "cache_creation_input_tokens": 1674,
+        "cache_read_input_tokens": 29712,
         "input_tokens": 2,
-        "output_tokens": 630,
+        "output_tokens": 744,
         "type": "message"
       }
     ],
-    "output_tokens": 2561,
+    "output_tokens": 2551,
     "output_tokens_details": {
-      "thinking_tokens": 349
+      "thinking_tokens": 224
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -281,11 +359,17 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 27990,
+  "wall_ms": 24250,
   "world": {
     "operations": {
       "groups.create": {
+        "answer": {
+          "record": ""
+        },
         "kind": "create",
+        "request": {
+          "record": ""
+        },
         "type": "Groups"
       },
       "groups.delete": {
@@ -308,7 +392,26 @@
         "answer": {
           "records": "/Resources"
         },
+        "fields": {
+          "always": [
+            "id",
+            "schemas"
+          ],
+          "param": "attributes",
+          "separator": ","
+        },
+        "filters": [
+          {
+            "grammar": "scim",
+            "param": "filter"
+          }
+        ],
         "kind": "list",
+        "paging": {
+          "request": "startIndex",
+          "size": "count",
+          "style": "offset"
+        },
         "type": "Groups"
       },
       "groups.patch": {
@@ -320,7 +423,13 @@
         "type": "Groups"
       },
       "users.create": {
+        "answer": {
+          "record": ""
+        },
         "kind": "create",
+        "request": {
+          "record": ""
+        },
         "type": "Users"
       },
       "users.delete": {
@@ -332,6 +441,14 @@
         "type": "Users"
       },
       "users.get": {
+        "fields": {
+          "always": [
+            "id",
+            "schemas"
+          ],
+          "param": "attributes",
+          "separator": ","
+        },
         "kind": "read",
         "not_found": 404,
         "target": {
@@ -343,7 +460,26 @@
         "answer": {
           "records": "/Resources"
         },
+        "fields": {
+          "always": [
+            "id",
+            "schemas"
+          ],
+          "param": "attributes",
+          "separator": ","
+        },
+        "filters": [
+          {
+            "grammar": "scim",
+            "param": "filter"
+          }
+        ],
         "kind": "list",
+        "paging": {
+          "request": "startIndex",
+          "size": "count",
+          "style": "offset"
+        },
         "type": "Users"
       },
       "users.patch": {
@@ -355,7 +491,7 @@
         "type": "Users"
       },
       "users.update": {
-        "kind": "update",
+        "kind": "replace",
         "not_found": 404,
         "target": {
           "path_param": "id"

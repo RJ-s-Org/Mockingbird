@@ -7,21 +7,18 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:07:59Z",
+  "authored_at": "2026-11-10T17:30:22Z",
   "authors": {
-    "/operations/CreateCall/answer": "agent",
-    "/operations/CreateMessage/answer": "agent",
     "/operations/DeleteMessage/not_found": "agent",
     "/operations/DeleteMessage/target": "agent",
     "/operations/FetchCall/not_found": "agent",
     "/operations/FetchMessage/not_found": "agent",
     "/operations/ListCall/answer": "agent",
     "/operations/ListCall/filters": "agent",
-    "/operations/ListCall/paging": "agent",
     "/operations/ListMessage/answer": "agent",
     "/operations/ListMessage/filters": "agent",
     "/operations/ListMessage/paging": "agent",
-    "/operations/UpdateMessage/kind": "agent",
+    "/operations/UpdateMessage/changes": "agent",
     "/operations/UpdateMessage/not_found": "agent",
     "/types/Calls/lifecycle": "agent",
     "/types/Messages/lifecycle": "agent"
@@ -33,19 +30,9 @@
   ],
   "contract": "examples/apis/twilio/twilio.openapi.yaml",
   "contract_sha256": "af04d533beda30666fa0f16b1cf1cf5160b5df7d3f1c15f398e3fdafec3b5dd3",
-  "cost_usd": 0.1819583,
+  "cost_usd": 0.1261468,
   "document": {
     "operations": {
-      "CreateCall": {
-        "answer": {
-          "record": ""
-        }
-      },
-      "CreateMessage": {
-        "answer": {
-          "record": ""
-        }
-      },
       "DeleteMessage": {
         "not_found": 404,
         "target": {
@@ -78,12 +65,7 @@
             "member": "status",
             "param": "Status"
           }
-        ],
-        "paging": {
-          "response": "next_page_uri",
-          "size": "PageSize",
-          "style": "next_url"
-        }
+        ]
       },
       "ListMessage": {
         "answer": {
@@ -102,32 +84,64 @@
           }
         ],
         "paging": {
-          "response": "next_page_uri",
+          "request": "Page",
           "size": "PageSize",
-          "style": "next_url"
+          "style": "page"
         }
       },
       "UpdateMessage": {
-        "kind": "update",
+        "changes": {
+          "body": {
+            "from_request": "/Body"
+          },
+          "status": {
+            "from_request": "/Status"
+          }
+        },
         "not_found": 404
       }
     },
     "types": {
       "Calls": {
         "lifecycle": {
-          "member": "status"
+          "member": "status",
+          "states": [
+            "queued",
+            "ringing",
+            "in-progress",
+            "completed",
+            "busy",
+            "failed",
+            "no-answer",
+            "canceled"
+          ]
         }
       },
       "Messages": {
         "lifecycle": {
           "initial": "queued",
-          "member": "status"
+          "member": "status",
+          "states": [
+            "queued",
+            "sending",
+            "sent",
+            "failed",
+            "delivered",
+            "undelivered",
+            "receiving",
+            "received",
+            "accepted",
+            "scheduled",
+            "read",
+            "partially_delivered",
+            "canceled"
+          ]
         }
       }
     },
     "version": 1
   },
-  "duration_ms": 39220,
+  "duration_ms": 22641,
   "error": null,
   "exit_code": 0,
   "gaps": [],
@@ -140,42 +154,37 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "twilio",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 27253,
+      "cacheCreationEphemeral1hInputTokens": 23299,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 27253,
-      "cacheReadInputTokens": 322543,
+      "cacheCreationInputTokens": 23299,
+      "cacheReadInputTokens": 87308,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1819583,
-      "inputTokens": 26,
+      "costUSD": 0.1261468,
+      "inputTokens": 10,
       "maxOutputTokens": 128000,
-      "outputTokens": 4064,
+      "outputTokens": 2420,
       "provider": "firstParty",
-      "thinkingTokens": 638,
+      "thinkingTokens": 555,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 17,
+  "num_turns": 7,
   "refused": [],
-  "revision": 2,
+  "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:07:33.418235Z",
+      "created_at": "2026-11-10T17:30:12.871367Z",
       "revision": 1
-    },
-    {
-      "author": "agent",
-      "created_at": "2026-11-07T02:07:45.705457Z",
-      "revision": 2
     }
   ],
   "session": {
@@ -222,6 +231,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -250,30 +260,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 27253,
+      "ephemeral_1h_input_tokens": 23299,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 27253,
-    "cache_read_input_tokens": 322543,
+    "cache_creation_input_tokens": 23299,
+    "cache_read_input_tokens": 87308,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 26,
+    "input_tokens": 10,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 1897,
+          "ephemeral_1h_input_tokens": 1709,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 1897,
-        "cache_read_input_tokens": 32942,
+        "cache_creation_input_tokens": 1709,
+        "cache_read_input_tokens": 29176,
         "input_tokens": 2,
-        "output_tokens": 856,
+        "output_tokens": 717,
         "type": "message"
       }
     ],
-    "output_tokens": 4064,
+    "output_tokens": 2420,
     "output_tokens_details": {
-      "thinking_tokens": 638
+      "thinking_tokens": 555
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -282,20 +292,14 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 39801,
+  "wall_ms": 23537,
   "world": {
     "operations": {
       "CreateCall": {
-        "answer": {
-          "record": ""
-        },
         "kind": "create",
         "type": "Calls"
       },
       "CreateMessage": {
-        "answer": {
-          "record": ""
-        },
         "kind": "create",
         "type": "Messages"
       },
@@ -345,11 +349,6 @@
           }
         ],
         "kind": "list",
-        "paging": {
-          "response": "next_page_uri",
-          "size": "PageSize",
-          "style": "next_url"
-        },
         "type": "Calls"
       },
       "ListMessage": {
@@ -370,14 +369,22 @@
         ],
         "kind": "list",
         "paging": {
-          "response": "next_page_uri",
+          "request": "Page",
           "size": "PageSize",
-          "style": "next_url"
+          "style": "page"
         },
         "type": "Messages"
       },
       "UpdateMessage": {
-        "kind": "update",
+        "changes": {
+          "body": {
+            "from_request": "/Body"
+          },
+          "status": {
+            "from_request": "/Status"
+          }
+        },
+        "kind": "action",
         "not_found": 404,
         "target": {
           "path_param": "Sid"
@@ -391,7 +398,17 @@
           "member": "sid"
         },
         "lifecycle": {
-          "member": "status"
+          "member": "status",
+          "states": [
+            "queued",
+            "ringing",
+            "in-progress",
+            "completed",
+            "busy",
+            "failed",
+            "no-answer",
+            "canceled"
+          ]
         }
       },
       "Messages": {
@@ -400,7 +417,22 @@
         },
         "lifecycle": {
           "initial": "queued",
-          "member": "status"
+          "member": "status",
+          "states": [
+            "queued",
+            "sending",
+            "sent",
+            "failed",
+            "delivered",
+            "undelivered",
+            "receiving",
+            "received",
+            "accepted",
+            "scheduled",
+            "read",
+            "partially_delivered",
+            "canceled"
+          ]
         }
       }
     },
@@ -411,12 +443,6 @@
       "ok": true,
       "refused": [],
       "revision": 1,
-      "tool": "patch_world"
-    },
-    {
-      "ok": true,
-      "refused": [],
-      "revision": 2,
       "tool": "patch_world"
     }
   ]

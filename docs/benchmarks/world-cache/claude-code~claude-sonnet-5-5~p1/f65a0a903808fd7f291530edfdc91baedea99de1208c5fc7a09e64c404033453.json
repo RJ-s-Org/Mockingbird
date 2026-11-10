@@ -7,18 +7,28 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:14:11Z",
+  "authored_at": "2026-11-10T17:37:49Z",
   "authors": {
+    "/operations/createProducts/answer": "agent",
+    "/operations/createProducts/request": "agent",
     "/operations/deleteProduct/not_found": "agent",
     "/operations/deleteProduct/target": "agent",
+    "/operations/readCategories/answer": "agent",
+    "/operations/readCategories/fields": "agent",
+    "/operations/readCategories/filters": "agent",
     "/operations/readCategories/order": "agent",
     "/operations/readCategories/paging": "agent",
+    "/operations/readProduct/fields": "agent",
     "/operations/readProduct/not_found": "agent",
+    "/operations/readProducts/answer": "agent",
+    "/operations/readProducts/fields": "agent",
     "/operations/readProducts/filters": "agent",
     "/operations/readProducts/order": "agent",
     "/operations/readProducts/paging": "agent",
     "/operations/updateProduct/not_found": "agent",
+    "/operations/updateProducts/answer": "agent",
     "/operations/updateProducts/not_found": "agent",
+    "/operations/updateProducts/request": "agent",
     "/operations/updateProducts/target": "agent",
     "/types/products/unique": "agent"
   },
@@ -29,9 +39,17 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind9/directus.openapi.yaml",
   "contract_sha256": "f65a0a903808fd7f291530edfdc91baedea99de1208c5fc7a09e64c404033453",
-  "cost_usd": 0.10357680000000001,
+  "cost_usd": 0.13432470000000002,
   "document": {
     "operations": {
+      "createProducts": {
+        "answer": {
+          "record": "/data"
+        },
+        "request": {
+          "record": ""
+        }
+      },
       "deleteProduct": {
         "not_found": 403,
         "target": {
@@ -39,6 +57,19 @@
         }
       },
       "readCategories": {
+        "answer": {
+          "records": "/data"
+        },
+        "fields": {
+          "param": "fields",
+          "separator": ","
+        },
+        "filters": [
+          {
+            "grammar": "deep_object",
+            "param": "filter"
+          }
+        ],
         "order": {
           "member": "id"
         },
@@ -49,10 +80,25 @@
         }
       },
       "readProduct": {
+        "fields": {
+          "param": "fields",
+          "separator": ","
+        },
         "not_found": 403
       },
       "readProducts": {
+        "answer": {
+          "records": "/data"
+        },
+        "fields": {
+          "param": "fields",
+          "separator": ","
+        },
         "filters": [
+          {
+            "grammar": "deep_object",
+            "param": "filter"
+          },
           {
             "kind": "text",
             "param": "search"
@@ -71,7 +117,13 @@
         "not_found": 403
       },
       "updateProducts": {
+        "answer": {
+          "records": "/data"
+        },
         "not_found": 403,
+        "request": {
+          "record": "/data"
+        },
         "target": {
           "member": "keys"
         }
@@ -91,7 +143,7 @@
     },
     "version": 1
   },
-  "duration_ms": 21958,
+  "duration_ms": 24366,
   "error": null,
   "exit_code": 0,
   "gaps": [],
@@ -110,37 +162,42 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "directus",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 18230,
+      "cacheCreationEphemeral1hInputTokens": 23706,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 18230,
-      "cacheReadInputTokens": 101128,
+      "cacheCreationInputTokens": 23706,
+      "cacheReadInputTokens": 146027,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.10357680000000001,
-      "inputTokens": 12,
+      "costUSD": 0.13432470000000002,
+      "inputTokens": 14,
       "maxOutputTokens": 128000,
-      "outputTokens": 2052,
+      "outputTokens": 2487,
       "provider": "firstParty",
-      "thinkingTokens": 391,
+      "thinkingTokens": 318,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 8,
+  "num_turns": 10,
   "refused": [],
-  "revision": 1,
+  "revision": 2,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:14:01.161305Z",
+      "created_at": "2026-11-10T17:37:36.535262Z",
       "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:37:37.999645Z",
+      "revision": 2
     }
   ],
   "session": {
@@ -187,6 +244,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -215,30 +273,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 18230,
+      "ephemeral_1h_input_tokens": 23706,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 18230,
-    "cache_read_input_tokens": 101128,
+    "cache_creation_input_tokens": 23706,
+    "cache_read_input_tokens": 146027,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 12,
+    "input_tokens": 14,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 815,
+          "ephemeral_1h_input_tokens": 1425,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 815,
-        "cache_read_input_tokens": 25001,
+        "cache_creation_input_tokens": 1425,
+        "cache_read_input_tokens": 29867,
         "input_tokens": 2,
-        "output_tokens": 697,
+        "output_tokens": 817,
         "type": "message"
       }
     ],
-    "output_tokens": 2052,
+    "output_tokens": 2487,
     "output_tokens_details": {
-      "thinking_tokens": 391
+      "thinking_tokens": 318
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -247,7 +305,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 22545,
+  "wall_ms": 25054,
   "world": {
     "operations": {
       "createCategory": {
@@ -258,7 +316,13 @@
         "type": "categories"
       },
       "createProducts": {
+        "answer": {
+          "record": "/data"
+        },
         "kind": "create",
+        "request": {
+          "record": ""
+        },
         "type": "products"
       },
       "deleteProduct": {
@@ -270,6 +334,19 @@
         "type": "products"
       },
       "readCategories": {
+        "answer": {
+          "records": "/data"
+        },
+        "fields": {
+          "param": "fields",
+          "separator": ","
+        },
+        "filters": [
+          {
+            "grammar": "deep_object",
+            "param": "filter"
+          }
+        ],
         "kind": "list",
         "order": {
           "member": "id"
@@ -285,6 +362,10 @@
         "answer": {
           "record": "/data"
         },
+        "fields": {
+          "param": "fields",
+          "separator": ","
+        },
         "kind": "read",
         "not_found": 403,
         "target": {
@@ -293,7 +374,18 @@
         "type": "products"
       },
       "readProducts": {
+        "answer": {
+          "records": "/data"
+        },
+        "fields": {
+          "param": "fields",
+          "separator": ","
+        },
         "filters": [
+          {
+            "grammar": "deep_object",
+            "param": "filter"
+          },
           {
             "kind": "text",
             "param": "search"
@@ -322,8 +414,14 @@
         "type": "products"
       },
       "updateProducts": {
+        "answer": {
+          "records": "/data"
+        },
         "kind": "update",
         "not_found": 403,
+        "request": {
+          "record": "/data"
+        },
         "target": {
           "member": "keys"
         },
@@ -355,8 +453,25 @@
   "writes": [
     {
       "ok": true,
-      "refused": [],
+      "refused": [
+        {
+          "code": "invalid",
+          "message": "`fields` applies to a read or a list",
+          "path": "/operations/updateProduct/fields"
+        },
+        {
+          "code": "unresolved",
+          "message": "`/keys` is not a member of operation `updateProducts`'s request body",
+          "path": "/operations/updateProducts/target/member"
+        }
+      ],
       "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 2,
       "tool": "patch_world"
     }
   ]

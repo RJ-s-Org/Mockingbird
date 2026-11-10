@@ -7,19 +7,32 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:15:55Z",
+  "authored_at": "2026-11-10T17:39:41Z",
   "authors": {
+    "/operations/addComment/answer": "agent",
+    "/operations/addComment/kind": "agent",
+    "/operations/addComment/not_found": "agent",
+    "/operations/addComment/type": "agent",
+    "/operations/createIssue/answer": "agent",
+    "/operations/createIssue/kind": "agent",
+    "/operations/createIssue/type": "agent",
     "/operations/doTransition/not_found": "agent",
     "/operations/editIssue/not_found": "agent",
     "/operations/editIssue/target": "agent",
-    "/operations/getComments/order": "agent",
+    "/operations/getComments/answer": "agent",
+    "/operations/getComments/not_found": "agent",
     "/operations/getComments/paging": "agent",
     "/operations/getIssue/not_found": "agent",
     "/operations/getProject/not_found": "agent",
+    "/operations/searchAndReconsileIssuesUsingJql/answer": "agent",
     "/operations/searchAndReconsileIssuesUsingJql/paging": "agent",
+    "/operations/searchAndReconsileIssuesUsingJqlPost/answer": "agent",
+    "/operations/searchAndReconsileIssuesUsingJqlPost/ignores": "agent",
     "/operations/searchAndReconsileIssuesUsingJqlPost/kind": "agent",
     "/operations/searchAndReconsileIssuesUsingJqlPost/paging": "agent",
     "/operations/searchAndReconsileIssuesUsingJqlPost/type": "agent",
+    "/operations/searchProjects/answer": "agent",
+    "/operations/searchProjects/filters": "agent",
     "/operations/searchProjects/paging": "agent",
     "/types/comment/identity": "agent",
     "/types/comment/parent": "agent",
@@ -33,9 +46,24 @@
   ],
   "contract": "examples/apis/jira/jira.openapi.yaml",
   "contract_sha256": "0d746b84f04ca60d338042b27905b7c001f45ceadb8ea9c22110786a3240d1fd",
-  "cost_usd": 0.1386456,
+  "cost_usd": 0.1744724,
   "document": {
     "operations": {
+      "addComment": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "not_found": 404,
+        "type": "comment"
+      },
+      "createIssue": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "issue"
+      },
       "doTransition": {
         "not_found": 404
       },
@@ -46,9 +74,10 @@
         }
       },
       "getComments": {
-        "order": {
-          "member": "created"
+        "answer": {
+          "records": "/comments"
         },
+        "not_found": 404,
         "paging": {
           "request": "startAt",
           "size": "maxResults",
@@ -62,6 +91,9 @@
         "not_found": 404
       },
       "searchAndReconsileIssuesUsingJql": {
+        "answer": {
+          "records": "/issues"
+        },
         "paging": {
           "request": "nextPageToken",
           "response": "nextPageToken",
@@ -70,6 +102,13 @@
         }
       },
       "searchAndReconsileIssuesUsingJqlPost": {
+        "answer": {
+          "records": "/issues"
+        },
+        "ignores": [
+          "/expand",
+          "/fields"
+        ],
         "kind": "list",
         "paging": {
           "request": "nextPageToken",
@@ -80,6 +119,16 @@
         "type": "issue"
       },
       "searchProjects": {
+        "answer": {
+          "records": "/values"
+        },
+        "filters": [
+          {
+            "kind": "contains",
+            "member": "name",
+            "param": "query"
+          }
+        ],
         "paging": {
           "request": "startAt",
           "size": "maxResults",
@@ -116,7 +165,7 @@
     },
     "version": 1
   },
-  "duration_ms": 19267,
+  "duration_ms": 27613,
   "error": null,
   "exit_code": 0,
   "gaps": [],
@@ -134,37 +183,42 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "jira",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 26161,
+      "cacheCreationEphemeral1hInputTokens": 31464,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 26161,
-      "cacheReadInputTokens": 116576,
+      "cacheCreationInputTokens": 31464,
+      "cacheReadInputTokens": 166684,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1386456,
-      "inputTokens": 12,
+      "costUSD": 0.1744724,
+      "inputTokens": 14,
       "maxOutputTokens": 128000,
-      "outputTokens": 2232,
+      "outputTokens": 3192,
       "provider": "firstParty",
-      "thinkingTokens": 467,
+      "thinkingTokens": 726,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 8,
+  "num_turns": 10,
   "refused": [],
-  "revision": 1,
+  "revision": 2,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:15:48.305365Z",
+      "created_at": "2026-11-10T17:39:29.059284Z",
       "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:39:31.155687Z",
+      "revision": 2
     }
   ],
   "session": {
@@ -211,6 +265,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -239,30 +294,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 26161,
+      "ephemeral_1h_input_tokens": 31464,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 26161,
-    "cache_read_input_tokens": 116576,
+    "cache_creation_input_tokens": 31464,
+    "cache_read_input_tokens": 166684,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 12,
+    "input_tokens": 14,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 1156,
+          "ephemeral_1h_input_tokens": 1856,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 1156,
-        "cache_read_input_tokens": 32591,
+        "cache_creation_input_tokens": 1856,
+        "cache_read_input_tokens": 37194,
         "input_tokens": 2,
-        "output_tokens": 686,
+        "output_tokens": 900,
         "type": "message"
       }
     ],
-    "output_tokens": 2232,
+    "output_tokens": 3192,
     "output_tokens_details": {
-      "thinking_tokens": 467
+      "thinking_tokens": 726
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -271,14 +326,21 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 19759,
+  "wall_ms": 28170,
   "world": {
     "operations": {
       "addComment": {
+        "answer": {
+          "record": ""
+        },
         "kind": "create",
+        "not_found": 404,
         "type": "comment"
       },
       "createIssue": {
+        "answer": {
+          "record": ""
+        },
         "kind": "create",
         "type": "issue"
       },
@@ -303,10 +365,11 @@
         "type": "project"
       },
       "getComments": {
-        "kind": "list",
-        "order": {
-          "member": "created"
+        "answer": {
+          "records": "/comments"
         },
+        "kind": "list",
+        "not_found": 404,
         "paging": {
           "request": "startAt",
           "size": "maxResults",
@@ -347,6 +410,9 @@
         "type": "transitions"
       },
       "searchAndReconsileIssuesUsingJql": {
+        "answer": {
+          "records": "/issues"
+        },
         "kind": "list",
         "paging": {
           "request": "nextPageToken",
@@ -357,6 +423,13 @@
         "type": "issue"
       },
       "searchAndReconsileIssuesUsingJqlPost": {
+        "answer": {
+          "records": "/issues"
+        },
+        "ignores": [
+          "/expand",
+          "/fields"
+        ],
         "kind": "list",
         "paging": {
           "request": "nextPageToken",
@@ -367,6 +440,16 @@
         "type": "issue"
       },
       "searchProjects": {
+        "answer": {
+          "records": "/values"
+        },
+        "filters": [
+          {
+            "kind": "contains",
+            "member": "name",
+            "param": "query"
+          }
+        ],
         "kind": "list",
         "paging": {
           "request": "startAt",
@@ -408,8 +491,25 @@
   "writes": [
     {
       "ok": true,
-      "refused": [],
+      "refused": [
+        {
+          "code": "invalid",
+          "message": "`expand` names a member of the list's items",
+          "path": "/operations/searchAndReconsileIssuesUsingJqlPost/ignores/0"
+        },
+        {
+          "code": "invalid",
+          "message": "`fields` names a member of the list's items",
+          "path": "/operations/searchAndReconsileIssuesUsingJqlPost/ignores/1"
+        }
+      ],
       "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 2,
       "tool": "patch_world"
     }
   ]

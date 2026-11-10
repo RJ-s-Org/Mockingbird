@@ -7,23 +7,34 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:13:39Z",
+  "authored_at": "2026-11-10T17:37:00Z",
   "authors": {
+    "/operations/createIndex/request": "agent",
     "/operations/deleteDocument/target": "agent",
+    "/operations/getDocument/fields": "agent",
     "/operations/getDocument/kind": "agent",
     "/operations/getDocument/not_found": "agent",
     "/operations/getDocument/target": "agent",
     "/operations/getDocument/type": "agent",
+    "/operations/getDocuments/fields": "agent",
     "/operations/getDocuments/not_found": "agent",
     "/operations/getDocuments/paging": "agent",
+    "/operations/getDocuments/type": "agent",
     "/operations/getIndex/not_found": "agent",
+    "/operations/getSettings/kind": "agent",
     "/operations/getSettings/not_found": "agent",
+    "/operations/getSettings/target": "agent",
     "/operations/getTask/not_found": "agent",
     "/operations/getTasks/order": "agent",
     "/operations/getTasks/paging": "agent",
     "/operations/listIndexes/paging": "agent",
-    "/operations/searchWithPost/not_found": "agent",
-    "/operations/searchWithPost/type": "agent"
+    "/operations/searchWithPost/answer": "agent",
+    "/operations/searchWithPost/filters": "agent",
+    "/operations/searchWithPost/ignores": "agent",
+    "/operations/searchWithPost/paging": "agent",
+    "/operations/searchWithPost/type": "agent",
+    "/operations/updateSettings/target": "agent",
+    "/types/documents/parent": "agent"
   },
   "builtin_plugins": [
     "cc-plugin-agents-md",
@@ -32,15 +43,24 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind8/meilisearch.openapi.yaml",
   "contract_sha256": "9147236214f3786451d8643126946f64ecb9643fec6f05785e05d645de6e8ce9",
-  "cost_usd": 0.1167046,
+  "cost_usd": 0.1582766,
   "document": {
     "operations": {
+      "createIndex": {
+        "request": {
+          "record": ""
+        }
+      },
       "deleteDocument": {
         "target": {
           "path_param": "document_id"
         }
       },
       "getDocument": {
+        "fields": {
+          "param": "fields",
+          "separator": ","
+        },
         "kind": "read",
         "not_found": 404,
         "target": {
@@ -49,18 +69,27 @@
         "type": "documents"
       },
       "getDocuments": {
+        "fields": {
+          "param": "fields",
+          "separator": ","
+        },
         "not_found": 404,
         "paging": {
           "request": "offset",
           "size": "limit",
           "style": "offset"
-        }
+        },
+        "type": "documents"
       },
       "getIndex": {
         "not_found": 404
       },
       "getSettings": {
-        "not_found": 404
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "index_uid"
+        }
       },
       "getTask": {
         "not_found": 404
@@ -85,13 +114,44 @@
         }
       },
       "searchWithPost": {
-        "not_found": 404,
+        "answer": {
+          "records": "/hits"
+        },
+        "filters": [
+          {
+            "kind": "text",
+            "param": "/q"
+          }
+        ],
+        "ignores": [
+          "attributesToRetrieve",
+          "attributesToHighlight",
+          "showRankingScore"
+        ],
+        "paging": {
+          "request": "/offset",
+          "size": "/limit",
+          "style": "offset"
+        },
         "type": "documents"
+      },
+      "updateSettings": {
+        "target": {
+          "path_param": "index_uid"
+        }
+      }
+    },
+    "types": {
+      "documents": {
+        "parent": {
+          "path_param": "index_uid",
+          "type": "indexes"
+        }
       }
     },
     "version": 1
   },
-  "duration_ms": 22749,
+  "duration_ms": 30238,
   "error": null,
   "exit_code": 0,
   "gaps": [
@@ -127,12 +187,6 @@
       "message": "operation `deleteAllDocuments` (Delete) acts on one `documents` record but no target says where the request names it",
       "operation": "deleteAllDocuments",
       "type": "documents"
-    },
-    {
-      "code": "no_target",
-      "message": "operation `updateSettings` (Update) acts on one `settings` record but no target says where the request names it",
-      "operation": "updateSettings",
-      "type": "settings"
     }
   ],
   "heuristic_gaps": [
@@ -183,36 +237,36 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "meilisearch",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 21244,
+      "cacheCreationEphemeral1hInputTokens": 27904,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 21244,
-      "cacheReadInputTokens": 81486,
+      "cacheCreationInputTokens": 27904,
+      "cacheReadInputTokens": 125766,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1167046,
-      "inputTokens": 10,
+      "costUSD": 0.1582766,
+      "inputTokens": 12,
       "maxOutputTokens": 128000,
-      "outputTokens": 2356,
+      "outputTokens": 3406,
       "provider": "firstParty",
-      "thinkingTokens": 622,
+      "thinkingTokens": 1224,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 7,
+  "num_turns": 8,
   "refused": [],
   "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:13:30.872142Z",
+      "created_at": "2026-11-10T17:36:49.778212Z",
       "revision": 1
     }
   ],
@@ -260,6 +314,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -288,30 +343,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 21244,
+      "ephemeral_1h_input_tokens": 27904,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 21244,
-    "cache_read_input_tokens": 81486,
+    "cache_creation_input_tokens": 27904,
+    "cache_read_input_tokens": 125766,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 10,
+    "input_tokens": 12,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 1385,
+          "ephemeral_1h_input_tokens": 1840,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 1385,
-        "cache_read_input_tokens": 27445,
+        "cache_creation_input_tokens": 1840,
+        "cache_read_input_tokens": 33650,
         "input_tokens": 2,
-        "output_tokens": 718,
+        "output_tokens": 952,
         "type": "message"
       }
     ],
-    "output_tokens": 2356,
+    "output_tokens": 3406,
     "output_tokens_details": {
-      "thinking_tokens": 622
+      "thinking_tokens": 1224
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -320,7 +375,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 23307,
+  "wall_ms": 30854,
   "world": {
     "operations": {
       "addOrReplaceDocuments": {
@@ -333,6 +388,9 @@
       },
       "createIndex": {
         "kind": "create",
+        "request": {
+          "record": ""
+        },
         "type": "indexes"
       },
       "deleteAllDocuments": {
@@ -358,6 +416,10 @@
         "type": "indexes"
       },
       "getDocument": {
+        "fields": {
+          "param": "fields",
+          "separator": ","
+        },
         "kind": "read",
         "not_found": 404,
         "target": {
@@ -366,6 +428,10 @@
         "type": "documents"
       },
       "getDocuments": {
+        "fields": {
+          "param": "fields",
+          "separator": ","
+        },
         "kind": "list",
         "not_found": 404,
         "paging": {
@@ -384,8 +450,11 @@
         "type": "indexes"
       },
       "getSettings": {
-        "kind": "list",
+        "kind": "read",
         "not_found": 404,
+        "target": {
+          "path_param": "index_uid"
+        },
         "type": "settings"
       },
       "getTask": {
@@ -420,16 +489,43 @@
         "type": "indexes"
       },
       "searchWithPost": {
+        "answer": {
+          "records": "/hits"
+        },
+        "filters": [
+          {
+            "kind": "text",
+            "param": "/q"
+          }
+        ],
+        "ignores": [
+          "attributesToRetrieve",
+          "attributesToHighlight",
+          "showRankingScore"
+        ],
         "kind": "list",
-        "not_found": 404,
+        "paging": {
+          "request": "/offset",
+          "size": "/limit",
+          "style": "offset"
+        },
         "type": "documents"
       },
       "updateSettings": {
         "kind": "update",
+        "target": {
+          "path_param": "index_uid"
+        },
         "type": "settings"
       }
     },
     "types": {
+      "documents": {
+        "parent": {
+          "path_param": "index_uid",
+          "type": "indexes"
+        }
+      },
       "indexes": {
         "identity": {
           "member": "uid"

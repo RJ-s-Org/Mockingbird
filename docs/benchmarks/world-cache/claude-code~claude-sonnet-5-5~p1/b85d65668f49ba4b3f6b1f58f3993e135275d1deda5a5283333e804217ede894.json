@@ -7,7 +7,7 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:07:54Z",
+  "authored_at": "2026-11-10T17:30:43Z",
   "authors": {
     "/operations/authorizations.get/not_found": "agent",
     "/operations/captures.get/not_found": "agent",
@@ -15,9 +15,7 @@
     "/operations/captures.refund/idempotency": "agent",
     "/operations/captures.refund/not_found": "agent",
     "/operations/refunds.get/not_found": "agent",
-    "/types/authorizations/lifecycle": "agent",
-    "/types/captures/lifecycle": "agent",
-    "/types/refunds/lifecycle": "agent"
+    "/types/refunds/parent": "agent"
   },
   "builtin_plugins": [
     "cc-plugin-agents-md",
@@ -26,7 +24,7 @@
   ],
   "contract": "examples/apis/paypal/paypal-payments.openapi.yaml",
   "contract_sha256": "b85d65668f49ba4b3f6b1f58f3993e135275d1deda5a5283333e804217ede894",
-  "cost_usd": 0.0797512,
+  "cost_usd": 0.1268098,
   "document": {
     "operations": {
       "authorizations.get": {
@@ -49,82 +47,51 @@
       }
     },
     "types": {
-      "authorizations": {
-        "lifecycle": {
-          "member": "status",
-          "states": [
-            "CREATED",
-            "CAPTURED",
-            "DENIED",
-            "PARTIALLY_CAPTURED",
-            "VOIDED",
-            "PENDING"
-          ]
-        }
-      },
-      "captures": {
-        "lifecycle": {
-          "member": "status",
-          "states": [
-            "COMPLETED",
-            "DECLINED",
-            "PARTIALLY_REFUNDED",
-            "PENDING",
-            "REFUNDED",
-            "FAILED"
-          ]
-        }
-      },
       "refunds": {
-        "lifecycle": {
-          "member": "status",
-          "states": [
-            "CANCELLED",
-            "FAILED",
-            "PENDING",
-            "COMPLETED"
-          ]
+        "parent": {
+          "path_param": "capture_id",
+          "type": "captures"
         }
       }
     },
     "version": 1
   },
-  "duration_ms": 16124,
+  "duration_ms": 23372,
   "error": null,
   "exit_code": 0,
   "gaps": [],
   "heuristic_gaps": [],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "paypal-payments",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 13917,
+      "cacheCreationEphemeral1hInputTokens": 20577,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 13917,
-      "cacheReadInputTokens": 73132,
+      "cacheCreationInputTokens": 20577,
+      "cacheReadInputTokens": 216418,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.0797512,
-      "inputTokens": 10,
+      "costUSD": 0.1268098,
+      "inputTokens": 20,
       "maxOutputTokens": 128000,
-      "outputTokens": 1675,
+      "outputTokens": 2282,
       "provider": "firstParty",
-      "thinkingTokens": 164,
+      "thinkingTokens": 266,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 7,
+  "num_turns": 12,
   "refused": [],
   "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:07:47.052349Z",
+      "created_at": "2026-11-10T17:30:30.645232Z",
       "revision": 1
     }
   ],
@@ -172,6 +139,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -200,30 +168,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 13917,
+      "ephemeral_1h_input_tokens": 20577,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 13917,
-    "cache_read_input_tokens": 73132,
+    "cache_creation_input_tokens": 20577,
+    "cache_read_input_tokens": 216418,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 10,
+    "input_tokens": 20,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 963,
+          "ephemeral_1h_input_tokens": 491,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 963,
-        "cache_read_input_tokens": 20540,
+        "cache_creation_input_tokens": 491,
+        "cache_read_input_tokens": 27672,
         "input_tokens": 2,
-        "output_tokens": 505,
+        "output_tokens": 551,
         "type": "message"
       }
     ],
-    "output_tokens": 1675,
+    "output_tokens": 2282,
     "output_tokens_details": {
-      "thinking_tokens": 164
+      "thinking_tokens": 266
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -232,7 +200,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 16703,
+  "wall_ms": 23963,
   "world": {
     "operations": {
       "authorizations.get": {
@@ -275,47 +243,20 @@
       "authorizations": {
         "identity": {
           "member": "id"
-        },
-        "lifecycle": {
-          "member": "status",
-          "states": [
-            "CREATED",
-            "CAPTURED",
-            "DENIED",
-            "PARTIALLY_CAPTURED",
-            "VOIDED",
-            "PENDING"
-          ]
         }
       },
       "captures": {
         "identity": {
           "member": "id"
-        },
-        "lifecycle": {
-          "member": "status",
-          "states": [
-            "COMPLETED",
-            "DECLINED",
-            "PARTIALLY_REFUNDED",
-            "PENDING",
-            "REFUNDED",
-            "FAILED"
-          ]
         }
       },
       "refunds": {
         "identity": {
           "member": "id"
         },
-        "lifecycle": {
-          "member": "status",
-          "states": [
-            "CANCELLED",
-            "FAILED",
-            "PENDING",
-            "COMPLETED"
-          ]
+        "parent": {
+          "path_param": "capture_id",
+          "type": "captures"
         }
       }
     },

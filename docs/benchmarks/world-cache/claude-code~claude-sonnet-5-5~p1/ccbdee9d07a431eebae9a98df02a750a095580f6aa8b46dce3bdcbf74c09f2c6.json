@@ -7,21 +7,25 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:13:16Z",
+  "authored_at": "2026-11-10T17:36:31Z",
   "authors": {
     "/operations/comments_addComment/answer": "agent",
-    "/operations/comments_addComment/not_found": "agent",
-    "/operations/comments_getComments/not_found": "agent",
-    "/operations/comments_getComments/order": "agent",
+    "/operations/comments_getComments/answer": "agent",
     "/operations/comments_getComments/paging": "agent",
     "/operations/comments_getComments/scope": "agent",
+    "/operations/wiql_queryByWiql/answer": "agent",
+    "/operations/wiql_queryByWiql/ignores": "agent",
+    "/operations/wiql_queryByWiql/kind": "agent",
+    "/operations/wiql_queryByWiql/type": "agent",
     "/operations/workItems_create/answer": "agent",
     "/operations/workItems_delete/not_found": "agent",
     "/operations/workItems_get/not_found": "agent",
+    "/operations/workItems_getWorkItemsBatch/answer": "agent",
+    "/operations/workItems_getWorkItemsBatch/kind": "agent",
+    "/operations/workItems_getWorkItemsBatch/type": "agent",
     "/operations/workItems_update/answer": "agent",
     "/operations/workItems_update/not_found": "agent",
-    "/types/comments/parent": "agent",
-    "/types/workitems/concurrency": "agent"
+    "/types/comments/parent": "agent"
   },
   "builtin_plugins": [
     "cc-plugin-agents-md",
@@ -30,20 +34,17 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind8/azuredevops.openapi.yaml",
   "contract_sha256": "ccbdee9d07a431eebae9a98df02a750a095580f6aa8b46dce3bdcbf74c09f2c6",
-  "cost_usd": 0.12048920000000002,
+  "cost_usd": 0.145655,
   "document": {
     "operations": {
       "comments_addComment": {
         "answer": {
           "record": ""
-        },
-        "not_found": 404
+        }
       },
       "comments_getComments": {
-        "not_found": 404,
-        "order": {
-          "descending": true,
-          "member": "createdDate"
+        "answer": {
+          "records": "/comments"
         },
         "paging": {
           "request": "continuationToken",
@@ -56,6 +57,16 @@
           "param": "workItemId"
         }
       },
+      "wiql_queryByWiql": {
+        "answer": {
+          "records": "/workItems"
+        },
+        "ignores": [
+          "timePrecision"
+        ],
+        "kind": "list",
+        "type": "workitems"
+      },
       "workItems_create": {
         "answer": {
           "record": ""
@@ -66,6 +77,13 @@
       },
       "workItems_get": {
         "not_found": 404
+      },
+      "workItems_getWorkItemsBatch": {
+        "answer": {
+          "records": "/value"
+        },
+        "kind": "list",
+        "type": "workitems"
       },
       "workItems_update": {
         "answer": {
@@ -81,31 +99,14 @@
           "path_param": "workItemId",
           "type": "workitems"
         }
-      },
-      "workitems": {
-        "concurrency": {
-          "conflict": 412,
-          "member": "rev"
-        }
       }
     },
     "version": 1
   },
-  "duration_ms": 24941,
+  "duration_ms": 30352,
   "error": null,
   "exit_code": 0,
-  "gaps": [
-    {
-      "code": "no_identity",
-      "message": "type `wiql` is written by `wiql_queryByWiql` but has no identity: no member is known to name a record",
-      "type": "wiql"
-    },
-    {
-      "code": "no_identity",
-      "message": "type `workitemsbatch` is written by `workItems_getWorkItemsBatch` but has no identity: no member is known to name a record",
-      "type": "workitemsbatch"
-    }
-  ],
+  "gaps": [],
   "heuristic_gaps": [
     {
       "code": "no_identity",
@@ -119,37 +120,42 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "azuredevops",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 20917,
+      "cacheCreationEphemeral1hInputTokens": 24544,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 20917,
-      "cacheReadInputTokens": 106672,
+      "cacheCreationInputTokens": 24544,
+      "cacheReadInputTokens": 148310,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.12048920000000002,
-      "inputTokens": 12,
+      "costUSD": 0.145655,
+      "inputTokens": 14,
       "maxOutputTokens": 128000,
-      "outputTokens": 2613,
+      "outputTokens": 3262,
       "provider": "firstParty",
-      "thinkingTokens": 544,
+      "thinkingTokens": 861,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 8,
+  "num_turns": 10,
   "refused": [],
-  "revision": 1,
+  "revision": 2,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:13:04.376210Z",
+      "created_at": "2026-11-10T17:36:17.354850Z",
       "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:36:19.118508Z",
+      "revision": 2
     }
   ],
   "session": {
@@ -196,6 +202,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -224,30 +231,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 20917,
+      "ephemeral_1h_input_tokens": 24544,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 20917,
-    "cache_read_input_tokens": 106672,
+    "cache_creation_input_tokens": 24544,
+    "cache_read_input_tokens": 148310,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 12,
+    "input_tokens": 14,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 867,
+          "ephemeral_1h_input_tokens": 712,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 867,
-        "cache_read_input_tokens": 27636,
+        "cache_creation_input_tokens": 712,
+        "cache_read_input_tokens": 31418,
         "input_tokens": 2,
-        "output_tokens": 842,
+        "output_tokens": 932,
         "type": "message"
       }
     ],
-    "output_tokens": 2613,
+    "output_tokens": 3262,
     "output_tokens_details": {
-      "thinking_tokens": 544
+      "thinking_tokens": 861
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -256,7 +263,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 25534,
+  "wall_ms": 31008,
   "world": {
     "operations": {
       "comments_addComment": {
@@ -264,16 +271,13 @@
           "record": ""
         },
         "kind": "create",
-        "not_found": 404,
         "type": "comments"
       },
       "comments_getComments": {
-        "kind": "list",
-        "not_found": 404,
-        "order": {
-          "descending": true,
-          "member": "createdDate"
+        "answer": {
+          "records": "/comments"
         },
+        "kind": "list",
         "paging": {
           "request": "continuationToken",
           "response": "continuationToken",
@@ -287,8 +291,14 @@
         "type": "comments"
       },
       "wiql_queryByWiql": {
-        "kind": "create",
-        "type": "wiql"
+        "answer": {
+          "records": "/workItems"
+        },
+        "ignores": [
+          "timePrecision"
+        ],
+        "kind": "list",
+        "type": "workitems"
       },
       "workItems_create": {
         "answer": {
@@ -314,8 +324,11 @@
         "type": "workitems"
       },
       "workItems_getWorkItemsBatch": {
-        "kind": "create",
-        "type": "workitemsbatch"
+        "answer": {
+          "records": "/value"
+        },
+        "kind": "list",
+        "type": "workitems"
       },
       "workItems_update": {
         "answer": {
@@ -341,10 +354,6 @@
         }
       },
       "workitems": {
-        "concurrency": {
-          "conflict": 412,
-          "member": "rev"
-        },
         "identity": {
           "member": "id"
         }
@@ -355,8 +364,20 @@
   "writes": [
     {
       "ok": true,
-      "refused": [],
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "`id` is not a member of operation `comments_addComment`'s request body",
+          "path": "/operations/comments_addComment/target/member"
+        }
+      ],
       "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 2,
       "tool": "patch_world"
     }
   ]

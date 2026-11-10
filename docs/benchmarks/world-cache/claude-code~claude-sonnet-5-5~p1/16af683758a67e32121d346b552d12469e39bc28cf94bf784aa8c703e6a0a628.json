@@ -7,21 +7,22 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:14:14Z",
+  "authored_at": "2026-11-10T17:37:50Z",
   "authors": {
     "/operations/folders.create/answer": "agent",
     "/operations/folders.create/kind": "agent",
-    "/operations/folders.create/request": "agent",
     "/operations/folders.create/type": "agent",
     "/operations/folders.delete/answer": "agent",
     "/operations/folders.delete/kind": "agent",
     "/operations/folders.delete/not_found": "agent",
     "/operations/folders.delete/target": "agent",
     "/operations/folders.delete/type": "agent",
+    "/operations/folders.get/fields": "agent",
     "/operations/folders.get/kind": "agent",
     "/operations/folders.get/not_found": "agent",
     "/operations/folders.get/target": "agent",
     "/operations/folders.get/type": "agent",
+    "/operations/folders.list/fields": "agent",
     "/operations/folders.list/filters": "agent",
     "/operations/folders.list/kind": "agent",
     "/operations/folders.list/order": "agent",
@@ -40,6 +41,7 @@
     "/operations/folders.patch/request": "agent",
     "/operations/folders.patch/target": "agent",
     "/operations/folders.patch/type": "agent",
+    "/operations/folders.search/fields": "agent",
     "/operations/folders.search/kind": "agent",
     "/operations/folders.search/order": "agent",
     "/operations/folders.search/paging": "agent",
@@ -50,11 +52,15 @@
     "/operations/folders.undelete/target": "agent",
     "/operations/folders.undelete/transition": "agent",
     "/operations/folders.undelete/type": "agent",
+    "/operations/operations.get/fields": "agent",
+    "/operations/operations.get/kind": "agent",
     "/operations/operations.get/not_found": "agent",
+    "/operations/operations.get/target": "agent",
+    "/operations/operations.get/type": "agent",
     "/types/folders/identity": "agent",
     "/types/folders/lifecycle": "agent",
-    "/types/folders/parent": "agent",
-    "/types/folders/unique": "agent"
+    "/types/folders/unique": "agent",
+    "/types/operations/identity": "agent"
   },
   "builtin_plugins": [
     "cc-plugin-agents-md",
@@ -63,7 +69,7 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind9/resourcemanager.openapi.yaml",
   "contract_sha256": "16af683758a67e32121d346b552d12469e39bc28cf94bf784aa8c703e6a0a628",
-  "cost_usd": 0.1210435,
+  "cost_usd": 0.1425088,
   "document": {
     "operations": {
       "folders.create": {
@@ -74,9 +80,6 @@
           }
         },
         "kind": "create",
-        "request": {
-          "record": ""
-        },
         "type": "folders"
       },
       "folders.delete": {
@@ -94,6 +97,9 @@
         "type": "folders"
       },
       "folders.get": {
+        "fields": {
+          "param": "fields"
+        },
         "kind": "read",
         "not_found": 404,
         "target": {
@@ -102,6 +108,9 @@
         "type": "folders"
       },
       "folders.list": {
+        "fields": {
+          "param": "fields"
+        },
         "filters": [
           {
             "kind": "flag",
@@ -161,6 +170,9 @@
         "type": "folders"
       },
       "folders.search": {
+        "fields": {
+          "param": "fields"
+        },
         "kind": "list",
         "order": {
           "member": "displayName"
@@ -191,7 +203,15 @@
         "type": "folders"
       },
       "operations.get": {
-        "not_found": 404
+        "fields": {
+          "param": "fields"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "operation"
+        },
+        "type": "operations"
       }
     },
     "types": {
@@ -211,13 +231,10 @@
             "state": "DELETE_REQUESTED"
           },
           "states": [
+            "STATE_UNSPECIFIED",
             "ACTIVE",
             "DELETE_REQUESTED"
           ]
-        },
-        "parent": {
-          "member": "parent",
-          "type": "folders"
         },
         "unique": [
           {
@@ -228,11 +245,17 @@
             "scope": "parent"
           }
         ]
+      },
+      "operations": {
+        "identity": {
+          "member": "name",
+          "pattern": "operations/{id}"
+        }
       }
     },
     "version": 1
   },
-  "duration_ms": 25070,
+  "duration_ms": 25887,
   "error": null,
   "exit_code": 0,
   "gaps": [],
@@ -266,26 +289,26 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "resourcemanager",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 21247,
+      "cacheCreationEphemeral1hInputTokens": 25138,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 21247,
-      "cacheReadInputTokens": 85655,
+      "cacheCreationInputTokens": 25138,
+      "cacheReadInputTokens": 95268,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1210435,
+      "costUSD": 0.1425088,
       "inputTokens": 10,
       "maxOutputTokens": 128000,
-      "outputTokens": 2747,
+      "outputTokens": 3241,
       "provider": "firstParty",
-      "thinkingTokens": 437,
+      "thinkingTokens": 712,
       "webSearchRequests": 0
     }
   },
@@ -295,7 +318,7 @@
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:14:01.537337Z",
+      "created_at": "2026-11-10T17:37:38.796897Z",
       "revision": 1
     }
   ],
@@ -343,6 +366,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -371,30 +395,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 21247,
+      "ephemeral_1h_input_tokens": 25138,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 21247,
-    "cache_read_input_tokens": 85655,
+    "cache_creation_input_tokens": 25138,
+    "cache_read_input_tokens": 95268,
     "fallback_credit": null,
     "inference_geo": "global",
     "input_tokens": 10,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 2035,
+          "ephemeral_1h_input_tokens": 2421,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 2035,
-        "cache_read_input_tokens": 26798,
+        "cache_creation_input_tokens": 2421,
+        "cache_read_input_tokens": 30303,
         "input_tokens": 2,
-        "output_tokens": 808,
+        "output_tokens": 951,
         "type": "message"
       }
     ],
-    "output_tokens": 2747,
+    "output_tokens": 3241,
     "output_tokens_details": {
-      "thinking_tokens": 437
+      "thinking_tokens": 712
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -403,7 +427,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 25653,
+  "wall_ms": 26421,
   "world": {
     "operations": {
       "folders.create": {
@@ -414,9 +438,6 @@
           }
         },
         "kind": "create",
-        "request": {
-          "record": ""
-        },
         "type": "folders"
       },
       "folders.delete": {
@@ -434,6 +455,9 @@
         "type": "folders"
       },
       "folders.get": {
+        "fields": {
+          "param": "fields"
+        },
         "kind": "read",
         "not_found": 404,
         "target": {
@@ -442,6 +466,9 @@
         "type": "folders"
       },
       "folders.list": {
+        "fields": {
+          "param": "fields"
+        },
         "filters": [
           {
             "kind": "flag",
@@ -501,6 +528,9 @@
         "type": "folders"
       },
       "folders.search": {
+        "fields": {
+          "param": "fields"
+        },
         "kind": "list",
         "order": {
           "member": "displayName"
@@ -531,8 +561,14 @@
         "type": "folders"
       },
       "operations.get": {
-        "kind": "list",
+        "fields": {
+          "param": "fields"
+        },
+        "kind": "read",
         "not_found": 404,
+        "target": {
+          "path_param": "operation"
+        },
         "type": "operations"
       }
     },
@@ -553,13 +589,10 @@
             "state": "DELETE_REQUESTED"
           },
           "states": [
+            "STATE_UNSPECIFIED",
             "ACTIVE",
             "DELETE_REQUESTED"
           ]
-        },
-        "parent": {
-          "member": "parent",
-          "type": "folders"
         },
         "unique": [
           {
@@ -570,6 +603,12 @@
             "scope": "parent"
           }
         ]
+      },
+      "operations": {
+        "identity": {
+          "member": "name",
+          "pattern": "operations/{id}"
+        }
       }
     },
     "version": 1

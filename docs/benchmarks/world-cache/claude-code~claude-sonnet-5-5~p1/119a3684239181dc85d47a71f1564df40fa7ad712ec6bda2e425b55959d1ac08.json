@@ -7,11 +7,17 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:14:43Z",
+  "authored_at": "2026-11-10T17:38:18Z",
   "authors": {
+    "/operations/createLedger/answer": "agent",
     "/operations/createLedger/idempotency": "agent",
+    "/operations/createLedger/request": "agent",
+    "/operations/createLedgerAccount/answer": "agent",
     "/operations/createLedgerAccount/idempotency": "agent",
+    "/operations/createLedgerAccount/request": "agent",
+    "/operations/createLedgerTransaction/answer": "agent",
     "/operations/createLedgerTransaction/idempotency": "agent",
+    "/operations/createLedgerTransaction/request": "agent",
     "/operations/getLedger/not_found": "agent",
     "/operations/getLedgerAccount/not_found": "agent",
     "/operations/getLedgerTransaction/not_found": "agent",
@@ -33,22 +39,40 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind9/moderntreasury.openapi.yaml",
   "contract_sha256": "119a3684239181dc85d47a71f1564df40fa7ad712ec6bda2e425b55959d1ac08",
-  "cost_usd": 0.14813630000000003,
+  "cost_usd": 0.1452609,
   "document": {
     "operations": {
       "createLedger": {
+        "answer": {
+          "record": ""
+        },
         "idempotency": {
           "header": "Idempotency-Key"
+        },
+        "request": {
+          "record": ""
         }
       },
       "createLedgerAccount": {
+        "answer": {
+          "record": ""
+        },
         "idempotency": {
           "header": "Idempotency-Key"
+        },
+        "request": {
+          "record": ""
         }
       },
       "createLedgerTransaction": {
+        "answer": {
+          "record": ""
+        },
         "idempotency": {
           "header": "Idempotency-Key"
+        },
+        "request": {
+          "record": ""
         }
       },
       "getLedger": {
@@ -68,9 +92,9 @@
             "param": "ledger_id"
           },
           {
-            "kind": "eq",
-            "member": "balances.posted_balance.currency",
-            "param": "currency"
+            "grammar": "deep_object",
+            "member_prefix": "metadata",
+            "param": "metadata"
           }
         ],
         "order": {
@@ -100,6 +124,11 @@
             "kind": "eq",
             "member": "external_id",
             "param": "external_id"
+          },
+          {
+            "grammar": "deep_object",
+            "member_prefix": "metadata",
+            "param": "metadata"
           }
         ],
         "order": {
@@ -142,48 +171,43 @@
     },
     "version": 1
   },
-  "duration_ms": 33840,
+  "duration_ms": 27618,
   "error": null,
   "exit_code": 0,
   "gaps": [],
   "heuristic_gaps": [],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "moderntreasury",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 22141,
+      "cacheCreationEphemeral1hInputTokens": 24152,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 22141,
-      "cacheReadInputTokens": 219523,
+      "cacheCreationInputTokens": 24152,
+      "cacheReadInputTokens": 180209,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.14813630000000003,
-      "inputTokens": 20,
+      "costUSD": 0.1452609,
+      "inputTokens": 16,
       "maxOutputTokens": 128000,
-      "outputTokens": 3758,
+      "outputTokens": 3060,
       "provider": "firstParty",
-      "thinkingTokens": 675,
+      "thinkingTokens": 541,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 12,
+  "num_turns": 10,
   "refused": [],
-  "revision": 2,
+  "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:14:24.400854Z",
+      "created_at": "2026-11-10T17:38:05.011322Z",
       "revision": 1
-    },
-    {
-      "author": "agent",
-      "created_at": "2026-11-07T02:14:27.820155Z",
-      "revision": 2
     }
   ],
   "session": {
@@ -230,6 +254,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -258,30 +283,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 22141,
+      "ephemeral_1h_input_tokens": 24152,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 22141,
-    "cache_read_input_tokens": 219523,
+    "cache_creation_input_tokens": 24152,
+    "cache_read_input_tokens": 180209,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 20,
+    "input_tokens": 16,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 385,
+          "ephemeral_1h_input_tokens": 405,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 385,
-        "cache_read_input_tokens": 29342,
+        "cache_creation_input_tokens": 405,
+        "cache_read_input_tokens": 31333,
         "input_tokens": 2,
-        "output_tokens": 920,
+        "output_tokens": 784,
         "type": "message"
       }
     ],
-    "output_tokens": 3758,
+    "output_tokens": 3060,
     "output_tokens_details": {
-      "thinking_tokens": 675
+      "thinking_tokens": 541
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -290,28 +315,46 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 34417,
+  "wall_ms": 28267,
   "world": {
     "operations": {
       "createLedger": {
+        "answer": {
+          "record": ""
+        },
         "idempotency": {
           "header": "Idempotency-Key"
         },
         "kind": "create",
+        "request": {
+          "record": ""
+        },
         "type": "ledgers"
       },
       "createLedgerAccount": {
+        "answer": {
+          "record": ""
+        },
         "idempotency": {
           "header": "Idempotency-Key"
         },
         "kind": "create",
+        "request": {
+          "record": ""
+        },
         "type": "ledger_accounts"
       },
       "createLedgerTransaction": {
+        "answer": {
+          "record": ""
+        },
         "idempotency": {
           "header": "Idempotency-Key"
         },
         "kind": "create",
+        "request": {
+          "record": ""
+        },
         "type": "ledger_transactions"
       },
       "getLedger": {
@@ -346,9 +389,9 @@
             "param": "ledger_id"
           },
           {
-            "kind": "eq",
-            "member": "balances.posted_balance.currency",
-            "param": "currency"
+            "grammar": "deep_object",
+            "member_prefix": "metadata",
+            "param": "metadata"
           }
         ],
         "kind": "list",
@@ -380,6 +423,11 @@
             "kind": "eq",
             "member": "external_id",
             "param": "external_id"
+          },
+          {
+            "grammar": "deep_object",
+            "member_prefix": "metadata",
+            "param": "metadata"
           }
         ],
         "kind": "list",
@@ -451,12 +499,6 @@
         }
       ],
       "revision": 1,
-      "tool": "patch_world"
-    },
-    {
-      "ok": true,
-      "refused": [],
-      "revision": 2,
       "tool": "patch_world"
     }
   ]

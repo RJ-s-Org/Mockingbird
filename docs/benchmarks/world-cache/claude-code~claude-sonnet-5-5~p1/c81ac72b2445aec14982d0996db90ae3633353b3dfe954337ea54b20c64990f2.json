@@ -7,7 +7,7 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:10:44Z",
+  "authored_at": "2026-11-10T17:33:43Z",
   "authors": {
     "/operations/attachTagToConversation/not_found": "agent",
     "/operations/deleteContact/not_found": "agent",
@@ -17,12 +17,15 @@
     "/operations/listConversations/answer": "agent",
     "/operations/listConversations/order": "agent",
     "/operations/listConversations/paging": "agent",
+    "/operations/manageConversation/kind": "agent",
     "/operations/manageConversation/not_found": "agent",
+    "/operations/replyConversation/kind": "agent",
     "/operations/replyConversation/not_found": "agent",
     "/operations/searchContacts/answer": "agent",
+    "/operations/searchContacts/paging": "agent",
     "/operations/searchConversations/answer": "agent",
+    "/operations/searchConversations/paging": "agent",
     "/operations/updateConversation/not_found": "agent",
-    "/types/admins/identity": "agent",
     "/types/contacts/unique": "agent",
     "/types/conversations/lifecycle": "agent"
   },
@@ -33,7 +36,7 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind5/intercom.openapi.yaml",
   "contract_sha256": "c81ac72b2445aec14982d0996db90ae3633353b3dfe954337ea54b20c64990f2",
-  "cost_usd": 0.12131940000000001,
+  "cost_usd": 0.1591454,
   "document": {
     "operations": {
       "attachTagToConversation": {
@@ -69,19 +72,33 @@
         }
       },
       "manageConversation": {
+        "kind": "action",
         "not_found": 404
       },
       "replyConversation": {
+        "kind": "action",
         "not_found": 404
       },
       "searchContacts": {
         "answer": {
           "records": "/data"
+        },
+        "paging": {
+          "request": "/pagination/starting_after",
+          "response": "pages.next.starting_after",
+          "size": "/pagination/per_page",
+          "style": "cursor"
         }
       },
       "searchConversations": {
         "answer": {
           "records": "/conversations"
+        },
+        "paging": {
+          "request": "/pagination/starting_after",
+          "response": "pages.next.starting_after",
+          "size": "/pagination/per_page",
+          "style": "cursor"
         }
       },
       "updateConversation": {
@@ -89,11 +106,6 @@
       }
     },
     "types": {
-      "admins": {
-        "identity": {
-          "member": "id"
-        }
-      },
       "contacts": {
         "unique": [
           {
@@ -123,42 +135,42 @@
     },
     "version": 1
   },
-  "duration_ms": 21380,
+  "duration_ms": 27870,
   "error": null,
   "exit_code": 0,
   "gaps": [],
   "heuristic_gaps": [],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "intercom",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 22339,
+      "cacheCreationEphemeral1hInputTokens": 27904,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 22339,
-      "cacheReadInputTokens": 81334,
+      "cacheCreationInputTokens": 27904,
+      "cacheReadInputTokens": 161714,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.12131940000000001,
-      "inputTokens": 10,
+      "costUSD": 0.1591454,
+      "inputTokens": 14,
       "maxOutputTokens": 128000,
-      "outputTokens": 2381,
+      "outputTokens": 3133,
       "provider": "firstParty",
-      "thinkingTokens": 600,
+      "thinkingTokens": 877,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 7,
+  "num_turns": 10,
   "refused": [],
   "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:10:36.975800Z",
+      "created_at": "2026-11-10T17:33:31.197929Z",
       "revision": 1
     }
   ],
@@ -206,6 +218,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -234,30 +247,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 22339,
+      "ephemeral_1h_input_tokens": 27904,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 22339,
-    "cache_read_input_tokens": 81334,
+    "cache_creation_input_tokens": 27904,
+    "cache_read_input_tokens": 161714,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 10,
+    "input_tokens": 14,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 1573,
+          "ephemeral_1h_input_tokens": 658,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 1573,
-        "cache_read_input_tokens": 28352,
+        "cache_creation_input_tokens": 658,
+        "cache_read_input_tokens": 34832,
         "input_tokens": 2,
-        "output_tokens": 714,
+        "output_tokens": 777,
         "type": "message"
       }
     ],
-    "output_tokens": 2381,
+    "output_tokens": 3133,
     "output_tokens_details": {
-      "thinking_tokens": 600
+      "thinking_tokens": 877
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -266,7 +279,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 21999,
+  "wall_ms": 28743,
   "world": {
     "operations": {
       "attachTagToConversation": {
@@ -338,7 +351,7 @@
         "type": "conversations"
       },
       "manageConversation": {
-        "kind": "update",
+        "kind": "action",
         "not_found": 404,
         "target": {
           "path_param": "conversation_id"
@@ -346,7 +359,7 @@
         "type": "conversations"
       },
       "replyConversation": {
-        "kind": "update",
+        "kind": "action",
         "not_found": 404,
         "target": {
           "path_param": "conversation_id"
@@ -358,6 +371,12 @@
           "records": "/data"
         },
         "kind": "list",
+        "paging": {
+          "request": "/pagination/starting_after",
+          "response": "pages.next.starting_after",
+          "size": "/pagination/per_page",
+          "style": "cursor"
+        },
         "type": "contacts"
       },
       "searchConversations": {
@@ -365,6 +384,12 @@
           "records": "/conversations"
         },
         "kind": "list",
+        "paging": {
+          "request": "/pagination/starting_after",
+          "response": "pages.next.starting_after",
+          "size": "/pagination/per_page",
+          "style": "cursor"
+        },
         "type": "conversations"
       },
       "updateConversation": {
@@ -377,11 +402,6 @@
       }
     },
     "types": {
-      "admins": {
-        "identity": {
-          "member": "id"
-        }
-      },
       "contacts": {
         "identity": {
           "member": "id"

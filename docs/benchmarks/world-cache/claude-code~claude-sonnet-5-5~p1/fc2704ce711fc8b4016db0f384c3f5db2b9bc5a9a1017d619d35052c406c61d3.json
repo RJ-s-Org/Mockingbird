@@ -1,0 +1,354 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-10T17:44:08Z",
+  "authors": {
+    "/operations/envelope_create/answer": "agent",
+    "/operations/envelope_create/request": "agent",
+    "/operations/envelope_update/answer": "agent",
+    "/operations/envelope_update/request": "agent",
+    "/operations/envelopes_list_status_changes/answer": "agent",
+    "/operations/envelopes_list_status_changes/filters": "agent",
+    "/operations/envelopes_list_status_changes/ignores": "agent",
+    "/operations/envelopes_list_status_changes/paging": "agent",
+    "/types/envelopes/lifecycle": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind13/docusign.openapi.yaml",
+  "contract_sha256": "fc2704ce711fc8b4016db0f384c3f5db2b9bc5a9a1017d619d35052c406c61d3",
+  "cost_usd": 0.12458999999999999,
+  "document": {
+    "operations": {
+      "envelope_create": {
+        "answer": {
+          "record": ""
+        },
+        "request": {
+          "record": ""
+        }
+      },
+      "envelope_update": {
+        "answer": {
+          "record": ""
+        },
+        "request": {
+          "record": ""
+        }
+      },
+      "envelopes_list_status_changes": {
+        "answer": {
+          "records": "/envelopes"
+        },
+        "filters": [
+          {
+            "kind": "gte",
+            "member": "statusChangedDateTime",
+            "param": "from_date"
+          },
+          {
+            "kind": "lte",
+            "member": "statusChangedDateTime",
+            "param": "to_date"
+          },
+          {
+            "kind": "text",
+            "member": "emailSubject",
+            "param": "search_text"
+          }
+        ],
+        "ignores": [
+          "from_to_status",
+          "include"
+        ],
+        "paging": {
+          "request": "start_position",
+          "size": "count",
+          "style": "offset"
+        }
+      }
+    },
+    "types": {
+      "envelopes": {
+        "lifecycle": {
+          "initial": "created",
+          "member": "status",
+          "states": [
+            "created",
+            "sent",
+            "delivered",
+            "signed",
+            "completed",
+            "declined",
+            "voided",
+            "deleted",
+            "processing",
+            "timedout"
+          ]
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 27660,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [],
+  "inputs": {
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
+  },
+  "is_error": false,
+  "mock": "docusign",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 20953,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 20953,
+      "cacheReadInputTokens": 166760,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.12458999999999999,
+      "inputTokens": 16,
+      "maxOutputTokens": 128000,
+      "outputTokens": 2407,
+      "provider": "firstParty",
+      "thinkingTokens": 388,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 10,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:43:55.256667Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "send-to-project",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 20953,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 20953,
+    "cache_read_input_tokens": 166760,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 16,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 652,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 652,
+        "cache_read_input_tokens": 27887,
+        "input_tokens": 2,
+        "output_tokens": 705,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 2407,
+    "output_tokens_details": {
+      "thinking_tokens": 388
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 28223,
+  "world": {
+    "operations": {
+      "envelope_create": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "request": {
+          "record": ""
+        },
+        "type": "envelopes"
+      },
+      "envelope_custom_fields_list": {
+        "kind": "list",
+        "type": "custom_fields"
+      },
+      "envelope_get": {
+        "kind": "read",
+        "target": {
+          "path_param": "envelopeId"
+        },
+        "type": "envelopes"
+      },
+      "envelope_recipients_list": {
+        "kind": "list",
+        "type": "recipients"
+      },
+      "envelope_update": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "update",
+        "request": {
+          "record": ""
+        },
+        "target": {
+          "path_param": "envelopeId"
+        },
+        "type": "envelopes"
+      },
+      "envelopes_list_status_changes": {
+        "answer": {
+          "records": "/envelopes"
+        },
+        "filters": [
+          {
+            "kind": "gte",
+            "member": "statusChangedDateTime",
+            "param": "from_date"
+          },
+          {
+            "kind": "lte",
+            "member": "statusChangedDateTime",
+            "param": "to_date"
+          },
+          {
+            "kind": "text",
+            "member": "emailSubject",
+            "param": "search_text"
+          }
+        ],
+        "ignores": [
+          "from_to_status",
+          "include"
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "start_position",
+          "size": "count",
+          "style": "offset"
+        },
+        "type": "envelopes"
+      }
+    },
+    "types": {
+      "envelopes": {
+        "identity": {
+          "member": "envelopeId"
+        },
+        "lifecycle": {
+          "initial": "created",
+          "member": "status",
+          "states": [
+            "created",
+            "sent",
+            "delivered",
+            "signed",
+            "completed",
+            "declined",
+            "voided",
+            "deleted",
+            "processing",
+            "timedout"
+          ]
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

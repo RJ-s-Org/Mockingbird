@@ -7,7 +7,7 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:09:28Z",
+  "authored_at": "2026-11-10T17:32:19Z",
   "authors": {
     "/operations/deleteIssue/not_found": "agent",
     "/operations/deleteIssue/target": "agent",
@@ -24,7 +24,7 @@
     "/operations/retrieveProject/not_found": "agent",
     "/operations/updateIssue/not_found": "agent",
     "/operations/updateProject/not_found": "agent",
-    "/types/keys/parent": "agent",
+    "/types/events/identity": "agent",
     "/types/projects/identity": "agent",
     "/types/projects/unique": "agent",
     "/types/teams/identity": "agent",
@@ -37,7 +37,7 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind4/sentry.openapi.yaml",
   "contract_sha256": "c08e5eb52198720c145ff91db5ee38dfa4cd608edcb73e61fab5f129a1a6f791",
-  "cost_usd": 0.1535043,
+  "cost_usd": 0.1482271,
   "document": {
     "operations": {
       "deleteIssue": {
@@ -60,7 +60,7 @@
         "paging": {
           "request": "cursor",
           "response_header": "Link",
-          "style": "header_cursor"
+          "style": "next_url"
         },
         "scope": {
           "member": "groupID",
@@ -72,28 +72,28 @@
           "request": "cursor",
           "response_header": "Link",
           "size": "limit",
-          "style": "header_cursor"
+          "style": "next_url"
         }
       },
       "listOrganizationProjects": {
         "paging": {
           "request": "cursor",
           "response_header": "Link",
-          "style": "header_cursor"
+          "style": "next_url"
         }
       },
       "listOrganizationTeams": {
         "paging": {
           "request": "cursor",
           "response_header": "Link",
-          "style": "header_cursor"
+          "style": "next_url"
         }
       },
       "listProjectKeys": {
         "paging": {
           "request": "cursor",
           "response_header": "Link",
-          "style": "header_cursor"
+          "style": "next_url"
         }
       },
       "retrieveIssue": {
@@ -110,10 +110,9 @@
       }
     },
     "types": {
-      "keys": {
-        "parent": {
-          "path_param": "project_id_or_slug",
-          "type": "projects"
+      "events": {
+        "identity": {
+          "member": "id"
         }
       },
       "projects": {
@@ -128,7 +127,8 @@
             "conflict": 409,
             "members": [
               "slug"
-            ]
+            ],
+            "scope": "organization.id"
           }
         ]
       },
@@ -151,7 +151,7 @@
     },
     "version": 1
   },
-  "duration_ms": 29629,
+  "duration_ms": 25358,
   "error": null,
   "exit_code": 0,
   "gaps": [],
@@ -170,36 +170,36 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "sentry",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 25736,
+      "cacheCreationEphemeral1hInputTokens": 27604,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 25736,
-      "cacheReadInputTokens": 177783,
+      "cacheCreationInputTokens": 27604,
+      "cacheReadInputTokens": 93511,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1535043,
-      "inputTokens": 16,
+      "costUSD": 0.1482271,
+      "inputTokens": 10,
       "maxOutputTokens": 128000,
-      "outputTokens": 3275,
+      "outputTokens": 2844,
       "provider": "firstParty",
-      "thinkingTokens": 771,
+      "thinkingTokens": 894,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 12,
+  "num_turns": 7,
   "refused": [],
   "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:09:13.720920Z",
+      "created_at": "2026-11-10T17:32:10.085224Z",
       "revision": 1
     }
   ],
@@ -247,6 +247,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -275,30 +276,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 25736,
+      "ephemeral_1h_input_tokens": 27604,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 25736,
-    "cache_read_input_tokens": 177783,
+    "cache_creation_input_tokens": 27604,
+    "cache_read_input_tokens": 93511,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 16,
+    "input_tokens": 10,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 1240,
+          "ephemeral_1h_input_tokens": 2179,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 1240,
-        "cache_read_input_tokens": 32082,
+        "cache_creation_input_tokens": 2179,
+        "cache_read_input_tokens": 33011,
         "input_tokens": 2,
-        "output_tokens": 831,
+        "output_tokens": 683,
         "type": "message"
       }
     ],
-    "output_tokens": 3275,
+    "output_tokens": 2844,
     "output_tokens_details": {
-      "thinking_tokens": 771
+      "thinking_tokens": 894
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -307,7 +308,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 30226,
+  "wall_ms": 26027,
   "world": {
     "operations": {
       "createProject": {
@@ -347,7 +348,7 @@
         "paging": {
           "request": "cursor",
           "response_header": "Link",
-          "style": "header_cursor"
+          "style": "next_url"
         },
         "scope": {
           "member": "groupID",
@@ -361,7 +362,7 @@
           "request": "cursor",
           "response_header": "Link",
           "size": "limit",
-          "style": "header_cursor"
+          "style": "next_url"
         },
         "type": "issues"
       },
@@ -370,7 +371,7 @@
         "paging": {
           "request": "cursor",
           "response_header": "Link",
-          "style": "header_cursor"
+          "style": "next_url"
         },
         "type": "projects"
       },
@@ -379,7 +380,7 @@
         "paging": {
           "request": "cursor",
           "response_header": "Link",
-          "style": "header_cursor"
+          "style": "next_url"
         },
         "type": "teams"
       },
@@ -388,7 +389,7 @@
         "paging": {
           "request": "cursor",
           "response_header": "Link",
-          "style": "header_cursor"
+          "style": "next_url"
         },
         "type": "keys"
       },
@@ -426,6 +427,11 @@
       }
     },
     "types": {
+      "events": {
+        "identity": {
+          "member": "id"
+        }
+      },
       "issues": {
         "identity": {
           "member": "id"
@@ -434,10 +440,6 @@
       "keys": {
         "identity": {
           "member": "id"
-        },
-        "parent": {
-          "path_param": "project_id_or_slug",
-          "type": "projects"
         }
       },
       "projects": {
@@ -452,7 +454,8 @@
             "conflict": 409,
             "members": [
               "slug"
-            ]
+            ],
+            "scope": "organization.id"
           }
         ]
       },

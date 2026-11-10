@@ -7,27 +7,31 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:10:51Z",
+  "authored_at": "2026-11-10T17:33:51Z",
   "authors": {
+    "/operations/cancelBooking/changes": "agent",
     "/operations/cancelBooking/kind": "agent",
     "/operations/cancelBooking/not_found": "agent",
     "/operations/cancelBooking/transition": "agent",
     "/operations/deleteEventType/answer": "agent",
-    "/operations/deleteEventType/kind": "agent",
     "/operations/deleteEventType/not_found": "agent",
     "/operations/deleteEventType/target": "agent",
-    "/operations/deleteEventType/type": "agent",
     "/operations/getBooking/not_found": "agent",
     "/operations/getBookings/answer": "agent",
     "/operations/getBookings/filters": "agent",
     "/operations/getBookings/paging": "agent",
     "/operations/getEventTypeById/not_found": "agent",
     "/operations/getEventTypes/answer": "agent",
+    "/operations/getEventTypes/filters": "agent",
+    "/operations/getMe/answer": "agent",
+    "/operations/getMe/kind": "agent",
+    "/operations/getMe/type": "agent",
     "/operations/markNoShow/not_found": "agent",
     "/operations/rescheduleBooking/not_found": "agent",
     "/operations/updateEventType/not_found": "agent",
     "/types/bookings/identity": "agent",
     "/types/bookings/lifecycle": "agent",
+    "/types/event-types/identity": "agent",
     "/types/event-types/unique": "agent"
   },
   "builtin_plugins": [
@@ -37,10 +41,15 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind5/calcom.openapi.yaml",
   "contract_sha256": "49b743623c178ea850868dab35e57ddc84080535d14e16b115608eeba06f200e",
-  "cost_usd": 0.1451195,
+  "cost_usd": 0.15891349999999999,
   "document": {
     "operations": {
       "cancelBooking": {
+        "changes": {
+          "cancellationReason": {
+            "from_request": "/cancellationReason"
+          }
+        },
         "kind": "action",
         "not_found": 404,
         "transition": {
@@ -51,12 +60,10 @@
         "answer": {
           "record": "/data"
         },
-        "kind": "delete",
         "not_found": 404,
         "target": {
           "path_param": "eventTypeId"
-        },
-        "type": "event-types"
+        }
       },
       "getBooking": {
         "not_found": 404
@@ -95,7 +102,21 @@
       "getEventTypes": {
         "answer": {
           "records": "/data"
-        }
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "slug",
+            "param": "eventSlug"
+          }
+        ]
+      },
+      "getMe": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "read",
+        "type": "me"
       },
       "markNoShow": {
         "not_found": 404
@@ -127,6 +148,9 @@
         }
       },
       "event-types": {
+        "identity": {
+          "member": "id"
+        },
         "unique": [
           {
             "conflict": 409,
@@ -140,10 +164,17 @@
     },
     "version": 1
   },
-  "duration_ms": 27759,
+  "duration_ms": 29279,
   "error": null,
   "exit_code": 0,
-  "gaps": [],
+  "gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `getMe` (Read) acts on one `me` record but no target says where the request names it",
+      "operation": "getMe",
+      "type": "me"
+    }
+  ],
   "heuristic_gaps": [
     {
       "code": "no_target",
@@ -153,37 +184,42 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "calcom",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 23968,
+      "cacheCreationEphemeral1hInputTokens": 26889,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 23968,
-      "cacheReadInputTokens": 172955,
+      "cacheCreationInputTokens": 26889,
+      "cacheReadInputTokens": 185155,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1451195,
+      "costUSD": 0.15891349999999999,
       "inputTokens": 16,
       "maxOutputTokens": 128000,
-      "outputTokens": 3192,
+      "outputTokens": 3281,
       "provider": "firstParty",
-      "thinkingTokens": 509,
+      "thinkingTokens": 667,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 11,
+  "num_turns": 10,
   "refused": [],
-  "revision": 1,
+  "revision": 2,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:10:40.717111Z",
+      "created_at": "2026-11-10T17:33:40.616903Z",
       "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:33:41.942110Z",
+      "revision": 2
     }
   ],
   "session": {
@@ -230,6 +266,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -258,30 +295,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 23968,
+      "ephemeral_1h_input_tokens": 26889,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 23968,
-    "cache_read_input_tokens": 172955,
+    "cache_creation_input_tokens": 26889,
+    "cache_read_input_tokens": 185155,
     "fallback_credit": null,
     "inference_geo": "global",
     "input_tokens": 16,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 326,
+          "ephemeral_1h_input_tokens": 788,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 326,
-        "cache_read_input_tokens": 31228,
+        "cache_creation_input_tokens": 788,
+        "cache_read_input_tokens": 33687,
         "input_tokens": 2,
-        "output_tokens": 870,
+        "output_tokens": 886,
         "type": "message"
       }
     ],
-    "output_tokens": 3192,
+    "output_tokens": 3281,
     "output_tokens_details": {
-      "thinking_tokens": 509
+      "thinking_tokens": 667
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -290,12 +327,17 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 28291,
+  "wall_ms": 29862,
   "world": {
     "operations": {
       "cancelBooking": {
         "answer": {
           "record": "/data"
+        },
+        "changes": {
+          "cancellationReason": {
+            "from_request": "/cancellationReason"
+          }
         },
         "kind": "action",
         "not_found": 404,
@@ -392,11 +434,21 @@
         "answer": {
           "records": "/data"
         },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "slug",
+            "param": "eventSlug"
+          }
+        ],
         "kind": "list",
         "type": "event-types"
       },
       "getMe": {
-        "kind": "list",
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "read",
         "type": "me"
       },
       "markNoShow": {
@@ -472,8 +524,20 @@
   "writes": [
     {
       "ok": true,
-      "refused": [],
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "`/pagination/nextCursor` is not a member of operation `getBookings`'s answer",
+          "path": "/operations/getBookings/paging/response"
+        }
+      ],
       "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 2,
       "tool": "patch_world"
     }
   ]

@@ -7,16 +7,18 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:08:51Z",
+  "authored_at": "2026-11-10T17:31:51Z",
   "authors": {
+    "/operations/archiveListMember/kind": "agent",
     "/operations/archiveListMember/target": "agent",
+    "/operations/archiveListMember/transition": "agent",
     "/operations/deleteList/target": "agent",
-    "/operations/getListMemberTags/paging": "agent",
+    "/operations/deleteListMemberPermanent/kind": "agent",
+    "/operations/deleteListMemberPermanent/target": "agent",
     "/operations/getListMembers/filters": "agent",
     "/operations/getListMembers/paging": "agent",
     "/operations/getListMembers/scope": "agent",
     "/operations/getLists/paging": "agent",
-    "/operations/searchMembers/filters": "agent",
     "/types/members/lifecycle": "agent",
     "/types/members/parent": "agent"
   },
@@ -27,12 +29,16 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind3/mailchimp.openapi.yaml",
   "contract_sha256": "f5000a480f06081924d2acb8de0eb7a16bf163f479199db843437b99367979b6",
-  "cost_usd": 0.1115405,
+  "cost_usd": 0.18163159999999998,
   "document": {
     "operations": {
       "archiveListMember": {
+        "kind": "action",
         "target": {
           "path_param": "subscriber_hash"
+        },
+        "transition": {
+          "status": "archived"
         }
       },
       "deleteList": {
@@ -40,11 +46,10 @@
           "path_param": "list_id"
         }
       },
-      "getListMemberTags": {
-        "paging": {
-          "request": "offset",
-          "size": "count",
-          "style": "offset"
+      "deleteListMemberPermanent": {
+        "kind": "delete",
+        "target": {
+          "path_param": "subscriber_hash"
         }
       },
       "getListMembers": {
@@ -86,23 +91,20 @@
           "size": "count",
           "style": "offset"
         }
-      },
-      "searchMembers": {
-        "filters": [
-          {
-            "kind": "text",
-            "param": "query"
-          }
-        ]
       }
     },
     "types": {
       "members": {
         "lifecycle": {
           "member": "status",
-          "soft_delete": {
-            "state": "archived"
-          }
+          "states": [
+            "subscribed",
+            "unsubscribed",
+            "cleaned",
+            "pending",
+            "transactional",
+            "archived"
+          ]
         },
         "parent": {
           "member": "list_id",
@@ -113,7 +115,7 @@
     },
     "version": 1
   },
-  "duration_ms": 20640,
+  "duration_ms": 35012,
   "error": null,
   "exit_code": 0,
   "gaps": [],
@@ -132,37 +134,47 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "mailchimp",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 20358,
+      "cacheCreationEphemeral1hInputTokens": 28174,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 20358,
-      "cacheReadInputTokens": 79985,
+      "cacheCreationInputTokens": 28174,
+      "cacheReadInputTokens": 286616,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1115405,
-      "inputTokens": 10,
+      "costUSD": 0.18163159999999998,
+      "inputTokens": 22,
       "maxOutputTokens": 128000,
-      "outputTokens": 2209,
+      "outputTokens": 4023,
       "provider": "firstParty",
-      "thinkingTokens": 412,
+      "thinkingTokens": 811,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 7,
+  "num_turns": 16,
   "refused": [],
-  "revision": 1,
+  "revision": 3,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:08:42.594659Z",
+      "created_at": "2026-11-10T17:31:29.308279Z",
       "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:31:36.461206Z",
+      "revision": 2
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:31:41.984973Z",
+      "revision": 3
     }
   ],
   "session": {
@@ -209,6 +221,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -237,30 +250,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 20358,
+      "ephemeral_1h_input_tokens": 28174,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 20358,
-    "cache_read_input_tokens": 79985,
+    "cache_creation_input_tokens": 28174,
+    "cache_read_input_tokens": 286616,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 10,
+    "input_tokens": 22,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 1399,
+          "ephemeral_1h_input_tokens": 727,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 1399,
-        "cache_read_input_tokens": 26545,
+        "cache_creation_input_tokens": 727,
+        "cache_read_input_tokens": 35033,
         "input_tokens": 2,
-        "output_tokens": 784,
+        "output_tokens": 901,
         "type": "message"
       }
     ],
-    "output_tokens": 2209,
+    "output_tokens": 4023,
     "output_tokens_details": {
-      "thinking_tokens": 412
+      "thinking_tokens": 811
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -269,7 +282,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 21181,
+  "wall_ms": 35663,
   "world": {
     "operations": {
       "addListMember": {
@@ -277,9 +290,12 @@
         "type": "members"
       },
       "archiveListMember": {
-        "kind": "delete",
+        "kind": "action",
         "target": {
           "path_param": "subscriber_hash"
+        },
+        "transition": {
+          "status": "archived"
         },
         "type": "members"
       },
@@ -295,7 +311,7 @@
         "type": "lists"
       },
       "deleteListMemberPermanent": {
-        "kind": "action",
+        "kind": "delete",
         "target": {
           "path_param": "subscriber_hash"
         },
@@ -317,11 +333,6 @@
       },
       "getListMemberTags": {
         "kind": "list",
-        "paging": {
-          "request": "offset",
-          "size": "count",
-          "style": "offset"
-        },
         "type": "tags"
       },
       "getListMembers": {
@@ -369,12 +380,6 @@
         "type": "lists"
       },
       "searchMembers": {
-        "filters": [
-          {
-            "kind": "text",
-            "param": "query"
-          }
-        ],
         "kind": "list",
         "type": "search-members"
       },
@@ -419,9 +424,14 @@
         },
         "lifecycle": {
           "member": "status",
-          "soft_delete": {
-            "state": "archived"
-          }
+          "states": [
+            "subscribed",
+            "unsubscribed",
+            "cleaned",
+            "pending",
+            "transactional",
+            "archived"
+          ]
         },
         "parent": {
           "member": "list_id",
@@ -435,14 +445,26 @@
   "writes": [
     {
       "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 2,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
       "refused": [
         {
           "code": "unresolved",
-          "message": "`list_id` is not a member of a `search-members` record",
-          "path": "/operations/searchMembers/filters/1/member"
+          "message": "operation `getListMember` declares no 404 response",
+          "path": "/operations/getListMember/not_found"
         }
       ],
-      "revision": 1,
+      "revision": 3,
       "tool": "patch_world"
     }
   ]

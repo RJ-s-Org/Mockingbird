@@ -7,10 +7,10 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:07:08Z",
+  "authored_at": "2026-11-10T17:29:57Z",
   "authors": {
     "/operations/chat_postMessage/answer": "agent",
-    "/operations/chat_postMessage/request": "agent",
+    "/operations/chat_postMessage/kind": "agent",
     "/operations/conversations_history/answer": "agent",
     "/operations/conversations_history/order": "agent",
     "/operations/conversations_history/paging": "agent",
@@ -35,7 +35,6 @@
     "/operations/users_list_post/answer": "agent",
     "/operations/users_list_post/paging": "agent",
     "/types/chat.postMessage/identity": "agent",
-    "/types/conversations/identity": "agent",
     "/types/users/identity": "agent"
   },
   "builtin_plugins": [
@@ -45,16 +44,14 @@
   ],
   "contract": "examples/apis/slack/slack.openapi.yaml",
   "contract_sha256": "ce8f9fb2daec04a480b533932379a9ba61e9889d7b64a05ed8774e7ee8c34fba",
-  "cost_usd": 0.1561125,
+  "cost_usd": 0.15902349999999998,
   "document": {
     "operations": {
       "chat_postMessage": {
         "answer": {
           "record": "/message"
         },
-        "request": {
-          "record": ""
-        }
+        "kind": "create"
       },
       "conversations_history": {
         "answer": {
@@ -156,11 +153,6 @@
           "member": "ts"
         }
       },
-      "conversations": {
-        "identity": {
-          "member": "id"
-        }
-      },
       "users": {
         "identity": {
           "member": "id"
@@ -169,7 +161,7 @@
     },
     "version": 1
   },
-  "duration_ms": 28555,
+  "duration_ms": 29451,
   "error": null,
   "exit_code": 0,
   "gaps": [
@@ -208,41 +200,41 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "slack",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 26960,
+      "cacheCreationEphemeral1hInputTokens": 27524,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 26960,
-      "cacheReadInputTokens": 176205,
+      "cacheCreationInputTokens": 27524,
+      "cacheReadInputTokens": 159095,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1561125,
-      "inputTokens": 16,
+      "costUSD": 0.15902349999999998,
+      "inputTokens": 14,
       "maxOutputTokens": 128000,
-      "outputTokens": 3062,
+      "outputTokens": 3299,
       "provider": "firstParty",
-      "thinkingTokens": 674,
+      "thinkingTokens": 859,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 11,
+  "num_turns": 9,
   "refused": [],
   "revision": 2,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:06:53.366503Z",
+      "created_at": "2026-11-10T17:29:43.605983Z",
       "revision": 1
     },
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:06:56.719098Z",
+      "created_at": "2026-11-10T17:29:46.987820Z",
       "revision": 2
     }
   ],
@@ -290,6 +282,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -318,30 +311,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 26960,
+      "ephemeral_1h_input_tokens": 27524,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 26960,
-    "cache_read_input_tokens": 176205,
+    "cache_creation_input_tokens": 27524,
+    "cache_read_input_tokens": 159095,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 16,
+    "input_tokens": 14,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 1889,
+          "ephemeral_1h_input_tokens": 491,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 1889,
-        "cache_read_input_tokens": 32657,
+        "cache_creation_input_tokens": 491,
+        "cache_read_input_tokens": 34619,
         "input_tokens": 2,
-        "output_tokens": 796,
+        "output_tokens": 842,
         "type": "message"
       }
     ],
-    "output_tokens": 3062,
+    "output_tokens": 3299,
     "output_tokens_details": {
-      "thinking_tokens": 674
+      "thinking_tokens": 859
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -350,7 +343,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 29161,
+  "wall_ms": 30035,
   "world": {
     "operations": {
       "auth_test": {
@@ -366,9 +359,6 @@
           "record": "/message"
         },
         "kind": "create",
-        "request": {
-          "record": ""
-        },
         "type": "chat.postMessage"
       },
       "conversations_history": {
@@ -485,11 +475,6 @@
           "member": "ts"
         }
       },
-      "conversations": {
-        "identity": {
-          "member": "id"
-        }
-      },
       "users": {
         "identity": {
           "member": "id"
@@ -504,8 +489,28 @@
       "refused": [
         {
           "code": "unresolved",
-          "message": "`id` is not a member of a `users` record",
-          "path": "/types/users/identity/member"
+          "message": "`id` is not a member of a `conversations` record",
+          "path": "/types/conversations/identity/member"
+        },
+        {
+          "code": "unresolved",
+          "message": "no operation has resource type `message` and no definition is named so",
+          "path": "/types/message"
+        },
+        {
+          "code": "unresolved",
+          "message": "no operation has resource type `message` and no definition is named so",
+          "path": "/operations/chat_postMessage/type"
+        },
+        {
+          "code": "unresolved",
+          "message": "no operation has resource type `message` and no definition is named so",
+          "path": "/operations/conversations_history/type"
+        },
+        {
+          "code": "unresolved",
+          "message": "no operation has resource type `message` and no definition is named so",
+          "path": "/operations/conversations_history_post/type"
         },
         {
           "code": "unresolved",

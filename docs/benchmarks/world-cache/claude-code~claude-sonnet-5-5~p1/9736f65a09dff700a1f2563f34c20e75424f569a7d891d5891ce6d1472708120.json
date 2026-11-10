@@ -1,0 +1,602 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-10T17:42:03Z",
+  "authors": {
+    "/operations/createOrganization/request": "agent",
+    "/operations/createWorkspace/request": "agent",
+    "/operations/createWorkspaceVariable/request": "agent",
+    "/operations/deleteWorkspaceVariable/not_found": "agent",
+    "/operations/deleteWorkspaceVariable/target": "agent",
+    "/operations/forceDeleteWorkspace/not_found": "agent",
+    "/operations/forceDeleteWorkspace/target": "agent",
+    "/operations/listWorkspaceVariables/answer": "agent",
+    "/operations/listWorkspaceVariables/scope": "agent",
+    "/operations/listWorkspaces/answer": "agent",
+    "/operations/listWorkspaces/filters": "agent",
+    "/operations/listWorkspaces/paging": "agent",
+    "/operations/listWorkspaces/scope": "agent",
+    "/operations/lockWorkspace/changes": "agent",
+    "/operations/lockWorkspace/kind": "agent",
+    "/operations/lockWorkspace/target": "agent",
+    "/operations/safeDeleteWorkspace/not_found": "agent",
+    "/operations/showOrganization/not_found": "agent",
+    "/operations/showWorkspace/not_found": "agent",
+    "/operations/showWorkspaceByName/not_found": "agent",
+    "/operations/unlockWorkspace/changes": "agent",
+    "/operations/unlockWorkspace/kind": "agent",
+    "/operations/unlockWorkspace/target": "agent",
+    "/operations/updateWorkspace/not_found": "agent",
+    "/operations/updateWorkspace/request": "agent",
+    "/operations/updateWorkspaceVariable/not_found": "agent",
+    "/operations/updateWorkspaceVariable/request": "agent",
+    "/types/vars/parent": "agent",
+    "/types/vars/unique": "agent",
+    "/types/workspaces/parent": "agent",
+    "/types/workspaces/unique": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind11/terraform.openapi.yaml",
+  "contract_sha256": "9736f65a09dff700a1f2563f34c20e75424f569a7d891d5891ce6d1472708120",
+  "cost_usd": 0.161461,
+  "document": {
+    "operations": {
+      "createOrganization": {
+        "request": {
+          "record": "/data"
+        }
+      },
+      "createWorkspace": {
+        "request": {
+          "record": "/data"
+        }
+      },
+      "createWorkspaceVariable": {
+        "request": {
+          "record": "/data"
+        }
+      },
+      "deleteWorkspaceVariable": {
+        "not_found": 404,
+        "target": {
+          "path_param": "variable_id"
+        }
+      },
+      "forceDeleteWorkspace": {
+        "not_found": 404,
+        "target": {
+          "path_param": "workspace_id"
+        }
+      },
+      "listWorkspaceVariables": {
+        "answer": {
+          "records": "/data"
+        },
+        "scope": {
+          "member": "relationships.configurable.data.id",
+          "param": "workspace_id"
+        }
+      },
+      "listWorkspaces": {
+        "answer": {
+          "records": "/data"
+        },
+        "filters": [
+          {
+            "kind": "contains",
+            "member": "attributes.name",
+            "param": "search[name]"
+          }
+        ],
+        "paging": {
+          "request": "page[number]",
+          "size": "page[size]",
+          "style": "page"
+        },
+        "scope": {
+          "member": "relationships.organization.data.id",
+          "param": "organization_name"
+        }
+      },
+      "lockWorkspace": {
+        "changes": {
+          "attributes.locked": {
+            "value": true
+          },
+          "attributes.locked-reason": {
+            "from_request": "/reason"
+          }
+        },
+        "kind": "action",
+        "target": {
+          "path_param": "workspace_id"
+        }
+      },
+      "safeDeleteWorkspace": {
+        "not_found": 404
+      },
+      "showOrganization": {
+        "not_found": 404
+      },
+      "showWorkspace": {
+        "not_found": 404
+      },
+      "showWorkspaceByName": {
+        "not_found": 404
+      },
+      "unlockWorkspace": {
+        "changes": {
+          "attributes.locked": {
+            "value": false
+          }
+        },
+        "kind": "action",
+        "target": {
+          "path_param": "workspace_id"
+        }
+      },
+      "updateWorkspace": {
+        "not_found": 404,
+        "request": {
+          "record": "/data"
+        }
+      },
+      "updateWorkspaceVariable": {
+        "not_found": 404,
+        "request": {
+          "record": "/data"
+        }
+      }
+    },
+    "types": {
+      "vars": {
+        "parent": {
+          "member": "relationships.configurable.data.id",
+          "path_param": "workspace_id",
+          "type": "workspaces"
+        },
+        "unique": [
+          {
+            "conflict": 422,
+            "members": [
+              "attributes.key",
+              "attributes.category"
+            ],
+            "scope": "relationships.configurable.data.id"
+          }
+        ]
+      },
+      "workspaces": {
+        "parent": {
+          "member": "relationships.organization.data.id",
+          "path_param": "organization_name",
+          "type": "organizations"
+        },
+        "unique": [
+          {
+            "conflict": 422,
+            "members": [
+              "attributes.name"
+            ],
+            "scope": "relationships.organization.data.id"
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 33181,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `forceDeleteWorkspace` (Delete) acts on one `workspaces` record but no target says where the request names it",
+      "operation": "forceDeleteWorkspace",
+      "type": "workspaces"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteWorkspaceVariable` (Delete) acts on one `vars` record but no target says where the request names it",
+      "operation": "deleteWorkspaceVariable",
+      "type": "vars"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
+  },
+  "is_error": false,
+  "mock": "terraform",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 26226,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 26226,
+      "cacheReadInputTokens": 155190,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.161461,
+      "inputTokens": 14,
+      "maxOutputTokens": 128000,
+      "outputTokens": 4101,
+      "provider": "firstParty",
+      "thinkingTokens": 624,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 9,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:41:50.951765Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "send-to-project",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 26226,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 26226,
+    "cache_read_input_tokens": 155190,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 14,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 338,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 338,
+        "cache_read_input_tokens": 33474,
+        "input_tokens": 2,
+        "output_tokens": 907,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 4101,
+    "output_tokens_details": {
+      "thinking_tokens": 624
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 33744,
+  "world": {
+    "operations": {
+      "createOrganization": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "create",
+        "request": {
+          "record": "/data"
+        },
+        "type": "organizations"
+      },
+      "createWorkspace": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "create",
+        "request": {
+          "record": "/data"
+        },
+        "type": "workspaces"
+      },
+      "createWorkspaceVariable": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "create",
+        "request": {
+          "record": "/data"
+        },
+        "type": "vars"
+      },
+      "deleteWorkspaceVariable": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "variable_id"
+        },
+        "type": "vars"
+      },
+      "forceDeleteWorkspace": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "workspace_id"
+        },
+        "type": "workspaces"
+      },
+      "listWorkspaceVariables": {
+        "answer": {
+          "records": "/data"
+        },
+        "kind": "list",
+        "scope": {
+          "member": "relationships.configurable.data.id",
+          "param": "workspace_id"
+        },
+        "type": "vars"
+      },
+      "listWorkspaces": {
+        "answer": {
+          "records": "/data"
+        },
+        "filters": [
+          {
+            "kind": "contains",
+            "member": "attributes.name",
+            "param": "search[name]"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page[number]",
+          "size": "page[size]",
+          "style": "page"
+        },
+        "scope": {
+          "member": "relationships.organization.data.id",
+          "param": "organization_name"
+        },
+        "type": "workspaces"
+      },
+      "lockWorkspace": {
+        "answer": {
+          "record": "/data"
+        },
+        "changes": {
+          "attributes.locked": {
+            "value": true
+          },
+          "attributes.locked-reason": {
+            "from_request": "/reason"
+          }
+        },
+        "kind": "action",
+        "target": {
+          "path_param": "workspace_id"
+        },
+        "type": "workspaces"
+      },
+      "safeDeleteWorkspace": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "workspace_id"
+        },
+        "type": "workspaces"
+      },
+      "showOrganization": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "organization_name"
+        },
+        "type": "organizations"
+      },
+      "showWorkspace": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "workspace_id"
+        },
+        "type": "workspaces"
+      },
+      "showWorkspaceByName": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "workspace_name"
+        },
+        "type": "workspaces"
+      },
+      "unlockWorkspace": {
+        "answer": {
+          "record": "/data"
+        },
+        "changes": {
+          "attributes.locked": {
+            "value": false
+          }
+        },
+        "kind": "action",
+        "target": {
+          "path_param": "workspace_id"
+        },
+        "type": "workspaces"
+      },
+      "updateWorkspace": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "update",
+        "not_found": 404,
+        "request": {
+          "record": "/data"
+        },
+        "target": {
+          "path_param": "workspace_id"
+        },
+        "type": "workspaces"
+      },
+      "updateWorkspaceVariable": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "update",
+        "not_found": 404,
+        "request": {
+          "record": "/data"
+        },
+        "target": {
+          "path_param": "variable_id"
+        },
+        "type": "vars"
+      }
+    },
+    "types": {
+      "organizations": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "vars": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "member": "relationships.configurable.data.id",
+          "path_param": "workspace_id",
+          "type": "workspaces"
+        },
+        "unique": [
+          {
+            "conflict": 422,
+            "members": [
+              "attributes.key",
+              "attributes.category"
+            ],
+            "scope": "relationships.configurable.data.id"
+          }
+        ]
+      },
+      "workspaces": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "member": "relationships.organization.data.id",
+          "path_param": "organization_name",
+          "type": "organizations"
+        },
+        "unique": [
+          {
+            "conflict": 422,
+            "members": [
+              "attributes.name"
+            ],
+            "scope": "relationships.organization.data.id"
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": false,
+      "problem": "Admin API answered 422 Unprocessable Entity: {\"code\":\"invalid\",\"detail\":\"not a world description entry: invalid value: map, expected map with a single key\",\"path\":\"/operations/unlockWorkspace/changes/attributes.locked-reason\",\"status\":422,\"title\":\"Invalid world description\",\"type\":\"about:blank\"}",
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

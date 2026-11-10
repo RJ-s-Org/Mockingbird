@@ -1,0 +1,399 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-10T17:44:09Z",
+  "authors": {
+    "/operations/bookmarks_list/paging": "agent",
+    "/operations/scheduled_status_cancel/not_found": "agent",
+    "/operations/scheduled_status_cancel/target": "agent",
+    "/operations/scheduled_status_get/not_found": "agent",
+    "/operations/scheduled_status_update/not_found": "agent",
+    "/operations/scheduled_statuses_list/paging": "agent",
+    "/operations/status_delete/not_found": "agent",
+    "/operations/status_edit/not_found": "agent",
+    "/operations/status_favourite/not_found": "agent",
+    "/operations/status_get/not_found": "agent",
+    "/operations/status_post/idempotency": "agent",
+    "/operations/status_unbookmark/not_found": "agent",
+    "/operations/status_unfavourite/not_found": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind13/mastodon.openapi.yaml",
+  "contract_sha256": "1947c16febff3c2fca576526b489c6ee92a56662ab0ca01fffd0f00ba7240852",
+  "cost_usd": 0.12500329999999998,
+  "document": {
+    "operations": {
+      "bookmarks_list": {
+        "paging": {
+          "request": "max_id",
+          "response_header": "Link",
+          "size": "limit",
+          "style": "next_url"
+        }
+      },
+      "scheduled_status_cancel": {
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        }
+      },
+      "scheduled_status_get": {
+        "not_found": 404
+      },
+      "scheduled_status_update": {
+        "not_found": 404
+      },
+      "scheduled_statuses_list": {
+        "paging": {
+          "request": "max_id",
+          "response_header": "Link",
+          "size": "limit",
+          "style": "next_url"
+        }
+      },
+      "status_delete": {
+        "not_found": 404
+      },
+      "status_edit": {
+        "not_found": 404
+      },
+      "status_favourite": {
+        "not_found": 404
+      },
+      "status_get": {
+        "not_found": 404
+      },
+      "status_post": {
+        "idempotency": {
+          "header": "Idempotency-Key"
+        }
+      },
+      "status_unbookmark": {
+        "not_found": 404
+      },
+      "status_unfavourite": {
+        "not_found": 404
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 26330,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `verify_credentials` (Read) acts on one `verify_credentials` record but no target says where the request names it",
+      "operation": "verify_credentials",
+      "type": "verify_credentials"
+    }
+  ],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `verify_credentials` (Read) acts on one `verify_credentials` record but no target says where the request names it",
+      "operation": "verify_credentials",
+      "type": "verify_credentials"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `scheduled_status_cancel` (Delete) acts on one `scheduled_statuses` record but no target says where the request names it",
+      "operation": "scheduled_status_cancel",
+      "type": "scheduled_statuses"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
+  },
+  "is_error": false,
+  "mock": "mastodon",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 22052,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 22052,
+      "cacheReadInputTokens": 90153,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.12500329999999998,
+      "inputTokens": 10,
+      "maxOutputTokens": 128000,
+      "outputTokens": 2776,
+      "provider": "firstParty",
+      "thinkingTokens": 356,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 11,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:44:00.762908Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "send-to-project",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 22052,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 22052,
+    "cache_read_input_tokens": 90153,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 10,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1140,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1140,
+        "cache_read_input_tokens": 28498,
+        "input_tokens": 2,
+        "output_tokens": 763,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 2776,
+    "output_tokens_details": {
+      "thinking_tokens": 356
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 26924,
+  "world": {
+    "operations": {
+      "bookmarks_list": {
+        "kind": "list",
+        "paging": {
+          "request": "max_id",
+          "response_header": "Link",
+          "size": "limit",
+          "style": "next_url"
+        },
+        "type": "statuses"
+      },
+      "scheduled_status_cancel": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "scheduled_statuses"
+      },
+      "scheduled_status_get": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "scheduled_statuses"
+      },
+      "scheduled_status_update": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "scheduled_statuses"
+      },
+      "scheduled_statuses_list": {
+        "kind": "list",
+        "paging": {
+          "request": "max_id",
+          "response_header": "Link",
+          "size": "limit",
+          "style": "next_url"
+        },
+        "type": "scheduled_statuses"
+      },
+      "status_bookmark": {
+        "kind": "update",
+        "target": {
+          "path_param": "id"
+        },
+        "type": "statuses"
+      },
+      "status_delete": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "statuses"
+      },
+      "status_edit": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "statuses"
+      },
+      "status_favourite": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "statuses"
+      },
+      "status_get": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "statuses"
+      },
+      "status_history": {
+        "kind": "list",
+        "type": "statuses"
+      },
+      "status_post": {
+        "idempotency": {
+          "header": "Idempotency-Key"
+        },
+        "kind": "create",
+        "type": "statuses"
+      },
+      "status_unbookmark": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "statuses"
+      },
+      "status_unfavourite": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "statuses"
+      },
+      "verify_credentials": {
+        "kind": "read",
+        "type": "verify_credentials"
+      }
+    },
+    "types": {
+      "scheduled_statuses": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "statuses": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "verify_credentials": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}
