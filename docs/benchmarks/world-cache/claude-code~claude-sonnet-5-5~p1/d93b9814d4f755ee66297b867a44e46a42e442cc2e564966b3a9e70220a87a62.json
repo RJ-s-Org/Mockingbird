@@ -7,7 +7,7 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:17:04Z",
+  "authored_at": "2026-11-10T17:40:44Z",
   "authors": {
     "/operations/payInvoice/kind": "agent",
     "/operations/payInvoice/target": "agent",
@@ -32,7 +32,7 @@
   ],
   "contract": "docs/benchmarks/contracts/invoicing.openapi.yaml",
   "contract_sha256": "d93b9814d4f755ee66297b867a44e46a42e442cc2e564966b3a9e70220a87a62",
-  "cost_usd": 0.08957499999999999,
+  "cost_usd": 0.09742209999999998,
   "document": {
     "operations": {
       "payInvoice": {
@@ -88,42 +88,42 @@
     },
     "version": 1
   },
-  "duration_ms": 19588,
+  "duration_ms": 20563,
   "error": null,
   "exit_code": 0,
   "gaps": [],
   "heuristic_gaps": [],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "invoicing",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 14251,
+      "cacheCreationEphemeral1hInputTokens": 16849,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 14251,
-      "cacheReadInputTokens": 119630,
+      "cacheCreationInputTokens": 16849,
+      "cacheReadInputTokens": 86661,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.08957499999999999,
-      "inputTokens": 14,
+      "costUSD": 0.09742209999999998,
+      "inputTokens": 10,
       "maxOutputTokens": 128000,
-      "outputTokens": 2058,
+      "outputTokens": 2134,
       "provider": "firstParty",
-      "thinkingTokens": 323,
+      "thinkingTokens": 383,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 11,
+  "num_turns": 9,
   "refused": [],
   "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:16:52.768038Z",
+      "created_at": "2026-11-10T17:40:31.341779Z",
       "revision": 1
     }
   ],
@@ -171,6 +171,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -199,30 +200,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 14251,
+      "ephemeral_1h_input_tokens": 16849,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 14251,
-    "cache_read_input_tokens": 119630,
+    "cache_creation_input_tokens": 16849,
+    "cache_read_input_tokens": 86661,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 14,
+    "input_tokens": 10,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 512,
+          "ephemeral_1h_input_tokens": 581,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 512,
-        "cache_read_input_tokens": 21325,
+        "cache_creation_input_tokens": 581,
+        "cache_read_input_tokens": 23854,
         "input_tokens": 2,
-        "output_tokens": 573,
+        "output_tokens": 729,
         "type": "message"
       }
     ],
-    "output_tokens": 2058,
+    "output_tokens": 2134,
     "output_tokens_details": {
-      "thinking_tokens": 323
+      "thinking_tokens": 383
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -231,7 +232,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 20179,
+  "wall_ms": 21193,
   "world": {
     "operations": {
       "createInvoice": {

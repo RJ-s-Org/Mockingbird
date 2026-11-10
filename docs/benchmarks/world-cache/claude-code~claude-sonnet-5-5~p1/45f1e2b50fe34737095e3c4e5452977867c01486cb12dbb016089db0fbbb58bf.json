@@ -7,33 +7,23 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:12:44Z",
+  "authored_at": "2026-11-10T17:35:59Z",
   "authors": {
-    "/operations/createRepository/answer": "agent",
     "/operations/createRepository/kind": "agent",
     "/operations/createRepository/target": "agent",
     "/operations/declinePullRequest/kind": "agent",
-    "/operations/declinePullRequest/not_found": "agent",
     "/operations/declinePullRequest/transition": "agent",
-    "/operations/deletePullRequestComment/changes": "agent",
-    "/operations/deletePullRequestComment/kind": "agent",
-    "/operations/deletePullRequestComment/not_found": "agent",
     "/operations/deletePullRequestComment/target": "agent",
-    "/operations/deleteRepository/not_found": "agent",
     "/operations/deleteRepository/target": "agent",
-    "/operations/getPullRequest/not_found": "agent",
-    "/operations/getPullRequestComment/not_found": "agent",
-    "/operations/getRepository/not_found": "agent",
     "/operations/listPullRequestComments/order": "agent",
     "/operations/listPullRequestComments/paging": "agent",
+    "/operations/listPullRequestComments/scope": "agent",
     "/operations/listPullRequests/filters": "agent",
     "/operations/listPullRequests/order": "agent",
     "/operations/listPullRequests/paging": "agent",
     "/operations/mergePullRequest/kind": "agent",
-    "/operations/mergePullRequest/not_found": "agent",
     "/operations/mergePullRequest/transition": "agent",
-    "/operations/updatePullRequest/not_found": "agent",
-    "/operations/updatePullRequestComment/not_found": "agent",
+    "/types/comments/lifecycle": "agent",
     "/types/comments/parent": "agent",
     "/types/pullrequests/lifecycle": "agent",
     "/types/pullrequests/parent": "agent",
@@ -46,13 +36,10 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind7/bitbucket.openapi.yaml",
   "contract_sha256": "45f1e2b50fe34737095e3c4e5452977867c01486cb12dbb016089db0fbbb58bf",
-  "cost_usd": 0.1383759,
+  "cost_usd": 0.199639,
   "document": {
     "operations": {
       "createRepository": {
-        "answer": {
-          "record": ""
-        },
         "kind": "create",
         "target": {
           "path_param": "repo_slug"
@@ -60,37 +47,19 @@
       },
       "declinePullRequest": {
         "kind": "action",
-        "not_found": 404,
         "transition": {
           "state": "DECLINED"
         }
       },
       "deletePullRequestComment": {
-        "changes": {
-          "deleted": {
-            "value": true
-          }
-        },
-        "kind": "action",
-        "not_found": 404,
         "target": {
           "path_param": "comment_id"
         }
       },
       "deleteRepository": {
-        "not_found": 404,
         "target": {
           "path_param": "repo_slug"
         }
-      },
-      "getPullRequest": {
-        "not_found": 404
-      },
-      "getPullRequestComment": {
-        "not_found": 404
-      },
-      "getRepository": {
-        "not_found": 404
       },
       "listPullRequestComments": {
         "order": {
@@ -100,6 +69,10 @@
           "request": "page",
           "size": "pagelen",
           "style": "page"
+        },
+        "scope": {
+          "member": "pullrequest.id",
+          "param": "pull_request_id"
         }
       },
       "listPullRequests": {
@@ -122,20 +95,24 @@
       },
       "mergePullRequest": {
         "kind": "action",
-        "not_found": 404,
         "transition": {
           "state": "MERGED"
         }
-      },
-      "updatePullRequest": {
-        "not_found": 404
-      },
-      "updatePullRequestComment": {
-        "not_found": 404
       }
     },
     "types": {
       "comments": {
+        "lifecycle": {
+          "initial": "false",
+          "member": "deleted",
+          "soft_delete": {
+            "state": "true"
+          },
+          "states": [
+            "false",
+            "true"
+          ]
+        },
         "parent": {
           "path_param": "pull_request_id",
           "type": "pullrequests"
@@ -171,7 +148,7 @@
     },
     "version": 1
   },
-  "duration_ms": 27639,
+  "duration_ms": 39176,
   "error": null,
   "exit_code": 0,
   "gaps": [],
@@ -190,37 +167,47 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "bitbucket",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 23672,
+      "cacheCreationEphemeral1hInputTokens": 30936,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 23672,
-      "cacheReadInputTokens": 111439,
+      "cacheCreationInputTokens": 30936,
+      "cacheReadInputTokens": 299410,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1383759,
-      "inputTokens": 12,
+      "costUSD": 0.199639,
+      "inputTokens": 22,
       "maxOutputTokens": 128000,
-      "outputTokens": 3252,
+      "outputTokens": 4591,
       "provider": "firstParty",
-      "thinkingTokens": 851,
+      "thinkingTokens": 1031,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 9,
+  "num_turns": 17,
   "refused": [],
-  "revision": 1,
+  "revision": 3,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:12:33.442397Z",
+      "created_at": "2026-11-10T17:35:35.567309Z",
       "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:35:37.625870Z",
+      "revision": 2
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:35:42.864834Z",
+      "revision": 3
     }
   ],
   "session": {
@@ -267,6 +254,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -295,30 +283,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 23672,
+      "ephemeral_1h_input_tokens": 30936,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 23672,
-    "cache_read_input_tokens": 111439,
+    "cache_creation_input_tokens": 30936,
+    "cache_read_input_tokens": 299410,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 12,
+    "input_tokens": 22,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 1076,
+          "ephemeral_1h_input_tokens": 1344,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 1076,
-        "cache_read_input_tokens": 30182,
+        "cache_creation_input_tokens": 1344,
+        "cache_read_input_tokens": 37178,
         "input_tokens": 2,
-        "output_tokens": 950,
+        "output_tokens": 1048,
         "type": "message"
       }
     ],
-    "output_tokens": 3252,
+    "output_tokens": 4591,
     "output_tokens_details": {
-      "thinking_tokens": 851
+      "thinking_tokens": 1031
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -327,7 +315,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 28184,
+  "wall_ms": 39634,
   "world": {
     "operations": {
       "createPullRequest": {
@@ -339,9 +327,6 @@
         "type": "comments"
       },
       "createRepository": {
-        "answer": {
-          "record": ""
-        },
         "kind": "create",
         "target": {
           "path_param": "repo_slug"
@@ -350,7 +335,6 @@
       },
       "declinePullRequest": {
         "kind": "action",
-        "not_found": 404,
         "target": {
           "path_param": "pull_request_id"
         },
@@ -360,13 +344,7 @@
         "type": "pullrequests"
       },
       "deletePullRequestComment": {
-        "changes": {
-          "deleted": {
-            "value": true
-          }
-        },
-        "kind": "action",
-        "not_found": 404,
+        "kind": "delete",
         "target": {
           "path_param": "comment_id"
         },
@@ -374,7 +352,6 @@
       },
       "deleteRepository": {
         "kind": "delete",
-        "not_found": 404,
         "target": {
           "path_param": "repo_slug"
         },
@@ -382,7 +359,6 @@
       },
       "getPullRequest": {
         "kind": "read",
-        "not_found": 404,
         "target": {
           "path_param": "pull_request_id"
         },
@@ -390,7 +366,6 @@
       },
       "getPullRequestComment": {
         "kind": "read",
-        "not_found": 404,
         "target": {
           "path_param": "comment_id"
         },
@@ -398,7 +373,6 @@
       },
       "getRepository": {
         "kind": "read",
-        "not_found": 404,
         "target": {
           "path_param": "repo_slug"
         },
@@ -413,6 +387,10 @@
           "request": "page",
           "size": "pagelen",
           "style": "page"
+        },
+        "scope": {
+          "member": "pullrequest.id",
+          "param": "pull_request_id"
         },
         "type": "comments"
       },
@@ -438,7 +416,6 @@
       },
       "mergePullRequest": {
         "kind": "action",
-        "not_found": 404,
         "target": {
           "path_param": "pull_request_id"
         },
@@ -449,7 +426,6 @@
       },
       "updatePullRequest": {
         "kind": "update",
-        "not_found": 404,
         "target": {
           "path_param": "pull_request_id"
         },
@@ -457,7 +433,6 @@
       },
       "updatePullRequestComment": {
         "kind": "update",
-        "not_found": 404,
         "target": {
           "path_param": "comment_id"
         },
@@ -468,6 +443,17 @@
       "comments": {
         "identity": {
           "member": "id"
+        },
+        "lifecycle": {
+          "initial": "false",
+          "member": "deleted",
+          "soft_delete": {
+            "state": "true"
+          },
+          "states": [
+            "false",
+            "true"
+          ]
         },
         "parent": {
           "path_param": "pull_request_id",
@@ -515,6 +501,18 @@
       "ok": true,
       "refused": [],
       "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 2,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 3,
       "tool": "patch_world"
     }
   ]

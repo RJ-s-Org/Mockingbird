@@ -7,11 +7,12 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:15:35Z",
+  "authored_at": "2026-11-10T17:39:11Z",
   "authors": {
     "/operations/createEscalationPolicy/request": "agent",
     "/operations/createIncident/request": "agent",
     "/operations/createIncidentNote/request": "agent",
+    "/operations/createIncidentNote/target": "agent",
     "/operations/createService/request": "agent",
     "/operations/createUser/request": "agent",
     "/operations/getEscalationPolicy/not_found": "agent",
@@ -21,12 +22,14 @@
     "/operations/listIncidentNotes/answer": "agent",
     "/operations/listIncidentNotes/not_found": "agent",
     "/operations/listIncidentNotes/order": "agent",
+    "/operations/listIncidentNotes/target": "agent",
     "/operations/listIncidents/answer": "agent",
     "/operations/listIncidents/filters": "agent",
     "/operations/listIncidents/paging": "agent",
     "/operations/listServices/answer": "agent",
     "/operations/listServices/filters": "agent",
     "/operations/listServices/paging": "agent",
+    "/operations/updateIncident/not_found": "agent",
     "/operations/updateIncident/request": "agent",
     "/types/incidents/lifecycle": "agent",
     "/types/notes/parent": "agent",
@@ -39,7 +42,7 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind10/pagerduty.openapi.yaml",
   "contract_sha256": "cb76071ebe60436133a5e6f72fd1e721ff6d96566ede4ce9c7ced164dd439bb6",
-  "cost_usd": 0.12594309999999997,
+  "cost_usd": 0.14049230000000001,
   "document": {
     "operations": {
       "createEscalationPolicy": {
@@ -55,6 +58,9 @@
       "createIncidentNote": {
         "request": {
           "record": "/note"
+        },
+        "target": {
+          "path_param": "id"
         }
       },
       "createService": {
@@ -86,6 +92,9 @@
         "not_found": 404,
         "order": {
           "member": "created_at"
+        },
+        "target": {
+          "path_param": "id"
         }
       },
       "listIncidents": {
@@ -116,7 +125,6 @@
         ],
         "paging": {
           "request": "offset",
-          "response": "more",
           "size": "limit",
           "style": "offset"
         }
@@ -134,12 +142,12 @@
         ],
         "paging": {
           "request": "offset",
-          "response": "more",
           "size": "limit",
           "style": "offset"
         }
       },
       "updateIncident": {
+        "not_found": 404,
         "request": {
           "record": "/incident"
         }
@@ -166,48 +174,55 @@
       "services": {
         "lifecycle": {
           "initial": "active",
-          "member": "status"
+          "member": "status",
+          "states": [
+            "active",
+            "warning",
+            "critical",
+            "maintenance",
+            "disabled"
+          ]
         }
       }
     },
     "version": 1
   },
-  "duration_ms": 22807,
+  "duration_ms": 24660,
   "error": null,
   "exit_code": 0,
   "gaps": [],
   "heuristic_gaps": [],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "pagerduty",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 21699,
+      "cacheCreationEphemeral1hInputTokens": 25173,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 21699,
-      "cacheReadInputTokens": 136991,
+      "cacheCreationInputTokens": 25173,
+      "cacheReadInputTokens": 122363,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.12594309999999997,
-      "inputTokens": 14,
+      "costUSD": 0.14049230000000001,
+      "inputTokens": 12,
       "maxOutputTokens": 128000,
-      "outputTokens": 2542,
+      "outputTokens": 2754,
       "provider": "firstParty",
-      "thinkingTokens": 350,
+      "thinkingTokens": 427,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 9,
+  "num_turns": 8,
   "refused": [],
   "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:15:24.689789Z",
+      "created_at": "2026-11-10T17:39:01.024379Z",
       "revision": 1
     }
   ],
@@ -255,6 +270,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -283,30 +299,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 21699,
+      "ephemeral_1h_input_tokens": 25173,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 21699,
-    "cache_read_input_tokens": 136991,
+    "cache_creation_input_tokens": 25173,
+    "cache_read_input_tokens": 122363,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 14,
+    "input_tokens": 12,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 331,
+          "ephemeral_1h_input_tokens": 340,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 331,
-        "cache_read_input_tokens": 28954,
+        "cache_creation_input_tokens": 340,
+        "cache_read_input_tokens": 32419,
         "input_tokens": 2,
-        "output_tokens": 755,
+        "output_tokens": 831,
         "type": "message"
       }
     ],
-    "output_tokens": 2542,
+    "output_tokens": 2754,
     "output_tokens_details": {
-      "thinking_tokens": 350
+      "thinking_tokens": 427
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -315,7 +331,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 23383,
+  "wall_ms": 25415,
   "world": {
     "operations": {
       "createEscalationPolicy": {
@@ -345,6 +361,9 @@
         "kind": "create",
         "request": {
           "record": "/note"
+        },
+        "target": {
+          "path_param": "id"
         },
         "type": "notes"
       },
@@ -421,6 +440,9 @@
         "order": {
           "member": "created_at"
         },
+        "target": {
+          "path_param": "id"
+        },
         "type": "notes"
       },
       "listIncidents": {
@@ -452,7 +474,6 @@
         "kind": "list",
         "paging": {
           "request": "offset",
-          "response": "more",
           "size": "limit",
           "style": "offset"
         },
@@ -472,7 +493,6 @@
         "kind": "list",
         "paging": {
           "request": "offset",
-          "response": "more",
           "size": "limit",
           "style": "offset"
         },
@@ -483,6 +503,7 @@
           "record": "/incident"
         },
         "kind": "update",
+        "not_found": 404,
         "request": {
           "record": "/incident"
         },
@@ -527,7 +548,14 @@
         },
         "lifecycle": {
           "initial": "active",
-          "member": "status"
+          "member": "status",
+          "states": [
+            "active",
+            "warning",
+            "critical",
+            "maintenance",
+            "disabled"
+          ]
         }
       },
       "users": {

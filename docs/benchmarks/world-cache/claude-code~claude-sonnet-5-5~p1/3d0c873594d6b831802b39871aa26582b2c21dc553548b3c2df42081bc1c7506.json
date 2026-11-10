@@ -7,9 +7,10 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:12:17Z",
+  "authored_at": "2026-11-10T17:35:27Z",
   "authors": {
     "/operations/Mutation.commentUpdate/answer": "agent",
+    "/operations/Mutation.commentUpdate/request": "agent",
     "/operations/Mutation.commentUpdate/target": "agent",
     "/operations/Mutation.issueArchive/answer": "agent",
     "/operations/Mutation.issueArchive/target": "agent",
@@ -18,18 +19,19 @@
     "/operations/Mutation.issueUnarchive/target": "agent",
     "/operations/Mutation.issueUnarchive/type": "agent",
     "/operations/Mutation.issueUpdate/answer": "agent",
+    "/operations/Mutation.issueUpdate/request": "agent",
     "/operations/Mutation.issueUpdate/target": "agent",
-    "/operations/Query.comments/filters": "agent",
     "/operations/Query.comments/order": "agent",
     "/operations/Query.comments/paging": "agent",
     "/operations/Query.comments/type": "agent",
-    "/operations/Query.issues/filters": "agent",
     "/operations/Query.issues/order": "agent",
     "/operations/Query.issues/paging": "agent",
     "/operations/Query.issues/type": "agent",
-    "/operations/Query.teams/filters": "agent",
     "/operations/Query.teams/paging": "agent",
     "/operations/Query.teams/type": "agent",
+    "/types/comment/parent": "agent",
+    "/types/issue/identity": "agent",
+    "/types/issue/parent": "agent",
     "/types/team/unique": "agent"
   },
   "builtin_plugins": [
@@ -39,12 +41,15 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind7/linear.graphql",
   "contract_sha256": "3d0c873594d6b831802b39871aa26582b2c21dc553548b3c2df42081bc1c7506",
-  "cost_usd": 0.13181560000000003,
+  "cost_usd": 0.1557835,
   "document": {
     "operations": {
       "Mutation.commentUpdate": {
         "answer": {
           "record": "/comment"
+        },
+        "request": {
+          "record": "/input"
         },
         "target": {
           "member": "id"
@@ -72,17 +77,14 @@
         "answer": {
           "record": "/issue"
         },
+        "request": {
+          "record": "/input"
+        },
         "target": {
           "member": "id"
         }
       },
       "Query.comments": {
-        "filters": [
-          {
-            "kind": "flag",
-            "param": "includeArchived"
-          }
-        ],
         "order": {
           "descending": true,
           "member": "createdAt"
@@ -96,12 +98,6 @@
         "type": "comment"
       },
       "Query.issues": {
-        "filters": [
-          {
-            "kind": "flag",
-            "param": "includeArchived"
-          }
-        ],
         "order": {
           "descending": true,
           "member": "createdAt"
@@ -115,12 +111,6 @@
         "type": "issue"
       },
       "Query.teams": {
-        "filters": [
-          {
-            "kind": "flag",
-            "param": "includeArchived"
-          }
-        ],
         "paging": {
           "request": "after",
           "response": "pageInfo.endCursor",
@@ -131,6 +121,24 @@
       }
     },
     "types": {
+      "comment": {
+        "parent": {
+          "member": "issue",
+          "type": "issue"
+        }
+      },
+      "issue": {
+        "identity": {
+          "alternates": [
+            "identifier"
+          ],
+          "member": "id"
+        },
+        "parent": {
+          "member": "team",
+          "type": "team"
+        }
+      },
       "team": {
         "unique": [
           {
@@ -143,7 +151,7 @@
     },
     "version": 1
   },
-  "duration_ms": 27146,
+  "duration_ms": 32716,
   "error": null,
   "exit_code": 0,
   "gaps": [
@@ -192,26 +200,26 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "linear",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 20770,
+      "cacheCreationEphemeral1hInputTokens": 24767,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 20770,
-      "cacheReadInputTokens": 155136,
+      "cacheCreationInputTokens": 24767,
+      "cacheReadInputTokens": 175735,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.13181560000000003,
+      "costUSD": 0.1557835,
       "inputTokens": 16,
       "maxOutputTokens": 128000,
-      "outputTokens": 3319,
+      "outputTokens": 3911,
       "provider": "firstParty",
-      "thinkingTokens": 496,
+      "thinkingTokens": 540,
       "webSearchRequests": 0
     }
   },
@@ -221,12 +229,12 @@
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:12:06.118060Z",
+      "created_at": "2026-11-10T17:35:13.010429Z",
       "revision": 1
     },
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:12:08.145633Z",
+      "created_at": "2026-11-10T17:35:14.982781Z",
       "revision": 2
     }
   ],
@@ -274,6 +282,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -302,30 +311,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 20770,
+      "ephemeral_1h_input_tokens": 24767,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 20770,
-    "cache_read_input_tokens": 155136,
+    "cache_creation_input_tokens": 24767,
+    "cache_read_input_tokens": 175735,
     "fallback_credit": null,
     "inference_geo": "global",
     "input_tokens": 16,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 1539,
+          "ephemeral_1h_input_tokens": 1556,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 1539,
-        "cache_read_input_tokens": 26817,
+        "cache_creation_input_tokens": 1556,
+        "cache_read_input_tokens": 30797,
         "input_tokens": 2,
-        "output_tokens": 728,
+        "output_tokens": 879,
         "type": "message"
       }
     ],
-    "output_tokens": 3319,
+    "output_tokens": 3911,
     "output_tokens_details": {
-      "thinking_tokens": 496
+      "thinking_tokens": 540
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -334,7 +343,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 27725,
+  "wall_ms": 33320,
   "world": {
     "operations": {
       "Mutation.commentCreate": {
@@ -356,6 +365,9 @@
           "record": "/comment"
         },
         "kind": "update",
+        "request": {
+          "record": "/input"
+        },
         "target": {
           "member": "id"
         },
@@ -393,6 +405,9 @@
           "record": "/issue"
         },
         "kind": "update",
+        "request": {
+          "record": "/input"
+        },
         "target": {
           "member": "id"
         },
@@ -413,12 +428,6 @@
         "type": "comment"
       },
       "Query.comments": {
-        "filters": [
-          {
-            "kind": "flag",
-            "param": "includeArchived"
-          }
-        ],
         "kind": "list",
         "order": {
           "descending": true,
@@ -440,12 +449,6 @@
         "type": "issue"
       },
       "Query.issues": {
-        "filters": [
-          {
-            "kind": "flag",
-            "param": "includeArchived"
-          }
-        ],
         "kind": "list",
         "order": {
           "descending": true,
@@ -467,12 +470,6 @@
         "type": "team"
       },
       "Query.teams": {
-        "filters": [
-          {
-            "kind": "flag",
-            "param": "includeArchived"
-          }
-        ],
         "kind": "list",
         "paging": {
           "request": "after",
@@ -491,11 +488,22 @@
       "comment": {
         "identity": {
           "member": "id"
+        },
+        "parent": {
+          "member": "issue",
+          "type": "issue"
         }
       },
       "issue": {
         "identity": {
+          "alternates": [
+            "identifier"
+          ],
           "member": "id"
+        },
+        "parent": {
+          "member": "team",
+          "type": "team"
         }
       },
       "team": {
@@ -528,14 +536,44 @@
       "ok": true,
       "refused": [
         {
-          "code": "unresolved",
-          "message": "`createdAt` is not a member of a `commentconnection` record",
-          "path": "/operations/Query.comments/order/member"
+          "code": "not_applicable",
+          "message": "operation `Mutation.commentDelete` is not an HTTP operation and has no path",
+          "path": "/operations/Mutation.commentDelete/target/path_param"
         },
         {
-          "code": "unresolved",
-          "message": "`createdAt` is not a member of a `issueconnection` record",
-          "path": "/operations/Query.issues/order/member"
+          "code": "not_applicable",
+          "message": "operation `Mutation.commentUpdate` is not an HTTP operation and has no path",
+          "path": "/operations/Mutation.commentUpdate/target/path_param"
+        },
+        {
+          "code": "not_applicable",
+          "message": "operation `Mutation.issueArchive` is not an HTTP operation and has no path",
+          "path": "/operations/Mutation.issueArchive/target/path_param"
+        },
+        {
+          "code": "not_applicable",
+          "message": "operation `Mutation.issueUnarchive` is not an HTTP operation and has no path",
+          "path": "/operations/Mutation.issueUnarchive/target/path_param"
+        },
+        {
+          "code": "not_applicable",
+          "message": "operation `Mutation.issueUpdate` is not an HTTP operation and has no path",
+          "path": "/operations/Mutation.issueUpdate/target/path_param"
+        },
+        {
+          "code": "not_applicable",
+          "message": "operation `Query.comment` is not an HTTP operation and has no path",
+          "path": "/operations/Query.comment/target/path_param"
+        },
+        {
+          "code": "not_applicable",
+          "message": "operation `Query.issue` is not an HTTP operation and has no path",
+          "path": "/operations/Query.issue/target/path_param"
+        },
+        {
+          "code": "not_applicable",
+          "message": "operation `Query.team` is not an HTTP operation and has no path",
+          "path": "/operations/Query.team/target/path_param"
         }
       ],
       "revision": 1,

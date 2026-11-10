@@ -7,12 +7,8 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:16:03Z",
+  "authored_at": "2026-11-10T17:39:41Z",
   "authors": {
-    "/operations/CreateTicket/request": "agent",
-    "/operations/CreateTicketJson/request": "agent",
-    "/operations/CreateUser/request": "agent",
-    "/operations/CreateUserJson/request": "agent",
     "/operations/ListSearchResults/answer": "agent",
     "/operations/ListSearchResults/paging": "agent",
     "/operations/ListSearchResultsJson/answer": "agent",
@@ -21,16 +17,12 @@
     "/operations/ListTicketComments/order": "agent",
     "/operations/ListTicketCommentsJson/answer": "agent",
     "/operations/ListTicketCommentsJson/order": "agent",
-    "/operations/ListTickets/answer": "agent",
     "/operations/ListTickets/filters": "agent",
     "/operations/ListTickets/paging": "agent",
-    "/operations/ListTicketsJson/answer": "agent",
     "/operations/ListTicketsJson/filters": "agent",
     "/operations/ListTicketsJson/paging": "agent",
-    "/operations/ListUsers/answer": "agent",
     "/operations/ListUsers/filters": "agent",
     "/operations/ListUsers/paging": "agent",
-    "/operations/ListUsersJson/answer": "agent",
     "/operations/ListUsersJson/filters": "agent",
     "/operations/ListUsersJson/paging": "agent",
     "/operations/ShowTicket/not_found": "agent",
@@ -38,9 +30,8 @@
     "/operations/ShowUser/not_found": "agent",
     "/operations/ShowUserJson/not_found": "agent",
     "/operations/UpdateTicket/not_found": "agent",
-    "/operations/UpdateTicket/request": "agent",
     "/operations/UpdateTicketJson/not_found": "agent",
-    "/operations/UpdateTicketJson/request": "agent",
+    "/types/comments/identity": "agent",
     "/types/comments/parent": "agent",
     "/types/tickets/lifecycle": "agent"
   },
@@ -51,29 +42,9 @@
   ],
   "contract": "examples/apis/zendesk/zendesk.openapi.yaml",
   "contract_sha256": "b8cc78a1323cec22e2c40e9054d151ff8dda5e81a2d9f32ddfa50d5bda16f380",
-  "cost_usd": 0.1654198,
+  "cost_usd": 0.1716997,
   "document": {
     "operations": {
-      "CreateTicket": {
-        "request": {
-          "record": "/ticket"
-        }
-      },
-      "CreateTicketJson": {
-        "request": {
-          "record": "/ticket"
-        }
-      },
-      "CreateUser": {
-        "request": {
-          "record": "/user"
-        }
-      },
-      "CreateUserJson": {
-        "request": {
-          "record": "/user"
-        }
-      },
       "ListSearchResults": {
         "answer": {
           "records": "/results"
@@ -111,9 +82,6 @@
         }
       },
       "ListTickets": {
-        "answer": {
-          "records": "/tickets"
-        },
         "filters": [
           {
             "kind": "eq",
@@ -128,9 +96,6 @@
         }
       },
       "ListTicketsJson": {
-        "answer": {
-          "records": "/tickets"
-        },
         "filters": [
           {
             "kind": "eq",
@@ -145,9 +110,6 @@
         }
       },
       "ListUsers": {
-        "answer": {
-          "records": "/users"
-        },
         "filters": [
           {
             "kind": "eq",
@@ -162,9 +124,6 @@
         }
       },
       "ListUsersJson": {
-        "answer": {
-          "records": "/users"
-        },
         "filters": [
           {
             "kind": "eq",
@@ -191,20 +150,17 @@
         "not_found": 404
       },
       "UpdateTicket": {
-        "not_found": 404,
-        "request": {
-          "record": "/ticket"
-        }
+        "not_found": 404
       },
       "UpdateTicketJson": {
-        "not_found": 404,
-        "request": {
-          "record": "/ticket"
-        }
+        "not_found": 404
       }
     },
     "types": {
       "comments": {
+        "identity": {
+          "member": "id"
+        },
         "parent": {
           "path_param": "ticket_id",
           "type": "tickets"
@@ -226,7 +182,7 @@
     },
     "version": 1
   },
-  "duration_ms": 27008,
+  "duration_ms": 28418,
   "error": null,
   "exit_code": 0,
   "gaps": [
@@ -258,36 +214,36 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "zendesk",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 29325,
+      "cacheCreationEphemeral1hInputTokens": 29477,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 29325,
-      "cacheReadInputTokens": 174518,
+      "cacheCreationInputTokens": 29477,
+      "cacheReadInputTokens": 230857,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1654198,
-      "inputTokens": 14,
+      "costUSD": 0.1716997,
+      "inputTokens": 18,
       "maxOutputTokens": 128000,
-      "outputTokens": 3064,
+      "outputTokens": 3067,
       "provider": "firstParty",
-      "thinkingTokens": 649,
+      "thinkingTokens": 443,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 9,
+  "num_turns": 11,
   "refused": [],
   "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:15:52.008264Z",
+      "created_at": "2026-11-10T17:39:28.374723Z",
       "revision": 1
     }
   ],
@@ -335,6 +291,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -363,30 +320,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 29325,
+      "ephemeral_1h_input_tokens": 29477,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 29325,
-    "cache_read_input_tokens": 174518,
+    "cache_creation_input_tokens": 29477,
+    "cache_read_input_tokens": 230857,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 14,
+    "input_tokens": 18,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 569,
+          "ephemeral_1h_input_tokens": 581,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 569,
-        "cache_read_input_tokens": 36342,
+        "cache_creation_input_tokens": 581,
+        "cache_read_input_tokens": 36482,
         "input_tokens": 2,
-        "output_tokens": 785,
+        "output_tokens": 763,
         "type": "message"
       }
     ],
-    "output_tokens": 3064,
+    "output_tokens": 3067,
     "output_tokens_details": {
-      "thinking_tokens": 649
+      "thinking_tokens": 443
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -395,7 +352,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 27528,
+  "wall_ms": 29036,
   "world": {
     "operations": {
       "CreateTicket": {
@@ -404,9 +361,6 @@
           "record": "/ticket"
         },
         "kind": "create",
-        "request": {
-          "record": "/ticket"
-        },
         "type": "tickets"
       },
       "CreateTicketJson": {
@@ -415,9 +369,6 @@
           "record": "/ticket"
         },
         "kind": "create",
-        "request": {
-          "record": "/ticket"
-        },
         "type": "tickets"
       },
       "CreateUser": {
@@ -425,9 +376,6 @@
           "record": "/user"
         },
         "kind": "create",
-        "request": {
-          "record": "/user"
-        },
         "type": "users"
       },
       "CreateUserJson": {
@@ -435,9 +383,6 @@
           "record": "/user"
         },
         "kind": "create",
-        "request": {
-          "record": "/user"
-        },
         "type": "users"
       },
       "ListSearchResults": {
@@ -485,9 +430,6 @@
         "type": "comments"
       },
       "ListTickets": {
-        "answer": {
-          "records": "/tickets"
-        },
         "filters": [
           {
             "kind": "eq",
@@ -504,9 +446,6 @@
         "type": "tickets"
       },
       "ListTicketsJson": {
-        "answer": {
-          "records": "/tickets"
-        },
         "filters": [
           {
             "kind": "eq",
@@ -523,9 +462,6 @@
         "type": "tickets"
       },
       "ListUsers": {
-        "answer": {
-          "records": "/users"
-        },
         "filters": [
           {
             "kind": "eq",
@@ -542,9 +478,6 @@
         "type": "users"
       },
       "ListUsersJson": {
-        "answer": {
-          "records": "/users"
-        },
         "filters": [
           {
             "kind": "eq",
@@ -624,9 +557,6 @@
         },
         "kind": "update",
         "not_found": 404,
-        "request": {
-          "record": "/ticket"
-        },
         "target": {
           "path_param": "ticket_id"
         },
@@ -638,9 +568,6 @@
         },
         "kind": "update",
         "not_found": 404,
-        "request": {
-          "record": "/ticket"
-        },
         "target": {
           "path_param": "ticket_id"
         },
@@ -649,6 +576,9 @@
     },
     "types": {
       "comments": {
+        "identity": {
+          "member": "id"
+        },
         "parent": {
           "path_param": "ticket_id",
           "type": "tickets"

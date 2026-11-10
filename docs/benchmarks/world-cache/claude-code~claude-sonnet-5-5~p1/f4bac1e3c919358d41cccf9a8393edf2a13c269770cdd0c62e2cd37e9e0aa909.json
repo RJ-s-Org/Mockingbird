@@ -7,7 +7,7 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:06:38Z",
+  "authored_at": "2026-11-10T17:29:26Z",
   "authors": {
     "/operations/add-items-to-playlist/kind": "agent",
     "/operations/add-items-to-playlist/not_found": "agent",
@@ -21,6 +21,7 @@
     "/operations/get-an-artists-top-tracks/answer": "agent",
     "/operations/get-an-artists-top-tracks/not_found": "agent",
     "/operations/get-playlist/not_found": "agent",
+    "/operations/get-playlists-items/answer": "agent",
     "/operations/get-playlists-items/not_found": "agent",
     "/operations/get-playlists-items/paging": "agent",
     "/operations/get-track/not_found": "agent"
@@ -32,7 +33,7 @@
   ],
   "contract": "examples/apis/spotify/spotify.openapi.yaml",
   "contract_sha256": "f4bac1e3c919358d41cccf9a8393edf2a13c269770cdd0c62e2cd37e9e0aa909",
-  "cost_usd": 0.1530903,
+  "cost_usd": 0.1736985,
   "document": {
     "operations": {
       "add-items-to-playlist": {
@@ -64,6 +65,9 @@
         "not_found": 404
       },
       "get-playlists-items": {
+        "answer": {
+          "records": "/items"
+        },
         "not_found": 404,
         "paging": {
           "request": "offset",
@@ -77,7 +81,7 @@
     },
     "version": 1
   },
-  "duration_ms": 19685,
+  "duration_ms": 21942,
   "error": null,
   "exit_code": 0,
   "gaps": [
@@ -108,36 +112,36 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "spotify",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 30419,
+      "cacheCreationEphemeral1hInputTokens": 33850,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 30419,
-      "cacheReadInputTokens": 102503,
+      "cacheCreationInputTokens": 33850,
+      "cacheReadInputTokens": 144805,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1530903,
-      "inputTokens": 12,
+      "costUSD": 0.1736985,
+      "inputTokens": 14,
       "maxOutputTokens": 128000,
-      "outputTokens": 2114,
+      "outputTokens": 2379,
       "provider": "firstParty",
-      "thinkingTokens": 488,
+      "thinkingTokens": 512,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 8,
+  "num_turns": 9,
   "refused": [],
   "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:06:30.727623Z",
+      "created_at": "2026-11-10T17:29:18.448815Z",
       "revision": 1
     }
   ],
@@ -185,6 +189,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -213,30 +218,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 30419,
+      "ephemeral_1h_input_tokens": 33850,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 30419,
-    "cache_read_input_tokens": 102503,
+    "cache_creation_input_tokens": 33850,
+    "cache_read_input_tokens": 144805,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 12,
+    "input_tokens": 14,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 1044,
+          "ephemeral_1h_input_tokens": 1072,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 1044,
-        "cache_read_input_tokens": 29375,
+        "cache_creation_input_tokens": 1072,
+        "cache_read_input_tokens": 32778,
         "input_tokens": 2,
-        "output_tokens": 631,
+        "output_tokens": 693,
         "type": "message"
       }
     ],
-    "output_tokens": 2114,
+    "output_tokens": 2379,
     "output_tokens_details": {
-      "thinking_tokens": 488
+      "thinking_tokens": 512
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -245,7 +250,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 20328,
+  "wall_ms": 22879,
   "world": {
     "operations": {
       "add-items-to-playlist": {
@@ -293,6 +298,9 @@
         "type": "playlists"
       },
       "get-playlists-items": {
+        "answer": {
+          "records": "/items"
+        },
         "kind": "list",
         "not_found": 404,
         "paging": {

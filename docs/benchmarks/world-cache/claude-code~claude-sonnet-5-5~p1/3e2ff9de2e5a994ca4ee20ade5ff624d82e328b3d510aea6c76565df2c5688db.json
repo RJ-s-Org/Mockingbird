@@ -7,14 +7,16 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:10:33Z",
+  "authored_at": "2026-11-10T17:33:26Z",
   "authors": {
     "/operations/activateUser/kind": "agent",
     "/operations/activateUser/not_found": "agent",
     "/operations/activateUser/target": "agent",
     "/operations/activateUser/type": "agent",
+    "/operations/addGroup/answer": "agent",
     "/operations/assignUserToGroup/not_found": "agent",
     "/operations/assignUserToGroup/target": "agent",
+    "/operations/createUser/answer": "agent",
     "/operations/deactivateUser/kind": "agent",
     "/operations/deactivateUser/not_found": "agent",
     "/operations/deactivateUser/target": "agent",
@@ -38,6 +40,9 @@
     "/operations/unsuspendUser/type": "agent",
     "/operations/updateUser/kind": "agent",
     "/operations/updateUser/not_found": "agent",
+    "/operations/updateUser/target": "agent",
+    "/operations/updateUser/type": "agent",
+    "/types/groups/identity": "agent",
     "/types/users/identity": "agent",
     "/types/users/lifecycle": "agent",
     "/types/users/unique": "agent"
@@ -49,7 +54,7 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind5/okta.openapi.yaml",
   "contract_sha256": "3e2ff9de2e5a994ca4ee20ade5ff624d82e328b3d510aea6c76565df2c5688db",
-  "cost_usd": 0.1316062,
+  "cost_usd": 0.162173,
   "document": {
     "operations": {
       "activateUser": {
@@ -60,10 +65,20 @@
         },
         "type": "users"
       },
+      "addGroup": {
+        "answer": {
+          "record": ""
+        }
+      },
       "assignUserToGroup": {
         "not_found": 404,
         "target": {
           "path_param": "userId"
+        }
+      },
+      "createUser": {
+        "answer": {
+          "record": ""
         }
       },
       "deactivateUser": {
@@ -92,7 +107,11 @@
       "listUsers": {
         "filters": [
           {
-            "kind": "text",
+            "grammar": "scim",
+            "param": "filter"
+          },
+          {
+            "grammar": "scim",
             "param": "search"
           }
         ],
@@ -100,7 +119,7 @@
           "request": "after",
           "response_header": "Link",
           "size": "limit",
-          "style": "header_cursor"
+          "style": "next_url"
         }
       },
       "suspendUser": {
@@ -127,10 +146,19 @@
       },
       "updateUser": {
         "kind": "update",
-        "not_found": 404
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "users"
       }
     },
     "types": {
+      "groups": {
+        "identity": {
+          "member": "id"
+        }
+      },
       "users": {
         "identity": {
           "alternates": [
@@ -166,7 +194,7 @@
     },
     "version": 1
   },
-  "duration_ms": 34581,
+  "duration_ms": 34826,
   "error": null,
   "exit_code": 0,
   "gaps": [],
@@ -205,41 +233,41 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "okta",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 21638,
+      "cacheCreationEphemeral1hInputTokens": 26934,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 21638,
-      "cacheReadInputTokens": 133162,
+      "cacheCreationInputTokens": 26934,
+      "cacheReadInputTokens": 151290,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1316062,
+      "costUSD": 0.162173,
       "inputTokens": 14,
       "maxOutputTokens": 128000,
-      "outputTokens": 3171,
+      "outputTokens": 3928,
       "provider": "firstParty",
-      "thinkingTokens": 842,
+      "thinkingTokens": 1100,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 9,
+  "num_turns": 10,
   "refused": [],
   "revision": 2,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:10:16.490368Z",
+      "created_at": "2026-11-10T17:33:13.807806Z",
       "revision": 1
     },
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:10:18.369845Z",
+      "created_at": "2026-11-10T17:33:15.573009Z",
       "revision": 2
     }
   ],
@@ -287,6 +315,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -315,30 +344,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 21638,
+      "ephemeral_1h_input_tokens": 26934,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 21638,
-    "cache_read_input_tokens": 133162,
+    "cache_creation_input_tokens": 26934,
+    "cache_read_input_tokens": 151290,
     "fallback_credit": null,
     "inference_geo": "global",
     "input_tokens": 14,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 1459,
+          "ephemeral_1h_input_tokens": 1535,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 1459,
-        "cache_read_input_tokens": 27765,
+        "cache_creation_input_tokens": 1535,
+        "cache_read_input_tokens": 32985,
         "input_tokens": 2,
-        "output_tokens": 834,
+        "output_tokens": 948,
         "type": "message"
       }
     ],
-    "output_tokens": 3171,
+    "output_tokens": 3928,
     "output_tokens_details": {
-      "thinking_tokens": 842
+      "thinking_tokens": 1100
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -347,7 +376,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 35117,
+  "wall_ms": 35509,
   "world": {
     "operations": {
       "activateUser": {
@@ -359,6 +388,9 @@
         "type": "users"
       },
       "addGroup": {
+        "answer": {
+          "record": ""
+        },
         "kind": "create",
         "type": "groups"
       },
@@ -371,6 +403,9 @@
         "type": "users"
       },
       "createUser": {
+        "answer": {
+          "record": ""
+        },
         "kind": "create",
         "type": "users"
       },
@@ -420,7 +455,11 @@
       "listUsers": {
         "filters": [
           {
-            "kind": "text",
+            "grammar": "scim",
+            "param": "filter"
+          },
+          {
+            "grammar": "scim",
             "param": "search"
           }
         ],
@@ -429,7 +468,7 @@
           "request": "after",
           "response_header": "Link",
           "size": "limit",
-          "style": "header_cursor"
+          "style": "next_url"
         },
         "type": "users"
       },

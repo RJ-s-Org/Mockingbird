@@ -1,0 +1,520 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-10T17:43:41Z",
+  "authors": {
+    "/operations/build_cancel/kind": "agent",
+    "/operations/build_cancel/target": "agent",
+    "/operations/build_cancel/type": "agent",
+    "/operations/build_get/not_found": "agent",
+    "/operations/build_rebuild/answer": "agent",
+    "/operations/build_rebuild/kind": "agent",
+    "/operations/build_rebuild/type": "agent",
+    "/operations/builds_list/filters": "agent",
+    "/operations/builds_list/paging": "agent",
+    "/operations/builds_list/scope": "agent",
+    "/operations/pipeline_delete/not_found": "agent",
+    "/operations/pipeline_delete/target": "agent",
+    "/operations/pipeline_get/not_found": "agent",
+    "/operations/pipelines_list/filters": "agent",
+    "/operations/pipelines_list/paging": "agent",
+    "/types/builds/identity": "agent",
+    "/types/builds/lifecycle": "agent",
+    "/types/builds/parent": "agent",
+    "/types/pipelines/identity": "agent",
+    "/types/pipelines/unique": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind13/buildkite.openapi.yaml",
+  "contract_sha256": "59eb97331cf66dbcc3425faa7a0544a70af6b6b971207632917c963a82756c17",
+  "cost_usd": 0.1307459,
+  "document": {
+    "operations": {
+      "build_cancel": {
+        "kind": "update",
+        "target": {
+          "path_param": "number"
+        },
+        "type": "builds"
+      },
+      "build_get": {
+        "not_found": 404
+      },
+      "build_rebuild": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "builds"
+      },
+      "builds_list": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "branch",
+            "param": "branch"
+          },
+          {
+            "kind": "eq",
+            "member": "commit",
+            "param": "commit"
+          },
+          {
+            "grammar": "deep_object",
+            "member_prefix": "meta_data",
+            "param": "meta_data"
+          },
+          {
+            "kind": "gte",
+            "member": "created_at",
+            "param": "created_from"
+          },
+          {
+            "kind": "lte",
+            "member": "created_at",
+            "param": "created_to"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "scope": {
+          "member": "pipeline.slug",
+          "param": "pipeline"
+        }
+      },
+      "pipeline_delete": {
+        "not_found": 404,
+        "target": {
+          "path_param": "pipeline"
+        }
+      },
+      "pipeline_get": {
+        "not_found": 404
+      },
+      "pipelines_list": {
+        "filters": [
+          {
+            "kind": "contains",
+            "member": "name",
+            "param": "name"
+          },
+          {
+            "kind": "contains",
+            "member": "repository",
+            "param": "repository"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      }
+    },
+    "types": {
+      "builds": {
+        "identity": {
+          "alternates": [
+            "number"
+          ],
+          "member": "id"
+        },
+        "lifecycle": {
+          "member": "state",
+          "states": [
+            "scheduled",
+            "running",
+            "passed",
+            "failed",
+            "blocked",
+            "canceled",
+            "canceling",
+            "skipped",
+            "not_run",
+            "waiting",
+            "waiting_failed"
+          ]
+        },
+        "parent": {
+          "path_param": "pipeline",
+          "type": "pipelines"
+        }
+      },
+      "pipelines": {
+        "identity": {
+          "alternates": [
+            "slug"
+          ],
+          "member": "id"
+        },
+        "unique": [
+          {
+            "members": [
+              "name"
+            ]
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 30167,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `pipeline_delete` (Delete) acts on one `pipelines` record but no target says where the request names it",
+      "operation": "pipeline_delete",
+      "type": "pipelines"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `build_cancel` (Update) acts on one `cancel` record but no target says where the request names it",
+      "operation": "build_cancel",
+      "type": "cancel"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `build_rebuild` (Update) acts on one `rebuild` record but no target says where the request names it",
+      "operation": "build_rebuild",
+      "type": "rebuild"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
+  },
+  "is_error": false,
+  "mock": "buildkite",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 22795,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 22795,
+      "cacheReadInputTokens": 115019,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1307459,
+      "inputTokens": 12,
+      "maxOutputTokens": 128000,
+      "outputTokens": 2804,
+      "provider": "firstParty",
+      "thinkingTokens": 700,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 8,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:43:30.240834Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "send-to-project",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 22795,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 22795,
+    "cache_read_input_tokens": 115019,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 12,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1270,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1270,
+        "cache_read_input_tokens": 29111,
+        "input_tokens": 2,
+        "output_tokens": 806,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 2804,
+    "output_tokens_details": {
+      "thinking_tokens": 700
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 30714,
+  "world": {
+    "operations": {
+      "build_cancel": {
+        "kind": "update",
+        "target": {
+          "path_param": "number"
+        },
+        "type": "builds"
+      },
+      "build_create": {
+        "kind": "create",
+        "type": "builds"
+      },
+      "build_get": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "number"
+        },
+        "type": "builds"
+      },
+      "build_rebuild": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "builds"
+      },
+      "builds_list": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "branch",
+            "param": "branch"
+          },
+          {
+            "kind": "eq",
+            "member": "commit",
+            "param": "commit"
+          },
+          {
+            "grammar": "deep_object",
+            "member_prefix": "meta_data",
+            "param": "meta_data"
+          },
+          {
+            "kind": "gte",
+            "member": "created_at",
+            "param": "created_from"
+          },
+          {
+            "kind": "lte",
+            "member": "created_at",
+            "param": "created_to"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "scope": {
+          "member": "pipeline.slug",
+          "param": "pipeline"
+        },
+        "type": "builds"
+      },
+      "pipeline_create": {
+        "kind": "create",
+        "type": "pipelines"
+      },
+      "pipeline_delete": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "pipeline"
+        },
+        "type": "pipelines"
+      },
+      "pipeline_get": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "pipeline"
+        },
+        "type": "pipelines"
+      },
+      "pipeline_update": {
+        "kind": "update",
+        "target": {
+          "path_param": "pipeline"
+        },
+        "type": "pipelines"
+      },
+      "pipelines_list": {
+        "filters": [
+          {
+            "kind": "contains",
+            "member": "name",
+            "param": "name"
+          },
+          {
+            "kind": "contains",
+            "member": "repository",
+            "param": "repository"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "pipelines"
+      }
+    },
+    "types": {
+      "builds": {
+        "identity": {
+          "alternates": [
+            "number"
+          ],
+          "member": "id"
+        },
+        "lifecycle": {
+          "member": "state",
+          "states": [
+            "scheduled",
+            "running",
+            "passed",
+            "failed",
+            "blocked",
+            "canceled",
+            "canceling",
+            "skipped",
+            "not_run",
+            "waiting",
+            "waiting_failed"
+          ]
+        },
+        "parent": {
+          "path_param": "pipeline",
+          "type": "pipelines"
+        }
+      },
+      "cancel": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "pipelines": {
+        "identity": {
+          "alternates": [
+            "slug"
+          ],
+          "member": "id"
+        },
+        "unique": [
+          {
+            "members": [
+              "name"
+            ]
+          }
+        ]
+      },
+      "rebuild": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

@@ -7,7 +7,7 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:10:22Z",
+  "authored_at": "2026-11-10T17:33:14Z",
   "authors": {
     "/operations/deleteFolder/not_found": "agent",
     "/operations/deleteFolder/target": "agent",
@@ -21,14 +21,14 @@
     "/operations/getTrashedWebLink/target": "agent",
     "/operations/getTrashedWebLink/type": "agent",
     "/operations/getWebLink/not_found": "agent",
+    "/operations/listFolderItems/answer": "agent",
     "/operations/listFolderItems/paging": "agent",
+    "/operations/listTrash/answer": "agent",
     "/operations/listTrash/paging": "agent",
-    "/operations/restoreFolder/not_found": "agent",
+    "/operations/restoreFolder/changes": "agent",
     "/operations/restoreFolder/transition": "agent",
-    "/operations/restoreWebLink/not_found": "agent",
+    "/operations/restoreWebLink/changes": "agent",
     "/operations/restoreWebLink/transition": "agent",
-    "/operations/updateFolder/not_found": "agent",
-    "/operations/updateWebLink/not_found": "agent",
     "/types/folders/concurrency": "agent",
     "/types/folders/lifecycle": "agent",
     "/types/folders/parent": "agent",
@@ -44,7 +44,7 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind5/box.openapi.yaml",
   "contract_sha256": "1fc3396b58d74740b3a97cf386bc3ec3c2297d9f52cc87f46b3d413f791fd25b",
-  "cost_usd": 0.119073,
+  "cost_usd": 0.1310095,
   "document": {
     "operations": {
       "deleteFolder": {
@@ -80,6 +80,9 @@
         "not_found": 404
       },
       "listFolderItems": {
+        "answer": {
+          "records": "/entries"
+        },
         "paging": {
           "request": "offset",
           "size": "limit",
@@ -87,6 +90,9 @@
         }
       },
       "listTrash": {
+        "answer": {
+          "records": "/entries"
+        },
         "paging": {
           "request": "offset",
           "size": "limit",
@@ -94,22 +100,24 @@
         }
       },
       "restoreFolder": {
-        "not_found": 404,
+        "changes": {
+          "name": {
+            "from_request": "/name"
+          }
+        },
         "transition": {
           "item_status": "active"
         }
       },
       "restoreWebLink": {
-        "not_found": 404,
+        "changes": {
+          "name": {
+            "from_request": "/name"
+          }
+        },
         "transition": {
           "item_status": "active"
         }
-      },
-      "updateFolder": {
-        "not_found": 404
-      },
-      "updateWebLink": {
-        "not_found": 404
       }
     },
     "types": {
@@ -175,7 +183,7 @@
     },
     "version": 1
   },
-  "duration_ms": 22540,
+  "duration_ms": 22093,
   "error": null,
   "exit_code": 0,
   "gaps": [],
@@ -206,26 +214,26 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "box",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 21452,
+      "cacheCreationEphemeral1hInputTokens": 24658,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 21452,
-      "cacheReadInputTokens": 87450,
+      "cacheCreationInputTokens": 24658,
+      "cacheReadInputTokens": 75815,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.119073,
-      "inputTokens": 10,
+      "costUSD": 0.1310095,
+      "inputTokens": 8,
       "maxOutputTokens": 128000,
-      "outputTokens": 2450,
+      "outputTokens": 2478,
       "provider": "firstParty",
-      "thinkingTokens": 532,
+      "thinkingTokens": 627,
       "webSearchRequests": 0
     }
   },
@@ -235,7 +243,7 @@
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:10:11.683728Z",
+      "created_at": "2026-11-10T17:33:03.749841Z",
       "revision": 1
     }
   ],
@@ -283,6 +291,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -311,30 +320,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 21452,
+      "ephemeral_1h_input_tokens": 24658,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 21452,
-    "cache_read_input_tokens": 87450,
+    "cache_creation_input_tokens": 24658,
+    "cache_read_input_tokens": 75815,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 10,
+    "input_tokens": 8,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 1596,
+          "ephemeral_1h_input_tokens": 1649,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 1596,
-        "cache_read_input_tokens": 27442,
+        "cache_creation_input_tokens": 1649,
+        "cache_read_input_tokens": 30595,
         "input_tokens": 2,
-        "output_tokens": 789,
+        "output_tokens": 721,
         "type": "message"
       }
     ],
-    "output_tokens": 2450,
+    "output_tokens": 2478,
     "output_tokens_details": {
-      "thinking_tokens": 532
+      "thinking_tokens": 627
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -343,7 +352,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 23102,
+  "wall_ms": 22649,
   "world": {
     "operations": {
       "createFolder": {
@@ -403,6 +412,9 @@
         "type": "web_links"
       },
       "listFolderItems": {
+        "answer": {
+          "records": "/entries"
+        },
         "kind": "list",
         "paging": {
           "request": "offset",
@@ -412,6 +424,9 @@
         "type": "items"
       },
       "listTrash": {
+        "answer": {
+          "records": "/entries"
+        },
         "kind": "list",
         "paging": {
           "request": "offset",
@@ -421,8 +436,12 @@
         "type": "items"
       },
       "restoreFolder": {
+        "changes": {
+          "name": {
+            "from_request": "/name"
+          }
+        },
         "kind": "action",
-        "not_found": 404,
         "target": {
           "path_param": "folder_id"
         },
@@ -432,8 +451,12 @@
         "type": "folders"
       },
       "restoreWebLink": {
+        "changes": {
+          "name": {
+            "from_request": "/name"
+          }
+        },
         "kind": "action",
-        "not_found": 404,
         "target": {
           "path_param": "web_link_id"
         },
@@ -444,7 +467,6 @@
       },
       "updateFolder": {
         "kind": "update",
-        "not_found": 404,
         "target": {
           "path_param": "folder_id"
         },
@@ -452,7 +474,6 @@
       },
       "updateWebLink": {
         "kind": "update",
-        "not_found": 404,
         "target": {
           "path_param": "web_link_id"
         },

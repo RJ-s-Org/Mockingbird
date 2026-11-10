@@ -7,13 +7,13 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:15:06Z",
+  "authored_at": "2026-11-10T17:38:45Z",
   "authors": {
     "/operations/app-delete/not_found": "agent",
     "/operations/app-info/not_found": "agent",
     "/operations/app-update/not_found": "agent",
-    "/operations/config-vars-info-for-app/not_found": "agent",
-    "/operations/config-vars-update/not_found": "agent",
+    "/operations/config-vars-info-for-app/kind": "agent",
+    "/operations/config-vars-info-for-app/target": "agent",
     "/operations/config-vars-update/target": "agent",
     "/operations/domain-delete/not_found": "agent",
     "/operations/domain-info/not_found": "agent",
@@ -32,7 +32,7 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind10/heroku.openapi.yaml",
   "contract_sha256": "3cf5964c3ead9d428a2d66c5e94fd2c9aaf9d466b88b82994c1dfd3834f77566",
-  "cost_usd": 0.1050455,
+  "cost_usd": 0.1364361,
   "document": {
     "operations": {
       "app-delete": {
@@ -45,10 +45,12 @@
         "not_found": 404
       },
       "config-vars-info-for-app": {
-        "not_found": 404
+        "kind": "read",
+        "target": {
+          "path_param": "app_id_or_name"
+        }
       },
       "config-vars-update": {
-        "not_found": 404,
         "target": {
           "path_param": "app_id_or_name"
         }
@@ -107,7 +109,7 @@
     },
     "version": 1
   },
-  "duration_ms": 21369,
+  "duration_ms": 26077,
   "error": null,
   "exit_code": 0,
   "gaps": [
@@ -131,41 +133,41 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "heroku",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 17985,
+      "cacheCreationEphemeral1hInputTokens": 23339,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 17985,
-      "cacheReadInputTokens": 104415,
+      "cacheCreationInputTokens": 23339,
+      "cacheReadInputTokens": 148421,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1050455,
-      "inputTokens": 12,
+      "costUSD": 0.1364361,
+      "inputTokens": 14,
       "maxOutputTokens": 128000,
-      "outputTokens": 2264,
+      "outputTokens": 2821,
       "provider": "firstParty",
-      "thinkingTokens": 367,
+      "thinkingTokens": 562,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 8,
+  "num_turns": 10,
   "refused": [],
   "revision": 2,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:14:56.745038Z",
+      "created_at": "2026-11-10T17:38:33.492763Z",
       "revision": 1
     },
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:14:59.044691Z",
+      "created_at": "2026-11-10T17:38:36.709859Z",
       "revision": 2
     }
   ],
@@ -213,6 +215,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -241,30 +244,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 17985,
+      "ephemeral_1h_input_tokens": 23339,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 17985,
-    "cache_read_input_tokens": 104415,
+    "cache_creation_input_tokens": 23339,
+    "cache_read_input_tokens": 148421,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 12,
+    "input_tokens": 14,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 640,
+          "ephemeral_1h_input_tokens": 639,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 640,
-        "cache_read_input_tokens": 24931,
+        "cache_creation_input_tokens": 639,
+        "cache_read_input_tokens": 30286,
         "input_tokens": 2,
-        "output_tokens": 667,
+        "output_tokens": 728,
         "type": "message"
       }
     ],
-    "output_tokens": 2264,
+    "output_tokens": 2821,
     "output_tokens_details": {
-      "thinking_tokens": 367
+      "thinking_tokens": 562
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -273,7 +276,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 21949,
+  "wall_ms": 26663,
   "world": {
     "operations": {
       "app-create": {
@@ -309,13 +312,14 @@
         "type": "apps"
       },
       "config-vars-info-for-app": {
-        "kind": "list",
-        "not_found": 404,
+        "kind": "read",
+        "target": {
+          "path_param": "app_id_or_name"
+        },
         "type": "config-vars"
       },
       "config-vars-update": {
         "kind": "update",
-        "not_found": 404,
         "target": {
           "path_param": "app_id_or_name"
         },
@@ -409,7 +413,23 @@
   "writes": [
     {
       "ok": true,
-      "refused": [],
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "operation `app-list` declares no parameter `Range`",
+          "path": "/operations/app-list/paging/request"
+        },
+        {
+          "code": "unresolved",
+          "message": "operation `domain-list` declares no parameter `Range`",
+          "path": "/operations/domain-list/paging/request"
+        },
+        {
+          "code": "unresolved",
+          "message": "operation `release-list` declares no parameter `Range`",
+          "path": "/operations/release-list/paging/request"
+        }
+      ],
       "revision": 1,
       "tool": "patch_world"
     },

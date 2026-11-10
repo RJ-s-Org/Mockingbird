@@ -7,23 +7,35 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:15:34Z",
+  "authored_at": "2026-11-10T17:39:11Z",
   "authors": {
     "/operations/createCoreV1Namespace/answer": "agent",
+    "/operations/createCoreV1Namespace/kind": "agent",
     "/operations/createCoreV1Namespace/request": "agent",
+    "/operations/createCoreV1Namespace/type": "agent",
     "/operations/createCoreV1NamespacedConfigMap/answer": "agent",
+    "/operations/createCoreV1NamespacedConfigMap/kind": "agent",
     "/operations/createCoreV1NamespacedConfigMap/request": "agent",
+    "/operations/createCoreV1NamespacedConfigMap/type": "agent",
+    "/operations/deleteCoreV1Namespace/kind": "agent",
     "/operations/deleteCoreV1Namespace/not_found": "agent",
     "/operations/deleteCoreV1Namespace/target": "agent",
+    "/operations/deleteCoreV1Namespace/type": "agent",
     "/operations/deleteCoreV1NamespacedConfigMap/not_found": "agent",
+    "/operations/listCoreV1ConfigMapForAllNamespaces/answer": "agent",
     "/operations/listCoreV1ConfigMapForAllNamespaces/paging": "agent",
+    "/operations/listCoreV1Namespace/answer": "agent",
+    "/operations/listCoreV1Namespace/kind": "agent",
     "/operations/listCoreV1Namespace/paging": "agent",
+    "/operations/listCoreV1Namespace/type": "agent",
+    "/operations/listCoreV1NamespacedConfigMap/answer": "agent",
     "/operations/listCoreV1NamespacedConfigMap/paging": "agent",
     "/operations/listCoreV1NamespacedConfigMap/scope": "agent",
     "/operations/patchCoreV1NamespacedConfigMap/not_found": "agent",
     "/operations/readCoreV1Namespace/kind": "agent",
     "/operations/readCoreV1Namespace/not_found": "agent",
     "/operations/readCoreV1Namespace/target": "agent",
+    "/operations/readCoreV1Namespace/type": "agent",
     "/operations/readCoreV1NamespacedConfigMap/not_found": "agent",
     "/operations/replaceCoreV1NamespacedConfigMap/kind": "agent",
     "/operations/replaceCoreV1NamespacedConfigMap/not_found": "agent",
@@ -42,35 +54,44 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind10/kubernetes.openapi.yaml",
   "contract_sha256": "f5a048972df26d30993a00026342250338b62f779cd23b95a4bfd535688600f5",
-  "cost_usd": 0.1251587,
+  "cost_usd": 0.143719,
   "document": {
     "operations": {
       "createCoreV1Namespace": {
         "answer": {
           "record": ""
         },
+        "kind": "create",
         "request": {
           "record": ""
-        }
+        },
+        "type": "namespaces"
       },
       "createCoreV1NamespacedConfigMap": {
         "answer": {
           "record": ""
         },
+        "kind": "create",
         "request": {
           "record": ""
-        }
+        },
+        "type": "configmaps"
       },
       "deleteCoreV1Namespace": {
+        "kind": "delete",
         "not_found": 404,
         "target": {
           "path_param": "namespace"
-        }
+        },
+        "type": "namespaces"
       },
       "deleteCoreV1NamespacedConfigMap": {
         "not_found": 404
       },
       "listCoreV1ConfigMapForAllNamespaces": {
+        "answer": {
+          "records": "/items"
+        },
         "paging": {
           "request": "continue",
           "response": "metadata.continue",
@@ -79,14 +100,22 @@
         }
       },
       "listCoreV1Namespace": {
+        "answer": {
+          "records": "/items"
+        },
+        "kind": "list",
         "paging": {
           "request": "continue",
           "response": "metadata.continue",
           "size": "limit",
           "style": "cursor"
-        }
+        },
+        "type": "namespaces"
       },
       "listCoreV1NamespacedConfigMap": {
+        "answer": {
+          "records": "/items"
+        },
         "paging": {
           "request": "continue",
           "response": "metadata.continue",
@@ -106,7 +135,8 @@
         "not_found": 404,
         "target": {
           "path_param": "namespace"
-        }
+        },
+        "type": "namespaces"
       },
       "readCoreV1NamespacedConfigMap": {
         "not_found": 404
@@ -167,7 +197,7 @@
     },
     "version": 1
   },
-  "duration_ms": 26673,
+  "duration_ms": 27901,
   "error": null,
   "exit_code": 0,
   "gaps": [],
@@ -185,26 +215,26 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "kubernetes",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 21882,
+      "cacheCreationEphemeral1hInputTokens": 25431,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 21882,
-      "cacheReadInputTokens": 106067,
+      "cacheCreationInputTokens": 25431,
+      "cacheReadInputTokens": 118210,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1251587,
+      "costUSD": 0.143719,
       "inputTokens": 12,
       "maxOutputTokens": 128000,
-      "outputTokens": 2700,
+      "outputTokens": 3015,
       "provider": "firstParty",
-      "thinkingTokens": 424,
+      "thinkingTokens": 438,
       "webSearchRequests": 0
     }
   },
@@ -214,7 +244,7 @@
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:15:23.566100Z",
+      "created_at": "2026-11-10T17:38:58.294169Z",
       "revision": 1
     }
   ],
@@ -262,6 +292,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -290,30 +321,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 21882,
+      "ephemeral_1h_input_tokens": 25431,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 21882,
-    "cache_read_input_tokens": 106067,
+    "cache_creation_input_tokens": 25431,
+    "cache_read_input_tokens": 118210,
     "fallback_credit": null,
     "inference_geo": "global",
     "input_tokens": 12,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 1968,
+          "ephemeral_1h_input_tokens": 2325,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 1968,
-        "cache_read_input_tokens": 27500,
+        "cache_creation_input_tokens": 2325,
+        "cache_read_input_tokens": 30692,
         "input_tokens": 2,
-        "output_tokens": 758,
+        "output_tokens": 893,
         "type": "message"
       }
     ],
-    "output_tokens": 2700,
+    "output_tokens": 3015,
     "output_tokens_details": {
-      "thinking_tokens": 424
+      "thinking_tokens": 438
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -322,7 +353,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 27279,
+  "wall_ms": 28449,
   "world": {
     "operations": {
       "createCoreV1Namespace": {
@@ -362,6 +393,9 @@
         "type": "configmaps"
       },
       "listCoreV1ConfigMapForAllNamespaces": {
+        "answer": {
+          "records": "/items"
+        },
         "kind": "list",
         "paging": {
           "request": "continue",
@@ -372,6 +406,9 @@
         "type": "configmaps"
       },
       "listCoreV1Namespace": {
+        "answer": {
+          "records": "/items"
+        },
         "kind": "list",
         "paging": {
           "request": "continue",
@@ -382,6 +419,9 @@
         "type": "namespaces"
       },
       "listCoreV1NamespacedConfigMap": {
+        "answer": {
+          "records": "/items"
+        },
         "kind": "list",
         "paging": {
           "request": "continue",

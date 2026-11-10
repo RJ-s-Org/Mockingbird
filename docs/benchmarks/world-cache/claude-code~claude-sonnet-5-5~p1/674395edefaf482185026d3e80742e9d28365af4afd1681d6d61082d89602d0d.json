@@ -7,16 +7,18 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:06:39Z",
+  "authored_at": "2026-11-10T17:29:30Z",
   "authors": {
     "/operations/delete_users_by_id/not_found": "agent",
     "/operations/delete_users_by_id/target": "agent",
     "/operations/get_roles/answer": "agent",
-    "/operations/get_roles/filters": "agent",
     "/operations/get_roles/paging": "agent",
+    "/operations/get_roles/type": "agent",
     "/operations/get_user_roles/answer": "agent",
     "/operations/get_user_roles/not_found": "agent",
     "/operations/get_user_roles/paging": "agent",
+    "/operations/get_user_roles/target": "agent",
+    "/operations/get_user_roles/type": "agent",
     "/operations/get_users-by-email/filters": "agent",
     "/operations/get_users/answer": "agent",
     "/operations/get_users/paging": "agent",
@@ -32,7 +34,7 @@
   ],
   "contract": "examples/apis/auth0-management/auth0-management.openapi.yaml",
   "contract_sha256": "674395edefaf482185026d3e80742e9d28365af4afd1681d6d61082d89602d0d",
-  "cost_usd": 0.13196950000000002,
+  "cost_usd": 0.1332442,
   "document": {
     "operations": {
       "delete_users_by_id": {
@@ -45,18 +47,12 @@
         "answer": {
           "records": "/roles"
         },
-        "filters": [
-          {
-            "kind": "contains",
-            "member": "name",
-            "param": "name_filter"
-          }
-        ],
         "paging": {
           "request": "page",
           "size": "per_page",
           "style": "page"
-        }
+        },
+        "type": "roles"
       },
       "get_user_roles": {
         "answer": {
@@ -67,7 +63,11 @@
           "request": "page",
           "size": "per_page",
           "style": "page"
-        }
+        },
+        "target": {
+          "path_param": "id"
+        },
+        "type": "roles"
       },
       "get_users": {
         "answer": {
@@ -107,7 +107,7 @@
     },
     "version": 1
   },
-  "duration_ms": 19901,
+  "duration_ms": 25224,
   "error": null,
   "exit_code": 0,
   "gaps": [
@@ -131,36 +131,36 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "auth0-management",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 26311,
+      "cacheCreationEphemeral1hInputTokens": 23793,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 26311,
-      "cacheReadInputTokens": 69855,
+      "cacheCreationInputTokens": 23793,
+      "cacheReadInputTokens": 148942,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.13196950000000002,
-      "inputTokens": 10,
+      "costUSD": 0.1332442,
+      "inputTokens": 14,
       "maxOutputTokens": 128000,
-      "outputTokens": 1972,
+      "outputTokens": 2315,
       "provider": "firstParty",
-      "thinkingTokens": 307,
+      "thinkingTokens": 414,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 7,
+  "num_turns": 9,
   "refused": [],
   "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:06:31.273931Z",
+      "created_at": "2026-11-10T17:29:19.085035Z",
       "revision": 1
     }
   ],
@@ -208,6 +208,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -236,30 +237,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 26311,
+      "ephemeral_1h_input_tokens": 23793,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 26311,
-    "cache_read_input_tokens": 69855,
+    "cache_creation_input_tokens": 23793,
+    "cache_read_input_tokens": 148942,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 10,
+    "input_tokens": 14,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 1158,
+          "ephemeral_1h_input_tokens": 595,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 1158,
-        "cache_read_input_tokens": 25153,
+        "cache_creation_input_tokens": 595,
+        "cache_read_input_tokens": 30784,
         "input_tokens": 2,
-        "output_tokens": 698,
+        "output_tokens": 660,
         "type": "message"
       }
     ],
-    "output_tokens": 1972,
+    "output_tokens": 2315,
     "output_tokens_details": {
-      "thinking_tokens": 307
+      "thinking_tokens": 414
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -268,7 +269,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 20524,
+  "wall_ms": 25917,
   "world": {
     "operations": {
       "delete_users_by_id": {
@@ -283,13 +284,6 @@
         "answer": {
           "records": "/roles"
         },
-        "filters": [
-          {
-            "kind": "contains",
-            "member": "name",
-            "param": "name_filter"
-          }
-        ],
         "kind": "list",
         "paging": {
           "request": "page",
@@ -308,6 +302,9 @@
           "request": "page",
           "size": "per_page",
           "style": "page"
+        },
+        "target": {
+          "path_param": "id"
         },
         "type": "roles"
       },

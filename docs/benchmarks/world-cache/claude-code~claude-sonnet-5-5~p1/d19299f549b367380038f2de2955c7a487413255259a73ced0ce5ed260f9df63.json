@@ -7,7 +7,7 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:13:12Z",
+  "authored_at": "2026-11-10T17:36:29Z",
   "authors": {
     "/operations/deleteCartById/not_found": "agent",
     "/operations/deleteCartByKey/not_found": "agent",
@@ -16,8 +16,12 @@
     "/operations/getOrderById/not_found": "agent",
     "/operations/queryCarts/paging": "agent",
     "/operations/queryOrders/paging": "agent",
+    "/operations/updateCartById/kind": "agent",
     "/operations/updateCartById/not_found": "agent",
+    "/operations/updateCartById/request": "agent",
+    "/operations/updateCartByKey/kind": "agent",
     "/operations/updateCartByKey/not_found": "agent",
+    "/operations/updateCartByKey/request": "agent",
     "/types/carts/concurrency": "agent",
     "/types/carts/identity": "agent",
     "/types/carts/lifecycle": "agent",
@@ -32,7 +36,7 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind8/commercetools.openapi.yaml",
   "contract_sha256": "d19299f549b367380038f2de2955c7a487413255259a73ced0ce5ed260f9df63",
-  "cost_usd": 0.1203166,
+  "cost_usd": 0.1482905,
   "document": {
     "operations": {
       "deleteCartById": {
@@ -65,10 +69,112 @@
         }
       },
       "updateCartById": {
-        "not_found": 404
+        "kind": "update",
+        "not_found": 404,
+        "request": {
+          "instructions": {
+            "at": "/actions",
+            "kind": "action",
+            "kinds": {
+              "setBillingAddress": {
+                "changes": {
+                  "billingAddress": {
+                    "from_instruction": "/address"
+                  }
+                }
+              },
+              "setCountry": {
+                "changes": {
+                  "country": {
+                    "from_instruction": "/country"
+                  }
+                }
+              },
+              "setCustomerEmail": {
+                "changes": {
+                  "customerEmail": {
+                    "from_instruction": "/email"
+                  }
+                }
+              },
+              "setKey": {
+                "changes": {
+                  "key": {
+                    "from_instruction": "/key"
+                  }
+                }
+              },
+              "setLocale": {
+                "changes": {
+                  "locale": {
+                    "from_instruction": "/locale"
+                  }
+                }
+              },
+              "setShippingAddress": {
+                "changes": {
+                  "shippingAddress": {
+                    "from_instruction": "/address"
+                  }
+                }
+              }
+            }
+          }
+        }
       },
       "updateCartByKey": {
-        "not_found": 404
+        "kind": "update",
+        "not_found": 404,
+        "request": {
+          "instructions": {
+            "at": "/actions",
+            "kind": "action",
+            "kinds": {
+              "setBillingAddress": {
+                "changes": {
+                  "billingAddress": {
+                    "from_instruction": "/address"
+                  }
+                }
+              },
+              "setCountry": {
+                "changes": {
+                  "country": {
+                    "from_instruction": "/country"
+                  }
+                }
+              },
+              "setCustomerEmail": {
+                "changes": {
+                  "customerEmail": {
+                    "from_instruction": "/email"
+                  }
+                }
+              },
+              "setKey": {
+                "changes": {
+                  "key": {
+                    "from_instruction": "/key"
+                  }
+                }
+              },
+              "setLocale": {
+                "changes": {
+                  "locale": {
+                    "from_instruction": "/locale"
+                  }
+                }
+              },
+              "setShippingAddress": {
+                "changes": {
+                  "shippingAddress": {
+                    "from_instruction": "/address"
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
     "types": {
@@ -116,32 +222,32 @@
     },
     "version": 1
   },
-  "duration_ms": 21639,
+  "duration_ms": 27662,
   "error": null,
   "exit_code": 0,
   "gaps": [],
   "heuristic_gaps": [],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "commercetools",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 21882,
+      "cacheCreationEphemeral1hInputTokens": 26044,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 21882,
-      "cacheReadInputTokens": 107846,
+      "cacheCreationInputTokens": 26044,
+      "cacheReadInputTokens": 121205,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1203166,
+      "costUSD": 0.1482905,
       "inputTokens": 12,
       "maxOutputTokens": 128000,
-      "outputTokens": 2198,
+      "outputTokens": 3197,
       "provider": "firstParty",
-      "thinkingTokens": 432,
+      "thinkingTokens": 596,
       "webSearchRequests": 0
     }
   },
@@ -151,7 +257,7 @@
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:13:03.079087Z",
+      "created_at": "2026-11-10T17:36:16.515549Z",
       "revision": 1
     }
   ],
@@ -199,6 +305,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -227,30 +334,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 21882,
+      "ephemeral_1h_input_tokens": 26044,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 21882,
-    "cache_read_input_tokens": 107846,
+    "cache_creation_input_tokens": 26044,
+    "cache_read_input_tokens": 121205,
     "fallback_credit": null,
     "inference_geo": "global",
     "input_tokens": 12,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 997,
+          "ephemeral_1h_input_tokens": 946,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 997,
-        "cache_read_input_tokens": 28471,
+        "cache_creation_input_tokens": 946,
+        "cache_read_input_tokens": 32684,
         "input_tokens": 2,
-        "output_tokens": 618,
+        "output_tokens": 959,
         "type": "message"
       }
     ],
-    "output_tokens": 2198,
+    "output_tokens": 3197,
     "output_tokens_details": {
-      "thinking_tokens": 432
+      "thinking_tokens": 596
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -259,7 +366,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 22189,
+  "wall_ms": 28345,
   "world": {
     "operations": {
       "createCart": {
@@ -329,16 +436,116 @@
         "type": "orders"
       },
       "updateCartById": {
-        "kind": "action",
+        "kind": "update",
         "not_found": 404,
+        "request": {
+          "instructions": {
+            "at": "/actions",
+            "kind": "action",
+            "kinds": {
+              "setBillingAddress": {
+                "changes": {
+                  "billingAddress": {
+                    "from_instruction": "/address"
+                  }
+                }
+              },
+              "setCountry": {
+                "changes": {
+                  "country": {
+                    "from_instruction": "/country"
+                  }
+                }
+              },
+              "setCustomerEmail": {
+                "changes": {
+                  "customerEmail": {
+                    "from_instruction": "/email"
+                  }
+                }
+              },
+              "setKey": {
+                "changes": {
+                  "key": {
+                    "from_instruction": "/key"
+                  }
+                }
+              },
+              "setLocale": {
+                "changes": {
+                  "locale": {
+                    "from_instruction": "/locale"
+                  }
+                }
+              },
+              "setShippingAddress": {
+                "changes": {
+                  "shippingAddress": {
+                    "from_instruction": "/address"
+                  }
+                }
+              }
+            }
+          }
+        },
         "target": {
           "path_param": "ID"
         },
         "type": "carts"
       },
       "updateCartByKey": {
-        "kind": "action",
+        "kind": "update",
         "not_found": 404,
+        "request": {
+          "instructions": {
+            "at": "/actions",
+            "kind": "action",
+            "kinds": {
+              "setBillingAddress": {
+                "changes": {
+                  "billingAddress": {
+                    "from_instruction": "/address"
+                  }
+                }
+              },
+              "setCountry": {
+                "changes": {
+                  "country": {
+                    "from_instruction": "/country"
+                  }
+                }
+              },
+              "setCustomerEmail": {
+                "changes": {
+                  "customerEmail": {
+                    "from_instruction": "/email"
+                  }
+                }
+              },
+              "setKey": {
+                "changes": {
+                  "key": {
+                    "from_instruction": "/key"
+                  }
+                }
+              },
+              "setLocale": {
+                "changes": {
+                  "locale": {
+                    "from_instruction": "/locale"
+                  }
+                }
+              },
+              "setShippingAddress": {
+                "changes": {
+                  "shippingAddress": {
+                    "from_instruction": "/address"
+                  }
+                }
+              }
+            }
+          }
+        },
         "target": {
           "path_param": "key"
         },

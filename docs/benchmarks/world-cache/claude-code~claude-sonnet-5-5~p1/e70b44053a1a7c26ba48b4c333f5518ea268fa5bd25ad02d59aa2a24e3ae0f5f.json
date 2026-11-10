@@ -7,21 +7,22 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:12:31Z",
+  "authored_at": "2026-11-10T17:35:28Z",
   "authors": {
     "/operations/add_promotional_credits/answer": "agent",
     "/operations/add_promotional_credits/kind": "agent",
-    "/operations/add_promotional_credits/type": "agent",
     "/operations/deduct_promotional_credits/answer": "agent",
     "/operations/deduct_promotional_credits/kind": "agent",
-    "/operations/deduct_promotional_credits/type": "agent",
     "/operations/delete_comment/not_found": "agent",
     "/operations/delete_customer/not_found": "agent",
+    "/operations/list_comments/answer": "agent",
     "/operations/list_comments/filters": "agent",
     "/operations/list_comments/order": "agent",
     "/operations/list_comments/paging": "agent",
+    "/operations/list_customers/answer": "agent",
     "/operations/list_customers/filters": "agent",
     "/operations/list_customers/paging": "agent",
+    "/operations/list_promotional_credits/answer": "agent",
     "/operations/list_promotional_credits/paging": "agent",
     "/operations/retrieve_comment/not_found": "agent",
     "/operations/retrieve_customer/not_found": "agent",
@@ -30,7 +31,9 @@
     "/operations/update_customer/not_found": "agent",
     "/operations/update_customer/target": "agent",
     "/operations/update_customer/type": "agent",
-    "/types/customers/unique": "agent"
+    "/types/add/identity": "agent",
+    "/types/customers/unique": "agent",
+    "/types/deduct/identity": "agent"
   },
   "builtin_plugins": [
     "cc-plugin-agents-md",
@@ -39,22 +42,20 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind7/chargebee.openapi.yaml",
   "contract_sha256": "e70b44053a1a7c26ba48b4c333f5518ea268fa5bd25ad02d59aa2a24e3ae0f5f",
-  "cost_usd": 0.1827572,
+  "cost_usd": 0.1833268,
   "document": {
     "operations": {
       "add_promotional_credits": {
         "answer": {
           "record": "/promotional_credit"
         },
-        "kind": "create",
-        "type": "promotional_credits"
+        "kind": "create"
       },
       "deduct_promotional_credits": {
         "answer": {
           "record": "/promotional_credit"
         },
-        "kind": "create",
-        "type": "promotional_credits"
+        "kind": "create"
       },
       "delete_comment": {
         "not_found": 404
@@ -63,6 +64,9 @@
         "not_found": 404
       },
       "list_comments": {
+        "answer": {
+          "records": "/list"
+        },
         "filters": [
           {
             "kind": "eq",
@@ -87,6 +91,9 @@
         }
       },
       "list_customers": {
+        "answer": {
+          "records": "/list"
+        },
         "filters": [
           {
             "kind": "eq",
@@ -117,6 +124,9 @@
         }
       },
       "list_promotional_credits": {
+        "answer": {
+          "records": "/list"
+        },
         "paging": {
           "request": "offset",
           "response": "next_offset",
@@ -143,6 +153,11 @@
       }
     },
     "types": {
+      "add": {
+        "identity": {
+          "member": "id"
+        }
+      },
       "customers": {
         "unique": [
           {
@@ -152,20 +167,19 @@
             ]
           }
         ]
+      },
+      "deduct": {
+        "identity": {
+          "member": "id"
+        }
       }
     },
     "version": 1
   },
-  "duration_ms": 40751,
+  "duration_ms": 34503,
   "error": null,
   "exit_code": 0,
-  "gaps": [
-    {
-      "code": "no_identity",
-      "message": "type `promotional_credits` is written by `add_promotional_credits`, `deduct_promotional_credits` but has no identity: no member is known to name a record",
-      "type": "promotional_credits"
-    }
-  ],
+  "gaps": [],
   "heuristic_gaps": [
     {
       "code": "no_identity",
@@ -185,52 +199,47 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "chargebee",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 27066,
+      "cacheCreationEphemeral1hInputTokens": 29623,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 27066,
-      "cacheReadInputTokens": 262292,
+      "cacheCreationInputTokens": 29623,
+      "cacheReadInputTokens": 253248,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1827572,
-      "inputTokens": 22,
+      "costUSD": 0.1833268,
+      "inputTokens": 20,
       "maxOutputTokens": 128000,
-      "outputTokens": 4822,
+      "outputTokens": 3947,
       "provider": "firstParty",
-      "thinkingTokens": 1456,
+      "thinkingTokens": 639,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 14,
+  "num_turns": 13,
   "refused": [],
-  "revision": 4,
+  "revision": 3,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:12:07.660503Z",
+      "created_at": "2026-11-10T17:35:10.742369Z",
       "revision": 1
     },
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:12:10.503338Z",
+      "created_at": "2026-11-10T17:35:12.981152Z",
       "revision": 2
     },
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:12:15.046731Z",
+      "created_at": "2026-11-10T17:35:16.969540Z",
       "revision": 3
-    },
-    {
-      "author": "agent",
-      "created_at": "2026-11-07T02:12:18.404857Z",
-      "revision": 4
     }
   ],
   "session": {
@@ -277,6 +286,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -305,30 +315,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 27066,
+      "ephemeral_1h_input_tokens": 29623,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 27066,
-    "cache_read_input_tokens": 262292,
+    "cache_creation_input_tokens": 29623,
+    "cache_read_input_tokens": 253248,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 22,
+    "input_tokens": 20,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 622,
+          "ephemeral_1h_input_tokens": 942,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 622,
-        "cache_read_input_tokens": 34030,
+        "cache_creation_input_tokens": 942,
+        "cache_read_input_tokens": 36267,
         "input_tokens": 2,
-        "output_tokens": 912,
+        "output_tokens": 836,
         "type": "message"
       }
     ],
-    "output_tokens": 4822,
+    "output_tokens": 3947,
     "output_tokens_details": {
-      "thinking_tokens": 1456
+      "thinking_tokens": 639
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -337,7 +347,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 41305,
+  "wall_ms": 35125,
   "world": {
     "operations": {
       "add_promotional_credits": {
@@ -345,7 +355,7 @@
           "record": "/promotional_credit"
         },
         "kind": "create",
-        "type": "promotional_credits"
+        "type": "add"
       },
       "create_comment": {
         "answer": {
@@ -366,7 +376,7 @@
           "record": "/promotional_credit"
         },
         "kind": "create",
-        "type": "promotional_credits"
+        "type": "deduct"
       },
       "delete_comment": {
         "answer": {
@@ -391,6 +401,9 @@
         "type": "customers"
       },
       "list_comments": {
+        "answer": {
+          "records": "/list"
+        },
         "filters": [
           {
             "kind": "eq",
@@ -417,6 +430,9 @@
         "type": "comments"
       },
       "list_customers": {
+        "answer": {
+          "records": "/list"
+        },
         "filters": [
           {
             "kind": "eq",
@@ -449,6 +465,9 @@
         "type": "customers"
       },
       "list_promotional_credits": {
+        "answer": {
+          "records": "/list"
+        },
         "kind": "list",
         "paging": {
           "request": "offset",
@@ -493,6 +512,11 @@
       }
     },
     "types": {
+      "add": {
+        "identity": {
+          "member": "id"
+        }
+      },
       "comments": {
         "identity": {
           "member": "id"
@@ -510,6 +534,11 @@
             ]
           }
         ]
+      },
+      "deduct": {
+        "identity": {
+          "member": "id"
+        }
       }
     },
     "version": 1
@@ -547,8 +576,23 @@
       "refused": [
         {
           "code": "unresolved",
-          "message": "`id` is not a member of a `promotional_credits` record",
-          "path": "/types/promotional_credits/identity/member"
+          "message": "no operation has resource type `promotional_credit` and no definition is named so",
+          "path": "/types/promotional_credit"
+        },
+        {
+          "code": "unresolved",
+          "message": "no operation has resource type `promotional_credit` and no definition is named so",
+          "path": "/operations/add_promotional_credits/type"
+        },
+        {
+          "code": "unresolved",
+          "message": "no operation has resource type `promotional_credit` and no definition is named so",
+          "path": "/operations/deduct_promotional_credits/type"
+        },
+        {
+          "code": "unresolved",
+          "message": "no operation has resource type `promotional_credit` and no definition is named so",
+          "path": "/operations/list_promotional_credits/type"
         },
         {
           "code": "unresolved",
@@ -574,23 +618,11 @@
       "refused": [
         {
           "code": "unresolved",
-          "message": "`promotional_credit.id` is not a member of a `promotional_credits` record",
+          "message": "`id` is not a member of a `promotional_credits` record",
           "path": "/types/promotional_credits/identity/member"
         }
       ],
       "revision": 3,
-      "tool": "patch_world"
-    },
-    {
-      "ok": true,
-      "refused": [
-        {
-          "code": "unresolved",
-          "message": "type `add` has no record schema to find `id` in",
-          "path": "/types/add/identity/member"
-        }
-      ],
-      "revision": 4,
       "tool": "patch_world"
     }
   ]

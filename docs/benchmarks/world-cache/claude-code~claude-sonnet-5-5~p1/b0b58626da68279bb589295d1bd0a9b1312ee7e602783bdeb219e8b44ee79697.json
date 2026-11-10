@@ -7,33 +7,33 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:09:31Z",
+  "authored_at": "2026-11-10T17:32:26Z",
   "authors": {
     "/operations/addDealProduct/answer": "agent",
     "/operations/addDealProduct/not_found": "agent",
-    "/operations/addDealProduct/target": "agent",
-    "/operations/addDealProduct/type": "agent",
     "/operations/addProduct/answer": "agent",
     "/operations/deleteDeal/not_found": "agent",
     "/operations/deleteDeal/target": "agent",
     "/operations/getDeal/not_found": "agent",
+    "/operations/getDealProducts/answer": "agent",
     "/operations/getDealProducts/not_found": "agent",
+    "/operations/getDealProducts/order": "agent",
     "/operations/getDealProducts/paging": "agent",
     "/operations/getDealProducts/scope": "agent",
-    "/operations/getDealProducts/type": "agent",
     "/operations/getDeals/answer": "agent",
     "/operations/getDeals/filters": "agent",
+    "/operations/getDeals/order": "agent",
     "/operations/getDeals/paging": "agent",
     "/operations/getOrganization/not_found": "agent",
     "/operations/getPerson/not_found": "agent",
     "/operations/getPersons/answer": "agent",
     "/operations/getPersons/filters": "agent",
+    "/operations/getPersons/order": "agent",
     "/operations/getPersons/paging": "agent",
+    "/operations/searchDeals/answer": "agent",
     "/operations/searchDeals/paging": "agent",
     "/operations/updateDeal/not_found": "agent",
     "/operations/updatePerson/not_found": "agent",
-    "/types/DealProduct/identity": "agent",
-    "/types/DealProduct/parent": "agent",
     "/types/deals/lifecycle": "agent"
   },
   "builtin_plugins": [
@@ -43,18 +43,14 @@
   ],
   "contract": "scripts/llm-bench/contracts/blind4/pipedrive.openapi.yaml",
   "contract_sha256": "b0b58626da68279bb589295d1bd0a9b1312ee7e602783bdeb219e8b44ee79697",
-  "cost_usd": 0.17488429999999996,
+  "cost_usd": 0.18201569999999997,
   "document": {
     "operations": {
       "addDealProduct": {
         "answer": {
           "record": "/data"
         },
-        "not_found": 404,
-        "target": {
-          "path_param": "id"
-        },
-        "type": "DealProduct"
+        "not_found": 404
       },
       "addProduct": {
         "answer": {
@@ -71,7 +67,13 @@
         "not_found": 404
       },
       "getDealProducts": {
+        "answer": {
+          "records": "/data"
+        },
         "not_found": 404,
+        "order": {
+          "member": "id"
+        },
         "paging": {
           "request": "cursor",
           "response": "additional_data.next_cursor",
@@ -81,8 +83,7 @@
         "scope": {
           "member": "deal_id",
           "param": "id"
-        },
-        "type": "DealProduct"
+        }
       },
       "getDeals": {
         "answer": {
@@ -120,6 +121,9 @@
             "param": "updated_since"
           }
         ],
+        "order": {
+          "member": "id"
+        },
         "paging": {
           "request": "cursor",
           "response": "additional_data.next_cursor",
@@ -154,6 +158,9 @@
             "param": "updated_since"
           }
         ],
+        "order": {
+          "member": "id"
+        },
         "paging": {
           "request": "cursor",
           "response": "additional_data.next_cursor",
@@ -162,6 +169,9 @@
         }
       },
       "searchDeals": {
+        "answer": {
+          "records": "/data/items"
+        },
         "paging": {
           "request": "cursor",
           "response": "additional_data.next_cursor",
@@ -177,16 +187,6 @@
       }
     },
     "types": {
-      "DealProduct": {
-        "identity": {
-          "member": "id"
-        },
-        "parent": {
-          "member": "deal_id",
-          "path_param": "id",
-          "type": "deals"
-        }
-      },
       "deals": {
         "lifecycle": {
           "initial": "open",
@@ -209,7 +209,7 @@
     },
     "version": 1
   },
-  "duration_ms": 32312,
+  "duration_ms": 32983,
   "error": null,
   "exit_code": 0,
   "gaps": [],
@@ -222,42 +222,37 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "pipedrive",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 28361,
+      "cacheCreationEphemeral1hInputTokens": 30723,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 28361,
-      "cacheReadInputTokens": 220743,
+      "cacheCreationInputTokens": 30723,
+      "cacheReadInputTokens": 203417,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.17488429999999996,
-      "inputTokens": 18,
+      "costUSD": 0.18201569999999997,
+      "inputTokens": 16,
       "maxOutputTokens": 128000,
-      "outputTokens": 3933,
+      "outputTokens": 3875,
       "provider": "firstParty",
-      "thinkingTokens": 773,
+      "thinkingTokens": 908,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 12,
+  "num_turns": 11,
   "refused": [],
-  "revision": 2,
+  "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:09:14.726362Z",
+      "created_at": "2026-11-10T17:32:10.611601Z",
       "revision": 1
-    },
-    {
-      "author": "agent",
-      "created_at": "2026-11-07T02:09:16.764855Z",
-      "revision": 2
     }
   ],
   "session": {
@@ -304,6 +299,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -332,30 +328,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 28361,
+      "ephemeral_1h_input_tokens": 30723,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 28361,
-    "cache_read_input_tokens": 220743,
+    "cache_creation_input_tokens": 30723,
+    "cache_read_input_tokens": 203417,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 18,
+    "input_tokens": 16,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 747,
+          "ephemeral_1h_input_tokens": 820,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 747,
-        "cache_read_input_tokens": 35200,
+        "cache_creation_input_tokens": 820,
+        "cache_read_input_tokens": 37489,
         "input_tokens": 2,
-        "output_tokens": 1075,
+        "output_tokens": 1049,
         "type": "message"
       }
     ],
-    "output_tokens": 3933,
+    "output_tokens": 3875,
     "output_tokens_details": {
-      "thinking_tokens": 773
+      "thinking_tokens": 908
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -364,7 +360,7 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 32953,
+  "wall_ms": 33583,
   "world": {
     "operations": {
       "addDeal": {
@@ -380,10 +376,7 @@
         },
         "kind": "create",
         "not_found": 404,
-        "target": {
-          "path_param": "id"
-        },
-        "type": "DealProduct"
+        "type": "products"
       },
       "addOrganization": {
         "answer": {
@@ -426,8 +419,14 @@
         "type": "deals"
       },
       "getDealProducts": {
+        "answer": {
+          "records": "/data"
+        },
         "kind": "list",
         "not_found": 404,
+        "order": {
+          "member": "id"
+        },
         "paging": {
           "request": "cursor",
           "response": "additional_data.next_cursor",
@@ -438,7 +437,7 @@
           "member": "deal_id",
           "param": "id"
         },
-        "type": "DealProduct"
+        "type": "products"
       },
       "getDeals": {
         "answer": {
@@ -477,6 +476,9 @@
           }
         ],
         "kind": "list",
+        "order": {
+          "member": "id"
+        },
         "paging": {
           "request": "cursor",
           "response": "additional_data.next_cursor",
@@ -529,6 +531,9 @@
           }
         ],
         "kind": "list",
+        "order": {
+          "member": "id"
+        },
         "paging": {
           "request": "cursor",
           "response": "additional_data.next_cursor",
@@ -538,6 +543,9 @@
         "type": "persons"
       },
       "searchDeals": {
+        "answer": {
+          "records": "/data/items"
+        },
         "kind": "list",
         "paging": {
           "request": "cursor",
@@ -571,16 +579,6 @@
       }
     },
     "types": {
-      "DealProduct": {
-        "identity": {
-          "member": "id"
-        },
-        "parent": {
-          "member": "deal_id",
-          "path_param": "id",
-          "type": "deals"
-        }
-      },
       "deals": {
         "identity": {
           "member": "id"
@@ -627,27 +625,26 @@
       "refused": [
         {
           "code": "unresolved",
-          "message": "no operation has resource type `dealProducts` and no definition is named so",
-          "path": "/types/dealProducts"
+          "message": "no operation has resource type `dealproducts` and no definition is named so",
+          "path": "/types/dealproducts"
         },
         {
           "code": "unresolved",
-          "message": "no operation has resource type `dealProducts` and no definition is named so",
+          "message": "no operation has resource type `dealproducts` and no definition is named so",
           "path": "/operations/addDealProduct/type"
         },
         {
           "code": "unresolved",
-          "message": "no operation has resource type `dealProducts` and no definition is named so",
+          "message": "no operation has resource type `dealproducts` and no definition is named so",
           "path": "/operations/getDealProducts/type"
+        },
+        {
+          "code": "unresolved",
+          "message": "`result_score` is not a member of a `deals` record",
+          "path": "/operations/searchDeals/order/member"
         }
       ],
       "revision": 1,
-      "tool": "patch_world"
-    },
-    {
-      "ok": true,
-      "refused": [],
-      "revision": 2,
       "tool": "patch_world"
     }
   ]

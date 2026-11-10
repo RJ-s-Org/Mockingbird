@@ -1,0 +1,656 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-10T17:42:40Z",
+  "authors": {
+    "/operations/createBinding/answer": "agent",
+    "/operations/createBinding/kind": "agent",
+    "/operations/declareExchange/target": "agent",
+    "/operations/declareQueue/target": "agent",
+    "/operations/deleteBinding/not_found": "agent",
+    "/operations/deleteBinding/target": "agent",
+    "/operations/deleteExchange/not_found": "agent",
+    "/operations/deleteExchange/target": "agent",
+    "/operations/deleteQueue/not_found": "agent",
+    "/operations/deleteQueue/target": "agent",
+    "/operations/deleteVhost/not_found": "agent",
+    "/operations/deleteVhost/target": "agent",
+    "/operations/getBinding/kind": "agent",
+    "/operations/getBinding/not_found": "agent",
+    "/operations/getBinding/target": "agent",
+    "/operations/getExchange/not_found": "agent",
+    "/operations/getMessages/kind": "agent",
+    "/operations/getMessages/not_found": "agent",
+    "/operations/getMessages/queue": "agent",
+    "/operations/getMessages/target": "agent",
+    "/operations/getMessages/type": "agent",
+    "/operations/getQueue/not_found": "agent",
+    "/operations/getVhost/kind": "agent",
+    "/operations/getVhost/not_found": "agent",
+    "/operations/getVhost/target": "agent",
+    "/operations/getVhost/type": "agent",
+    "/operations/listBindingsBetween/scope": "agent",
+    "/operations/listQueues/filters": "agent",
+    "/operations/listQueues/ignores": "agent",
+    "/operations/listQueues/paging": "agent",
+    "/operations/listQueues/scope": "agent",
+    "/operations/purgeQueue/not_found": "agent",
+    "/operations/purgeQueue/target": "agent",
+    "/operations/putVhost/target": "agent",
+    "/types/q/identity": "agent",
+    "/types/vhosts/identity": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind12/rabbitmq.openapi.yaml",
+  "contract_sha256": "c5fc6af1ef4fd3db44034f86dd2b1190993edf0e53893bd010ea28eacbcfe251",
+  "cost_usd": 0.17178330000000003,
+  "document": {
+    "operations": {
+      "createBinding": {
+        "answer": {
+          "identity_header": "Location"
+        },
+        "kind": "create"
+      },
+      "declareExchange": {
+        "target": {
+          "path_param": "name"
+        }
+      },
+      "declareQueue": {
+        "target": {
+          "path_param": "name"
+        }
+      },
+      "deleteBinding": {
+        "not_found": 404,
+        "target": {
+          "path_param": "props"
+        }
+      },
+      "deleteExchange": {
+        "not_found": 404,
+        "target": {
+          "path_param": "name"
+        }
+      },
+      "deleteQueue": {
+        "not_found": 404,
+        "target": {
+          "path_param": "name"
+        }
+      },
+      "deleteVhost": {
+        "not_found": 404,
+        "target": {
+          "path_param": "vhost"
+        }
+      },
+      "getBinding": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "props"
+        }
+      },
+      "getExchange": {
+        "not_found": 404
+      },
+      "getMessages": {
+        "kind": "action",
+        "not_found": 404,
+        "queue": {
+          "count": "/count",
+          "effect": "take",
+          "redelivered": "redelivered",
+          "requeue": {
+            "at": "/ackmode",
+            "value": "ack_requeue_true"
+          }
+        },
+        "target": {
+          "path_param": "name"
+        },
+        "type": "queues"
+      },
+      "getQueue": {
+        "not_found": 404
+      },
+      "getVhost": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "vhost"
+        },
+        "type": "vhosts"
+      },
+      "listBindingsBetween": {
+        "scope": {
+          "member": "destination",
+          "param": "queue"
+        }
+      },
+      "listQueues": {
+        "filters": [
+          {
+            "kind": "contains",
+            "member": "name",
+            "param": "name"
+          }
+        ],
+        "ignores": [
+          "use_regex"
+        ],
+        "paging": {
+          "request": "page",
+          "size": "page_size",
+          "style": "page"
+        },
+        "scope": {
+          "member": "vhost",
+          "param": "vhost"
+        }
+      },
+      "purgeQueue": {
+        "not_found": 404,
+        "target": {
+          "path_param": "name"
+        }
+      },
+      "putVhost": {
+        "target": {
+          "path_param": "vhost"
+        }
+      }
+    },
+    "types": {
+      "q": {
+        "identity": {
+          "member": "properties_key"
+        }
+      },
+      "vhosts": {
+        "identity": {
+          "member": "name"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 35331,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `contents` is written by `purgeQueue` but has no identity: no member is known to name a record",
+      "type": "contents"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `permissions` is written by `putPermissions` but has no identity: no member is known to name a record",
+      "type": "permissions"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `publish` is written by `publish` but has no identity: no member is known to name a record",
+      "type": "publish"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `putPermissions` (Update) acts on one `permissions` record but no target says where the request names it",
+      "operation": "putPermissions",
+      "type": "permissions"
+    }
+  ],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `contents` is written by `purgeQueue` but has no identity: no member is known to name a record",
+      "type": "contents"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `permissions` is written by `putPermissions` but has no identity: no member is known to name a record",
+      "type": "permissions"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `publish` is written by `publish` but has no identity: no member is known to name a record",
+      "type": "publish"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `q` is written by `createBinding`, `deleteBinding` but has no identity: no member is known to name a record",
+      "type": "q"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `vhosts` is written by `putVhost`, `deleteVhost` but has no identity: no member is known to name a record",
+      "type": "vhosts"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `createBinding` (Action) acts on one `q` record but no target says where the request names it",
+      "operation": "createBinding",
+      "type": "q"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteBinding` (Delete) acts on one `q` record but no target says where the request names it",
+      "operation": "deleteBinding",
+      "type": "q"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `declareExchange` (Update) acts on one `exchanges` record but no target says where the request names it",
+      "operation": "declareExchange",
+      "type": "exchanges"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteExchange` (Delete) acts on one `exchanges` record but no target says where the request names it",
+      "operation": "deleteExchange",
+      "type": "exchanges"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `putPermissions` (Update) acts on one `permissions` record but no target says where the request names it",
+      "operation": "putPermissions",
+      "type": "permissions"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `declareQueue` (Update) acts on one `queues` record but no target says where the request names it",
+      "operation": "declareQueue",
+      "type": "queues"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteQueue` (Delete) acts on one `queues` record but no target says where the request names it",
+      "operation": "deleteQueue",
+      "type": "queues"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `purgeQueue` (Delete) acts on one `contents` record but no target says where the request names it",
+      "operation": "purgeQueue",
+      "type": "contents"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `putVhost` (Update) acts on one `vhosts` record but no target says where the request names it",
+      "operation": "putVhost",
+      "type": "vhosts"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteVhost` (Delete) acts on one `vhosts` record but no target says where the request names it",
+      "operation": "deleteVhost",
+      "type": "vhosts"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
+  },
+  "is_error": false,
+  "mock": "rabbitmq",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 28314,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 28314,
+      "cacheReadInputTokens": 196753,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.17178330000000003,
+      "inputTokens": 16,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3882,
+      "provider": "firstParty",
+      "thinkingTokens": 1157,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 12,
+  "refused": [],
+  "revision": 2,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:42:24.945993Z",
+      "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-10T17:42:26.753409Z",
+      "revision": 2
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "send-to-project",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 28314,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 28314,
+    "cache_read_input_tokens": 196753,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 16,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 504,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 504,
+        "cache_read_input_tokens": 35396,
+        "input_tokens": 2,
+        "output_tokens": 864,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3882,
+    "output_tokens_details": {
+      "thinking_tokens": 1157
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 35969,
+  "world": {
+    "operations": {
+      "createBinding": {
+        "answer": {
+          "identity_header": "Location"
+        },
+        "kind": "create",
+        "type": "q"
+      },
+      "declareExchange": {
+        "kind": "update",
+        "target": {
+          "path_param": "name"
+        },
+        "type": "exchanges"
+      },
+      "declareQueue": {
+        "kind": "update",
+        "target": {
+          "path_param": "name"
+        },
+        "type": "queues"
+      },
+      "deleteBinding": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "props"
+        },
+        "type": "q"
+      },
+      "deleteExchange": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "name"
+        },
+        "type": "exchanges"
+      },
+      "deleteQueue": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "name"
+        },
+        "type": "queues"
+      },
+      "deleteVhost": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "vhost"
+        },
+        "type": "vhosts"
+      },
+      "getBinding": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "props"
+        },
+        "type": "q"
+      },
+      "getExchange": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "name"
+        },
+        "type": "exchanges"
+      },
+      "getMessages": {
+        "kind": "action",
+        "not_found": 404,
+        "queue": {
+          "count": "/count",
+          "effect": "take",
+          "redelivered": "redelivered",
+          "requeue": {
+            "at": "/ackmode",
+            "value": "ack_requeue_true"
+          }
+        },
+        "target": {
+          "path_param": "name"
+        },
+        "type": "queues"
+      },
+      "getQueue": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "name"
+        },
+        "type": "queues"
+      },
+      "getVhost": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "vhost"
+        },
+        "type": "vhosts"
+      },
+      "listBindingsBetween": {
+        "kind": "list",
+        "scope": {
+          "member": "destination",
+          "param": "queue"
+        },
+        "type": "q"
+      },
+      "listQueues": {
+        "filters": [
+          {
+            "kind": "contains",
+            "member": "name",
+            "param": "name"
+          }
+        ],
+        "ignores": [
+          "use_regex"
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "page_size",
+          "style": "page"
+        },
+        "scope": {
+          "member": "vhost",
+          "param": "vhost"
+        },
+        "type": "queues"
+      },
+      "publish": {
+        "kind": "create",
+        "type": "publish"
+      },
+      "purgeQueue": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "name"
+        },
+        "type": "contents"
+      },
+      "putPermissions": {
+        "kind": "update",
+        "type": "permissions"
+      },
+      "putVhost": {
+        "kind": "update",
+        "target": {
+          "path_param": "vhost"
+        },
+        "type": "vhosts"
+      }
+    },
+    "types": {
+      "exchanges": {
+        "identity": {
+          "member": "name"
+        }
+      },
+      "q": {
+        "identity": {
+          "member": "properties_key"
+        }
+      },
+      "queues": {
+        "identity": {
+          "member": "name"
+        }
+      },
+      "vhosts": {
+        "identity": {
+          "member": "name"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "type `contents` has no record schema to find `name` in",
+          "path": "/types/contents/identity/member"
+        },
+        {
+          "code": "unresolved",
+          "message": "`properties_key` is not a member of operation `createBinding`'s request body",
+          "path": "/operations/createBinding/target/member"
+        }
+      ],
+      "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 2,
+      "tool": "patch_world"
+    }
+  ]
+}

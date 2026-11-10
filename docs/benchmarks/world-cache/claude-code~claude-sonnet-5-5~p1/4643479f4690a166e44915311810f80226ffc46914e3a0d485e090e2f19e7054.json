@@ -7,19 +7,30 @@
     "model_requested": "claude-sonnet-5-5",
     "prompt_version": 1
   },
-  "authored_at": "2026-11-07T02:16:25Z",
+  "authored_at": "2026-11-10T17:40:00Z",
   "authors": {
+    "/operations/get-block-children/answer": "agent",
+    "/operations/get-block-children/not_found": "agent",
     "/operations/get-block-children/paging": "agent",
+    "/operations/get-block-children/scope": "agent",
     "/operations/patch-block-children/answer": "agent",
-    "/operations/patch-block-children/kind": "agent",
+    "/operations/patch-block-children/not_found": "agent",
     "/operations/patch-block-children/request": "agent",
+    "/operations/patch-block-children/target": "agent",
     "/operations/patch-page/not_found": "agent",
+    "/operations/post-database-query/answer": "agent",
+    "/operations/post-database-query/not_found": "agent",
     "/operations/post-database-query/paging": "agent",
-    "/operations/post-page/answer": "agent",
+    "/operations/post-database-query/scope": "agent",
+    "/operations/post-search/answer": "agent",
     "/operations/post-search/paging": "agent",
+    "/operations/query-data-source/answer": "agent",
+    "/operations/query-data-source/not_found": "agent",
     "/operations/query-data-source/paging": "agent",
+    "/operations/query-data-source/scope": "agent",
     "/operations/retrieve-a-database/not_found": "agent",
-    "/operations/retrieve-a-page/not_found": "agent"
+    "/operations/retrieve-a-page/not_found": "agent",
+    "/types/children/identity": "agent"
   },
   "builtin_plugins": [
     "cc-plugin-agents-md",
@@ -28,56 +39,81 @@
   ],
   "contract": "examples/apis/notion/notion.openapi.yaml",
   "contract_sha256": "4643479f4690a166e44915311810f80226ffc46914e3a0d485e090e2f19e7054",
-  "cost_usd": 0.1342207,
+  "cost_usd": 0.15431709999999998,
   "document": {
     "operations": {
       "get-block-children": {
+        "answer": {
+          "records": "/results"
+        },
+        "not_found": 404,
         "paging": {
           "request": "start_cursor",
           "response": "next_cursor",
           "size": "page_size",
           "style": "cursor"
+        },
+        "scope": {
+          "member": "parent.page_id",
+          "param": "block_id"
         }
       },
       "patch-block-children": {
         "answer": {
           "records": "/results"
         },
-        "kind": "create",
+        "not_found": 404,
         "request": {
           "records": "/children"
+        },
+        "target": {
+          "path_param": "block_id"
         }
       },
       "patch-page": {
         "not_found": 404
       },
       "post-database-query": {
-        "paging": {
-          "request": "start_cursor",
-          "response": "next_cursor",
-          "size": "page_size",
-          "style": "cursor"
-        }
-      },
-      "post-page": {
         "answer": {
-          "record": ""
+          "records": "/results"
+        },
+        "not_found": 404,
+        "paging": {
+          "request": "/start_cursor",
+          "response": "next_cursor",
+          "size": "/page_size",
+          "style": "cursor"
+        },
+        "scope": {
+          "member": "parent.database_id",
+          "param": "database_id"
         }
       },
       "post-search": {
+        "answer": {
+          "records": "/results"
+        },
         "paging": {
-          "request": "start_cursor",
+          "request": "/start_cursor",
           "response": "next_cursor",
-          "size": "page_size",
+          "size": "/page_size",
           "style": "cursor"
         }
       },
       "query-data-source": {
+        "answer": {
+          "records": "/results"
+        },
+        "not_found": 404,
         "paging": {
-          "request": "start_cursor",
+          "request": "/start_cursor",
           "response": "next_cursor",
-          "size": "page_size",
+          "size": "/page_size",
           "style": "cursor"
+        },
+        "scope": {
+          "member": "parent.data_source_id",
+          "param": "data_source_id"
         }
       },
       "retrieve-a-database": {
@@ -87,17 +123,19 @@
         "not_found": 404
       }
     },
+    "types": {
+      "children": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
     "version": 1
   },
-  "duration_ms": 29727,
+  "duration_ms": 25600,
   "error": null,
   "exit_code": 0,
   "gaps": [
-    {
-      "code": "no_identity",
-      "message": "type `children` is written by `patch-block-children` but has no identity: no member is known to name a record",
-      "type": "children"
-    },
     {
       "code": "no_target",
       "message": "operation `get-self` (Read) acts on one `me` record but no target says where the request names it",
@@ -125,42 +163,37 @@
     }
   ],
   "inputs": {
-    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
-    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+    "skills_sha256": "95edee61c6b77685b5069b90cc0fff6be87bbe8ee6f66bcbd0d7cf92987fb2a9",
+    "world_schema_sha256": "02049d1af1124c9a88ee41ac34548617923d9d48e888c6a6ba57e5b2cc3bb496"
   },
   "is_error": false,
   "mock": "notion",
   "model_usage": {
     "claude-sonnet-5-5": {
-      "cacheCreationEphemeral1hInputTokens": 21596,
+      "cacheCreationEphemeral1hInputTokens": 27953,
       "cacheCreationEphemeral5mInputTokens": 0,
-      "cacheCreationInputTokens": 21596,
-      "cacheReadInputTokens": 159047,
+      "cacheCreationInputTokens": 27953,
+      "cacheReadInputTokens": 151971,
       "canonicalModel": "claude-sonnet-5-5",
       "contextWindow": 1000000,
       "costBasis": "list",
-      "costUSD": 0.1342207,
-      "inputTokens": 16,
+      "costUSD": 0.15431709999999998,
+      "inputTokens": 14,
       "maxOutputTokens": 128000,
-      "outputTokens": 3190,
+      "outputTokens": 2728,
       "provider": "firstParty",
-      "thinkingTokens": 717,
+      "thinkingTokens": 577,
       "webSearchRequests": 0
     }
   },
-  "num_turns": 11,
+  "num_turns": 9,
   "refused": [],
-  "revision": 2,
+  "revision": 1,
   "revisions": [
     {
       "author": "agent",
-      "created_at": "2026-11-07T02:16:10.025064Z",
+      "created_at": "2026-11-10T17:39:50.323394Z",
       "revision": 1
-    },
-    {
-      "author": "agent",
-      "created_at": "2026-11-07T02:16:15.172265Z",
-      "revision": 2
     }
   ],
   "session": {
@@ -207,6 +240,7 @@
       "doctor",
       "loop",
       "schedule",
+      "send-to-project",
       "claude-api",
       "workflow-authoring",
       "run",
@@ -235,30 +269,30 @@
   },
   "usage": {
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 21596,
+      "ephemeral_1h_input_tokens": 27953,
       "ephemeral_5m_input_tokens": 0
     },
-    "cache_creation_input_tokens": 21596,
-    "cache_read_input_tokens": 159047,
+    "cache_creation_input_tokens": 27953,
+    "cache_read_input_tokens": 151971,
     "fallback_credit": null,
     "inference_geo": "global",
-    "input_tokens": 16,
+    "input_tokens": 14,
     "iterations": [
       {
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 787,
+          "ephemeral_1h_input_tokens": 1289,
           "ephemeral_5m_input_tokens": 0
         },
-        "cache_creation_input_tokens": 787,
-        "cache_read_input_tokens": 28395,
+        "cache_creation_input_tokens": 1289,
+        "cache_read_input_tokens": 34250,
         "input_tokens": 2,
-        "output_tokens": 917,
+        "output_tokens": 784,
         "type": "message"
       }
     ],
-    "output_tokens": 3190,
+    "output_tokens": 2728,
     "output_tokens_details": {
-      "thinking_tokens": 717
+      "thinking_tokens": 577
     },
     "server_tool_use": {
       "web_fetch_requests": 0,
@@ -267,16 +301,24 @@
     "service_tier": "standard",
     "speed": "standard"
   },
-  "wall_ms": 30534,
+  "wall_ms": 26285,
   "world": {
     "operations": {
       "get-block-children": {
+        "answer": {
+          "records": "/results"
+        },
         "kind": "list",
+        "not_found": 404,
         "paging": {
           "request": "start_cursor",
           "response": "next_cursor",
           "size": "page_size",
           "style": "cursor"
+        },
+        "scope": {
+          "member": "parent.page_id",
+          "param": "block_id"
         },
         "type": "children"
       },
@@ -288,9 +330,13 @@
         "answer": {
           "records": "/results"
         },
-        "kind": "create",
+        "kind": "update",
+        "not_found": 404,
         "request": {
           "records": "/children"
+        },
+        "target": {
+          "path_param": "block_id"
         },
         "type": "children"
       },
@@ -303,39 +349,55 @@
         "type": "pages"
       },
       "post-database-query": {
+        "answer": {
+          "records": "/results"
+        },
         "kind": "list",
+        "not_found": 404,
         "paging": {
-          "request": "start_cursor",
+          "request": "/start_cursor",
           "response": "next_cursor",
-          "size": "page_size",
+          "size": "/page_size",
           "style": "cursor"
+        },
+        "scope": {
+          "member": "parent.database_id",
+          "param": "database_id"
         },
         "type": "pages"
       },
       "post-page": {
-        "answer": {
-          "record": ""
-        },
         "kind": "create",
         "type": "pages"
       },
       "post-search": {
+        "answer": {
+          "records": "/results"
+        },
         "kind": "list",
         "paging": {
-          "request": "start_cursor",
+          "request": "/start_cursor",
           "response": "next_cursor",
-          "size": "page_size",
+          "size": "/page_size",
           "style": "cursor"
         },
         "type": "pages"
       },
       "query-data-source": {
+        "answer": {
+          "records": "/results"
+        },
         "kind": "list",
+        "not_found": 404,
         "paging": {
-          "request": "start_cursor",
+          "request": "/start_cursor",
           "response": "next_cursor",
-          "size": "page_size",
+          "size": "/page_size",
           "style": "cursor"
+        },
+        "scope": {
+          "member": "parent.data_source_id",
+          "param": "data_source_id"
         },
         "type": "pages"
       },
@@ -357,6 +419,11 @@
       }
     },
     "types": {
+      "children": {
+        "identity": {
+          "member": "id"
+        }
+      },
       "databases": {
         "identity": {
           "member": "id"
@@ -378,41 +445,8 @@
   "writes": [
     {
       "ok": true,
-      "refused": [
-        {
-          "code": "unresolved",
-          "message": "`id` is not a member of a `children` record",
-          "path": "/types/children/identity/member"
-        },
-        {
-          "code": "unresolved",
-          "message": "`parent.page_id` is not a member of a `children` record",
-          "path": "/types/children/parent/member"
-        },
-        {
-          "code": "unresolved",
-          "message": "`parent.page_id` is not a member of a `children` record",
-          "path": "/operations/get-block-children/scope/member"
-        }
-      ],
+      "refused": [],
       "revision": 1,
-      "tool": "patch_world"
-    },
-    {
-      "ok": true,
-      "refused": [
-        {
-          "code": "unresolved",
-          "message": "no operation has resource type `block` and no definition is named so",
-          "path": "/operations/get-block-children/type"
-        },
-        {
-          "code": "unresolved",
-          "message": "no operation has resource type `block` and no definition is named so",
-          "path": "/operations/patch-block-children/type"
-        }
-      ],
-      "revision": 2,
       "tool": "patch_world"
     }
   ]
