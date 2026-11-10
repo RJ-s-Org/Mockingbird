@@ -123,6 +123,117 @@ pub(super) fn fresh_record(
     identity.record_in(&fresh).cloned()
 }
 
+/// What the path of `call`, a create of type `t`, says of the record it makes: each
+/// (dotted) member with the path value it holds, the first for a member standing.
+///
+/// - The described parent's member, from the parent's path parameter (in the parent's
+///   pattern).
+/// - The member a described list scope of the type matches to a path parameter of the
+///   create's route (a note's `noteable_iid` by `issue_iid`).
+/// - A dotted member the description names (the parent's, a list scope's, a unique
+///   set's member or scope) below an object member a path parameter is named for: the
+///   parameter's words start with the object member's, and the rest, if any, start
+///   with `id` or with the dotted member's own name (`team.slug` under `{team}`,
+///   `owner.id` under `{owner_id_or_key}`).
+///
+/// A member is set at its dotted path, never as a literal `a.b` key, and the values are
+/// as the path holds them: the create types them as its record declares.
+pub(super) fn path_set(rt: &MockRuntime, t: &str, call: &OperationCall) -> Vec<(String, Value)> {
+    let described = rt.described();
+    let desc = described.type_desc(t);
+    let mut out: Vec<(String, Value)> = Vec::new();
+    let add = |member: &str, value: Value, out: &mut Vec<(String, Value)>| {
+        if !out.iter().any(|(m, _)| m == member) {
+            out.push((member.to_owned(), value));
+        }
+    };
+    let parent = desc.and_then(|d| d.parent.as_ref());
+    if let Some(parent) = parent
+        && let (Some(member), Some(param)) = (&parent.member, &parent.path_param)
+        && let Some(value) = call.path_params.get(param)
+    {
+        let value = match (&parent.pattern, id_string(value)) {
+            (Some(pattern), Some(id)) if records::bare_id(pattern, &id).is_none() => {
+                Value::String(records::patterned(pattern, &id))
+            }
+            _ => value.clone(),
+        };
+        add(member, value, &mut out);
+    }
+    let scopes = list_scopes(rt, t);
+    for scope in &scopes {
+        if let Some(value) = call.path_params.get(&scope.param) {
+            add(&scope.member, value.clone(), &mut out);
+        }
+    }
+    // The dotted members the description names, each under an object member a path
+    // parameter may be named for.
+    let mut named: Vec<&str> = parent
+        .and_then(|p| p.member.as_deref())
+        .into_iter()
+        .collect();
+    named.extend(scopes.iter().map(|s| s.member.as_str()));
+    for set in desc.map(|d| d.unique.as_slice()).unwrap_or_default() {
+        named.extend(set.members.iter().map(String::as_str));
+        named.extend(set.scope.as_deref());
+    }
+    // A parameter fills one member: the first the description names that it matches.
+    let mut used: Vec<&str> = Vec::new();
+    for member in named {
+        let Some((head, rest)) = member.split_once('.') else {
+            continue;
+        };
+        let found = call
+            .path_params
+            .iter()
+            .find(|(param, _)| !used.contains(&param.as_str()) && names_object(param, head, rest));
+        if let Some((param, value)) = found
+            && !out.iter().any(|(m, _)| m == member)
+        {
+            used.push(param.as_str());
+            add(member, value.clone(), &mut out);
+        }
+    }
+    out
+}
+
+/// Whether path parameter `param` names object member `head` by its member `rest`:
+/// its words start with `head`'s, and the rest of them, if any, start with `rest`'s,
+/// hold all of `rest`'s, or start with `id` while `rest` is an id (`id`, `gid`).
+fn names_object(param: &str, head: &str, rest: &str) -> bool {
+    let lower = |name: &str| -> Vec<String> {
+        mb_mcm::words(name)
+            .iter()
+            .map(|w| w.to_ascii_lowercase())
+            .collect()
+    };
+    let (param, head, rest) = (lower(param), lower(head), lower(rest));
+    let Some(after) = param.strip_prefix(head.as_slice()) else {
+        return false;
+    };
+    let rest_is_id = rest.last().is_some_and(|w| w.ends_with("id"));
+    after.is_empty()
+        || after.starts_with(&rest)
+        || rest.iter().all(|w| after.contains(w))
+        || (rest_is_id && after.first().is_some_and(|w| w == "id"))
+}
+
+/// The described scopes of the lists of type `t`.
+pub(super) fn list_scopes<'r>(rt: &'r MockRuntime, t: &str) -> Vec<&'r mb_mcm::world::ScopeDesc> {
+    let described = rt.described();
+    rt.bundle()
+        .operations
+        .iter()
+        .filter_map(|op| {
+            let desc = described.op(&op.id)?;
+            let item = desc.r#type.as_deref().or(op.resource_type.as_deref());
+            let kind = desc.kind.or_else(|| mb_mcm::world::OpKind::of(op));
+            (item == Some(t) && kind == Some(mb_mcm::world::OpKind::List))
+                .then_some(desc.scope.as_ref()?)
+        })
+        .collect()
+}
+
 /// The values a request carries in its path and, as strings, anywhere in its body. A
 /// create's path value naming the record itself, and a body member named as the
 /// identity at any depth (`{"book": {"id": ..}}`, or `@id` for an XML attribute), are
@@ -530,4 +641,23 @@ pub(super) async fn place_new_record(
         ));
     }
     stored
+}
+
+#[cfg(test)]
+mod path_set_tests {
+    use super::names_object;
+
+    #[test]
+    fn a_parameter_names_an_object_member_by_its_words_then_id_or_the_member() {
+        assert!(names_object("owner", "owner", "id"));
+        assert!(names_object("owner_id_or_key", "owner", "id"));
+        assert!(names_object("ownerId", "owner", "id"));
+        assert!(names_object("team_slug", "team", "slug"));
+        assert!(!names_object("owner_name", "owner", "id"));
+        assert!(!names_object("ownership", "owner", "id"));
+        assert!(!names_object("id", "owner", "id"));
+        // An id names the object by its id, never by another member.
+        assert!(!names_object("team_id", "team", "slug"));
+        assert!(names_object("owner_id_or_key", "owner", "key"));
+    }
 }

@@ -97,11 +97,35 @@ pub(super) async fn described_conflict(
         .unwrap_or(body);
     let (target_id, held) = target;
     let held = held.filter(|_| updates);
-    // A scope member a create's body leaves out is its parent's, from the path.
-    let parent_param = desc
-        .parent
-        .as_ref()
-        .and_then(|p| Some((p.member.as_deref()?, p.path_param.as_deref()?)));
+    // A member a create's body leaves out may be the path's: its parent, a scope, a
+    // member of an object member a path parameter is named for, and the id its own URI
+    // names ([`super::path_set`]), compared as text.
+    let mut from_path = if creates {
+        super::path_set(rt, t, call)
+    } else {
+        Vec::new()
+    };
+    // A `PUT` at its own URI replaces what is held there: no repeat of itself.
+    let puts = matches!(
+        &op.binding,
+        mb_mcm::Binding::Http {
+            method: mb_mcm::HttpMethod::Put,
+            ..
+        }
+    );
+    if creates
+        && !puts
+        && let Some(id) = super::target_id(op, call)
+    {
+        let field = super::records::identity_member(rt, op, t);
+        from_path.push((field.to_owned(), Value::String(id)));
+    }
+    let path_value = |m: &str| {
+        from_path
+            .iter()
+            .find(|(member, _)| member == m)
+            .map(|(_, v)| v.clone())
+    };
     let in_collection = collection_of(op, call).is_some();
     // A soft-deleted record's values are free again.
     let gone = super::lifecycle::exclusion(rt, t);
@@ -127,24 +151,29 @@ pub(super) async fn described_conflict(
                 .cloned()
                 .or_else(|| held.and_then(|h| mb_mcm::member_at(&h.data, m)).cloned())
         };
+        // Each member's value, and whether the path gave it.
         let Some(values) = set
             .members
             .iter()
-            .map(|m| after(m).map(|v| (m.as_str(), v)))
+            .map(|m| match after(m) {
+                Some(v) => Some((m.as_str(), v, false)),
+                None => path_value(m).map(|v| (m.as_str(), v, true)),
+            })
             .collect::<Option<Vec<_>>>()
         else {
             continue;
         };
         let scope = set.scope.as_deref().map(|scope| {
-            let from_path = parent_param
-                .filter(|(member, _)| *member == scope)
-                .and_then(|(_, param)| call.path_params.get(param))
-                .cloned();
+            let from_path = path_value(scope);
             // Only a create whose scope the path gives (a parent's parameter naming the
             // scope member, or a collection under a parent path) can tell, from where a
             // record was placed, whether one holding no scope value shares it.
             let path_scoped = creates && (from_path.is_some() || in_collection);
-            (scope, after(scope).or(from_path), path_scoped)
+            let asked = match after(scope) {
+                Some(v) => Some((v, false)),
+                None => from_path.map(|v| (v, true)),
+            };
+            (scope, asked, path_scoped)
         });
         let records = match &listed {
             Some(records) => records,
@@ -156,13 +185,17 @@ pub(super) async fn described_conflict(
             (creates || Some(r.id.as_str()) != target_id)
                 && gone.as_ref().is_none_or(|g| !g.excludes(&r.data))
                 && held.is_none_or(|h| h.id != r.id)
-                && values
-                    .iter()
-                    .all(|(m, v)| same_scalar(mb_mcm::member_at(&r.data, m), v))
+                && values.iter().all(|(m, v, pathed)| {
+                    let kept = mb_mcm::member_at(&r.data, m);
+                    same_scalar(kept, v) || (*pathed && same_text(kept, v))
+                })
                 && scope.as_ref().is_none_or(|(member, asked, path_scoped)| {
                     let kept = mb_mcm::member_at(&r.data, member).filter(|v| !v.is_null());
                     match (asked, kept) {
-                        (Some(asked), Some(kept)) => same_scalar(Some(kept), asked),
+                        (Some((asked, pathed)), Some(kept)) => {
+                            same_scalar(Some(kept), asked)
+                                || (*pathed && same_text(Some(kept), asked))
+                        }
                         // Where a record is that holds no scope value, only the
                         // collection a create runs in tells, when the path scopes it.
                         (_, None) if *path_scoped => {
@@ -189,7 +222,7 @@ pub(super) async fn described_conflict(
             code,
             taken: values
                 .into_iter()
-                .map(|(m, v)| (m.to_string(), v))
+                .map(|(m, v, _)| (m.to_string(), v))
                 .collect(),
         });
     }
@@ -331,6 +364,17 @@ fn agrees(answered: &Value, kept: &Value) -> bool {
         }
         _ => answered == kept,
     }
+}
+
+/// Whether `held` and `asked`, a value from the path, which holds text, are the same
+/// text: `7` and `"7"`.
+fn same_text(held: Option<&Value>, asked: &Value) -> bool {
+    let text = |v: &Value| match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    };
+    held.and_then(text).is_some_and(|h| text(asked) == Some(h))
 }
 
 /// Whether `held` is the scalar `asked` (numbers by value).

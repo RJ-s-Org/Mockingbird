@@ -5,7 +5,9 @@
 //!   body: the members the type's records declare (all of them when it declares none),
 //!   with those of an object member the type does not declare itself (an input wrapper,
 //!   GraphQL's `input: {...}`) one level down, and the path values naming its parent or
-//!   a member it declares.
+//!   a member it declares. A path value is set at its member's dotted path
+//!   ([`super::super::path_set`]): one naming an object member goes into the member the
+//!   description names below it, and wins over anything fill would write.
 //! - Its id is the one the request asks for (a client-chosen id, a path value naming the
 //!   record), else one minted in the identity header the answer names it in, else one
 //!   drawn as the type declares its identity, in its pattern.
@@ -61,8 +63,8 @@ use crate::call::entities::type_check;
 use crate::call::owners::schema_members;
 use crate::call::writes::type_members;
 use crate::call::{
-    CallPlan, OperationCall, StateAccess, derived, header_ids, id_string, records, repeats,
-    request_values, serve_held, state_lists, state_span, target_id, value_index,
+    CallPlan, OperationCall, StateAccess, derived, header_ids, id_string, path_set, records,
+    repeats, request_values, serve_held, state_lists, state_span, target_id, value_index,
 };
 
 /// Whether the executor takes these calls.
@@ -129,7 +131,8 @@ pub(super) async fn run(
     let Some(mut record) = shape.request_record(rt, request) else {
         return fall("no_record");
     };
-    shape.path_members(rt, t, call, &mut record);
+    let from_path = path_set(rt, t, call);
+    shape.path_members(rt, call, &from_path, &mut record);
 
     // The id: the one asked for, else minted in the header the answer names it in, else
     // drawn as the type declares it.
@@ -198,6 +201,11 @@ pub(super) async fn run(
         reshape(state, &plan.session, t, known, &owned)
             .instrument(state_span())
             .await;
+    }
+    // What the path says of the record, below its top too: the path's value wins over
+    // anything fill would write.
+    if let Value::Object(known) = &mut data {
+        shape.path_scoped(rt, &from_path, known);
     }
     // A member the request did not send whose schema decides its value (a `const`, a
     // one-value `enum`: GraphQL's `__typename`; a `default`) takes it, at any depth.
@@ -682,56 +690,68 @@ impl Shape {
         Some(record)
     }
 
-    /// Sets on `record` what the call's path says of it: the described parent member,
-    /// from the parent's path parameter (in the parent's pattern), a member the type
-    /// declares under a path parameter's own name, and the member a described list
-    /// scope of the type matches to a path parameter of the create's route (typed as
-    /// the member is). A member the record holds already keeps its value.
+    /// Sets on `record` a member the type declares under a path parameter's own name,
+    /// from that parameter, and the top-level members of what the path says of it
+    /// (`from_path`, [`path_set`]: the described parent member, a list scope's member),
+    /// typed as the member is, when the record holds no value for them. They are set
+    /// before [`reshape`], which makes one naming an object member the record it names,
+    /// or leaves it for fill; a dotted one is set after ([`Shape::path_scoped`]).
     fn path_members(
         &self,
         rt: &crate::MockRuntime,
-        t: &str,
         call: &OperationCall,
+        from_path: &[(String, Value)],
         record: &mut Map<String, Value>,
     ) {
-        let parent = rt.described().type_desc(t).and_then(|d| d.parent.as_ref());
-        if let Some(parent) = parent
-            && let (Some(member), Some(param)) = (&parent.member, &parent.path_param)
-            && let Some(value) = call.path_params.get(param)
-            && !record.contains_key(member)
-        {
-            let value = match (&parent.pattern, id_string(value)) {
-                (Some(pattern), Some(id)) if records::bare_id(pattern, &id).is_none() => {
-                    Value::String(records::patterned(pattern, &id))
-                }
-                _ => value.clone(),
-            };
-            record.insert(member.clone(), value);
-        }
+        let top = from_path.iter().filter(|(member, _)| !member.contains('.'));
+        self.set_from_path(rt, top, record);
         for (name, value) in &call.path_params {
             if self.members.iter().any(|(m, _)| m == name) && !record.contains_key(name) {
                 record.insert(name.clone(), value.clone());
             }
         }
-        // A list of the type scoped by a parameter the create's path names (a note's
-        // `noteable_iid` by `issue_iid`): the created record is in that scope.
+    }
+
+    /// Sets on `record` the dotted members of what the path says of it (`from_path`,
+    /// [`path_set`]: a dotted parent or scope member, a described member of an object
+    /// member a path parameter is named for), each at its dotted path and typed as the
+    /// member is. An object member holding no object (`null`, or the path's own value
+    /// as sent, which [`reshape`] left) becomes one, so the value goes into the
+    /// described member, never over the object.
+    fn path_scoped(
+        &self,
+        rt: &crate::MockRuntime,
+        from_path: &[(String, Value)],
+        record: &mut Map<String, Value>,
+    ) {
+        let dotted = from_path.iter().filter(|(member, _)| member.contains('.'));
+        self.set_from_path(rt, dotted, record);
+    }
+
+    /// Sets each of `values` on `record` at its (dotted) member, typed as the member
+    /// is, unless the record holds a value there.
+    fn set_from_path<'v>(
+        &self,
+        rt: &crate::MockRuntime,
+        values: impl Iterator<Item = &'v (String, Value)>,
+        record: &mut Map<String, Value>,
+    ) {
+        let bundle = rt.bundle();
         let mut held = Value::Object(std::mem::take(record));
-        for scope in list_scopes(rt, t) {
-            let Some(value) = call.path_params.get(&scope.param) else {
-                continue;
-            };
-            if mb_mcm::member_at(&held, &scope.member).is_some() {
+        for (member, value) in values {
+            if mb_mcm::member_at(&held, member).is_some_and(|v| !v.is_null()) {
                 continue;
             }
             let declared = self
                 .schemas
                 .iter()
-                .find_map(|s| property_schema(rt.bundle(), s, &scope.member));
-            let value = match declared {
-                Some(schema) => typed_as(rt.bundle(), &schema, value),
+                .find_map(|s| property_schema(bundle, s, member));
+            let typed = match declared {
+                Some(schema) => typed_as(bundle, &schema, value),
                 None => value.clone(),
             };
-            mb_mcm::set_member_at(&mut held, &scope.member, value);
+            open_steps(&mut held, member, value);
+            mb_mcm::set_member_at(&mut held, member, typed);
         }
         if let Value::Object(members) = held {
             *record = members;
@@ -739,18 +759,26 @@ impl Shape {
     }
 }
 
-/// The described scopes of the lists of type `t`.
-fn list_scopes<'r>(rt: &'r crate::MockRuntime, t: &str) -> Vec<&'r mb_mcm::world::ScopeDesc> {
-    rt.bundle()
-        .operations
-        .iter()
-        .filter(|op| super::list::item_type(rt, op) == Some(t))
-        .filter_map(|op| {
-            let desc = rt.described().op(&op.id)?;
-            let kind = desc.kind.or_else(|| OpKind::of(op));
-            (kind == Some(OpKind::List)).then_some(desc.scope.as_ref()?)
-        })
-        .collect()
+/// Makes each step above dotted `member` of `record` that holds `null` or the path's
+/// `value` itself an empty object, so `member` can be set below it.
+fn open_steps(record: &mut Value, member: &str, value: &Value) {
+    let mut at = record;
+    let mut steps: Vec<&str> = member.split('.').collect();
+    steps.pop();
+    for step in steps {
+        let Some(object) = at.as_object_mut() else {
+            return;
+        };
+        let next = object
+            .entry(step.to_owned())
+            .or_insert_with(|| Value::Object(Map::new()));
+        let stands_in =
+            next.is_null() || (!next.is_object() && id_string(next) == id_string(value));
+        if stands_in {
+            *next = Value::Object(Map::new());
+        }
+        at = next;
+    }
 }
 
 /// `value` (a path value) as member schema `schema` types it: a number for a number
