@@ -231,57 +231,101 @@ impl WrittenTypes {
     }
 }
 
-/// Sessions [`MintCounts`] holds at most; it is emptied when full.
+/// Sessions [`MintCounts`] holds at most; the one that first minted longest ago is
+/// dropped for a new one.
 const MAX_MINTING_SESSIONS: usize = 4096;
+/// First calls [`MintCounts`] counts sessions under, at most; emptied when full.
+const MAX_FIRST_CALLS: usize = 16_384;
 
 /// How many ids each session has drawn through this runtime, by type and member, and
-/// in which order the sessions first drew one: the two seed the next draw
+/// what the session is known by: the call it first minted in (its operation, path,
+/// query and body, [`mb_engine::seed::call_parts`]) and how many sessions before it
+/// first minted in that same call. The two seed the next draw
 /// ([`header_ids::MintSeed`]), so successive mints in one session differ, a retry after
-/// a collision draws anew, sessions differ from each other, and the same calls in the
-/// same order in a fresh runtime draw the same ids whatever the sessions are named (a
-/// client's session names often hold the time).
+/// a collision draws anew, sessions differ from each other, and the same calls in a
+/// fresh runtime draw the same ids whatever the sessions are named (a client's session
+/// names often hold the time) and in whatever order sessions that first mint in
+/// different calls start. Only sessions whose first minting calls are alike depend on
+/// the order they start in, and concurrent calls of one session on the order they
+/// arrive in.
+///
+/// A session dropped when [`MAX_MINTING_SESSIONS`] are held is counted anew when it
+/// mints again, by a new place among its first call's sessions; after the first calls
+/// are emptied ([`MAX_FIRST_CALLS`]) places start over, so a new session may draw as a
+/// held one does. Either way every draw is still checked against what the session
+/// holds, so its ids stay its own, but they depend on the order of sessions.
 #[derive(Debug, Default)]
 pub(crate) struct MintCounts(std::sync::Mutex<Minting>);
 
 #[derive(Debug, Default)]
 pub(crate) struct Minting {
     sessions: HashMap<SessionKey, SessionMints>,
-    /// Sessions that have drawn an id, ever.
-    seen: u64,
+    /// The sessions held, the one that first minted longest ago first.
+    order: std::collections::VecDeque<SessionKey>,
+    /// How many sessions first minted in each call, by its fingerprint.
+    first_calls: HashMap<u64, u64>,
 }
 
-/// One session's place among those that drew an id, and its draws by type and member.
+/// What one session is known by (its first minting call's fingerprint and its place
+/// among the sessions that first minted in it), and its draws.
 #[derive(Debug)]
 struct SessionMints {
-    ordinal: u64,
+    known_by: (u64, u64),
     counts: HashMap<(String, String), u64>,
 }
 
 impl MintCounts {
-    /// The place of `session` among the sessions that drew an id, and the number of
-    /// ids of type `t`'s member `field` it drew before this one, counted.
-    pub(super) fn next(&self, session: &SessionKey, t: &str, field: &str) -> (u64, u64) {
+    /// What `session` is known by (its first minting call's fingerprint, `first` when
+    /// this is its first mint, and its place among the sessions that first minted in
+    /// that call), and the number of `t`'s `field` it drew before this one, counted.
+    pub(super) fn next(
+        &self,
+        session: &SessionKey,
+        first: impl FnOnce() -> u64,
+        (t, field): (&str, &str),
+    ) -> ((u64, u64), u64) {
         let mut minting = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Minting { sessions, seen } = &mut *minting;
-        if sessions.len() >= MAX_MINTING_SESSIONS && !sessions.contains_key(session) {
-            sessions.clear();
-        }
-        let mints = sessions.entry(session.clone()).or_insert_with(|| {
-            *seen = seen.saturating_add(1);
-            SessionMints {
-                ordinal: *seen,
-                counts: HashMap::new(),
+        let Minting {
+            sessions,
+            order,
+            first_calls,
+        } = &mut *minting;
+        if !sessions.contains_key(session) {
+            while sessions.len() >= MAX_MINTING_SESSIONS {
+                let Some(oldest) = order.pop_front() else {
+                    sessions.clear();
+                    break;
+                };
+                sessions.remove(&oldest);
             }
-        });
+            if first_calls.len() >= MAX_FIRST_CALLS {
+                first_calls.clear();
+            }
+            let fingerprint = first();
+            let before = first_calls.entry(fingerprint).or_default();
+            let place = *before;
+            *before = before.saturating_add(1);
+            order.push_back(session.clone());
+            sessions.insert(
+                session.clone(),
+                SessionMints {
+                    known_by: (fingerprint, place),
+                    counts: HashMap::new(),
+                },
+            );
+        }
+        let Some(mints) = sessions.get_mut(session) else {
+            return ((0, 0), 0);
+        };
         let count = mints
             .counts
             .entry((t.to_string(), field.to_string()))
             .or_default();
         let n = *count;
         *count = count.saturating_add(1);
-        (mints.ordinal, n)
+        (mints.known_by, n)
     }
 }

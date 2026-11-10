@@ -24,23 +24,29 @@ const ATTEMPTS: u32 = 8;
 
 /// What seeds the ids a call mints: the call's [`mb_engine::SEED_HEADER`], else the
 /// engine's faker seed, and the session the call is in. With a seed, each draw is
-/// seeded by it mixed with the contract, the mock, the type, the member, the session's
-/// place among those that minted and how many ids of that member it drew before
-/// ([`crate::call::MintCounts`]): the same seed and the same calls in the same order mint
-/// the same ids in a fresh runtime, and every draw (a retry after a collision too)
-/// differs from the others of the runtime. Not the session's name, which a client often
-/// makes of the time. Without a seed the draws are random, as the engine's are.
+/// seeded by it mixed with the contract, the mock, the type, the member, what the
+/// session is known by (the call it first minted in, and how many sessions first minted
+/// in a call alike before it) and how many ids of that member it drew before
+/// ([`crate::call::MintCounts`]): the same seed and the same calls mint the same ids in
+/// a fresh runtime, whatever the sessions are named (a client often makes the name of
+/// the time) and in whatever order sessions first minting in different calls start,
+/// and every draw (a retry after a collision too) differs from the others of the
+/// runtime. Concurrent calls of one session take their counts in the order they arrive,
+/// so their ids may swap from one run to the next. Without a seed the draws are random,
+/// as the engine's are.
 #[derive(Clone, Copy)]
 pub(super) struct MintSeed<'a> {
     seed: Option<u64>,
     session: &'a SessionKey,
+    call: &'a OperationCall,
 }
 
 impl<'a> MintSeed<'a> {
-    pub(super) fn new(rt: &MockRuntime, session: &'a SessionKey, call: &OperationCall) -> Self {
+    pub(super) fn new(rt: &MockRuntime, session: &'a SessionKey, call: &'a OperationCall) -> Self {
         Self {
             seed: mb_engine::seed::request_seed(call).or(rt.engine.faker_seed()),
             session,
+            call,
         }
     }
 
@@ -49,12 +55,20 @@ impl<'a> MintSeed<'a> {
         self.session
     }
 
-    /// The generator and faker of the next draw of an id of type `t`'s member `field`.
-    fn draws(self, rt: &MockRuntime, (t, field): (&str, &str)) -> (StdRng, Faker) {
-        let Some(seed) = self.seed else {
-            return (rand::make_rng::<StdRng>(), Faker::default());
+    /// The seed of the session's next draw of type `t`'s member `field`, and how many it
+    /// drew before; `None` without a seed (nothing is counted then).
+    pub(super) fn next(self, rt: &MockRuntime, (t, field): (&str, &str)) -> Option<(u64, u64)> {
+        let seed = self.seed?;
+        let call = self.call;
+        let first = || {
+            let parts = mb_engine::seed::call_parts(call);
+            mb_engine::seed::derive(
+                0,
+                &["first-mint", &call.operation_id],
+                &[&parts[0], &parts[1], &parts[2]],
+            )
         };
-        let (ordinal, drawn) = rt.mint_counts().next(self.session, t, field);
+        let ((fingerprint, place), drawn) = rt.mint_counts().next(self.session, first, (t, field));
         let s = self.session;
         let labels = [
             rt.bundle().source_digest.as_str(),
@@ -64,10 +78,24 @@ impl<'a> MintSeed<'a> {
             &s.workspace,
             &s.mock,
         ];
-        let counts = [Value::from(ordinal), Value::from(drawn)];
-        let derived = mb_engine::seed::derive(seed, &labels, &[&counts[0], &counts[1]]);
-        let faker = Faker::default().with_now(mb_engine::seed::SEEDED_NOW);
-        (StdRng::seed_from_u64(derived), faker)
+        let counts = [
+            Value::from(fingerprint),
+            Value::from(place),
+            Value::from(drawn),
+        ];
+        let derived = mb_engine::seed::derive(seed, &labels, &[&counts[0], &counts[1], &counts[2]]);
+        Some((derived, drawn))
+    }
+
+    /// The generator and faker of the next draw of an id of type `t`'s member `field`.
+    fn draws(self, rt: &MockRuntime, (t, field): (&str, &str)) -> (StdRng, Faker) {
+        match self.next(rt, (t, field)) {
+            Some((derived, _)) => (
+                StdRng::seed_from_u64(derived),
+                Faker::default().with_now(mb_engine::seed::SEEDED_NOW),
+            ),
+            None => (rand::make_rng::<StdRng>(), Faker::default()),
+        }
     }
 }
 
