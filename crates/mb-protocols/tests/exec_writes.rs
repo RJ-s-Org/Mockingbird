@@ -2346,3 +2346,107 @@ async fn a_nested_if_match_token_is_paired_and_served_as_the_entity_tag() {
         .await;
     assert_eq!(status, StatusCode::NOT_MODIFIED, "{body}");
 }
+
+/// Things kept per space, their server-set `sys` holding their id and version.
+const SPACED: &str = r##"
+openapi: 3.0.0
+info: {title: Spaced, version: "1"}
+paths:
+  /spaces/{space}/things:
+    parameters: [{name: space, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listThings
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Thing"}}}}}}}}
+    post:
+      operationId: createThing
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}}
+  /spaces/{space}/things/{id}:
+    parameters:
+      - {name: space, in: path, required: true, schema: {type: string}}
+      - {name: id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getThing
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}, "404": {description: missing}}
+    put:
+      operationId: replaceThing
+      parameters: [{name: X-Version, in: header, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/ThingInput"}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+        "409": {description: conflict, content: {application/json: {schema: {type: object, properties: {message: {type: string}}}}}}
+components:
+  schemas:
+    ThingInput:
+      type: object
+      properties:
+        name: {type: string}
+    Thing:
+      type: object
+      required: [name, sys]
+      properties:
+        name: {type: string}
+        sys:
+          type: object
+          required: [id, version]
+          properties: {id: {type: string}, version: {type: integer}}
+"##;
+
+#[tokio::test]
+async fn a_record_whose_nested_token_is_minted_stays_in_its_collection() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"things": {
+            "identity": {"member": "sys.id"},
+            "concurrency": {"member": "sys.version", "header": "X-Version", "conflict": 409}
+        }},
+        "operations": {
+            "getThing": {"kind": "read", "type": "things", "target": {"path_param": "id"}},
+            "replaceThing": {
+                "kind": "update", "type": "things", "target": {"path_param": "id"}, "answer": {"record": ""}
+            }
+        }
+    });
+    let one = json!({"name": "a", "sys": {"id": "t1", "version": 1}});
+    let two = json!({"name": "c", "sys": {"id": "t2", "version": 1}});
+    // The model's answer to the replace leaves the version as it was: it is minted anew.
+    let answered = json!({"name": "b", "sys": {"id": "t1", "version": 1}});
+    let h = support::harness(
+        SPACED,
+        vec![
+            one.clone(),
+            two.clone(),
+            answered,
+            json!({"message": "stale"}),
+        ],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    for made in [&one, &two] {
+        let (status, _, body) = h
+            .send("POST", "/spaces/s1/things", Some(made.clone()), SEEDED)
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let (status, headers, body) = h
+        .send(
+            "PUT",
+            "/spaces/s1/things/t1",
+            Some(json!({"name": "b"})),
+            &[("X-Version", "1"), SEEDED[0]],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_ne!(source(&headers), "state", "{body}");
+    assert_eq!(body["sys"]["version"], json!(2), "a new version: {body}");
+    let (status, headers, body) = h.send("GET", "/spaces/s1/things", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let names: Vec<&Value> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| &item["name"])
+        .collect();
+    assert_eq!(names, [&json!("b"), &json!("c")], "{body}");
+}

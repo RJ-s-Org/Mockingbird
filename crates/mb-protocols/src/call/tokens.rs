@@ -957,10 +957,15 @@ pub(super) async fn after_update(
         }
     }
     if !minted.is_empty() && after.data.is_object() {
+        let written = after.clone();
         for (member, new) in &minted {
             set_member_at(&mut after.data, member, new.clone());
         }
-        state.upsert(session, after).await;
+        if state.upsert(session, after.clone()).await {
+            // The record stays in the collection the write placed it in.
+            state.rt.collections().carry(session, &written, &after);
+            state.rt.collections().refresh_scope(session, &after);
+        }
         if let Some(record) = served.filter(|r| r.is_object()) {
             for (member, new) in &minted {
                 let shows_old = member_at(record, member).and_then(compared)
