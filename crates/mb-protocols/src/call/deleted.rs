@@ -30,6 +30,11 @@
 //! that the request names too, goes as a marked id does. A create storing a record with
 //! that value clears its marker, so a record made again with the same email stays.
 //!
+//! A write that changes a described alternate member of a held record (an app's
+//! `name`) retires the old value as a deleted id is marked ([`retire`]): a read by the
+//! old name is not found, while a record stored holding it answers, and a create
+//! storing it clears the marker.
+//!
 //! A described soft delete (see [`lifecycle`]) keeps the record in its deleted state,
 //! so it leaves no marker: what is stored answers.
 //!
@@ -122,6 +127,45 @@ fn identifying_values<'a>(rt: &MockRuntime, t: &str, data: &'a Value) -> Vec<(St
         })
         .take(MAX_MARKED_VALUES)
         .collect()
+}
+
+/// The text `data` holds in `t`'s described alternate members ([`records::alternates`]),
+/// each a name a path may give the record by.
+pub(super) fn alternate_values(rt: &MockRuntime, t: &str, data: &Value) -> Vec<String> {
+    records::alternates(rt, t)
+        .iter()
+        .filter_map(|member| mb_mcm::member_at(data, member)?.as_str())
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Marks the names a write took from a held record of type `t` (`retired`, the values
+/// its described alternate members held before), under `op`'s parent: a read by one
+/// answers as a deleted record's does, while what is stored under it answers. The
+/// names it holds now (`current`) name it again, so their markers end.
+pub(super) async fn retire(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    (op, call): (&Operation, &OperationCall),
+    t: &str,
+    (retired, current): (&[String], &[String]),
+) {
+    let parent = scope(op, call);
+    for name in current {
+        state
+            .delete(
+                session,
+                INTERNAL_TYPE,
+                &marker_key(t, parent.as_deref(), name),
+            )
+            .await;
+    }
+    let keys = retired
+        .iter()
+        .map(|name| marker_key(t, parent.as_deref(), name))
+        .collect();
+    write_markers(state, session, INDEX, keys, MAX_DELETED).await;
 }
 
 /// Strings a request holds, at most this many, and how deep its body is walked.
@@ -347,10 +391,16 @@ pub(super) async fn clear(
         scopes.push(read.as_deref());
     }
     let values = identifying_values(rt, t, &stored.data);
+    let alternates = alternate_values(rt, t, &stored.data);
     for scope in scopes {
         state
             .delete(session, INTERNAL_TYPE, &marker_key(t, scope, &stored.id))
             .await;
+        for name in &alternates {
+            state
+                .delete(session, INTERNAL_TYPE, &marker_key(t, scope, name))
+                .await;
+        }
         for (member, value) in &values {
             state
                 .delete(session, INTERNAL_TYPE, &value_key(t, scope, member, value))

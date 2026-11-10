@@ -27,8 +27,8 @@ use tracing::Instrument;
 use super::write_memory::Earlier;
 use super::writes::store_one;
 use super::{
-    CallPlan, OperationCall, StateAccess, collection_of, deleted, derived, envelopes, minted,
-    plain, records, replays, serve_held, state_lists, state_span, target_id, tokens, world,
+    CallPlan, OperationCall, StateAccess, collection_of, deleted, derived, envelopes, id_string,
+    minted, plain, records, replays, serve_held, state_lists, state_span, target_id, tokens, world,
     write_memory,
 };
 
@@ -535,7 +535,11 @@ pub(super) enum Write {
 /// record for a [`Write::Within`]), with the side effects every write has, and
 /// returns `answer` as it is: the session listed, the write noted as the session's
 /// latest and told to its list routes' memory, the record stored in its collection (a create noted as a
-/// member of its listed collection), a removal marked deleted under its route's parent
+/// member of its listed collection; a write of a held record that changed its identity
+/// moved to its new key unless another record holds it, in the old one's place in its
+/// collection and its type's creation order, the old key removed, marked deleted and its
+/// write memory settled, and the old values of
+/// its described alternate members retired, [`deleted::retire`]), a removal marked deleted under its route's parent
 /// and its tokens ended, the requests write memory kept for it forgotten (the executor's
 /// record is authoritative), the entity tag's state, the answer kept for a repeat of its
 /// idempotency key, the session's cached answers cleared, the webhooks sent, and the
@@ -572,11 +576,47 @@ pub(super) async fn commit(
                 id
             }
             Write::Put { id, data } => {
-                if op.kind == OperationKind::Command(Effect::Create) {
+                let creates = op.kind == OperationKind::Command(Effect::Create);
+                if creates {
                     state_lists::mark_created(state, session, (op, t), collection.as_ref(), &id)
                         .await;
                 }
-                let place = (collection, Some(&call.query), held.is_some());
+                let held = held.filter(|_| !creates);
+                if let Some(held) = held {
+                    retire_names(state, (plan, call), t, held, &data).await;
+                }
+                // A write that rewrote the identity moves the record to its new key, in
+                // the old one's place in its collection and its type's creation order:
+                // the old key is gone, as a delete leaves it. A new key another record
+                // holds is left to it, and the record stays where it was.
+                let mut moved = held.and_then(|h| re_keyed(rt, op, t, (&id, h), &data));
+                if let Some(new) = &moved
+                    && state.get(session, t, new).await.is_some()
+                {
+                    moved = None;
+                }
+                let was_held = held.is_some() && moved.is_none();
+                let id = match (moved, held) {
+                    (Some(new), Some(gone)) => {
+                        // Moved before the delete, which forgets the old key's place.
+                        let renamed = StoredResource {
+                            resource_type: t.to_string(),
+                            id: new.clone(),
+                            data: data.clone(),
+                        };
+                        rt.collections().rename(session, gone, &renamed);
+                        state.delete(session, t, &id).await;
+                        state_lists::note_renamed(state, session, t, (&id, &new)).await;
+                        if state.tracks_deleted {
+                            deleted::mark(state, session, (op, call), t, &id, None).await;
+                        }
+                        tokens::forget(state, session, t, &id).await;
+                        write_memory::settled(state, session, t, &id).await;
+                        new
+                    }
+                    _ => id,
+                };
+                let place = (collection, Some(&call.query), was_held);
                 store_one(state, session, (op, t), (id.clone(), data), place).await;
                 id
             }
@@ -633,6 +673,47 @@ pub(super) async fn commit(
     }
     .instrument(state_span())
     .await
+}
+
+/// The new id of `held`, held under `id`, once a write leaves it as `data`: the value of
+/// its identity member, when the write changed it from `id`.
+fn re_keyed(
+    rt: &crate::MockRuntime,
+    op: &mb_mcm::Operation,
+    t: &str,
+    (id, held): (&str, &StoredResource),
+    data: &Value,
+) -> Option<String> {
+    let member = records::identity_member(rt, op, t);
+    let was = mb_mcm::member_at(&held.data, member).and_then(id_string)?;
+    let now = mb_mcm::member_at(data, member).and_then(id_string)?;
+    (was == id && now != was).then_some(now)
+}
+
+/// Retires the names a write took from `held` ([`deleted::retire`]): the values of its
+/// type's described alternate members that `data`, what the write leaves, no longer
+/// holds.
+async fn retire_names(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: &str,
+    held: &StoredResource,
+    data: &Value,
+) {
+    if !state.tracks_deleted {
+        return;
+    }
+    let rt = state.rt;
+    let current = deleted::alternate_values(rt, t, data);
+    let retired: Vec<String> = deleted::alternate_values(rt, t, &held.data)
+        .into_iter()
+        .filter(|name| !current.contains(name))
+        .collect();
+    if retired.is_empty() {
+        return;
+    }
+    let at = (plan.op, call);
+    deleted::retire(state, &plan.session, at, t, (&retired, &current)).await;
 }
 
 /// The success answer of `op` with no body, when its success response declares none

@@ -38,8 +38,7 @@
       "type": "folder",
       "scope": { "param": "parent", "member": "parent" },
       "order": { "member": "displayName" },
-      "paging": { "style": "cursor", "request": "pageToken", "response": "nextPageToken", "size": "pageSize" },
-      "filters": [{ "param": "showDeleted", "kind": "flag" }]
+      "paging": { "style": "cursor", "request": "pageToken", "response": "nextPageToken", "size": "pageSize" }
     },
     "PutContacts": {
       "kind": "create",

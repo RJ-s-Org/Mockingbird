@@ -106,7 +106,7 @@ operations:
     scope: { param: parent, member: parent }
     order: { member: displayName }
     paging: { style: cursor, request: pageToken, response: nextPageToken, size: pageSize }
-    filters: [{ param: showDeleted, kind: flag }]
+    # no filter on showDeleted: soft_delete.listed_with already reads it
   PutContacts:             # Xero: PUT /Contacts with {Contacts: [...]}
     kind: create
     type: contact

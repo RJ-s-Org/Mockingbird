@@ -25,6 +25,9 @@
 //!   soft-deleted item out, unless the request sends its `listed_with` parameter. It is
 //!   a key of its own: a list whose type has one has a [`ListQuery`] even when its
 //!   operation describes nothing else, and every other key then falls back as unset.
+//!   A filter on the `listed_with` parameter naming no member is no filter when no
+//!   item member has the parameter's name: that parameter only lists the deleted
+//!   records too. One an item member shares (an `is_deleted` flag) still filters it.
 //!
 //! Filter semantics: `eq` compares the query text with the member by value (`"3"` is
 //! `3`, `"true"` is `true`), and an array parameter is any of its values; `contains`
@@ -401,6 +404,12 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
             asked.insert(param.clone(), value);
         }
     }
+    // The soft delete's own parameter: a filter on it naming no member, and no item
+    // member by its name, is no filter.
+    let listed_with = gone
+        .as_ref()
+        .and_then(|g| g.unless.as_ref())
+        .map(|(param, _)| param.clone());
     let lifecycle = gone.filter(|g| !g.lifted_by(&asked));
     let mut grammars = Grammars::default();
     let filters = d
@@ -408,6 +417,15 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
         .iter()
         .filter_map(|f| {
             params.push(f.param.clone());
+            if f.member.is_none()
+                && f.grammar.is_none()
+                && listed_with.as_deref() == Some(f.param.as_str())
+                && !item
+                    .as_ref()
+                    .is_some_and(|s| property_schema(bundle, s, &f.param).is_some())
+            {
+                return None;
+            }
             if let Some(grammar) = f.grammar {
                 grammars.add((bundle, op), item.as_ref(), call, (f, grammar));
                 return None;

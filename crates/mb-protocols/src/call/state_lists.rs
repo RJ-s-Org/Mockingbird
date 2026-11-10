@@ -327,6 +327,28 @@ pub(super) async fn note_created(
     write_mark(state, session, key, &order).await;
 }
 
+/// Puts `new` in `old`'s place in type `t`'s creation order ([`note_created`]), for a
+/// record a write moved to a new key.
+pub(super) async fn note_renamed(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    t: &str,
+    (old, new): (&str, &str),
+) {
+    let key = format!("{CREATED_PREFIX}{t}");
+    let Some(mut order) = read_mark(state, session, &key).await else {
+        return;
+    };
+    if !order.ids.iter().any(|id| id == old) {
+        return;
+    }
+    order.ids.retain(|id| id != new);
+    for id in order.ids.iter_mut().filter(|id| *id == old) {
+        *id = new.to_string();
+    }
+    write_mark(state, session, key, &order).await;
+}
+
 /// The ids of type `t`'s records in the order creates stored them ([`note_created`]).
 pub(super) async fn created_order(
     state: &mut StateAccess<'_>,

@@ -1504,10 +1504,33 @@ impl<'a> Ctx<'a> {
             }
         }
 
+        // The parameter that lists a soft-deleted record too: no filter of a member,
+        // unless an item member has its name (an `is_deleted` flag filters that member).
+        let listed_with = ty
+            .and_then(|t| applied.types.get(t))
+            .and_then(|t| t.lifecycle.as_ref())
+            .and_then(|l| l.soft_delete.as_ref())
+            .and_then(|sd| sd.listed_with.as_ref())
+            .map(|lw| lw.param.as_str());
         for (i, f) in d.filters.iter().enumerate() {
             let p = path.join("filters").join(i);
             self.unknown(&p, &f.extra);
             if !self.check_filter_shape(f, &p) {
+                continue;
+            }
+            if f.member.is_none()
+                && f.grammar.is_none()
+                && listed_with == Some(f.param.as_str())
+                && !record.is_some_and(|r| dotted_member(self.bundle, r, &f.param).is_some())
+            {
+                self.refuse(
+                    &p.join("param"),
+                    RefusalCode::Invalid,
+                    format!(
+                        "`{}` is the soft delete's `listed_with` parameter, which lists deleted records too: it filters no member",
+                        f.param
+                    ),
+                );
                 continue;
             }
             if f.grammar == Some(FilterGrammar::DeepObject) && f.param.starts_with('/') {
@@ -2193,7 +2216,8 @@ mod tests {
             "parent": {"type": "string"},
             "pageToken": {"type": "string"},
             "pageSize": {"type": "integer"},
-            "showDeleted": {"type": "boolean"}
+            "showDeleted": {"type": "boolean"},
+            "state": {"type": "string"}
         }}));
         op(&mut b, "CreateFolder").input.body = Some(json!({"$ref": "#/$defs/Folder"}));
         b
@@ -2340,7 +2364,7 @@ mod tests {
                     "scope": {"param": "parent", "member": "parent"},
                     "order": {"member": "displayName"},
                     "paging": {"style": "cursor", "request": "pageToken", "response": "nextPageToken", "size": "pageSize"},
-                    "filters": [{"param": "showDeleted", "kind": "flag"}],
+                    "filters": [{"param": "showDeleted", "member": "state", "kind": "eq"}],
                     "answer": {"records": "/folders"}
                 },
                 "CreateFolder": {
@@ -2352,6 +2376,62 @@ mod tests {
         let v = validate(&w, &b);
         assert_eq!(v.refused, vec![]);
         assert_eq!(v.applied, w);
+    }
+
+    #[test]
+    fn validate_refuses_a_member_less_filter_on_the_listed_with_parameter() {
+        let b = folders();
+        let w = world(json!({
+            "types": {"folder": {"lifecycle": {
+                "member": "state",
+                "states": ["ACTIVE", "DELETE_REQUESTED"],
+                "soft_delete": {
+                    "state": "DELETE_REQUESTED",
+                    "listed_with": {"param": "showDeleted", "value": true}
+                }
+            }}},
+            "operations": {"ListFolders": {
+                "filters": [
+                    {"param": "showDeleted", "kind": "flag"},
+                    {"param": "parent", "member": "parent", "kind": "eq"}
+                ]
+            }}
+        }));
+        let v = validate(&w, &b);
+        assert_eq!(
+            v.refused
+                .iter()
+                .map(|r| (r.path.as_str(), r.code))
+                .collect::<Vec<_>>(),
+            [(
+                "/operations/ListFolders/filters/0/param",
+                RefusalCode::Invalid
+            )]
+        );
+        let kept = &v.applied.operations["ListFolders"].filters;
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].param, "parent");
+    }
+
+    #[test]
+    fn validate_keeps_a_member_less_filter_on_a_listed_with_parameter_a_member_shares() {
+        let b = folders();
+        let w = world(json!({
+            "types": {"folder": {"lifecycle": {
+                "member": "state",
+                "states": ["ACTIVE", "DELETE_REQUESTED"],
+                "soft_delete": {
+                    "state": "DELETE_REQUESTED",
+                    "listed_with": {"param": "state", "value": "DELETE_REQUESTED"}
+                }
+            }}},
+            "operations": {"ListFolders": {
+                "filters": [{"param": "state", "kind": "eq"}]
+            }}
+        }));
+        let v = validate(&w, &b);
+        assert!(v.refused.is_empty(), "{:?}", v.refused);
+        assert_eq!(v.applied.operations["ListFolders"].filters.len(), 1);
     }
 
     #[test]

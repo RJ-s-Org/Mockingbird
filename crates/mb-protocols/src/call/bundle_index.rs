@@ -60,9 +60,14 @@ pub(crate) struct BundleIndex {
     /// Per type of items, how many list reads of it the contract has whose path has no
     /// parameter (`/tasks`, `/me/tasks`, `/tasks.list`), by any method: the type their
     /// `$defs` entry is, else the operation's, as [`BundleIndex::item_type`] finds it.
+    /// A search, which a required query parameter narrows ([`searches`]), is counted
+    /// apart.
     pub(super) unscoped_lists: HashMap<String, usize>,
-    /// Per path of such a list read, the type of its items, so counted.
-    pub(super) unscoped_paths: HashMap<String, String>,
+    /// Per type of items, how many such searches the contract has.
+    pub(super) unscoped_searches: HashMap<String, usize>,
+    /// Per path of such a list read or search, the type of its items, so counted, and
+    /// whether it is a search.
+    pub(super) unscoped_paths: HashMap<String, (String, bool)>,
     /// Whether a create or an action may mint a value for a client to send back (see
     /// [`minted::may_mint`]).
     pub(super) mints: bool,
@@ -343,15 +348,20 @@ impl BundleIndex {
         let lookup_members = lookup_members(bundle, &types_by_def, &list_members_of);
         // Each list counts under its items' type, as [`BundleIndex::item_type`] finds it.
         let mut unscoped_counts: HashMap<String, usize> = HashMap::new();
-        let mut unscoped_paths: HashMap<String, String> = HashMap::new();
+        let mut unscoped_searches: HashMap<String, usize> = HashMap::new();
+        let mut unscoped_paths: HashMap<String, (String, bool)> = HashMap::new();
         for list in unscoped_lists {
             let t = list
                 .def
                 .as_deref()
                 .and_then(|d| types_by_def.get(d).cloned())
                 .unwrap_or(list.resource_type);
-            *unscoped_counts.entry(t.clone()).or_default() += 1;
-            unscoped_paths.insert(list.path, t);
+            let counts = match list.search {
+                true => &mut unscoped_searches,
+                false => &mut unscoped_counts,
+            };
+            *counts.entry(t.clone()).or_default() += 1;
+            unscoped_paths.insert(list.path, (t, list.search));
         }
         Self {
             by_id,
@@ -376,6 +386,7 @@ impl BundleIndex {
             sibling_lists,
             told_lists,
             unscoped_lists: unscoped_counts,
+            unscoped_searches,
             unscoped_paths,
             mints: bundle
                 .operations
@@ -418,9 +429,27 @@ impl BundleIndex {
     /// the type's records are all that list's (`POST /tasks` beside `GET /tasks`).
     pub(super) fn sole_written_list(&self, path: &str, resource_type: &str) -> bool {
         !path.contains('{')
-            && self.unscoped_lists.get(resource_type) == Some(&1)
-            && self.unscoped_paths.get(path).map(String::as_str) == Some(resource_type)
+            && self.sole_unscoped(path, resource_type)
             && self.written_lists.contains_key(path)
+    }
+
+    /// Whether `path` is a list read of `resource_type` with no path parameter, and the
+    /// type's only one: a search ([`searches`]) beside the type's written collection
+    /// (a list that is no search, with a write on its path) is no second list
+    /// (`/search/tickets?query=` beside `/tickets`), and is never the only one itself.
+    /// Beside any other list (`/tasks?org=` beside `/me/tasks`), and where every such
+    /// list of the type is a search, each counts.
+    pub(super) fn sole_unscoped(&self, path: &str, resource_type: &str) -> bool {
+        let Some((t, search)) = self.unscoped_paths.get(path) else {
+            return false;
+        };
+        let lists = self.unscoped_lists.get(t).copied().unwrap_or_default();
+        let searches = self.unscoped_searches.get(t).copied().unwrap_or_default();
+        let count = match (lists, search) {
+            (_, false) if self.written_lists.contains_key(path) => lists,
+            _ => lists + searches,
+        };
+        t == resource_type && count == 1
     }
 
     pub(super) fn referrers(&self, resource_type: &str) -> &[String] {
@@ -506,6 +535,20 @@ pub(super) struct UnscopedList {
     pub(super) path: String,
     pub(super) def: Option<String>,
     pub(super) resource_type: String,
+    /// Whether it is a search ([`searches`]).
+    pub(super) search: bool,
+}
+
+/// Whether list read `op` is a search: its query requires a parameter, so it answers
+/// only the records that parameter picks (`/search/tickets?query=`,
+/// `/users-by-email?email=`), never every record of its type.
+pub(super) fn searches(op: &Operation) -> bool {
+    op.input
+        .query
+        .as_ref()
+        .and_then(|q| q.get("required"))
+        .and_then(Value::as_array)
+        .is_some_and(|required| !required.is_empty())
 }
 
 /// What [`routes_of`] finds: single reads, written lists, unscoped lists and sibling lists.
@@ -542,6 +585,7 @@ pub(super) fn routes_of(
                 path: path.clone(),
                 def: def_name(items).map(str::to_string),
                 resource_type: t.to_string(),
+                search: searches(op),
             });
         }
         if *method != mb_mcm::HttpMethod::Get {

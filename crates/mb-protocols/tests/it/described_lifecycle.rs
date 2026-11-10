@@ -27,6 +27,7 @@ paths:
         - {name: cursor, in: query, schema: {type: string}}
         - {name: showDeleted, in: query, schema: {type: boolean}}
         - {name: displayName, in: query, schema: {type: string}}
+        - {name: state, in: query, schema: {type: string}}
       responses:
         "200":
           description: ok
@@ -274,6 +275,64 @@ async fn listed_with_lists_it_again() {
     assert_eq!(ids(&body), ["s1", "s2"], "{body}");
     assert_eq!(body["spaces"][0]["state"], "DELETE_REQUESTED", "{body}");
     assert_eq!(h.provider.requests().len(), 2);
+}
+
+/// A flag filter naming no member on the soft delete's `listed_with` parameter would
+/// narrow to a member no record holds: the parameter is the soft delete's alone.
+#[tokio::test]
+async fn a_member_less_filter_on_the_listed_with_parameter_is_no_filter() {
+    let mut world = soft_spaces();
+    world["operations"] = json!({"listSpaces": {
+        "filters": [{"param": "showDeleted", "kind": "flag"}]
+    }});
+    let h = support::described_allowing_refusals(
+        CONTRACT,
+        world,
+        vec![
+            space("s1", "Docs", "ACTIVE"),
+            space("s2", "Notes", "ACTIVE"),
+        ],
+    );
+    create_space(&h, "Docs").await;
+    create_space(&h, "Notes").await;
+    delete(&h, "/spaces/s1").await;
+    let body = get(&h, "/spaces?showDeleted=true").await;
+    assert_eq!(ids(&body), ["s1", "s2"], "{body}");
+    let body = get(&h, "/spaces").await;
+    assert_eq!(ids(&body), ["s2"], "{body}");
+    assert_eq!(h.provider.requests().len(), 2);
+}
+
+/// A filter naming no member on a `listed_with` parameter an item member shares still
+/// filters that member: `?state=DELETE_REQUESTED` lists the soft-deleted record alone.
+#[tokio::test]
+async fn a_listed_with_parameter_named_like_a_member_still_filters_it() {
+    let mut world = json!({"types": {"spaces": {"lifecycle": {
+        "member": "state",
+        "states": ["ACTIVE", "PENDING", "DELETE_REQUESTED"],
+        "soft_delete": {
+            "state": "DELETE_REQUESTED",
+            "listed_with": {"param": "state", "value": "DELETE_REQUESTED"}
+        }
+    }}}});
+    world["operations"] = json!({"listSpaces": {
+        "filters": [{"param": "state", "kind": "eq"}]
+    }});
+    let h = support::described(
+        CONTRACT,
+        world,
+        vec![
+            space("s1", "Docs", "ACTIVE"),
+            space("s2", "Notes", "ACTIVE"),
+        ],
+    );
+    create_space(&h, "Docs").await;
+    create_space(&h, "Notes").await;
+    delete(&h, "/spaces/s1").await;
+    let body = get(&h, "/spaces?state=DELETE_REQUESTED").await;
+    assert_eq!(ids(&body), ["s1"], "{body}");
+    let body = get(&h, "/spaces").await;
+    assert_eq!(ids(&body), ["s2"], "{body}");
 }
 
 #[tokio::test]
