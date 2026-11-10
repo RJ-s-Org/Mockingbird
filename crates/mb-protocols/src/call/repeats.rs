@@ -105,7 +105,18 @@ pub(super) async fn described_conflict(
     } else {
         Vec::new()
     };
-    if creates && let Some(id) = super::target_id(op, call) {
+    // A `PUT` at its own URI replaces what is held there: no repeat of itself.
+    let puts = matches!(
+        &op.binding,
+        mb_mcm::Binding::Http {
+            method: mb_mcm::HttpMethod::Put,
+            ..
+        }
+    );
+    if creates
+        && !puts
+        && let Some(id) = super::target_id(op, call)
+    {
         let field = super::records::identity_member(rt, op, t);
         from_path.push((field.to_owned(), Value::String(id)));
     }
@@ -158,7 +169,11 @@ pub(super) async fn described_conflict(
             // scope member, or a collection under a parent path) can tell, from where a
             // record was placed, whether one holding no scope value shares it.
             let path_scoped = creates && (from_path.is_some() || in_collection);
-            (scope, after(scope).or(from_path), path_scoped)
+            let asked = match after(scope) {
+                Some(v) => Some((v, false)),
+                None => from_path.map(|v| (v, true)),
+            };
+            (scope, asked, path_scoped)
         });
         let records = match &listed {
             Some(records) => records,
@@ -177,8 +192,9 @@ pub(super) async fn described_conflict(
                 && scope.as_ref().is_none_or(|(member, asked, path_scoped)| {
                     let kept = mb_mcm::member_at(&r.data, member).filter(|v| !v.is_null());
                     match (asked, kept) {
-                        (Some(asked), Some(kept)) => {
-                            same_scalar(Some(kept), asked) || same_text(Some(kept), asked)
+                        (Some((asked, pathed)), Some(kept)) => {
+                            same_scalar(Some(kept), asked)
+                                || (*pathed && same_text(Some(kept), asked))
                         }
                         // Where a record is that holds no scope value, only the
                         // collection a create runs in tells, when the path scopes it.
@@ -350,7 +366,6 @@ fn agrees(answered: &Value, kept: &Value) -> bool {
     }
 }
 
-/// Whether `held` is the scalar `asked` (numbers by value).
 /// Whether `held` and `asked`, a value from the path, which holds text, are the same
 /// text: `7` and `"7"`.
 fn same_text(held: Option<&Value>, asked: &Value) -> bool {
@@ -362,6 +377,7 @@ fn same_text(held: Option<&Value>, asked: &Value) -> bool {
     held.and_then(text).is_some_and(|h| text(asked) == Some(h))
 }
 
+/// Whether `held` is the scalar `asked` (numbers by value).
 fn same_scalar(held: Option<&Value>, asked: &Value) -> bool {
     match (held, asked) {
         (Some(Value::Number(a)), Value::Number(b)) => a.as_f64() == b.as_f64(),

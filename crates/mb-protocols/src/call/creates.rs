@@ -177,6 +177,8 @@ pub(super) fn path_set(rt: &MockRuntime, t: &str, call: &OperationCall) -> Vec<(
         named.extend(set.members.iter().map(String::as_str));
         named.extend(set.scope.as_deref());
     }
+    // A parameter fills one member: the first the description names that it matches.
+    let mut used: Vec<&str> = Vec::new();
     for member in named {
         let Some((head, rest)) = member.split_once('.') else {
             continue;
@@ -184,8 +186,11 @@ pub(super) fn path_set(rt: &MockRuntime, t: &str, call: &OperationCall) -> Vec<(
         let found = call
             .path_params
             .iter()
-            .find(|(param, _)| names_object(param, head, rest));
-        if let Some((_, value)) = found {
+            .find(|(param, _)| !used.contains(&param.as_str()) && names_object(param, head, rest));
+        if let Some((param, value)) = found
+            && !out.iter().any(|(m, _)| m == member)
+        {
+            used.push(param.as_str());
             add(member, value.clone(), &mut out);
         }
     }
@@ -193,8 +198,8 @@ pub(super) fn path_set(rt: &MockRuntime, t: &str, call: &OperationCall) -> Vec<(
 }
 
 /// Whether path parameter `param` names object member `head` by its member `rest`:
-/// its words start with `head`'s, and the rest of them, if any, start with `id` or
-/// with `rest`'s.
+/// its words start with `head`'s, and the rest of them, if any, start with `rest`'s,
+/// hold all of `rest`'s, or start with `id` while `rest` is an id (`id`, `gid`).
 fn names_object(param: &str, head: &str, rest: &str) -> bool {
     let lower = |name: &str| -> Vec<String> {
         mb_mcm::words(name)
@@ -206,7 +211,11 @@ fn names_object(param: &str, head: &str, rest: &str) -> bool {
     let Some(after) = param.strip_prefix(head.as_slice()) else {
         return false;
     };
-    after.is_empty() || after.first().is_some_and(|w| w == "id") || after.starts_with(&rest)
+    let rest_is_id = rest.last().is_some_and(|w| w.ends_with("id"));
+    after.is_empty()
+        || after.starts_with(&rest)
+        || rest.iter().all(|w| after.contains(w))
+        || (rest_is_id && after.first().is_some_and(|w| w == "id"))
 }
 
 /// The described scopes of the lists of type `t`.
@@ -647,5 +656,8 @@ mod path_set_tests {
         assert!(!names_object("owner_name", "owner", "id"));
         assert!(!names_object("ownership", "owner", "id"));
         assert!(!names_object("id", "owner", "id"));
+        // An id names the object by its id, never by another member.
+        assert!(!names_object("team_id", "team", "slug"));
+        assert!(names_object("owner_id_or_key", "owner", "key"));
     }
 }

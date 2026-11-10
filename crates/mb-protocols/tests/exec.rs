@@ -4628,6 +4628,28 @@ paths:
     get:
       operationId: getRepo
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Repo"}}}}}
+  /orgs/{org}:
+    parameters: [{name: org, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getOrg
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {id: {type: string}, name: {type: string}}}}}}}
+  /orgs/{org}/notes:
+    parameters: [{name: org, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listNotes
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Note"}}}}}}
+    post:
+      operationId: createNote
+      requestBody: {content: {application/json: {schema: {type: object, properties: {text: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}}
+  /projects/{project_id}/issues:
+    parameters: [{name: project_id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: createIssue
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+        "409": {description: taken, content: {application/json: {schema: {$ref: "#/components/schemas/Problem"}}}}
 components:
   schemas:
     Item:
@@ -4657,6 +4679,20 @@ components:
         key: {type: string}
         title: {type: string}
         group: {type: object, required: [slug], properties: {slug: {type: string}, name: {type: string}}}
+    Note:
+      type: object
+      required: [id, text, organization]
+      properties:
+        id: {type: string}
+        text: {type: string}
+        organization: {type: object, required: [id, name], properties: {id: {type: string}, name: {type: string}}}
+    Issue:
+      type: object
+      required: [id, title, project]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        project: {type: object, required: [id], properties: {id: {type: integer}}}
     Problem:
       type: object
       properties: {message: {type: string}}
@@ -4674,7 +4710,9 @@ fn placed_world() -> serde_json::Value {
             "repos": {
                 "identity": {"member": "key"},
                 "unique": [{"members": ["key"], "scope": "group.slug", "conflict": 400}]
-            }
+            },
+            "notes": {"parent": {"type": "orgs", "member": "organization", "path_param": "org"}},
+            "issues": {"unique": [{"members": ["title"], "scope": "project.id", "conflict": 409}]}
         },
         "operations": {
             "listItems": {"kind": "list", "type": "items", "scope": {"param": "space", "member": "meta.space"}},
@@ -4685,7 +4723,11 @@ fn placed_world() -> serde_json::Value {
             "createCard": {"kind": "create", "type": "cards"},
             "createTag": {"kind": "create", "type": "tags"},
             "createRepo": {"kind": "create", "type": "repos", "target": {"path_param": "repo_key"}},
-            "getRepo": {"kind": "read", "type": "repos", "target": {"path_param": "repo_key"}}
+            "getRepo": {"kind": "read", "type": "repos", "target": {"path_param": "repo_key"}},
+            "getOrg": {"kind": "read", "type": "orgs", "target": {"path_param": "org"}},
+            "listNotes": {"kind": "list", "type": "notes"},
+            "createNote": {"kind": "create", "type": "notes"},
+            "createIssue": {"kind": "create", "type": "issues"}
         }
     })
 }
@@ -4823,4 +4865,51 @@ async fn a_create_at_its_own_uri_takes_its_id_and_scope_from_the_path() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(read_from_state(&h, "/groups/g1/repos/r1").await, repo);
+}
+
+#[tokio::test]
+async fn a_top_level_parent_member_that_is_an_object_never_holds_the_raw_path_value() {
+    let h = support::described(PLACED, placed_world(), Vec::new());
+    let (status, headers, note) = h
+        .send("POST", "/orgs/o1/notes", Some(json!({"text": "x"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{note}");
+    assert_eq!(source(&headers), "state", "{note}");
+    assert!(note["organization"].is_object(), "{note}");
+    let id = note["id"].as_str().unwrap().to_owned();
+    let stored = h.stored("notes", &id).await.unwrap();
+    assert!(stored["organization"].is_object(), "{stored}");
+}
+
+#[tokio::test]
+async fn an_integer_scope_from_the_path_is_typed_and_refuses_a_repeat() {
+    let h = support::described(PLACED, placed_world(), Vec::new());
+    let (status, _, issue) = h
+        .send(
+            "POST",
+            "/projects/7/issues",
+            Some(json!({"title": "bug"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{issue}");
+    assert_eq!(issue["project"]["id"], json!(7), "{issue}");
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/projects/7/issues",
+            Some(json!({"title": "bug"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let (status, _, other) = h
+        .send(
+            "POST",
+            "/projects/8/issues",
+            Some(json!({"title": "bug"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{other}");
 }

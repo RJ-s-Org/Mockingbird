@@ -131,7 +131,8 @@ pub(super) async fn run(
     let Some(mut record) = shape.request_record(rt, request) else {
         return fall("no_record");
     };
-    shape.path_members(call, &mut record);
+    let from_path = path_set(rt, t, call);
+    shape.path_members(rt, call, &from_path, &mut record);
 
     // The id: the one asked for, else minted in the header the answer names it in, else
     // drawn as the type declares it.
@@ -204,7 +205,7 @@ pub(super) async fn run(
     // What the path says of the record, below its top too: the path's value wins over
     // anything fill would write.
     if let Value::Object(known) = &mut data {
-        shape.path_scoped(rt, t, call, known);
+        shape.path_scoped(rt, &from_path, known);
     }
     // A member the request did not send whose schema decides its value (a `const`, a
     // one-value `enum`: GraphQL's `__typename`; a `default`) takes it, at any depth.
@@ -690,10 +691,20 @@ impl Shape {
     }
 
     /// Sets on `record` a member the type declares under a path parameter's own name,
-    /// from that parameter, when the record holds no value for it. What the path says
-    /// below the record's top ([`Shape::path_scoped`]) is set once the request's
-    /// members are reshaped.
-    fn path_members(&self, call: &OperationCall, record: &mut Map<String, Value>) {
+    /// from that parameter, and the top-level members of what the path says of it
+    /// (`from_path`, [`path_set`]: the described parent member, a list scope's member),
+    /// typed as the member is, when the record holds no value for them. They are set
+    /// before [`reshape`], which makes one naming an object member the record it names,
+    /// or leaves it for fill; a dotted one is set after ([`Shape::path_scoped`]).
+    fn path_members(
+        &self,
+        rt: &crate::MockRuntime,
+        call: &OperationCall,
+        from_path: &[(String, Value)],
+        record: &mut Map<String, Value>,
+    ) {
+        let top = from_path.iter().filter(|(member, _)| !member.contains('.'));
+        self.set_from_path(rt, top, record);
         for (name, value) in &call.path_params {
             if self.members.iter().any(|(m, _)| m == name) && !record.contains_key(name) {
                 record.insert(name.clone(), value.clone());
@@ -701,35 +712,46 @@ impl Shape {
         }
     }
 
-    /// Sets on `record` what the call's path says of it ([`path_set`]: the described
-    /// parent member, a list scope's member, a described member of an object member a
-    /// path parameter is named for), each at its dotted path and typed as the member is.
-    /// A member the record holds keeps its value; an object member holding no object
-    /// (`null`, or the path's own value as sent, which [`reshape`] left) becomes one, so
-    /// the value goes into the described member, never over the object.
+    /// Sets on `record` the dotted members of what the path says of it (`from_path`,
+    /// [`path_set`]: a dotted parent or scope member, a described member of an object
+    /// member a path parameter is named for), each at its dotted path and typed as the
+    /// member is. An object member holding no object (`null`, or the path's own value
+    /// as sent, which [`reshape`] left) becomes one, so the value goes into the
+    /// described member, never over the object.
     fn path_scoped(
         &self,
         rt: &crate::MockRuntime,
-        t: &str,
-        call: &OperationCall,
+        from_path: &[(String, Value)],
+        record: &mut Map<String, Value>,
+    ) {
+        let dotted = from_path.iter().filter(|(member, _)| member.contains('.'));
+        self.set_from_path(rt, dotted, record);
+    }
+
+    /// Sets each of `values` on `record` at its (dotted) member, typed as the member
+    /// is, unless the record holds a value there.
+    fn set_from_path<'v>(
+        &self,
+        rt: &crate::MockRuntime,
+        values: impl Iterator<Item = &'v (String, Value)>,
         record: &mut Map<String, Value>,
     ) {
         let bundle = rt.bundle();
         let mut held = Value::Object(std::mem::take(record));
-        for (member, value) in path_set(rt, t, call) {
-            if mb_mcm::member_at(&held, &member).is_some_and(|v| !v.is_null()) {
+        for (member, value) in values {
+            if mb_mcm::member_at(&held, member).is_some_and(|v| !v.is_null()) {
                 continue;
             }
             let declared = self
                 .schemas
                 .iter()
-                .find_map(|s| property_schema(bundle, s, &member));
+                .find_map(|s| property_schema(bundle, s, member));
             let typed = match declared {
-                Some(schema) => typed_as(bundle, &schema, &value),
+                Some(schema) => typed_as(bundle, &schema, value),
                 None => value.clone(),
             };
-            open_steps(&mut held, &member, &value);
-            mb_mcm::set_member_at(&mut held, &member, typed);
+            open_steps(&mut held, member, value);
+            mb_mcm::set_member_at(&mut held, member, typed);
         }
         if let Value::Object(members) = held {
             *record = members;
@@ -740,9 +762,6 @@ impl Shape {
 /// Makes each step above dotted `member` of `record` that holds `null` or the path's
 /// `value` itself an empty object, so `member` can be set below it.
 fn open_steps(record: &mut Value, member: &str, value: &Value) {
-    if record.get(member).is_some() {
-        return;
-    }
     let mut at = record;
     let mut steps: Vec<&str> = member.split('.').collect();
     steps.pop();
