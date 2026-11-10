@@ -709,6 +709,63 @@ async fn a_delete_sending_the_soft_delete_s_unless_parameter_removes_the_record(
     );
 }
 
+/// SCIM-like users whose error body says its HTTP status as free text.
+const SCIM_ERRORS: &str = r##"
+openapi: 3.0.0
+info: {title: Scim errors, version: "1"}
+paths:
+  /Users:
+    post:
+      operationId: createUser
+      requestBody: {content: {application/json: {schema: {type: object, properties: {userName: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}}
+  /Users/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getUser
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}
+        "404": {description: missing, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+    delete:
+      operationId: deleteUser
+      responses: {"204": {description: deleted}}
+components:
+  schemas:
+    User:
+      type: object
+      required: [id, userName]
+      properties: {id: {type: string}, userName: {type: string}}
+    Error:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string, description: "The HTTP status as a string."}
+        detail: {type: string}
+"##;
+
+/// A refusal from state (a read of a deleted record) says its HTTP status in its error
+/// body's free `status` text, whatever the body was drawn with.
+#[tokio::test]
+async fn a_refusal_from_state_says_its_status_in_a_free_status_member() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({"operations": {"getUser": {"kind": "read", "not_found": 404}}});
+    let h = support::harness(
+        SCIM_ERRORS,
+        vec![json!({"id": "u1", "userName": "ann"})],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    let (status, _, body) = h
+        .send("POST", "/Users", Some(json!({"userName": "ann"})), SEEDED)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, _, body) = h.send("DELETE", "/Users/u1", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, _, body) = h.send("GET", "/Users/u1", None, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["status"], json!("404"), "{body}");
+}
+
 /// The generated path agrees: a seeded delete (`seeded`, which the executor leaves to
 /// generation) of a record already soft-deleted removes it too.
 #[tokio::test]

@@ -35,7 +35,9 @@
 //! - A string member that holds the HTTP status as text, by its schema alone (its
 //!   shown values are 3-digit codes, or its pattern takes the status and no word), says
 //!   the response's status ([`with_status_text`]), at the top level or in the items of
-//!   an array of error objects.
+//!   an array of error objects. So does a string member named `status` whose schema
+//!   leaves it wholly free (no `const`, `enum`, `format`, `pattern` or shown value), as
+//!   SCIM's error says its HTTP status as text.
 //! - Since a written body serves every later call, it is checked before it is kept
 //!   (`body_flaw`): it validates against the declared error schema; each code-like
 //!   string is a short token (at most `64` characters, no unit repeated back to back
@@ -408,6 +410,26 @@ fn holds_status_text(parts: &[&Value], status: u16) -> bool {
         })
 }
 
+/// Whether member `name`, declared by `parts`, holds the HTTP status as text: by its
+/// schema ([`holds_status_text`]), or, named `status` (in any case), a string the schema
+/// leaves wholly free: no `const`, `enum`, `format` or `pattern`, and no value shown.
+/// An error body's free `status` text (SCIM's, RFC 7644 §3.12) says its own status.
+fn says_status(name: &str, parts: &[&Value], status: u16) -> bool {
+    if holds_status_text(parts, status) {
+        return true;
+    }
+    name.eq_ignore_ascii_case("status")
+        && types(parts).contains(&"string")
+        && shown_values(parts).next().is_none()
+        && !parts.iter().any(|b| {
+            [
+                "const", "enum", "format", "pattern", "example", "examples", "default",
+            ]
+            .iter()
+            .any(|k| b.get(*k).is_some())
+        })
+}
+
 /// Whether `schema` declares a free text member, at any depth, that nothing but the
 /// faker would fill in an error body for `status`: a string with no `const`, `enum`
 /// or `format`, that is not its object's message-like member (the first of
@@ -460,7 +482,7 @@ pub fn writes_text(
                 && !prop_parts.iter().any(|b| {
                     b.get("const").is_some() || b.get("enum").is_some() || b.get("format").is_some()
                 })
-                && !holds_status_text(&prop_parts, ctx.status)
+                && !says_status(name, &prop_parts, ctx.status)
                 && !ctx.named.contains(&path(name))
         };
         members
@@ -484,7 +506,8 @@ pub fn writes_text(
 }
 
 /// `body`, an error body declared by `schema` (its definitions in `defs`), with each
-/// string member that holds the HTTP status as text (`holds_status_text`) saying
+/// string member that holds the HTTP status as text (`says_status`: by its schema, or
+/// a wholly free `status`) saying
 /// `status`: at the top level, or in each item of an array member (JSON:API's
 /// `errors[].status`). Each change is kept only while the body still validates
 /// against `validator`.
@@ -507,7 +530,7 @@ pub fn with_status_text(
     // Each place as (the object's pointer, the member's name).
     let mut places: Vec<(String, String)> = Vec::new();
     for (name, prop) in members(schema) {
-        if holds_status_text(&branches(&prop, defs), status) {
+        if says_status(&name, &branches(&prop, defs), status) {
             places.push((String::new(), name));
             continue;
         }
@@ -519,7 +542,7 @@ pub fn with_status_text(
             .and_then(Value::as_array)
             .map_or(0, Vec::len);
         for (item_name, item_prop) in members(items) {
-            if holds_status_text(&branches(&item_prop, defs), status) {
+            if says_status(&item_name, &branches(&item_prop, defs), status) {
                 for i in 0..held {
                     places.push((format!("/{}/{i}", escaped(&name)), item_name.clone()));
                 }
@@ -1963,6 +1986,45 @@ mod tests {
         }
         for status in [&["100"][..], &["599"], &["404", "422"]] {
             assert!(held(status), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn a_free_status_text_says_the_http_status_and_a_constrained_one_does_not() {
+        let schema = json!({"type": "object", "properties": {
+            "status": {"type": "string", "description": "The HTTP status as a string."},
+            "detail": {"type": "string"},
+            "error": {"type": "object", "properties": {"status": {"type": "string"}}},
+            "errors": {"type": "array", "items": {"type": "object", "properties": {
+                "Status": {"type": "string"}
+            }}}
+        }});
+        let validator = SchemaValidator::new(&schema).unwrap();
+        let body = json!({
+            "status": "val7", "detail": "gone",
+            "error": {"status": "NOT_FOUND"},
+            "errors": [{"Status": "x"}]
+        });
+        let out = with_status_text(&validator, (&schema, &Map::new()), body, 404);
+        assert_eq!(
+            out,
+            json!({
+                "status": "404", "detail": "gone",
+                "error": {"status": "NOT_FOUND"},
+                "errors": [{"Status": "404"}]
+            })
+        );
+        // A status the schema shows as a word, or an enum of words, is the API's own.
+        for status in [
+            json!({"type": "string", "example": "error"}),
+            json!({"type": "string", "enum": ["error", "fail"]}),
+            json!({"type": "string", "pattern": "^[a-z]+$"}),
+        ] {
+            let schema = json!({"type": "object", "properties": {"status": status}});
+            let validator = SchemaValidator::new(&schema).unwrap();
+            let body = json!({"status": "error"});
+            let out = with_status_text(&validator, (&schema, &Map::new()), body.clone(), 404);
+            assert_eq!(out, body, "{schema}");
         }
     }
 
