@@ -39,7 +39,7 @@ import time
 import urllib.error
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import replay  # noqa: E402
@@ -1074,12 +1074,15 @@ class Handler(BaseHTTPRequestHandler):
                 out.error_body = json.dumps({"error": {"message": msg, "code": 503}}).encode()
         p_in, _ = px.price(model)
         prompt_est = len(json.dumps(body.get("messages", []), ensure_ascii=False)) / 3.0 * p_in
+        def dump() -> None:
+            px.dump(rec, body, out, getattr(self, "call_tag", None))
+
         if client_closed:
             self.close_connection = True
             self.client_closed(px, model, rec, out, received, prompt_est)
+            dump()
         else:
-            self.complete(px, model, rec, out, client_stream, received, prompt_est)
-        px.dump(rec, body, out, getattr(self, "call_tag", None))
+            self.complete(px, model, rec, out, client_stream, received, prompt_est, dump)
 
     @staticmethod
     def check_first_chunk(out: Outcome, pinned: Optional[Dict[str, Any]]) -> None:
@@ -1192,6 +1195,7 @@ class Handler(BaseHTTPRequestHandler):
         client_stream: bool,
         received: float,
         prompt_est: float,
+        dump: Callable[[], None],
     ) -> None:
         usage = self.fill_record(px, model, rec, out, prompt_est)
         err_status = 503 if out.error_kind == "provider_unavailable" else 502
@@ -1206,6 +1210,9 @@ class Handler(BaseHTTPRequestHandler):
         rec["total_ms"] = round((time.monotonic() - received) * 1000.0, 1)
         if out.client_gone_after_end:
             rec["client_gone_after_end"] = True  # recorded as usual: the answer had ended
+        # The dump line is written before the answer goes out, so a client that has its
+        # answer finds the call in `--dump` (a streamed answer has already ended by now).
+        dump()
         if client_stream and self.stream_started:
             if out.error_kind:
                 rec["status"] = 200  # the 200 head is already sent; the error went through in-stream
