@@ -43,8 +43,8 @@
 //! size, the page as answered, and the items left out that no delete marker covers (at
 //! most [`MAX_REST`]). They are seeded as a list's items are, so a read of one finds it.
 //! A session keeps at most [`MAX_CUTS`] cuts: each goes in one of that many places,
-//! picked by a counter this process shares across sessions, so nothing is read to count
-//! them. A new cut ends whichever of the session's cuts held its place, which is not
+//! picked by a counter this process shares across sessions (by the session's own count
+//! of cuts, with a faker seed), so nothing is read to count them. A new cut ends whichever of the session's cuts held its place, which is not
 //! always its oldest when other sessions mint meanwhile, and two nodes may pick the same
 //! place: either only ends a cut early, whose token then goes to the model. The
 //! session's TTL ends them all. A token is the cut's nonce, its place and the offset of the next item, in
@@ -1166,8 +1166,28 @@ pub(super) fn placed(body: &Value, path: &[String], value: Option<Value>) -> Opt
     Some(out)
 }
 
-/// A nonce not minted before, and the place its cut takes.
-fn new_cut(session: &SessionKey, op: &Operation) -> (String, u64) {
+/// A nonce not minted before, and the place its cut takes. Seeded (see
+/// [`super::header_ids::MintSeed`]), the nonce is drawn from the seed, the session's
+/// count of cuts, `op` and the call, and the place is that count's: the same seed and
+/// calls give the same tokens in a fresh runtime, so the next page's request, whose
+/// query seeds its answer, is the same too. Not seeded, the nonce is drawn from the
+/// clock and the place from a counter of the process.
+fn new_cut(
+    rt: &MockRuntime,
+    (session, call): (&SessionKey, &OperationCall),
+    op: &Operation,
+) -> (String, u64) {
+    let seed = super::header_ids::MintSeed::new(rt, session, call);
+    if let Some((derived, count)) = seed.next(rt, (INTERNAL_TYPE, PREFIX)) {
+        let parts = mb_engine::seed::call_parts(call);
+        let more = mb_engine::seed::derive(
+            derived,
+            &["cut", &op.id],
+            &[&parts[0], &parts[1], &parts[2]],
+        );
+        let hex = format!("{derived:016x}{more:016x}");
+        return (hex[..NONCE_LEN].to_string(), count % MAX_CUTS);
+    }
     let count = MINTED.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1743,7 +1763,7 @@ fn tokened(
             .try_fold(body, |at, name| at.get(name))
             .cloned()
     });
-    let (nonce, place) = new_cut(&plan.session, op);
+    let (nonce, place) = new_cut(rt, (&plan.session, call), op);
     let first = token(&nonce, place, 0);
     let header = match &slot.header {
         Some(name) => match next_header(name, slot.url.as_deref(), (call, &slot.param), &first) {

@@ -69,6 +69,7 @@ mod related_writes;
 mod repro234;
 mod routing;
 mod runtime;
+mod seeded_mints;
 mod sibling_writes;
 mod skeletal_answers;
 mod soap;

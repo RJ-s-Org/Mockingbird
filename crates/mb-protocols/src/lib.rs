@@ -411,6 +411,8 @@ pub struct MockRuntime {
     _value_feed: Option<call::ValueFeed>,
     /// Which types each session was last seen writing (see [`call::WrittenTypes`]).
     written_types: call::WrittenTypes,
+    /// How many ids each session minted (see [`call::MintCounts`]).
+    mint_counts: call::MintCounts,
     /// Which stored resources are a plain read's own answer (see
     /// [`call::OwnReads`]).
     own_reads: call::OwnReads,
@@ -541,6 +543,7 @@ impl MockRuntime {
             value_index,
             _value_feed: value_feed,
             written_types: call::WrittenTypes::default(),
+            mint_counts: call::MintCounts::default(),
             own_reads: call::OwnReads::default(),
             collections: call::Collections::default(),
             described: call::Described::default(),
@@ -658,6 +661,11 @@ impl MockRuntime {
     /// Which types each session was last seen writing.
     pub(crate) fn written_types(&self) -> &call::WrittenTypes {
         &self.written_types
+    }
+
+    /// How many ids each session minted.
+    pub(crate) fn mint_counts(&self) -> &call::MintCounts {
+        &self.mint_counts
     }
 
     /// Which stored resources are a plain read's own answer.

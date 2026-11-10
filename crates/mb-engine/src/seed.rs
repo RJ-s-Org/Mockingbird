@@ -21,6 +21,11 @@
 //! with identical LLM answers then answer alike. Request bodies kept as
 //! context are scrubbed at random.
 //!
+//! The ids a mock mints for the records it stores (see `mb-protocols`) are
+//! drawn from the same seed, mixed with the contract, the mock, the type,
+//! the member, the call the session first minted in and how many the session
+//! drew before; so is the token a page cut short is served the rest by.
+//!
 //! Generated dates and times are drawn back from [`SEEDED_NOW`] instead of
 //! the clock, so a seeded answer does not change from one day to the next.
 //! The values are reproducible with the same Mockingbird version: a new
@@ -90,7 +95,8 @@ impl Draws {
 
 /// `seed` mixed with `labels` and `parts`, hashed with a fixed function so
 /// that the result does not vary between processes.
-pub(crate) fn derive(seed: u64, labels: &[&str], parts: &[&Value]) -> u64 {
+#[must_use]
+pub fn derive(seed: u64, labels: &[&str], parts: &[&Value]) -> u64 {
     let mut h = Fnv::new();
     h.bytes(&seed.to_le_bytes());
     for label in labels {
@@ -125,7 +131,8 @@ pub(crate) fn repair_rng_for(seed: Option<u64>, label: &str, value: &Value) -> S
 
 /// The request inputs of `call` that decide its answer: path parameters,
 /// query and body (headers do not).
-pub(crate) fn call_parts(call: &OperationCall) -> [Value; 3] {
+#[must_use]
+pub fn call_parts(call: &OperationCall) -> [Value; 3] {
     [
         Value::Object(call.path_params.clone()),
         Value::Object(call.query.clone()),
