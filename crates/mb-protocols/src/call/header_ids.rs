@@ -24,11 +24,12 @@ const ATTEMPTS: u32 = 8;
 
 /// What seeds the ids a call mints: the call's [`mb_engine::SEED_HEADER`], else the
 /// engine's faker seed, and the session the call is in. With a seed, each draw is
-/// seeded by it mixed with the contract, the type, the member, the session and how many
-/// ids of that member the session drew before ([`crate::call::MintCounts`]): the same
-/// seed and the same calls in the same order mint the same ids, and every draw in a
-/// session (a retry after a collision too) differs. Without one the draws are random,
-/// as the engine's are.
+/// seeded by it mixed with the contract, the mock, the type, the member, the session's
+/// place among those that minted and how many ids of that member it drew before
+/// ([`crate::call::MintCounts`]): the same seed and the same calls in the same order mint
+/// the same ids in a fresh runtime, and every draw (a retry after a collision too)
+/// differs from the others of the runtime. Not the session's name, which a client often
+/// makes of the time. Without a seed the draws are random, as the engine's are.
 #[derive(Clone, Copy)]
 pub(super) struct MintSeed<'a> {
     seed: Option<u64>,
@@ -53,7 +54,7 @@ impl<'a> MintSeed<'a> {
         let Some(seed) = self.seed else {
             return (rand::make_rng::<StdRng>(), Faker::default());
         };
-        let drawn = rt.mint_counts().next(self.session, t, field);
+        let (ordinal, drawn) = rt.mint_counts().next(self.session, t, field);
         let s = self.session;
         let labels = [
             rt.bundle().source_digest.as_str(),
@@ -62,9 +63,9 @@ impl<'a> MintSeed<'a> {
             field,
             &s.workspace,
             &s.mock,
-            &s.session,
         ];
-        let derived = mb_engine::seed::derive(seed, &labels, &[&Value::from(drawn)]);
+        let counts = [Value::from(ordinal), Value::from(drawn)];
+        let derived = mb_engine::seed::derive(seed, &labels, &[&counts[0], &counts[1]]);
         let faker = Faker::default().with_now(mb_engine::seed::SEEDED_NOW);
         (StdRng::seed_from_u64(derived), faker)
     }

@@ -234,34 +234,54 @@ impl WrittenTypes {
 /// Sessions [`MintCounts`] holds at most; it is emptied when full.
 const MAX_MINTING_SESSIONS: usize = 4096;
 
-/// How many ids each session has drawn through this runtime, by type and member: the
-/// count seeds the next draw ([`header_ids::MintSeed`]), so successive mints in one
-/// session differ, a retry after a collision draws anew, and the same calls in the same
-/// order in a fresh runtime draw the same ids.
+/// How many ids each session has drawn through this runtime, by type and member, and
+/// in which order the sessions first drew one: the two seed the next draw
+/// ([`header_ids::MintSeed`]), so successive mints in one session differ, a retry after
+/// a collision draws anew, sessions differ from each other, and the same calls in the
+/// same order in a fresh runtime draw the same ids whatever the sessions are named (a
+/// client's session names often hold the time).
 #[derive(Debug, Default)]
-pub(crate) struct MintCounts(std::sync::Mutex<HashMap<SessionKey, MemberCounts>>);
+pub(crate) struct MintCounts(std::sync::Mutex<Minting>);
 
-/// One session's mints, by type and member.
-type MemberCounts = HashMap<(String, String), u64>;
+#[derive(Debug, Default)]
+pub(crate) struct Minting {
+    sessions: HashMap<SessionKey, SessionMints>,
+    /// Sessions that have drawn an id, ever.
+    seen: u64,
+}
+
+/// One session's place among those that drew an id, and its draws by type and member.
+#[derive(Debug)]
+struct SessionMints {
+    ordinal: u64,
+    counts: HashMap<(String, String), u64>,
+}
 
 impl MintCounts {
-    /// The number of ids of type `t`'s member `field` `session` drew before this one,
-    /// counted.
-    pub(super) fn next(&self, session: &SessionKey, t: &str, field: &str) -> u64 {
-        let mut counts = self
+    /// The place of `session` among the sessions that drew an id, and the number of
+    /// ids of type `t`'s member `field` it drew before this one, counted.
+    pub(super) fn next(&self, session: &SessionKey, t: &str, field: &str) -> (u64, u64) {
+        let mut minting = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if counts.len() >= MAX_MINTING_SESSIONS && !counts.contains_key(session) {
-            counts.clear();
+        let Minting { sessions, seen } = &mut *minting;
+        if sessions.len() >= MAX_MINTING_SESSIONS && !sessions.contains_key(session) {
+            sessions.clear();
         }
-        let count = counts
-            .entry(session.clone())
-            .or_default()
+        let mints = sessions.entry(session.clone()).or_insert_with(|| {
+            *seen = seen.saturating_add(1);
+            SessionMints {
+                ordinal: *seen,
+                counts: HashMap::new(),
+            }
+        });
+        let count = mints
+            .counts
             .entry((t.to_string(), field.to_string()))
             .or_default();
         let n = *count;
         *count = count.saturating_add(1);
-        n
+        (mints.ordinal, n)
     }
 }

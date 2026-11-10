@@ -22,8 +22,9 @@
 //! context are scrubbed at random.
 //!
 //! The ids a mock mints for the records it stores (see `mb-protocols`) are
-//! drawn from the same seed, mixed with the contract, the type, the member,
-//! the session and how many the session drew before.
+//! drawn from the same seed, mixed with the contract, the mock, the type,
+//! the member, the session's place among those that minted and how many the
+//! session drew before.
 //!
 //! Generated dates and times are drawn back from [`SEEDED_NOW`] instead of
 //! the clock, so a seeded answer does not change from one day to the next.

@@ -153,8 +153,8 @@ async fn the_same_seed_and_calls_mint_the_same_ids_in_a_fresh_runtime() {
 }
 
 /// Each session counts its own mints: its ids differ from another session's and from
-/// its own earlier ones, and repeat in a fresh runtime whatever the other sessions did
-/// in between.
+/// its own earlier ones, and repeat in a fresh runtime for the same calls whatever the
+/// sessions are named (a client's session names often hold the time).
 #[tokio::test]
 async fn successive_mints_and_other_sessions_differ() {
     let (a, b) = (router(1), router(1));
@@ -165,10 +165,10 @@ async fn successive_mints_and_other_sessions_differ() {
     let second = order(&a, "s1").await;
     assert_ne!(first["id"], second["id"]);
     assert_ne!(first["lines"][0], first["lines"][1]);
-    // The other order of sessions in a fresh runtime: each session's ids repeat.
-    assert_eq!(things(&b, "s2", 5).await, two);
-    assert_eq!(things(&b, "s1", 5).await, one);
-    assert_eq!(order(&b, "s1").await, first);
+    // The same calls in a fresh runtime, in sessions named otherwise: the same ids.
+    assert_eq!(things(&b, "run2-s1", 5).await, one);
+    assert_eq!(things(&b, "run2-s2", 5).await, two);
+    assert_eq!(order(&b, "run2-s1").await, first);
 }
 
 #[tokio::test]
