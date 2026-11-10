@@ -77,7 +77,13 @@ SKIP = ("journeys_blind14", "journeys_blind15")
 DEFAULT_MODEL = "claude-sonnet-5-5"
 # MCP tools the agent may not call: they start, stop or reconfigure servers (the harness
 # owns the server the agent works on), open a browser page, or call an LLM provider.
-BLOCKED = ("start_server", "stop_server", "init_config", "configure_llm", "test_llm", "open_key_setup")
+BLOCKED = ("start_server", "stop_server", "init_config", "configure_llm", "test_llm", "open_key_setup",
+           "put_llm_profile", "delete_llm_profile")
+# The deciding call of a failing check reached the model: only then can a real model change it.
+MODEL_REACHED = ("llm", "llm-repaired", "repaired", "patched", "fallback")
+# Tools whose `path` is an HTTP request path on the mock, not a file.
+REQUEST_PATH_TOOLS = ("call_mock", "get_request", "list_requests", "admin_api")
+FILE_KEYS = ("source", "path", "file", "file_path", "contract", "dir", "directory", "url")
 SNAPSHOT_PARTS = "scenarios,chaos,limits,world"
 # A deciding call answered by the engine itself (no model call): its result is the same
 # on a real model, so a failure there is floor.
@@ -342,6 +348,45 @@ def isolation_problems(init, plugin_dir):
     return problems
 
 
+def input_problems(lines, roots):
+    """Tool inputs that reach outside the task: an http(s) URL to anything but this machine,
+    or a file path (absolute, or with `..`) outside `roots` (the task and plugin
+    directories). --restricted confines Read, Grep and Glob; this audits the MCP tools
+    (`import_contract` reads local paths and URLs), so a run that escaped is not scored."""
+    roots = [os.path.realpath(r) for r in roots]
+    problems = []
+
+    def walk(tool, key, v):
+        if isinstance(v, dict):
+            for k, x in v.items():
+                walk(tool, k, x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(tool, key, x)
+        elif isinstance(v, str):
+            m = re.match(r"(?i)^\s*(https?|file)://([^/:?#]*)", v)
+            if m and not (m.group(1).lower() != "file" and m.group(2).lower() in ("127.0.0.1", "localhost", "[::1]")):
+                problems.append(f"{tool}: {key}={v[:120]}")
+            elif str(key).lower() in FILE_KEYS and tool not in REQUEST_PATH_TOOLS and not m:
+                path = os.path.expanduser(v.strip())
+                if os.path.isabs(path) or ".." in path.split(os.sep):
+                    real = os.path.realpath(path if os.path.isabs(path) else os.path.join(roots[0], path))
+                    if not any(real == r or real.startswith(r + os.sep) for r in roots):
+                        problems.append(f"{tool}: {key}={v[:120]}")
+
+    for line in lines:
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict) or ev.get("type") != "assistant":
+            continue
+        for b in (ev.get("message") or {}).get("content") or []:
+            if isinstance(b, dict) and b.get("type") == "tool_use" and str(b.get("name") or "").startswith(MCP_PREFIX):
+                walk(str(b["name"])[len(MCP_PREFIX):], "", b.get("input") or {})
+    return [f"tool input outside the task: {p}" for p in problems]
+
+
 def claude_command(args, prompt, srv, tool_names, plugin_dir=None):
     mcp = {"mcpServers": {"mockingbird": {"command": args.binary, "args": ["--admin-url", srv.admin, "mcp"],
                                           "env": {"MB_DATA_URL": srv.data}}}}
@@ -436,18 +481,31 @@ def built_state(api):
     return out
 
 
+def usable(result):
+    """Whether a stage-1 result is a build to score: no error (a session the caps ended
+    is not an error) and a snapshot. An errored build (an infra failure, a timeout, an
+    isolation problem, a failed export) is built again and never loaded."""
+    return isinstance(result, dict) and not result.get("is_error") and result.get("snapshot") == "snapshot"
+
+
+def cached_result(tdir):
+    try:
+        with open(os.path.join(tdir, "result.json")) as f:
+            r = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return r if usable(r) and os.path.isdir(os.path.join(tdir, "snapshot")) else None
+
+
 def run_task(task, args, keydir, surf):
-    """Builds one task (or returns its cached result): the agent run, the snapshot export,
-    and the result written to `<keydir>/<task id>/`."""
+    """Builds one task (or returns its usable cached result): the agent run, the snapshot
+    export, and the result written to `<keydir>/<task id>/`."""
     tdir = os.path.join(keydir, task["id"])
-    res_path = os.path.join(tdir, "result.json")
     with wa.file_lock(tdir + ".lock"):
-        if not args.refresh and os.path.exists(res_path):
-            with open(res_path) as f:
-                cached = json.load(f)
-            if not cached.get("is_error") or os.path.isdir(os.path.join(tdir, "snapshot")):
-                cached["cached"] = True
-                return cached
+        cached = None if args.refresh else cached_result(tdir)
+        if cached:
+            cached["cached"] = True
+            return cached
         base = tempfile.mkdtemp(prefix="mb-e2e-")
         try:
             work = write_task(task, os.path.join(base, "work"))
@@ -478,7 +536,7 @@ def run_task(task, args, keydir, surf):
                                       "--dir", os.path.join(stage, "snapshot"), "--include", SNAPSHOT_PARTS],
                                      capture_output=True, text=True, env=wa.scrubbed_env(), timeout=120)
             result = result or {}
-            problems = isolation_problems(init, plugin)
+            problems = isolation_problems(init, plugin) + input_problems(lines, [work, plugin])
             # The caps end a session with an error subtype; what it built still counts.
             capped = result.get("subtype") in ("error_max_turns", "error_max_budget_usd")
             if error is None and code != 0 and not capped:
@@ -520,17 +578,15 @@ def run_task(task, args, keydir, surf):
             shutil.rmtree(base, ignore_errors=True)
 
 
-def spent(keydir, since):
-    """Dollars spent by results written at or after `since` (epoch seconds) under keydir."""
-    total = 0.0
-    for root, _, files in os.walk(keydir):
-        if "result.json" in files and os.path.getmtime(os.path.join(root, "result.json")) >= since:
-            try:
-                with open(os.path.join(root, "result.json")) as f:
-                    total += float(json.load(f).get("cost_usd") or 0)
-            except (OSError, ValueError, TypeError):
-                pass
-    return total
+def charge(result, budget):
+    """What a task run cost: its reported cost, else (a timeout, a crash, no result event)
+    its whole budget, since the agent may have spent up to it."""
+    if result.get("cached") or result.get("skipped"):
+        return 0.0
+    try:
+        return float(result["cost_usd"])
+    except (KeyError, TypeError, ValueError):
+        return float(budget)
 
 
 def build(args):
@@ -541,6 +597,10 @@ def build(args):
         ts = {k: t for k, t in ts.items() if t["id"] in args.task or t["mock"] in args.task}
     surf = surface(args.binary)
     key = cache_key(surf, args.model, args.budget, args.max_turns, args.key_binary)
+    root = os.path.realpath(args.cache)
+    if root == wa.REPO or root.startswith(wa.REPO + os.sep):
+        raise SystemExit(f"e2e: --cache {args.cache} is inside the repository; its transcripts must never be "
+                         "committed, so keep the cache outside it")
     keydir = os.path.join(os.path.abspath(args.cache), key)
     os.makedirs(keydir, exist_ok=True)
     wa.write_json_atomic(os.path.join(keydir, "key.json"),
@@ -549,19 +609,32 @@ def build(args):
                           "max_turns": args.max_turns, "blocked": list(BLOCKED), "key_binary": args.key_binary,
                           "binary_sha256": surf["binary_sha256"] if args.key_binary else None})
     print(f"e2e: {len(ts)} tasks from {len(suites)} suites, cache {keydir}", file=sys.stderr)
-    since, lock, stop = time.time(), threading.Lock(), threading.Event()
+    lock, stop = threading.Lock(), threading.Event()
+    ledger = {"spent": 0.0, "running": 0}
 
     def one(task):
+        if not args.refresh:
+            cached = cached_result(os.path.join(keydir, task["id"]))
+            if cached:
+                cached["cached"] = True
+                return report_task(cached)
         with lock:
-            # Room for every task in flight at its full cap before starting another.
-            if stop.is_set() or spent(keydir, since) + args.budget * args.jobs > args.cap:
+            # Room for every task in flight, this one included, at its full budget.
+            if stop.is_set() or ledger["spent"] + args.budget * (ledger["running"] + 1) > args.cap:
                 stop.set()
                 return {"task": task["id"], "skipped": "cap"}
+            ledger["running"] += 1
         try:
             r = run_task(task, args, keydir, surf)
         except Exception as e:  # one broken task must not stop the others
             r = {"task": task["id"], "is_error": True, "error": f"{type(e).__name__}: {e}"[:500]}
-        print(f"e2e: {r['task']}: {'cached ' if r.get('cached') else ''}"
+        with lock:
+            ledger["running"] -= 1
+            ledger["spent"] += charge(r, args.budget)
+        return report_task(r)
+
+    def report_task(r):
+        print(f"e2e: {r.get('task')}: {'cached ' if r.get('cached') else ''}"
               f"${float(r.get('cost_usd') or 0):.2f}, {r.get('num_turns')} turns, "
               f"{len(r.get('tool_errors') or [])} tool errors, mocks {[m['name'] for m in r.get('built') or []]}"
               f"{' ERROR ' + str(r.get('error')) if r.get('is_error') else ''}", file=sys.stderr)
@@ -570,7 +643,8 @@ def build(args):
     with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
         rows = list(pool.map(one, list(ts.values())))
     skipped = [r["task"] for r in rows if r.get("skipped")]
-    print(f"e2e: spent ${spent(keydir, since):.2f} this run (cap ${args.cap:.2f}); "
+    print(f"e2e: spent ${ledger['spent']:.2f} this run (cap ${args.cap:.2f}; a run with no reported cost "
+          f"counts its whole budget); "
           f"{sum(1 for r in rows if r.get('is_error'))} errors; {len(skipped)} skipped at the cap", file=sys.stderr)
     print(keydir)
     return 3 if skipped else 0
@@ -581,7 +655,7 @@ def build(args):
 def find_result(keydir, sha):
     """The task directory under keydir whose result is for contract `sha`, or None."""
     for d in sorted(os.listdir(keydir)) if os.path.isdir(keydir) else []:
-        if d.endswith(sha[:12]) and os.path.exists(os.path.join(keydir, d, "result.json")):
+        if d.endswith("-" + sha[:12]) and os.path.exists(os.path.join(keydir, d, "result.json")):
             return os.path.join(keydir, d)
     return None
 
@@ -612,18 +686,20 @@ def choose_mock(snap, sha):
     return pick, f"first of {len(pool)} mocks" + (" with a world" if with_world else "")
 
 
-def rewrite(snap, pick, name, prefix, persona, dest):
+def rewrite(snap, pick, name, prefix, dest, bench=None):
     """A snapshot directory holding only the agent's mock `pick`, renamed to `name` with the
-    route prefix the journeys call (and the suite's persona, when it sets one)."""
+    route prefix the journeys call. Everything else is the agent's (its persona too: the
+    suite's would hand the mock facts the journeys check). `bench` adds the harness's
+    per-mock settings the other tiers get from the config (`llm_profile`, `faker_seed`)."""
     os.makedirs(os.path.join(dest, "mocks"))
     with open(os.path.join(snap, "mocks", f"{pick}.json")) as f:
         m = json.load(f)
     m["name"], m["route_prefix"] = name, prefix
-    if persona:
-        m["persona"] = persona
+    m.update(bench or {})
     if m.get("contract"):
         src = os.path.join(snap, m["contract"])
-        ext = os.path.basename(src).split(".", 1)[1] if "." in os.path.basename(src) else "yaml"
+        stem = os.path.basename(src)[len(pick):] if os.path.basename(src).startswith(pick + ".") else None
+        ext = stem[1:] if stem else (os.path.basename(src).split(".", 1)[1] if "." in os.path.basename(src) else "yaml")
         os.makedirs(os.path.join(dest, "contracts"), exist_ok=True)
         shutil.copyfile(src, os.path.join(dest, "contracts", f"{name}.{ext}"))
         m["contract"] = f"contracts/{name}.{ext}"
@@ -639,21 +715,29 @@ def rewrite(snap, pick, name, prefix, persona, dest):
     return dest
 
 
-def load_snapshots(srv, binary, keydir, suite, mocks, out=None):
+LOADED = "imported"
+
+
+def load_snapshots(srv, binary, keydir, suite, mocks, out=None, tag_journeys=False):
     """Stage 2: imports, for each of the suite's mocks, the stage-1 snapshot of its contract
     into the running server with `mockingbird snapshot import`, renamed to the mock the
-    journeys call. A contract with no result, or whose agent built no mock, is left
-    unmocked (its journeys fail: the product gave the user nothing). A failed import fails
-    the suite. One record per mock goes to <out>/world-applied.jsonl."""
+    journeys call. Any other outcome leaves that mock unmocked, so every check of its
+    journeys runs and fails: `no_snapshot` (no result), `build_error` (the result is not
+    usable: rebuild it), `nothing_built` (the agent built no mock: the product gave the
+    user nothing) and `import_failed`. Every status but `imported` and `nothing_built` is
+    the harness's to fix, and `e2e.py report` lists them. One record per mock goes to
+    <out>/world-applied.jsonl."""
     recs = []
-    for name, (contract, prefix, persona) in mocks.items():
+    for name, (contract, prefix, _persona) in mocks.items():
         sha = wa.sha256_file(os.path.join(wa.REPO, contract))
         tdir = find_result(keydir, sha)
         rec = {"ts": wa.utc_now(), "suite": suite, "mock": name, "world": "e2e", "contract": contract,
                "contract_sha256": sha, "task": os.path.basename(tdir) if tdir else None}
         snap = os.path.join(tdir, "snapshot") if tdir else None
-        if not snap or not os.path.isdir(snap):
+        if not tdir:
             rec["status"] = "no_snapshot"
+        elif not cached_result(tdir):
+            rec["status"] = "build_error"
         else:
             pick, why = choose_mock(snap, sha)
             rec.update({"agent_mock": pick, "chosen": why})
@@ -662,7 +746,8 @@ def load_snapshots(srv, binary, keydir, suite, mocks, out=None):
             else:
                 tmp = tempfile.mkdtemp(prefix="mb-e2e-load-")
                 try:
-                    d = rewrite(snap, pick, name, prefix, persona, os.path.join(tmp, "snap"))
+                    bench = {"faker_seed": 1, "llm_profile": f"bench_{name}"} if tag_journeys else None
+                    d = rewrite(snap, pick, name, prefix, os.path.join(tmp, "snap"), bench)
                     rec["world_file"] = os.path.exists(os.path.join(d, "worlds", f"{name}.json"))
                     rec["scenarios"] = len(os.listdir(os.path.join(d, "scenarios", name))) \
                         if os.path.isdir(os.path.join(d, "scenarios", name)) else 0
@@ -674,16 +759,15 @@ def load_snapshots(srv, binary, keydir, suite, mocks, out=None):
                     shutil.rmtree(tmp, ignore_errors=True)
                 rec["import_exit"] = p.returncode
                 rec["import_output"] = (p.stdout + p.stderr).strip()[-1500:]
-                if p.returncode != 0:
-                    rec["status"] = "import_failed"
-                    if out:
-                        wa.append_jsonl(os.path.join(out, "world-applied.jsonl"), rec)
-                    raise RuntimeError(f"snapshot import of {name} ({rec['task']}) failed: {rec['import_output'][-400:]}")
-                rec["status"] = "imported"
-                if rec["world_file"]:
-                    w = wa.read_world(srv.api, name)
-                    rec["refused"] = w.get("refused") or []
-                    rec["refused_n"] = len(rec["refused"])
+                rec["status"] = LOADED if p.returncode == 0 else "import_failed"
+                m = re.search(r"\{.*\}", p.stdout, re.S)
+                try:
+                    summary = json.loads(m.group(0)) if m else {}
+                except ValueError:
+                    summary = {}
+                refused = (summary.get("refused_world_entries") or {}).get(name) if isinstance(summary, dict) else None
+                rec["refused"] = refused or []
+                rec["refused_n"] = len(rec["refused"])
         if out:
             wa.append_jsonl(os.path.join(out, "world-applied.jsonl"), rec)
         print(f"  e2e {name}: {rec['status']}" + (f" ({rec.get('agent_mock')}, {rec.get('chosen')})"
@@ -723,14 +807,17 @@ def paid_passes(dirs):
 
 
 def summarize(rows, paid=None):
-    """Per (tier, suite): pass, total, model-dependent and floor under the engine-decided rule."""
+    """Per (tier, suite): pass, total, model-dependent and floor. A failure is model-dependent
+    only when its deciding call reached the model (MODEL_REACHED) and, with paid runs, some
+    paid run passed it; every other failure (decided by the engine, or never reached: no
+    mock, a suite error) is floor."""
     by = {}
     for (tier, suite, case), r in rows.items():
         s = by.setdefault((tier, suite), {"passed": 0, "total": 0, "model_dependent": [], "floor": []})
         s["total"] += 1
         if r.get("ok"):
             s["passed"] += 1
-        elif r.get("source") not in ENGINE_DECIDED and (paid is None or (suite, case) in paid):
+        elif r.get("source") in MODEL_REACHED and (paid is None or (suite, case) in paid):
             s["model_dependent"].append(case)
         else:
             s["floor"].append(case)
@@ -739,6 +826,23 @@ def summarize(rows, paid=None):
         s["rate"] = round(100 * s["passed"] / n, 1)
         s["projected"] = round(100 * (s["passed"] + len(s["model_dependent"])) / n, 1)
     return by
+
+
+def load_statuses(run):
+    """{status: [(suite, mock, task)]} of a stage-2 run's world-applied.jsonl e2e records."""
+    out = {}
+    for root, _, files in os.walk(run):
+        if "world-applied.jsonl" not in files:
+            continue
+        with open(os.path.join(root, "world-applied.jsonl")) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("world") == "e2e":
+                    out.setdefault(r.get("status"), []).append((r.get("suite"), r.get("mock"), r.get("task")))
+    return out
 
 
 def stage1_summary(keydir):
@@ -754,7 +858,7 @@ def stage1_summary(keydir):
                          "refused": len(r.get("refused_in_writes") or []),
                          "skills": sorted({s.split("/")[0] for s in r.get("skill_reads") or []}),
                          "mocks": [m["name"] for m in r.get("built") or []], "subtype": r.get("subtype"),
-                         "error": r.get("error")})
+                         "error": r.get("error"), "binary_sha256": r.get("binary_sha256")})
     return rows
 
 
@@ -778,9 +882,19 @@ def report(args):
               f"{sum(r['refused'] for r in s1)} refused world entries, "
               f"{sum(1 for r in s1 if not r['mocks'])} tasks built no mock, "
               f"{sum(1 for r in s1 if r['error'])} errors")
+        bins = sorted({str(r["binary_sha256"])[:12] for r in s1})
+        print(f"snapshots built on binary {', '.join(bins)}" + (" (MIXED)" if len(bins) > 1 else ""))
+    loads = load_statuses(args.run)
+    if loads:
+        print("\nstage 2 loads: " + ", ".join(f"{k} {len(v)}" for k, v in sorted(loads.items(), key=lambda kv: str(kv[0]))))
+        for status, rows in sorted(loads.items(), key=lambda kv: str(kv[0])):
+            if status not in (LOADED, "nothing_built"):
+                for suite, mock, task in rows:
+                    print(f"  NOT SCORED FAIRLY ({status}): {suite}/{mock} {task or ''}")
     if args.json:
         with open(args.json, "w") as f:
-            json.dump({"suites": {f"{s}@{t}": v for (t, s), v in rep.items()}, "stage1": s1}, f, indent=1)
+            json.dump({"suites": {f"{s}@{t}": v for (t, s), v in rep.items()}, "stage1": s1,
+                       "loads": {str(k): v for k, v in loads.items()}}, f, indent=1)
     return 0
 
 

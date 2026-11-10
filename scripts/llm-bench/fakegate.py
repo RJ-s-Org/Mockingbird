@@ -213,8 +213,8 @@ def side_meta(tree, binary, suites, models, cache, e2e=None):
 
 
 def e2e_meta(tree, suites, keydir):
-    """The e2e tier's inputs: the stage-1 snapshot (its result's hash) of every contract of
-    each suite. A suite with a contract that has none is left out of the tier."""
+    """The e2e tier's inputs: the stage-1 snapshot (a hash of its files) of every contract of
+    each suite. A suite with a contract that has no usable build is left out of the tier."""
     if not os.path.exists(os.path.join(tree, "scripts", "llm-bench", "e2e.py")):
         # A checkout from before the e2e tier: it cannot run it.
         return {"cache": keydir, "suites": [], "uncovered": list(suites), "results": {},
@@ -225,7 +225,8 @@ def e2e_meta(tree, suites, keydir):
         got = {}
         for c in suite_contracts(tree, s):
             d = e2e_mod.find_result(keydir, world_author.sha256_file(c))
-            got[os.path.relpath(c, tree)] = world_author.sha256_file(os.path.join(d, "result.json")) if d else None
+            ok = d and e2e_mod.cached_result(d)
+            got[os.path.relpath(c, tree)] = e2e_mod.tree_sha256(os.path.join(d, "snapshot")) if ok else None
         (covered if all(got.values()) else uncovered).append(s)
         results[s] = got
     return {"cache": keydir, "suites": covered, "uncovered": uncovered, "results": results}

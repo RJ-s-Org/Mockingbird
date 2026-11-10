@@ -145,13 +145,21 @@ class TranscriptTest(unittest.TestCase):
         self.assertEqual(e2e.transcript_metrics(lines)["retries"], 0)
 
 
+def usable_result(d, sha, name="x"):
+    """A usable stage-1 task directory for contract `sha` under keydir `d`."""
+    t = os.path.join(d, f"{name}-{sha[:12]}")
+    write(os.path.join(t, "result.json"), json.dumps({"is_error": False, "snapshot": "snapshot"}))
+    os.makedirs(os.path.join(t, "snapshot"), exist_ok=True)
+    return t
+
+
 def snapshot(d, mocks, contract_text="openapi: 3.0.0\n"):
     """A `snapshot export` directory: {agent mock name: {world?, scenarios?, sessions?}}."""
     for name, parts in mocks.items():
         write(os.path.join(d, "contracts", f"{name}.yaml"), parts.get("contract", contract_text))
         write(os.path.join(d, "mocks", f"{name}.json"),
               json.dumps({"name": name, "route_prefix": f"/{name}", "consistency": "strict",
-                          "contract": f"contracts/{name}.yaml"}))
+                          "persona": parts.get("persona"), "contract": f"contracts/{name}.yaml"}))
         if parts.get("world"):
             write(os.path.join(d, "worlds", f"{name}.json"), json.dumps({"version": 1}))
         for s in parts.get("scenarios", []):
@@ -179,13 +187,17 @@ class SnapshotTest(unittest.TestCase):
     def test_the_rewrite_renames_the_mock_to_what_the_journeys_call(self):
         with tempfile.TemporaryDirectory() as d:
             snap = snapshot(os.path.join(d, "s"), {"my-acme": {"world": True, "scenarios": ["happy"],
-                                                               "sessions": ["default"]}, "other": {}})
-            out = e2e.rewrite(snap, "my-acme", "acme", "/acme", "a persona", os.path.join(d, "out"))
+                                                               "sessions": ["default"], "persona": "agent's"},
+                                                   "other": {}})
+            out = e2e.rewrite(snap, "my-acme", "acme", "/acme", os.path.join(d, "out"),
+                              {"faker_seed": 1, "llm_profile": "bench_acme"})
             self.assertEqual(os.listdir(os.path.join(out, "mocks")), ["acme.json"])
             with open(os.path.join(out, "mocks", "acme.json")) as f:
                 m = json.load(f)
+            # The agent's persona stays: the suite's would hand the mock facts the journeys check.
             self.assertEqual((m["name"], m["route_prefix"], m["persona"], m["consistency"]),
-                             ("acme", "/acme", "a persona", "strict"))
+                             ("acme", "/acme", "agent's", "strict"))
+            self.assertEqual((m["faker_seed"], m["llm_profile"]), (1, "bench_acme"))
             self.assertEqual(m["contract"], "contracts/acme.yaml")
             self.assertTrue(os.path.exists(os.path.join(out, m["contract"])))
             self.assertTrue(os.path.exists(os.path.join(out, "worlds", "acme.json")))
@@ -199,25 +211,140 @@ class SnapshotTest(unittest.TestCase):
             self.assertEqual(e2e.find_result(d, sha), os.path.join(d, f"acme-{sha[:12]}"))
             self.assertIsNone(e2e.find_result(d, "cd" * 32))
 
+    def test_only_an_error_free_build_with_a_snapshot_is_reused(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = usable_result(d, "ab" * 32)
+            self.assertTrue(e2e.cached_result(t))
+            for bad in ({"is_error": True, "snapshot": "snapshot", "error": "isolation: x"},
+                        {"is_error": True, "snapshot": "snapshot", "error": "timed out"},
+                        {"is_error": False, "snapshot": None}):
+                write(os.path.join(t, "result.json"), json.dumps(bad))
+                self.assertIsNone(e2e.cached_result(t))
+            # A session the caps ended is not an error: what it built counts.
+            write(os.path.join(t, "result.json"), json.dumps({"is_error": False, "capped": True,
+                                                               "subtype": "error_max_turns", "snapshot": "snapshot"}))
+            self.assertTrue(e2e.cached_result(t))
+
+
+class FakeSrv:
+    admin = "http://127.0.0.1:9"
+    api = admin + "/api/v1/workspaces/default"
+
+
+def fake_binary(d, code):
+    """An executable standing in for `mockingbird snapshot import`: prints a summary, exits `code`."""
+    path = write(os.path.join(d, "mb"), "#!/bin/sh\necho '{\"created\": [\"x\"], \"refused_world_entries\": "
+                 "{\"travel\": [{\"path\": \"/p\"}]}}'\nexit %d\n" % code)
+    os.chmod(path, 0o755)
+    return path
+
+
+class LoadTest(unittest.TestCase):
+    MOCKS = {"travel": ("docs/benchmarks/contracts/travel.openapi.yaml", "/travel", None)}
+
+    def load(self, keydir, binary, out):
+        return e2e.load_snapshots(FakeSrv(), binary, keydir, "s", self.MOCKS, out)[0]
+
+    def test_every_outcome_is_recorded_and_none_aborts_the_suite(self):
+        sha = world_author.sha256_file(os.path.join(world_author.REPO, self.MOCKS["travel"][0]))
+        with tempfile.TemporaryDirectory() as d:
+            keydir, out = os.path.join(d, "k"), os.path.join(d, "out")
+            os.makedirs(out)
+            self.assertEqual(self.load(keydir, "/bin/false", out)["status"], "no_snapshot")
+            t = usable_result(keydir, sha)
+            write(os.path.join(t, "result.json"), json.dumps({"is_error": True, "snapshot": "snapshot"}))
+            self.assertEqual(self.load(keydir, "/bin/false", out)["status"], "build_error")
+            usable_result(keydir, sha)
+            self.assertEqual(self.load(keydir, "/bin/false", out)["status"], "nothing_built")
+            snapshot(os.path.join(t, "snapshot"), {"travel": {"world": True}})
+            failed = self.load(keydir, fake_binary(d, 1), out)
+            self.assertEqual(failed["status"], "import_failed")
+            ok = self.load(keydir, fake_binary(d, 0), out)
+            self.assertEqual((ok["status"], ok["agent_mock"], ok["refused_n"]), ("imported", "travel", 1))
+            loads = e2e.load_statuses(out)
+            self.assertEqual(sorted(loads), ["build_error", "import_failed", "imported", "no_snapshot",
+                                             "nothing_built"])
+
+
+class BuildTest(unittest.TestCase):
+    def args(self, cache, **kw):
+        a = dict(binary=sys.executable, model="m", budget=1.0, max_turns=60, key_binary=False, cache=cache,
+                 suite=["consistency"], task=None, jobs=1, cap=2.5, timeout=1, refresh=False, claude="claude")
+        a.update(kw)
+        return type("A", (), a)()
+
+    def run_build(self, args, results):
+        calls = []
+
+        def fake_run(task, a, keydir, surf):
+            calls.append(task["id"])
+            return dict(results.pop(0), task=task["id"])
+        real = (e2e.run_task, e2e.surface)
+        e2e.run_task = fake_run
+        e2e.surface = lambda b: {"skills_sha256": "s", "mcp_sha256": "m", "binary_sha256": "b", "tools": []}
+        try:
+            return e2e.build(args), calls
+        finally:
+            e2e.run_task, e2e.surface = real
+
+    def test_a_run_with_no_reported_cost_counts_its_whole_budget(self):
+        with tempfile.TemporaryDirectory() as d:
+            # $2.5 cap: the first task reports nothing (a timeout) and counts $1, the second $1.2;
+            # the third would need another $1 of room and is skipped.
+            code, calls = self.run_build(self.args(d), [{"is_error": True}, {"cost_usd": 1.2}, {"cost_usd": 0.1}])
+            self.assertEqual(code, 3)
+            self.assertEqual(len(calls), 2)
+
+    def test_cached_builds_are_reused_whatever_the_cap(self):
+        with tempfile.TemporaryDirectory() as d:
+            key = e2e.cache_key({"skills_sha256": "s", "mcp_sha256": "m", "binary_sha256": "b"}, "m", 1.0, 60)
+            for t in e2e.tasks(["consistency"]).values():
+                usable_result(os.path.join(d, key), t["sha"], t["mock"])
+            code, calls = self.run_build(self.args(d, cap=0), [])
+            self.assertEqual((code, calls), (0, []))
+
+    def test_the_cache_must_be_outside_the_repository(self):
+        with self.assertRaises(SystemExit):
+            self.run_build(self.args(os.path.join(world_author.REPO, "tmp-e2e-cache")), [])
+
+
+class IsolationInputTest(unittest.TestCase):
+    def test_paths_outside_the_task_and_urls_off_this_machine_are_problems(self):
+        with tempfile.TemporaryDirectory() as work, tempfile.TemporaryDirectory() as plugin:
+            mb = e2e.MCP_PREFIX
+            ok = [tool_use("1", mb + "import_contract", {"mock": "a", "source": "./contract.openapi.yaml"}),
+                  tool_use("2", mb + "import_contract", {"source": os.path.join(work, "contract.openapi.yaml")}),
+                  tool_use("3", mb + "call_mock", {"method": "GET", "path": "/a/v1/things"}),
+                  tool_use("4", mb + "admin_api", {"method": "GET", "path": "/workspaces/default/mocks"}),
+                  tool_use("5", mb + "call_mock", {"url": "http://127.0.0.1:4010/a/v1/x"})]
+            self.assertEqual(e2e.input_problems(ok, [work, plugin]), [])
+            for bad in ({"source": "/etc/passwd"}, {"source": "../../scripts/llm-bench/server_suites.py"},
+                        {"source": "https://example.com/openapi.yaml"}, {"source": "file:///tmp/x"}):
+                self.assertTrue(e2e.input_problems([tool_use("9", mb + "import_contract", bad)], [work, plugin]),
+                                bad)
+
 
 class ReportTest(unittest.TestCase):
     ROWS = {("e2e", "s", "pass"): {"ok": True, "source": "state"},
             ("e2e", "s", "engine"): {"ok": False, "source": "state"},
             ("e2e", "s", "refused"): {"ok": False, "source": "rejected"},
             ("e2e", "s", "model"): {"ok": False, "source": "llm"},
-            ("e2e", "s", "never"): {"ok": False, "source": "fallback"}}
+            ("e2e", "s", "never"): {"ok": False, "source": "fallback"},
+            ("e2e", "s", "unmocked"): {"ok": False, "source": "?"},
+            ("e2e", "s", "error"): {"ok": False, "source": "error"}}
 
     def test_engine_decided_failures_are_floor(self):
         s = e2e.summarize(self.ROWS)[("e2e", "s")]
-        self.assertEqual((s["passed"], s["total"]), (1, 5))
-        self.assertEqual(sorted(s["floor"]), ["engine", "refused"])
+        self.assertEqual((s["passed"], s["total"]), (1, 7))
+        # A failure that never reached the model (no mock, an error) is floor too.
+        self.assertEqual(sorted(s["floor"]), ["engine", "error", "refused", "unmocked"])
         self.assertEqual(sorted(s["model_dependent"]), ["model", "never"])
-        self.assertEqual(s["projected"], 60.0)
+        self.assertEqual(s["projected"], round(100 * 3 / 7, 1))
 
     def test_with_paid_runs_a_model_failure_needs_a_paid_pass(self):
         s = e2e.summarize(self.ROWS, paid={("s", "model")})[("e2e", "s")]
         self.assertEqual(s["model_dependent"], ["model"])
-        self.assertEqual(sorted(s["floor"]), ["engine", "never", "refused"])
+        self.assertEqual(sorted(s["floor"]), ["engine", "error", "never", "refused", "unmocked"])
 
 
 class FakegateE2eTest(unittest.TestCase):
@@ -243,13 +370,33 @@ class FakegateE2eTest(unittest.TestCase):
         contracts = fakegate.suite_contracts(tree, "consistency")
         with tempfile.TemporaryDirectory() as d:
             for c in contracts[:-1]:
-                sha = world_author.sha256_file(c)
-                write(os.path.join(d, f"x-{sha[:12]}", "result.json"), "{}")
+                usable_result(d, world_author.sha256_file(c))
             meta = fakegate.e2e_meta(tree, ["consistency"], d)
             self.assertEqual((meta["suites"], meta["uncovered"]), ([], ["consistency"]))
-            sha = world_author.sha256_file(contracts[-1])
-            write(os.path.join(d, f"x-{sha[:12]}", "result.json"), "{}")
+            last = usable_result(d, world_author.sha256_file(contracts[-1]))
+            write(os.path.join(last, "result.json"), json.dumps({"is_error": True, "snapshot": "snapshot"}))
+            self.assertEqual(fakegate.e2e_meta(tree, ["consistency"], d)["suites"], [])
+            usable_result(d, world_author.sha256_file(contracts[-1]))
             self.assertEqual(fakegate.e2e_meta(tree, ["consistency"], d)["suites"], ["consistency"])
+
+    def test_a_checkout_without_e2e_py_runs_no_e2e_tier(self):
+        with tempfile.TemporaryDirectory() as tree:
+            meta = fakegate.e2e_meta(tree, ["consistency"], tree)
+            self.assertEqual((meta["suites"], meta["uncovered"]), ([], ["consistency"]))
+            self.assertIn("no e2e.py", meta["missing"])
+
+
+class ServerConfigTest(unittest.TestCase):
+    def test_e2e_mocks_get_their_tagged_profiles_without_being_configured(self):
+        import server_suites
+        with tempfile.TemporaryDirectory() as d:
+            path = server_suites.write_config(d, "m", "http://p", (1, 2, 3), {}, "s", tag_journeys=True,
+                                              profile_names=["acme"])
+            with open(path) as f:
+                text = f.read()
+            self.assertIn("bench_acme:", text)
+            self.assertIn("x-bench-journey: \"acme\"", text)
+            self.assertNotIn("mocks:", text)
 
 
 if __name__ == "__main__":

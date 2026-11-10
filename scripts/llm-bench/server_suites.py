@@ -504,10 +504,11 @@ class Sink:
             print(f"  [{mark}] {self.suite}/{case} #{rep}: {lat} {source}", file=sys.stderr)
 
 
-def write_config(directory, model, base_url, ports, mocks, suite, tag_journeys=False):
+def write_config(directory, model, base_url, ports, mocks, suite, tag_journeys=False, profile_names=None):
     """`tag_journeys` (replay.py's record and replay): each mock gets its own copy of the
     profile that sends `x-bench-journey: <mock>`, so the proxy can tell the journeys'
-    calls apart, and a fixed `faker_seed`, so a fallback answers the same each run."""
+    calls apart, and a fixed `faker_seed`, so a fallback answers the same each run.
+    `profile_names` writes those profiles for mocks created later (`--world e2e`)."""
     lines = [
         "llm:\n  default_profile: bench\n  profiles:\n    bench:\n",
         "      api_key: env:OPENROUTER_API_KEY\n",
@@ -515,7 +516,7 @@ def write_config(directory, model, base_url, ports, mocks, suite, tag_journeys=F
         f"      model: {json.dumps(model)}\n",
     ]
     if tag_journeys:
-        for name in mocks:
+        for name in list(mocks) + [n for n in profile_names or [] if n not in mocks]:
             lines += [
                 f"    bench_{name}:\n",
                 "      api_key: env:OPENROUTER_API_KEY\n",
@@ -674,8 +675,9 @@ class Server:
     # by a process outside the bench between picking and binding it).
     START_ATTEMPTS = 3
 
-    def __init__(self, args, suite, mocks):
+    def __init__(self, args, suite, mocks, profile_names=None):
         self.args, self.suite, self.mocks = args, suite, mocks
+        self.profile_names = profile_names
         self.dir = tempfile.mkdtemp(prefix=f"mb-bench-{suite}-")
         self.base_url = f"{args.proxy_base.rstrip('/')}/r/{run_label(args.model, suite, args)}/api/v1"
         logs = os.path.join(args.out, "server-logs")
@@ -687,7 +689,8 @@ class Server:
     def use_ports(self, ports):
         self.ports = ports
         self.config = write_config(self.dir, self.args.model, self.base_url, ports, self.mocks, self.suite,
-                                   tag_journeys=getattr(self.args, "tag_journeys", False))
+                                   tag_journeys=getattr(self.args, "tag_journeys", False),
+                                   profile_names=self.profile_names)
         self.data = f"http://127.0.0.1:{ports[0]}"
         self.admin = f"http://127.0.0.1:{ports[1]}"
         self.api = f"{self.admin}/api/v1/workspaces/default"
@@ -10579,8 +10582,10 @@ def run_suite(suite, args):
             # The server starts with none of the suite's mocks: each is what the agent built,
             # imported from its stage-1 snapshot under the name the journeys call.
             import e2e
-            with Server(args, suite, {}) as srv:
-                e2e.load_snapshots(srv, args.binary, args.e2e_cache, suite, suite_mocks(suite, args), args.out)
+            wanted = suite_mocks(suite, args)
+            with Server(args, suite, {}, profile_names=list(wanted)) as srv:
+                e2e.load_snapshots(srv, args.binary, args.e2e_cache, suite, wanted, args.out,
+                                   tag_journeys=getattr(args, "tag_journeys", False))
                 runner(srv, sink, args)
         else:
             with Server(args, suite, mocks) as srv:
