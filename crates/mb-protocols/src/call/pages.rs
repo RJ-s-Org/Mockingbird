@@ -630,6 +630,32 @@ fn page_url(page_url: &str, call: &OperationCall, param: &str, token: &str) -> O
     Some(url.into())
 }
 
+/// Whether answer header `name` is an RFC 8288 `Link` header.
+fn is_link(name: &str) -> bool {
+    name.eq_ignore_ascii_case("link")
+}
+
+/// The value of answer header `name` that leads to the page of `call` whose cursor or
+/// position under `param` is `token`: with `base`, the URL the call reached
+/// ([`CallPlan::page_url`]), that page's URL ([`page_url`]), as an RFC 8288 link of
+/// relation `next` in a `Link` header (`<…?max_id=…>; rel="next"`); with none, the
+/// token itself. `None` when the URL cannot be made.
+pub(super) fn next_header(
+    name: &str,
+    base: Option<&str>,
+    (call, param): (&OperationCall, &str),
+    token: &str,
+) -> Option<String> {
+    let Some(base) = base else {
+        return Some(token.to_string());
+    };
+    let url = page_url(base, call, param, token)?;
+    Some(match is_link(name) {
+        true => format!("<{url}>; rel=\"next\""),
+        false => url,
+    })
+}
+
 /// The answers `body` to `call` may be with `token` at `slot`, in the order tried: the
 /// token there, or, for a URL, the page's URL (see [`page_url`]) there, else in a copy
 /// of an object beside the one holding it that holds the same member (HAL's
@@ -956,10 +982,14 @@ fn described_slot(ask: &list_query::PageAsk, page_url: Option<&str>) -> Option<S
 /// `next_url` paging has no URL of the call to build on.
 fn on_described(ask: &list_query::PageAsk, param: String, page_url: Option<&str>) -> Option<Slot> {
     if let Some(header) = &ask.response_header {
+        // A `Link` header, or a next-URL paging's, carries the next page's URL.
+        let url = (is_link(header) || ask.style == mb_mcm::world::PagingStyle::NextUrl)
+            .then(|| page_url.map(str::to_string))
+            .flatten();
         return Some(Slot {
             path: Vec::new(),
             param,
-            url: None,
+            url,
             header: Some(header.clone()),
         });
     }
@@ -1714,8 +1744,13 @@ fn tokened(
     let (nonce, place) = new_cut(&plan.session, op);
     let first = token(&nonce, place, 0);
     let header = match &slot.header {
-        Some(name) if !header_fits(rt, op, name, &first) => return None,
-        Some(name) => Some((name.clone(), first.clone())),
+        Some(name) => {
+            let value = next_header(name, slot.url.as_deref(), (call, &slot.param), &first)?;
+            if !header_fits(rt, op, name, &value) {
+                return None;
+            }
+            Some((name.clone(), value))
+        }
         None => None,
     };
     let valid = |candidate: &Value| {
@@ -1821,10 +1856,12 @@ pub(super) async fn serve(
             .iter()
             .find_map(valid)?;
         if let Some(name) = &cut.slot.header {
-            if !header_fits(rt, op, name, &token) {
+            let slot = &cut.slot;
+            let value = next_header(name, slot.url.as_deref(), (call, &slot.param), &token)?;
+            if !header_fits(rt, op, name, &value) {
                 return None;
             }
-            served.headers.push((name.clone(), token));
+            served.headers.push((name.clone(), value));
         }
         served
     } else if let Some(then) = cut

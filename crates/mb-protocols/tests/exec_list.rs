@@ -878,6 +878,79 @@ async fn a_next_url_walks_the_held_records() {
     assert!(h.provider.requests().is_empty());
 }
 
+/// A bare array whose next page is linked in an RFC 8288 `Link` header, by a cursor the
+/// URL carries (Mastodon's `max_id`).
+const LINK_HEADED: &str = r##"
+openapi: 3.0.0
+info: {title: Link headed, version: "1"}
+paths:
+  /v1/marks:
+    get:
+      operationId: listMarks
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1}}
+        - {name: max_id, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          headers:
+            Link: {schema: {type: string}}
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Mark"}}
+  /v1/marks/{id}:
+    get:
+      operationId: getMark
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Mark"}}}}}
+components:
+  schemas:
+    Mark:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+"##;
+
+/// The URL a `Link` header names for relation `next`.
+fn link_next(headers: &HeaderMap) -> Option<String> {
+    let link = headers.get("link")?.to_str().ok()?;
+    let (url, params) = link.strip_prefix('<')?.split_once('>')?;
+    params.contains("rel=\"next\"").then(|| url.to_owned())
+}
+
+#[tokio::test]
+async fn a_link_header_names_the_next_page_s_url() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"listMarks": {"paging": {
+        "style": "next_url", "request": "max_id", "response_header": "Link", "size": "limit"
+    }}}});
+    let h = support::described(LINK_HEADED, world, Vec::new());
+    let held: Vec<Value> = (1..=2).map(|i| json!({"id": format!("m{i}")})).collect();
+    h.hold("marks", &held).await;
+    let (status, headers, first) = h.send("GET", "/v1/marks?limit=1", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(source(&headers), "state", "{first}");
+    assert_eq!(ids(&first), [json!("m1")]);
+    let next = link_next(&headers).unwrap_or_else(|| panic!("a Link next: {headers:?}"));
+    let at = next.find("/v1/marks").expect("the route's URL");
+    let next = &next[at..];
+    assert!(
+        next.contains("max_id=") && next.contains("limit=1"),
+        "{next}"
+    );
+    let (status, headers, last) = h.send("GET", next, None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{last}");
+    assert_eq!(ids(&last), [json!("m2")]);
+    assert_eq!(
+        link_next(&headers),
+        None,
+        "the last page links no next: {headers:?}"
+    );
+    assert_eq!(capture.of("listMarks"), [None, None]);
+    assert!(h.provider.requests().is_empty());
+}
+
 /// Twilio's messages: a next-page URL beside the list, a page size and a page token
 /// that shares its first word.
 const MESSAGES: &str = r##"

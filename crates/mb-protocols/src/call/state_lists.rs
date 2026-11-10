@@ -715,7 +715,14 @@ pub(super) async fn page(
                 .ok_or(Unserved::Render)?;
         }
         if let Some(name) = &ask.response_header {
-            let value = next.to_string();
+            // A `Link` header carries the next page's URL; another the position.
+            let param = ask.request.as_deref().unwrap_or_default();
+            let base = plan
+                .page_url
+                .as_deref()
+                .filter(|_| name.eq_ignore_ascii_case("link") && !param.is_empty());
+            let value = pages::next_header(name, base, (call, param), &next.to_string())
+                .ok_or(Unserved::Render)?;
             if !pages::header_fits(rt, op, name, &value) {
                 return Err(Unserved::Render);
             }
