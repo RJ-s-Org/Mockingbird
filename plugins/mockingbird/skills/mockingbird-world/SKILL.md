@@ -18,7 +18,7 @@ The format is the JSON Schema `get_world_schema` answers (`mockingbird world sch
    - `skipped_route`: an HTTP route that is not served. It is reported, not fixable in the description; mention it to the user.
    - `refused`: an entry of the newest revision that did not validate (often after a contract change).
 
-   The next six point at behaviour the contract signals that the description does not state yet. Read the docs for each and write the entry they describe; when they say nothing, leave it:
+   The next four point at behaviour the contract signals that the description does not state yet. Read the docs for each and write the entry they describe; when they say nothing, leave it:
    - `undescribed_param`: list query parameters the executor reads nothing for. A request that sends one is answered by the model, not from the records. Describe each as the docs define it (a filter, the scope, the `paging` parameter or `fields`), or list it in `ignores` when it asks nothing of the items. A sort parameter has no description yet: leave it.
    - The advisory gaps (`advisory: true`) are checks. Write an entry only when the docs state the behaviour; otherwise leave the gap.
      - `no_effect`: an action that the description gives nothing to change. If the docs say what it does to the record, write its `changes` (members it sets, from the request or a value) or a `transition` of the type's lifecycle. An action the docs say changes nothing (a send, a test) needs neither.
