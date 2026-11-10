@@ -276,6 +276,32 @@ async fn listed_with_lists_it_again() {
     assert_eq!(h.provider.requests().len(), 2);
 }
 
+/// A flag filter naming no member on the soft delete's `listed_with` parameter would
+/// narrow to a member no record holds: the parameter is the soft delete's alone.
+#[tokio::test]
+async fn a_member_less_filter_on_the_listed_with_parameter_is_no_filter() {
+    let mut world = soft_spaces();
+    world["operations"] = json!({"listSpaces": {
+        "filters": [{"param": "showDeleted", "kind": "flag"}]
+    }});
+    let h = support::described_allowing_refusals(
+        CONTRACT,
+        world,
+        vec![
+            space("s1", "Docs", "ACTIVE"),
+            space("s2", "Notes", "ACTIVE"),
+        ],
+    );
+    create_space(&h, "Docs").await;
+    create_space(&h, "Notes").await;
+    delete(&h, "/spaces/s1").await;
+    let body = get(&h, "/spaces?showDeleted=true").await;
+    assert_eq!(ids(&body), ["s1", "s2"], "{body}");
+    let body = get(&h, "/spaces").await;
+    assert_eq!(ids(&body), ["s2"], "{body}");
+    assert_eq!(h.provider.requests().len(), 2);
+}
+
 #[tokio::test]
 async fn a_soft_deleted_record_is_not_added_back_by_the_held_record_paths() {
     // `listSpaces` describes nothing; the lifecycle of its type alone excludes.

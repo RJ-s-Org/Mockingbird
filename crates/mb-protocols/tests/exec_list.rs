@@ -2360,3 +2360,70 @@ async fn a_grpc_list_is_answered_from_state() {
         [Some("orderBy".to_owned())]
     );
 }
+
+/// Records listed whole beside their create, and a search over them by a required
+/// query, answering the same records in an envelope.
+const SEARCHED: &str = r##"
+openapi: 3.0.0
+info: {title: Searched, version: "1"}
+paths:
+  /records:
+    get:
+      operationId: listRecords
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Record"}}}}}
+    post:
+      operationId: createRecord
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Record"}}}}}
+  /search/records:
+    get:
+      operationId: searchRecords
+      parameters:
+        - {name: query, in: query, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, total]
+                properties:
+                  results: {type: array, items: {$ref: "#/components/schemas/Record"}}
+                  total: {type: integer}
+  /records/{id}:
+    get:
+      operationId: getRecord
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Record"}}}}}
+components:
+  schemas:
+    Record:
+      type: object
+      required: [id, name]
+      properties: {id: {type: integer}, name: {type: string}}
+"##;
+
+/// A search, which a required query narrows, is no second list of the type's
+/// records: the collection list beside the create still lists them all.
+#[tokio::test]
+async fn a_search_by_a_required_query_leaves_the_collection_the_type_s_only_list() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"records": {"identity": {"member": "id"}}},
+        "operations": {
+            "listRecords": {"kind": "list", "type": "records"},
+            "searchRecords": {"kind": "list", "type": "records", "answer": {"records": "/results"}}
+        }
+    });
+    let h = support::described(SEARCHED, world, Vec::new());
+    let held: Vec<Value> = (1..=2)
+        .map(|i| json!({"id": i, "name": format!("record {i}")}))
+        .collect();
+    h.hold("records", &held).await;
+    let (source, page) = get(&h, "/records").await;
+    assert_eq!(capture.of("listRecords"), [None]);
+    assert_eq!(source, "state", "{page}");
+    assert_eq!(ids(&page), [json!(1), json!(2)]);
+}

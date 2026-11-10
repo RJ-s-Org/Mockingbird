@@ -13,7 +13,8 @@
 //! - a route with none holds every record of the type when it is the type's one list
 //!   with no path parameter (`BundleIndex::unscoped_lists`); another (`/me/tasks`
 //!   beside `/tasks`) shows a part of them only, and falls back (`unscoped_list`)
-//!   unless the request gives the described scope.
+//!   unless the request gives the described scope. A search, whose query requires a
+//!   parameter (`/search/tickets?query=`), is no second list beside `/tickets`.
 //!
 //! A session that never wrote a record of the type (holds none, created none, deleted
 //! none) falls back (`never_written`): the type may be a catalog the model makes up,
@@ -79,8 +80,9 @@ use super::{Held, Ran, Stop, answered, fell_back_on};
 use crate::MockRuntime;
 use crate::call::state_lists::Shape;
 use crate::call::{
-    CallPlan, MAX_SCAN, OperationCall, StateAccess, cursors, id_string, item_identity, list_query,
-    lists, pages, property_schema, ranges, runs, schema_parts, state_lists, state_span,
+    CallPlan, MAX_SCAN, OperationCall, StateAccess, bundle_index, cursors, id_string,
+    item_identity, list_query, lists, pages, property_schema, ranges, runs, schema_parts,
+    state_lists, state_span,
 };
 
 /// Whether the executor takes these calls.
@@ -206,7 +208,7 @@ async fn answer(
         return Err(Stop::on("unparsed_filter", on));
     }
     let unscoped = call.path_params.is_empty()
-        && !only_unscoped(rt, path, t)
+        && !only_unscoped(rt, op, path, t)
         && q.as_ref().is_none_or(|q| q.scope.is_none());
     if unscoped {
         return Err("unscoped_list".into());
@@ -311,21 +313,25 @@ async fn answer(
     Ok(served)
 }
 
-/// Whether the list at `path` (none for a SOAP or gRPC operation), of items of type
+/// Whether list `op` at `path` (none for a SOAP or gRPC operation), of items of type
 /// `t`, is the type's one list with no path parameter: where the contract's schemas
 /// name its items' type (`BundleIndex::unscoped_lists`), the only such list of that
 /// type, which is `t`; where they name none (a lean schema of the record, SendGrid's
 /// `TemplateLean` under `result`), and for an operation with no path, the only one the
-/// description gives type `t`.
-fn only_unscoped(rt: &MockRuntime, path: Option<&str>, t: &str) -> bool {
+/// description gives type `t`. A search beside a list (one whose query requires a
+/// parameter, [`bundle_index::searches`]) is no second list of the type
+/// (`BundleIndex::sole_unscoped`).
+fn only_unscoped(rt: &MockRuntime, op: &Operation, path: Option<&str>, t: &str) -> bool {
     let index = rt.index();
-    if let Some(indexed) = path.and_then(|path| index.unscoped_paths.get(path)) {
-        return indexed == t && index.unscoped_lists.get(t) == Some(&1);
+    let search = bundle_index::searches(op);
+    if let Some(path) = path.filter(|path| index.unscoped_paths.contains_key(*path)) {
+        return index.sole_unscoped(path, t);
     }
     let described = rt
         .bundle()
         .operations
         .iter()
+        .filter(|other| search || !bundle_index::searches(other))
         .filter(|op| {
             let kind = rt
                 .described()

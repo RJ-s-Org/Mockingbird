@@ -1680,3 +1680,103 @@ async fn an_embedded_child_is_found_in_the_one_held_parent_holding_it() {
         .collect();
     assert_eq!(reasons, [None, Some("not_held".to_owned())]);
 }
+
+/// Entries read by their id or their name, renamed by an update; assets keyed by the
+/// key an action rewrites.
+const RENAMED: &str = r##"
+openapi: 3.0.0
+info: {title: Renamed, version: "1"}
+paths:
+  /entries/{ref}:
+    parameters: [{name: ref, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getEntry
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Entry"}}}}, "404": {description: missing}}
+    patch:
+      operationId: updateEntry
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Entry"}}}}}
+  /assets/{key}:
+    parameters: [{name: key, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getAsset
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Asset"}}}}, "404": {description: missing}}
+  /assets/{key}/rename:
+    post:
+      operationId: renameAsset
+      parameters: [{name: key, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, required: [to], properties: {to: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Asset"}}}}}
+components:
+  schemas:
+    Entry:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
+    Asset:
+      type: object
+      required: [key, size]
+      properties: {key: {type: string}, size: {type: integer}}
+"##;
+
+/// A name the record held before an update renamed it names nothing now: a read by
+/// it is not found from state, and the new name reads the record.
+#[tokio::test]
+async fn a_read_by_a_name_an_update_retired_is_not_found() {
+    let (_capture, _guard) = Capture::install();
+    let world =
+        json!({"types": {"entries": {"identity": {"member": "id", "alternates": ["name"]}}}});
+    let h = support::described(RENAMED, world, vec![json!({"id": "e9", "name": "alpha"})]);
+    h.hold("entries", &[json!({"id": "e1", "name": "alpha"})])
+        .await;
+    let (status, headers, body) = h
+        .send("PATCH", "/entries/e1", Some(json!({"name": "beta"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let (status, _, body) = h.send("GET", "/entries/alpha", None, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, _, body) = h.send("GET", "/entries/beta", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], json!("e1"), "{body}");
+    assert_eq!(h.provider.requests().len(), 0);
+}
+
+/// An action whose changes rewrite the record's identity moves it to its new key:
+/// the old key is not found, and the new one reads the record.
+#[tokio::test]
+async fn an_action_rewriting_the_identity_re_keys_the_record() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"assets": {"identity": {"member": "key"}}},
+        "operations": {"renameAsset": {"kind": "action", "type": "assets", "changes": {"key": {"from_request": "/to"}}}}
+    });
+    let h = support::described(RENAMED, world, vec![json!({"key": "made-up", "size": 1})]);
+    h.hold_by("assets", "key", &[json!({"key": "old", "size": 7})])
+        .await;
+    let (status, headers, body) = h
+        .send(
+            "POST",
+            "/assets/old/rename",
+            Some(json!({"to": "new"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(
+        capture.of("renameAsset"),
+        vec![line("renameAsset", "action", None)]
+    );
+    assert_eq!(
+        h.stored("assets", "new").await,
+        Some(json!({"key": "new", "size": 7}))
+    );
+    assert_eq!(h.stored("assets", "old").await, None);
+    let (status, _, body) = h.send("GET", "/assets/new", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"key": "new", "size": 7}));
+    let (status, _, body) = h.send("GET", "/assets/old", None, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(h.provider.requests().len(), 0);
+}
