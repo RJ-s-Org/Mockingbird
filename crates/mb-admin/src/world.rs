@@ -558,17 +558,13 @@ pub enum GapCodeSchema {
     SkippedRoute,
     /// An entry of the description refused at validation.
     Refused,
-    /// An action the description gives nothing to change.
+    /// An action the description gives nothing to change (advisory).
     NoEffect,
-    /// A list under path parameters with no `scope`.
-    UnscopedList,
-    /// A list query parameter the description does not mention.
+    /// A list query parameter the executor reads nothing for.
     UndescribedParam,
-    /// A type whose create can answer 409 with no `unique`.
+    /// A type whose create can answer 409 with no `unique` (advisory).
     NoUnique,
-    /// A type whose writes take `If-Match` or can answer 412 with no `concurrency`.
-    NoConcurrency,
-    /// A deleted type whose record has a deleted or archived member, with no `lifecycle.soft_delete`.
+    /// A deleted type whose record has a deleted member, with no `lifecycle.soft_delete` (advisory).
     NoSoftDelete,
 }
 
@@ -582,10 +578,8 @@ impl From<GapCode> for GapCodeSchema {
             GapCode::SkippedRoute => Self::SkippedRoute,
             GapCode::Refused => Self::Refused,
             GapCode::NoEffect => Self::NoEffect,
-            GapCode::UnscopedList => Self::UnscopedList,
             GapCode::UndescribedParam => Self::UndescribedParam,
             GapCode::NoUnique => Self::NoUnique,
-            GapCode::NoConcurrency => Self::NoConcurrency,
             GapCode::NoSoftDelete => Self::NoSoftDelete,
         }
     }
@@ -603,6 +597,10 @@ pub struct GapSchema {
     pub r#type: Option<String>,
     /// What is missing, for a person or an assistant to fix.
     pub message: String,
+    /// Whether it is a check, not something missing: behaviour the contract hints at,
+    /// to describe only when the docs state it. Absent when false.
+    #[schema(default = false)]
+    pub advisory: Option<bool>,
 }
 
 /// A contract version's effective world description.

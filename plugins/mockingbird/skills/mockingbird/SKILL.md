@@ -12,8 +12,8 @@ Mockingbird imports an API contract and serves a running mock that answers with 
 A mock is ready for an app only after its world description is reviewed. Importing is the first step, not the last:
 
 1. `import_contract`. Its answer lists `next_steps` and the new version's `world_gaps`.
-2. **Load the `mockingbird-world` skill and follow it.** Work through every gap: describe what each action changes, list scope, filters, order and paging, unique members, soft deletes and concurrency, from the contract and its documentation. Without these the mock forgets records, lists everything, ignores filters and changes nothing when an action runs.
-3. Check it with `call_mock`: create a record, read it back, list it, and run an action on it. Fix what answered wrongly (`get_request` names the gap).
+2. **Load the `mockingbird-world` skill and follow it.** Work through the gaps: describe what the contract and its documentation state about what actions change, list filters, scope and paging, unique members and soft deletes. Gaps marked advisory are checks: leave them when the docs say nothing. What the description does not state is answered by the model, not from the records.
+3. Check it with `call_mock`: create a record, read it back and list it; run an action on it when the API has one. Fix what answered wrongly.
 4. Add scenarios or seed data only when the user's app needs them (`mockingbird-mock-api`).
 
 ## What to reach for

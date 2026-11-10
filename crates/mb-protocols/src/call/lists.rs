@@ -218,7 +218,7 @@ pub(super) fn filtered_member<'a>(
 /// items declares (see the module's doc). An object member is one [`types_of`] types as
 /// `object` alone, which leaves `null` aside, so a nullable object is one; or one with
 /// `properties` and no type.
-fn nested_filtered_member<'a>(
+pub(super) fn nested_filtered_member<'a>(
     bundle: &'a mb_mcm::Bundle,
     query: Option<&'a Value>,
     item_parts: &[&'a Value],
@@ -337,7 +337,7 @@ fn string_elements<'a>(bundle: &'a mb_mcm::Bundle, member: &Member<'a>) -> Optio
 /// The array of text query parameter `param`, declared by `query` as text or an array,
 /// filters: the member its whole name names (see [`named_member`]), when that is one.
 /// Its elements' [`Member`], under the array's name.
-fn array_filter_member<'a>(
+pub(super) fn array_filter_member<'a>(
     bundle: &'a mb_mcm::Bundle,
     query: Option<&'a Value>,
     item_parts: &[&'a Value],

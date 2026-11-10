@@ -530,7 +530,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "get_world",
             title: "Show a contract version's world description",
-            description: "The world description of a contract version: how its types and operations behave (identity, targets, lifecycle, order, not_found, ...), the author of each entry set by a revision (unlisted entries are heuristic), the revision number (0 when only the heuristics wrote it), refused entries, and gaps to fix: what the description leaves open (no_identity, no_target, no_record, skipped_route, refused) and the behaviour the contract signals that it does not state yet (no_effect, unscoped_list, undescribed_param, no_unique, no_concurrency, no_soft_delete). The format is get_world_schema.",
+            description: "The world description of a contract version: how its types and operations behave (identity, targets, lifecycle, order, not_found, ...), the author of each entry set by a revision (unlisted entries are heuristic), the revision number (0 when only the heuristics wrote it), refused entries, and gaps to fix: what the description leaves open (no_identity, no_target, no_record, skipped_route, refused) and the behaviour the contract signals that it does not state yet (undescribed_param, and the advisory no_effect, no_unique and no_soft_delete, marked advisory: describe those only when the docs state the behaviour). The format is get_world_schema.",
             schema: obj(
                 json!({
                     "mock": mock(),
@@ -2010,16 +2010,12 @@ impl McpServer {
     }
 
     /// After an import that made a contract version (not a draft), adds what
-    /// to do next and that version's world gaps (at most [`IMPORT_GAPS`],
-    /// with the total), so the assistant reviews the world description
-    /// before calling the mock done. A failed gap read adds the steps alone.
+    /// to do next and that version's world gaps ([`next_steps`]), so the
+    /// assistant reviews the world description before calling the mock done.
     async fn add_next_steps(&self, answer: &mut Value, mock: &str) {
-        let Some(version) = answer.get("version").and_then(Value::as_u64) else {
+        let Some(version) = imported_version(answer) else {
             return;
         };
-        if answer.get("status").and_then(Value::as_str) == Some("draft") {
-            return;
-        }
         let v = version.to_string();
         let gaps = self
             .ws(
@@ -2029,26 +2025,14 @@ impl McpServer {
                 None,
             )
             .await
-            .ok()
-            .and_then(|w| w.get("gaps").and_then(Value::as_array).cloned())
-            .unwrap_or_default();
-        let Some(obj) = answer.as_object_mut() else {
-            return;
-        };
-        obj.insert(
-            "next_steps".into(),
-            json!([
-                format!("Review the world description of version {v} now, as the mockingbird-world skill says: read that skill, then work through world_gaps (get_world {{mock: {mock:?}, version: {v}}} lists them all)."),
-                "For each gap, read that part of the contract and its documentation and write what they state with patch_world (author \"agent\"): what actions change, list scope, filters, order and paging, unique members, soft deletes, concurrency tokens. Leave out what they do not state.",
-                "Read refused in each patch_world answer and fix those entries.",
-                "Check the mock with call_mock: create a record, read it back, list it, and run an action on it.",
-            ]),
-        );
-        obj.insert("world_gaps_total".into(), json!(gaps.len()));
-        obj.insert(
-            "world_gaps".into(),
-            Value::Array(gaps.into_iter().take(IMPORT_GAPS).collect()),
-        );
+            .map_err(|e| e.0)
+            .and_then(|w| {
+                w.get("gaps")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .ok_or_else(|| "the world answer has no gaps".to_owned())
+            });
+        next_steps(answer, mock, version, gaps);
     }
 
     /// The data-plane base URL: the argument, the background server's, or
@@ -2502,9 +2486,90 @@ async fn http_post(State(st): State<HttpState>, headers: HeaderMap, body: String
     }
 }
 
+/// The contract version an import answer made, unless it is only a draft.
+fn imported_version(answer: &Value) -> Option<u64> {
+    if answer.get("status").and_then(Value::as_str) == Some("draft") {
+        return None;
+    }
+    answer.get("version").and_then(Value::as_u64)
+}
+
+/// Adds to import `answer` of `mock`'s `version` the steps to take next and the
+/// version's world gaps: `world_gaps_total`, and `world_gaps` with at most
+/// [`IMPORT_GAPS`] of them, the ones to fix before the advisory ones. When the
+/// gaps could not be read, `world_gaps_error` says why instead.
+fn next_steps(answer: &mut Value, mock: &str, version: u64, gaps: Result<Vec<Value>, String>) {
+    let Some(obj) = answer.as_object_mut() else {
+        return;
+    };
+    obj.insert(
+        "next_steps".into(),
+        json!([
+            format!("Review the world description of version {version} now, as the mockingbird-world skill says: read that skill, then work through world_gaps (get_world {{mock: {mock:?}, version: {version}}} lists them all). Gaps marked advisory are checks: act on them only where the docs state the behaviour."),
+            "For each gap, read that part of the contract and its documentation and write what they state with patch_world (author \"agent\"): what actions change, list filters, scope and paging, unique members, soft deletes. Leave out what they do not state.",
+            "Read refused in each patch_world answer and fix those entries.",
+            "Check the mock with call_mock: create a record, read it back and list it; run an action on it when the API has one.",
+        ]),
+    );
+    match gaps {
+        Ok(mut gaps) => {
+            obj.insert("world_gaps_total".into(), json!(gaps.len()));
+            gaps.sort_by_key(|g| g.get("advisory").and_then(Value::as_bool).unwrap_or(false));
+            gaps.truncate(IMPORT_GAPS);
+            obj.insert("world_gaps".into(), Value::Array(gaps));
+        }
+        Err(e) => {
+            obj.insert(
+                "world_gaps_error".into(),
+                json!(format!("the world gaps could not be read ({e}); call get_world for them")),
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_draft_import_gets_no_next_steps() {
+        assert_eq!(
+            imported_version(&json!({"version": 3, "status": "draft"})),
+            None
+        );
+        assert_eq!(imported_version(&json!({"status": "imported"})), None);
+        assert_eq!(imported_version(&json!({"version": 3})), Some(3));
+    }
+
+    #[test]
+    fn next_steps_cap_the_gaps_with_the_real_total_and_fixes_first() {
+        let mut gaps: Vec<Value> = (0..50)
+            .map(|i| json!({"code": "no_effect", "message": i, "advisory": true}))
+            .collect();
+        gaps.push(json!({"code": "no_target", "message": "fix"}));
+        let mut answer = json!({"version": 2});
+        next_steps(&mut answer, "shop", 2, Ok(gaps));
+        assert_eq!(answer["world_gaps_total"], 51);
+        let listed = answer["world_gaps"].as_array().cloned().unwrap_or_default();
+        assert_eq!(listed.len(), IMPORT_GAPS);
+        assert_eq!(listed[0]["code"], "no_target", "{listed:?}");
+        assert!(answer["next_steps"][0]
+            .as_str()
+            .is_some_and(|s| s.contains("mockingbird-world") && s.contains("version: 2")));
+        assert!(answer.get("world_gaps_error").is_none());
+    }
+
+    #[test]
+    fn a_failed_gap_read_says_so_and_claims_no_gaps() {
+        let mut answer = json!({"version": 2});
+        next_steps(&mut answer, "shop", 2, Err("timed out".into()));
+        assert!(answer.get("world_gaps").is_none(), "{answer}");
+        assert!(answer.get("world_gaps_total").is_none(), "{answer}");
+        assert!(answer["world_gaps_error"]
+            .as_str()
+            .is_some_and(|s| s.contains("timed out")));
+        assert!(answer["next_steps"].is_array());
+    }
 
     fn server(read_only: bool) -> McpServer {
         McpServer {

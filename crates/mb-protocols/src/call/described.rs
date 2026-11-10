@@ -184,7 +184,7 @@ impl Described {
 /// operation that writes a type with no identity (a read or list of it is not marked),
 /// then its own `no_target` and `no_record`.
 fn static_gaps(bundle: &Bundle, world: &World) -> HashMap<String, Vec<GapCode>> {
-    let all = world_gaps::gaps(bundle, world, &[]);
+    let all = world_gaps::structural_gaps(bundle, world, &[]);
     let unidentified: HashSet<&str> = all
         .iter()
         .filter(|g| g.code == GapCode::NoIdentity)

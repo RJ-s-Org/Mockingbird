@@ -289,6 +289,19 @@ openapi: 3.0.0
 info: {title: Signals, version: "1"}
 paths:
   /projects:
+    get:
+      operationId: listProjects
+      parameters:
+        - {name: sort, in: query, schema: {type: string}}
+        - {name: name, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: page, in: query, schema: {type: integer}}
+        - {name: include_deleted, in: query, schema: {type: boolean}}
+        - {name: "filter[owner]", in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Project"}}}}
     post:
       operationId: createProject
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}
@@ -300,48 +313,32 @@ paths:
       operationId: getProject
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}}
-    patch:
-      operationId: updateProject
-      parameters:
-        - {name: id, in: path, required: true, schema: {type: string}}
-        - {name: If-Match, in: header, schema: {type: string}}
-      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}
-      responses:
-        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}
-        "412": {description: stale}
     delete:
       operationId: deleteProject
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses: {"204": {description: gone}}
+  /projects/{id}/settings:
+    patch:
+      operationId: updateSettings
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}}
   /projects/{id}/archive:
     post:
       operationId: archiveProject
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}}
-  /projects/{id}/tasks:
-    get:
-      operationId: listTasks
-      parameters:
-        - {name: id, in: path, required: true, schema: {type: string}}
-        - {name: sort, in: query, schema: {type: string}}
-        - {name: title, in: query, schema: {type: string}}
-      responses:
-        "200":
-          description: ok
-          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Task"}}}}
-    post:
-      operationId: createTask
-      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
-      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
-      responses: {"201": {description: made, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}}
 components:
   schemas:
     Project:
       type: object
-      properties: {id: {type: string}, name: {type: string}, archived: {type: boolean}, version: {type: integer}}
-    Task:
-      type: object
-      properties: {id: {type: string}, title: {type: string}, project_id: {type: string}}
+      properties:
+        id: {type: string}
+        name: {type: string}
+        owner: {type: string}
+        archived: {type: boolean}
+        status: {type: string, enum: [active, deleted]}
+        deleted_at: {type: string, format: date-time}
 "##;
 
 fn signal_gaps(overlay_doc: Option<serde_json::Value>) -> Vec<mb_protocols::world_gaps::Gap> {
@@ -352,40 +349,51 @@ fn signal_gaps(overlay_doc: Option<serde_json::Value>) -> Vec<mb_protocols::worl
         world = overlay(&world, &parsed);
     }
     let v = validate(&world, &b);
+    assert!(v.refused.is_empty(), "{:?}", v.refused);
     gaps(&b, &v.applied, &v.refused)
 }
 
 #[test]
 fn gaps_point_at_behaviour_the_contract_signals() {
     let all = signal_gaps(None);
-    let effect = codes(&all, GapCode::NoEffect);
-    assert!(
-        effect
-            .iter()
-            .any(|g| g.operation.as_deref() == Some("archiveProject")),
-        "{all:?}"
-    );
-    let unscoped = codes(&all, GapCode::UnscopedList);
-    assert_eq!(unscoped.len(), 1, "{all:?}");
-    assert!(
-        unscoped[0].message.contains("`id`"),
-        "{}",
-        unscoped[0].message
-    );
-    // `title` is a member of the items, so only `sort` is open.
+    // `name` filters a member of the items and `limit` sizes the page, so the
+    // executor reads both; the others it reads nothing for.
     let open = codes(&all, GapCode::UndescribedParam);
     assert_eq!(open.len(), 1, "{all:?}");
-    assert!(open[0].message.contains("`sort`"), "{}", open[0].message);
-    assert!(!open[0].message.contains("`title`"), "{}", open[0].message);
-    assert_eq!(codes(&all, GapCode::NoUnique).len(), 1, "{all:?}");
-    assert_eq!(codes(&all, GapCode::NoConcurrency).len(), 1, "{all:?}");
+    for param in ["`sort`", "`include_deleted`", "`filter[owner]`", "`page`"] {
+        assert!(open[0].message.contains(param), "{}", open[0].message);
+    }
+    for param in ["`name`", "`limit`"] {
+        assert!(!open[0].message.contains(param), "{}", open[0].message);
+    }
+    assert!(!open[0].advisory);
+    let unique = codes(&all, GapCode::NoUnique);
+    assert_eq!(unique.len(), 1, "{all:?}");
+    assert!(unique[0].advisory);
+    // `archived` is a state of its own beside a hard delete; `deleted_at` hints
+    // at a soft delete.
     let soft = codes(&all, GapCode::NoSoftDelete);
     assert_eq!(soft.len(), 1, "{all:?}");
-    assert!(
-        soft[0].message.contains("`archived`"),
-        "{}",
-        soft[0].message
-    );
+    assert!(soft[0].message.contains("`deleted_at`"), "{}", soft[0].message);
+    assert!(soft[0].advisory);
+    // An update the route only looks like an action on (`/settings`, and
+    // `/archive` that tier 0 reads as an update) is merged by the executor.
+    assert!(codes(&all, GapCode::NoEffect).is_empty(), "{all:?}");
+}
+
+#[test]
+fn an_action_with_nothing_to_change_is_an_advisory_gap() {
+    let all = signal_gaps(Some(json!({
+        "operations": {"archiveProject": {"kind": "action"}}
+    })));
+    let effect = codes(&all, GapCode::NoEffect);
+    assert_eq!(effect.len(), 1, "{all:?}");
+    assert_eq!(effect[0].operation.as_deref(), Some("archiveProject"));
+    assert!(effect[0].advisory);
+    let closed = signal_gaps(Some(json!({
+        "operations": {"archiveProject": {"kind": "action", "changes": {"archived": {"value": true}}}}
+    })));
+    assert!(codes(&closed, GapCode::NoEffect).is_empty(), "{closed:?}");
 }
 
 #[test]
@@ -394,23 +402,38 @@ fn behaviour_gaps_close_when_described() {
         "types": {
             "projects": {
                 "unique": [{"members": ["name"], "conflict": 409}],
-                "concurrency": {"member": "version", "header": "If-Match", "conflict": 412},
-                "lifecycle": {"member": "archived", "states": ["false", "true"], "soft_delete": {"state": "true"}}
+                "lifecycle": {
+                    "member": "status",
+                    "states": ["active", "deleted"],
+                    "soft_delete": {"state": "deleted", "listed_with": {"param": "include_deleted", "value": "true"}}
+                }
             }
         },
         "operations": {
-            "archiveProject": {"kind": "action", "changes": {"archived": {"value": true}}},
-            "listTasks": {"scope": {"param": "id", "member": "project_id"}, "ignores": ["sort"]}
+            "listProjects": {
+                "filters": [{"param": "filter", "grammar": "deep_object"}],
+                "paging": {"style": "page", "request": "page", "size": "limit"},
+                "ignores": ["sort"]
+            }
         }
     })));
     for code in [
         GapCode::NoEffect,
-        GapCode::UnscopedList,
         GapCode::UndescribedParam,
         GapCode::NoUnique,
-        GapCode::NoConcurrency,
         GapCode::NoSoftDelete,
     ] {
         assert!(codes(&all, code).is_empty(), "{code}: {all:?}");
     }
+}
+
+#[test]
+fn a_described_paging_replaces_the_page_size_detection() {
+    let all = signal_gaps(Some(json!({
+        "operations": {"listProjects": {"paging": {"style": "page", "request": "page"}}}
+    })));
+    let open = codes(&all, GapCode::UndescribedParam);
+    assert_eq!(open.len(), 1, "{all:?}");
+    assert!(open[0].message.contains("`limit`"), "{}", open[0].message);
+    assert!(!open[0].message.contains("`page`"), "{}", open[0].message);
 }
