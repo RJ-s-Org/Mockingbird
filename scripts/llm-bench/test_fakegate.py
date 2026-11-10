@@ -159,6 +159,36 @@ class AuthorForTest(unittest.TestCase):
         self.assertIsNone(fakegate.author_for(self.contracts, self.cache, ["opus"]))
 
 
+class CleanupTest(unittest.TestCase):
+    def test_unclaimed_worktrees_and_the_old_target_go_and_binaries_and_results_stay(self):
+        with tempfile.TemporaryDirectory() as work:
+            for d in ("src-aaa", "src-bbb", "bin", "run-x-123", "target"):
+                os.makedirs(os.path.join(work, d))
+            mine, other = [], []
+            for name, claims in (("src-aaa", mine), ("src-bbb", other)):
+                f = open(os.path.join(work, name + ".use"), "a")
+                fakegate.fcntl.flock(f, fakegate.fcntl.LOCK_SH)
+                claims.append(f)
+            removed = fakegate.cleanup(work, mine)
+            for f in other:
+                f.close()
+            self.assertEqual(removed, ["src-aaa", "target"])
+            self.assertEqual(mine, [])
+            self.assertEqual(sorted(os.listdir(work)),
+                             ["bin", "build.lock", "run-x-123", "src-bbb", "src-bbb.use", "worktree.lock"])
+
+    def test_builds_go_to_the_shared_lane(self):
+        old = os.environ.get("CARGO_TARGET_DIR")
+        try:
+            os.environ["CARGO_TARGET_DIR"] = "/lanes/lane-2"
+            self.assertEqual(fakegate.target_dir(), "/lanes/lane-2")
+            del os.environ["CARGO_TARGET_DIR"]
+            self.assertEqual(fakegate.target_dir(), os.path.expanduser("~/.cache/mb-targets/lane-1"))
+        finally:
+            if old is not None:
+                os.environ["CARGO_TARGET_DIR"] = old
+
+
 class CommittedCacheTest(unittest.TestCase):
     def test_every_gated_suite_has_cached_descriptions(self):
         """The committed world cache covers every suite the gate runs, so its agent tier
