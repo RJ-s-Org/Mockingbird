@@ -3834,6 +3834,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "jsonschema",
+ "md-5 0.11.0",
  "regex",
  "serde",
  "serde_json",

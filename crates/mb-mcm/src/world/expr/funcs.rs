@@ -1,5 +1,6 @@
 //! The plain functions: strings, conversions, hashes and the session's `seq` and `mint`.
 
+use md5::Md5;
 use regex::Regex;
 use serde_json::Value;
 use sha1::Sha1;
@@ -7,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::eval::{Num, double, type_name};
 use super::parse::Func;
-use super::{Fail, Host, compile_regex, md5};
+use super::{Fail, Host, compile_regex};
 
 pub(super) fn call(
     func: Func,
@@ -109,7 +110,7 @@ pub(super) fn call(
                 }
             },
         },
-        Func::Md5 => Value::String(hex(&md5::digest(string(0)?.as_bytes()))),
+        Func::Md5 => Value::String(hex(&Md5::digest(string(0)?.as_bytes()))),
         Func::Sha1 => Value::String(hex(&Sha1::digest(string(0)?.as_bytes()))),
         Func::Sha256 => Value::String(hex(&Sha256::digest(string(0)?.as_bytes()))),
         Func::Seq => Value::from(host.seq(string(0)?)),

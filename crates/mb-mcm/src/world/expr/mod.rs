@@ -55,7 +55,6 @@ mod check;
 mod eval;
 mod funcs;
 mod lex;
-mod md5;
 mod parse;
 #[cfg(test)]
 mod tests;
