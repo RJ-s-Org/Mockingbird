@@ -52,6 +52,9 @@ import world_author  # noqa: E402
 SKIP = ("journeys_blind14",)
 DEFAULT_MODELS = ("claude-sonnet-5-5", world_author.DEFAULT_AUTHOR_MODEL)
 TIERS = ("agent", "none")
+# A deciding call answered by the engine itself (no model call) gets the same answer on a real
+# model, so a failing check with one of these sources is the executor's failure, not junk content.
+ENGINE_DECIDED = ("state", "rejected")
 
 
 def git(*args, cwd=REPO, check=True):
@@ -118,10 +121,19 @@ def compare(base, cand, noise=1):
         missing = [k for k in lost if k not in c]
         gained = sorted(k for k, v in c.items() if v.get("ok") and not b.get(k, {}).get("ok"))
         net = len(gained) - len(lost)
-        report[tier] = {"base": sum(1 for v in b.values() if v.get("ok")), "cand": sum(1 for v in c.values() if v.get("ok")),
+        # Failing checks the executor decided, counted apart from the net: a junk-LLM fallback that
+        # gains a check can hide an executor regression that loses another.
+        eb, ec = executor_failed(b), executor_failed(c)
+        report[tier] = {"exec_base": len(eb), "exec_cand": len(ec), "exec_new": sorted(ec - eb),
+                        "exec_cleared": sorted(eb - ec),"base": sum(1 for v in b.values() if v.get("ok")), "cand": sum(1 for v in c.values() if v.get("ok")),
                         "checks": len(c), "lost": lost, "missing": missing, "gained": gained, "net": net,
                         "fails": net < -noise}
     return report
+
+
+def executor_failed(rows):
+    """Keys of the failing checks whose deciding call the engine answered."""
+    return {k for k, v in rows.items() if not v.get("ok") and v.get("source") in ENGINE_DECIDED}
 
 
 def load(run_dir):
@@ -296,6 +308,10 @@ def print_report(report, cand_name, base_sha, meta, bmeta, noise):
             print(f"  LOST   {k[1]}: {k[2]}{'  (not run by the candidate)' if k in r['missing'] else ''}")
         for k in r["gained"]:
             print(f"  gained {k[1]}: {k[2]}")
+        print(f"[{tier}] executor-decided: {r['exec_base']} -> {r['exec_cand']} fail "
+              f"(+{len(r['exec_new'])}/-{len(r['exec_cleared'])})")
+        for k in r["exec_new"]:
+            print(f"  EXEC-FAIL {k[1]}: {k[2]}")
     bad = [t for t, r in report.items() if r["fails"]]
     print("\nVERDICT:", f"NET LOSS on {', '.join(bad)}" if bad else "no net loss")
     return 1 if bad else 0
@@ -351,7 +367,9 @@ def main():
         with open(a.json, "w") as f:
             json.dump({"base": base_sha, "candidate": name, "meta": cmeta,
                        "tiers": {t: dict(r, lost=[list(k) for k in r["lost"]], gained=[list(k) for k in r["gained"]],
-                                         missing=[list(k) for k in r["missing"]])
+                                         missing=[list(k) for k in r["missing"]],
+                                         exec_new=[list(k) for k in r["exec_new"]],
+                                         exec_cleared=[list(k) for k in r["exec_cleared"]])
                                  for t, r in report.items()}}, f, indent=1)
     return print_report(report, name, base_sha, cmeta, meta, a.noise)
 

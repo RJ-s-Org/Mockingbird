@@ -53,6 +53,26 @@ class CompareTest(unittest.TestCase):
         self.assertTrue(r["agent"]["fails"])
 
 
+    def test_executor_decided_failures_are_counted_apart_from_the_net(self):
+        def row(ok, source):
+            return {"suite": "journeys_x", "ok": ok, "source": source}
+        k = lambda c: ("agent", "journeys_x", c)
+        base = {k("a"): row(True, "state"), k("b"): row(False, "llm"), k("c"): row(False, "state"), k("d"): row(False, "rejected")}
+        # a: the executor now fails it; b: a junk answer now passes; c: still failing from state; d: fixed.
+        cand = {k("a"): row(False, "state"), k("b"): row(True, "llm"), k("c"): row(False, "state"), k("d"): row(True, "state")}
+        r = fakegate.compare(base, cand, noise=1)["agent"]
+        self.assertEqual(r["net"], 1)
+        self.assertEqual((r["exec_base"], r["exec_cand"]), (2, 2))
+        self.assertEqual(r["exec_new"], [k("a")])
+        self.assertEqual(r["exec_cleared"], [k("d")])
+
+    def test_a_check_failing_through_the_model_is_not_executor_decided(self):
+        base = {("agent", "journeys_x", "a"): {"ok": True, "source": "state"}}
+        cand = {("agent", "journeys_x", "a"): {"ok": False, "source": "fallback"}}
+        r = fakegate.compare(base, cand)["agent"]
+        self.assertEqual((r["exec_cand"], r["exec_new"]), (0, []))
+
+
 class LoadTest(unittest.TestCase):
     def test_rows_are_keyed_by_tier_from_every_model_directory(self):
         with tempfile.TemporaryDirectory() as d:
