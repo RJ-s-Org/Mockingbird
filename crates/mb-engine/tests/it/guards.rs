@@ -759,6 +759,12 @@ impl Provider for PacedProvider {
             return Err(LlmError::Transport("script exhausted".into()));
         };
         tokio::time::sleep(delay).await;
+        if body == "ERROR" {
+            return Err(LlmError::Http {
+                status: 400,
+                body: "bad request".into(),
+            });
+        }
         Ok(ChatResponse {
             content: body,
             usage: Usage::default(),
@@ -767,17 +773,28 @@ impl Provider for PacedProvider {
 }
 
 fn hedging_engine(script: Vec<(Duration, String)>) -> (Arc<PacedProvider>, Engine) {
+    hedging_engine_with(script, Duration::from_secs(2), EngineGuards::default())
+}
+
+fn hedging_engine_with(
+    script: Vec<(Duration, String)>,
+    hedge_after: Duration,
+    guards: EngineGuards,
+) -> (Arc<PacedProvider>, Engine) {
     let provider = Arc::new(PacedProvider {
         script,
         calls: AtomicU64::new(0),
     });
     let config = EngineConfig {
         timeout: Duration::from_secs(60),
-        hedge_after: Some(Duration::from_secs(2)),
+        hedge_after: Some(hedge_after),
         ..EngineConfig::default()
     };
     let dyn_provider: Arc<dyn Provider> = provider.clone();
-    (provider, Engine::new(Some(dyn_provider), config))
+    (
+        provider,
+        Engine::new(Some(dyn_provider), config).with_guards(guards),
+    )
 }
 
 /// A call still unanswered after `hedge_after` is sent once more, and the first
@@ -831,4 +848,68 @@ async fn an_invalid_answer_is_hedged_at_once() {
         started.elapsed()
     );
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+}
+
+/// When neither answer passes, the first goes on to the repair round.
+#[tokio::test(start_paused = true)]
+async fn two_invalid_answers_go_on_to_the_repair() {
+    let bundle = bundle();
+    let (provider, engine) = hedging_engine(vec![
+        (Duration::from_millis(100), "{\"nope\": true".to_string()),
+        (Duration::from_millis(100), "{\"nope\": 2".to_string()),
+        (Duration::from_millis(100), contact("repaired@example.com")),
+    ]);
+    let response = generate(&engine, &bundle).await;
+    assert_eq!(
+        response.source,
+        Source::Repaired,
+        "{:?}",
+        response.fallback_reason
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+}
+
+/// A call that errors is not hedged.
+#[tokio::test(start_paused = true)]
+async fn an_error_is_not_hedged() {
+    let bundle = bundle();
+    let (provider, engine) = hedging_engine(vec![
+        (Duration::from_millis(100), "ERROR".to_string()),
+        (Duration::from_millis(100), contact("unused@example.com")),
+    ]);
+    let response = generate(&engine, &bundle).await;
+    assert_eq!(response.source, Source::Fallback);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+}
+
+/// `hedge_after: 0s` never hedges, and neither does a full limiter: the hedge
+/// never waits for a slot.
+#[tokio::test(start_paused = true)]
+async fn no_hedge_when_off_or_without_a_free_slot() {
+    let bundle = bundle();
+    let slow = || {
+        vec![
+            (Duration::from_secs(5), contact("only@example.com")),
+            (Duration::from_millis(1), contact("hedge@example.com")),
+        ]
+    };
+    let (provider, engine) = hedging_engine_with(slow(), Duration::ZERO, EngineGuards::default());
+    let response = generate(&engine, &bundle).await;
+    assert_eq!(
+        response.body.as_ref().and_then(|b| b["email"].as_str()),
+        Some("only@example.com")
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+    let guards = EngineGuards {
+        limiter: Some(GenerationLimiter::new_shared(1)),
+        ..EngineGuards::default()
+    };
+    let (provider, engine) = hedging_engine_with(slow(), Duration::from_secs(2), guards);
+    let response = generate(&engine, &bundle).await;
+    assert_eq!(
+        response.body.as_ref().and_then(|b| b["email"].as_str()),
+        Some("only@example.com")
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }

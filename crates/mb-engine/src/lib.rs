@@ -2660,15 +2660,19 @@ impl Engine {
         .await
     }
 
-    /// One LLM call and its check, hedged: when it has not answered within
-    /// [`EngineConfig::hedge_after`], or answers with something that does not
-    /// pass its check, the same request is sent once more (a provider router
-    /// such as OpenRouter usually serves it from another provider), and the first
-    /// answer that passes is taken. When neither passes, the first call's answer
-    /// (else the second's) goes on to the repair round; when neither answered,
-    /// the first call's error is returned. The call still running when the other
-    /// wins is dropped, which cancels its request: the tokens it spent are not
-    /// reported.
+    /// One LLM call and its check, hedged: when it has not finished within
+    /// [`EngineConfig::hedge_after`] (its whole reply, not its first token), or
+    /// finishes with an answer that does not pass its check, the same request is
+    /// sent once more (a provider router such as OpenRouter usually serves it
+    /// from another provider), and the first answer that passes is taken. A call
+    /// that errors is not hedged: the provider has retried what is worth retrying.
+    /// The second call needs what any call does: the token budget, and a free
+    /// generation slot now (it never waits for one), and time before `deadline`.
+    /// When neither answer passes, the first that is merely invalid goes on to the
+    /// repair round (else a rejected one); when neither answered, the first call's
+    /// error is returned. The call still running when the other wins is dropped,
+    /// which cancels its request; it is charged its prompt, estimated at four bytes
+    /// a token.
     #[allow(clippy::too_many_arguments)]
     async fn hedged(
         &self,
@@ -2699,46 +2703,80 @@ impl Engine {
             let checked = check(&reply);
             return Ok((reply, checked));
         };
+        // What a dropped call is charged: its prompt.
+        let dropped = || {
+            let bytes: usize = messages.iter().map(|m| m.content.len()).sum();
+            Usage {
+                prompt_tokens: u32::try_from(bytes / 4).unwrap_or(u32::MAX),
+                ..Usage::default()
+            }
+        };
+        let charge_dropped = |usage: &mut Usage| {
+            let spent = dropped();
+            self.spend(spent);
+            *usage = *usage + spent;
+        };
+        // A second call when the budget, a free slot and the deadline allow one.
+        let hedge = || {
+            let permit = self.admit_hedge()?;
+            (Instant::now() < deadline).then(|| (permit, Box::pin(attempt())))
+        };
         let first = attempt();
         tokio::pin!(first);
         let timer = tokio::time::sleep(after);
         tokio::pin!(timer);
         let mut second = None;
+        let mut hedged = false;
         let mut first_pending = true;
         let mut second_pending = false;
-        // What came back that did not pass: the first call's, then the second's.
+        // What came back without passing: the first call's, then the second's.
         let mut failed: [Option<Result<CheckedReply, String>>; 2] = [None, None];
         loop {
             tokio::select! {
                 (reply, spent) = &mut first, if first_pending => {
                     first_pending = false;
                     *usage = *usage + spent;
-                    match reply {
+                    let errored = match reply {
                         Ok(reply) => {
                             let checked = check(&reply);
                             if passes(&checked.0) {
+                                if second_pending {
+                                    charge_dropped(usage);
+                                }
                                 return Ok((reply, checked));
                             }
                             failed[0] = Some(Ok((reply, checked)));
+                            false
                         }
-                        Err(e) => failed[0] = Some(Err(e)),
+                        Err(e) => {
+                            failed[0] = Some(Err(e));
+                            true
+                        }
+                    };
+                    if !hedged && !errored {
+                        hedged = true;
+                        second = hedge();
+                        second_pending = second.is_some();
+                        if second_pending {
+                            tracing::info!("hedging the LLM call: the first answer did not pass");
+                        }
                     }
-                    if second.is_none() {
-                        tracing::info!("hedging the LLM call: the first answer did not pass");
-                        second = Some(Box::pin(attempt()));
-                        second_pending = true;
-                    } else if !second_pending {
+                    if !second_pending {
                         break;
                     }
                 }
-                () = &mut timer, if second.is_none() && first_pending => {
-                    tracing::info!(after_ms = after.as_millis() as u64, "hedging the LLM call: no answer yet");
-                    second = Some(Box::pin(attempt()));
-                    second_pending = true;
+                () = &mut timer, if !hedged && first_pending => {
+                    hedged = true;
+                    second = hedge();
+                    second_pending = second.is_some();
+                    if second_pending {
+                        let after_ms = u64::try_from(after.as_millis()).unwrap_or(u64::MAX);
+                        tracing::info!(after_ms, "hedging the LLM call: no answer yet");
+                    }
                 }
                 Some((reply, spent)) = async {
                     match second.as_mut() {
-                        Some(call) => Some(call.await),
+                        Some((_, call)) => Some(call.await),
                         None => None,
                     }
                 }, if second_pending => {
@@ -2748,6 +2786,9 @@ impl Engine {
                         Ok(reply) => {
                             let checked = check(&reply);
                             if passes(&checked.0) {
+                                if first_pending {
+                                    charge_dropped(usage);
+                                }
                                 return Ok((reply, checked));
                             }
                             failed[1] = Some(Ok((reply, checked)));
@@ -2760,7 +2801,16 @@ impl Engine {
                 }
             }
         }
+        let invalid = |a: &Option<Result<CheckedReply, String>>| {
+            matches!(a, Some(Ok((_, (Checked::Invalid(_), _, _)))))
+        };
         let [one, two] = failed;
+        // An invalid answer can be repaired; a rejected one cannot.
+        let (one, two) = if !invalid(&one) && invalid(&two) {
+            (two, one)
+        } else {
+            (one, two)
+        };
         match (one, two) {
             (Some(Ok(answer)), _) | (_, Some(Ok(answer))) => Ok(answer),
             (Some(Err(e)), _) | (None, Some(Err(e))) => Err(e),
