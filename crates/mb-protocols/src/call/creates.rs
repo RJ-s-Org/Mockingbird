@@ -644,7 +644,7 @@ fn identity_holds(rt: &MockRuntime, op: &Operation, t: &str, field: &str, id: &s
         .flatten()
         .filter_map(|schema| mb_engine::consistency::property_schema(bundle, &schema, field))
         .all(|declared| {
-            mb_engine::SchemaValidator::for_output(&bundle.with_defs(&declared))
+            mb_engine::SchemaValidator::for_output(&bundle.with_reachable_defs(&declared))
                 .is_ok_and(|v| v.is_valid_output(&value))
         })
 }

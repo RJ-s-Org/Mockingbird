@@ -416,7 +416,8 @@ impl IdChecks {
         header: &Value,
         serves_id: bool,
     ) -> Option<Self> {
-        let compile = |schema: &Value| SchemaValidator::for_output(&rt.bundle().with_defs(schema));
+        let compile =
+            |schema: &Value| SchemaValidator::for_output(&rt.bundle().with_reachable_defs(schema));
         let header_integer = header.get("type").and_then(Value::as_str) == Some("integer");
         Some(Self {
             header: match serves_id {
@@ -480,7 +481,7 @@ fn draw(
     let faked = schemas
         .into_iter()
         .flatten()
-        .map(|schema| faker.fake(&rt.bundle().with_defs(schema), &mut rng));
+        .map(|schema| faker.fake(&rt.bundle().with_reachable_defs(schema), &mut rng));
     shaped
         .into_iter()
         .chain(faked)

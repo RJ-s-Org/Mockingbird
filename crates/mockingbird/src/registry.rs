@@ -1374,6 +1374,8 @@ async fn build_mounted(
     let protocol = runtime.bundle().protocol();
     let channels = runtime.bundle().channels.clone();
     let runtime = Arc::new(runtime);
+    // The answer validators compile in the background, so no first read waits on one.
+    tokio::spawn(mb_protocols::warm_validators(Arc::downgrade(&runtime)));
     // The record pool fills in the background, never in the way of mounting the mock.
     // At most a tenth of a daily token budget, which requests need more.
     let pool_cap = match mock.limits.daily_token_budget {

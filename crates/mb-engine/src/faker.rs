@@ -599,10 +599,15 @@ fn echo_as(value: &Value, chosen: &str, s: &Map<String, Value>) -> Option<Value>
                     .is_none_or(|p| check_regex(p).is_some_and(|re| re.is_match(&text)));
             fits.then_some(Value::String(text))
         }
-        "integer" => text.parse::<i64>().ok().map(Value::from),
+        "integer" => text
+            .parse::<i64>()
+            .ok()
+            .filter(|n| within(s, *n as f64))
+            .map(Value::from),
         "number" => text
             .parse::<f64>()
             .ok()
+            .filter(|x| within(s, *x))
             .and_then(Number::from_f64)
             .map(Value::Number),
         "boolean" => match text.as_str() {
@@ -612,6 +617,19 @@ fn echo_as(value: &Value, chosen: &str, s: &Map<String, Value>) -> Option<Value>
         },
         _ => None,
     }
+}
+
+/// Whether `x` meets the numeric bounds of `s` (`minimum`, `maximum`, their exclusive
+/// forms and `multipleOf`), so an echoed request number never breaks them.
+fn within(s: &Map<String, Value>, x: f64) -> bool {
+    let num = |k: &str| s.get(k).and_then(Value::as_f64);
+    num("minimum").is_none_or(|m| x >= m)
+        && num("maximum").is_none_or(|m| x <= m)
+        && num("exclusiveMinimum").is_none_or(|m| x > m)
+        && num("exclusiveMaximum").is_none_or(|m| x < m)
+        && num("multipleOf")
+            .filter(|m| *m > 0.0)
+            .is_none_or(|m| ((x / m) - (x / m).round()).abs() < 1e-9)
 }
 
 fn hard_exhausted(ctx: &Ctx<'_>) -> bool {
@@ -1336,7 +1354,7 @@ fn random_datetime<R: Rng>(now: i64, rng: &mut R) -> chrono::DateTime<chrono::Ut
 
 /// Whether an integer member holds a Unix timestamp (`created`,
 /// `updated_at`, `expires_at`, `timestamp`).
-fn timestamp_field(field: &str) -> bool {
+pub(crate) fn timestamp_field(field: &str) -> bool {
     let f = field.to_ascii_lowercase();
     ["created", "updated", "timestamp", "date"].contains(&f.as_str())
         || f.ends_with("_at")

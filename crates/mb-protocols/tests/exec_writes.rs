@@ -1155,24 +1155,23 @@ async fn a_replace_keeps_the_id_and_server_owned_members_and_drops_the_rest() {
 #[tokio::test]
 async fn a_replace_missing_a_required_member_has_it_filled() {
     let (capture, _guard) = Capture::install();
-    // The create's answer, then the fill's: a value for `size`, and a `name` it never
-    // takes (the replace sent one).
-    let h = with_item(
-        replacing(),
-        vec![item(), json!({"size": 5, "name": "not sent"})],
-    )
-    .await;
+    // The create's answer; the fill of `size`, a number, is the faker's.
+    let h = with_item(replacing(), vec![item()]).await;
     let t = type_of(&h, "getItem");
     let (status, headers, body) = h
         .send("PUT", "/items/i1", Some(json!({"name": "c"})), &[])
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(source(&headers), "state", "{body}");
-    let replaced =
-        json!({"id": "i1", "name": "c", "size": 5, "created": "2026-01-01", "status": "open"});
+    assert!(body["size"].is_i64(), "{body}");
+    let replaced = json!({"id": "i1", "name": "c", "size": body["size"], "created": "2026-01-01", "status": "open"});
     assert_eq!(body, replaced);
     assert_eq!(h.stored(&t, "i1").await, Some(replaced.clone()));
-    assert_eq!(h.provider.requests().len(), 2, "the fill's one LLM call");
+    assert_eq!(
+        h.provider.requests().len(),
+        1,
+        "the fill of a number makes no LLM call"
+    );
     assert_eq!(
         capture.of("replaceItem"),
         vec![line("replaceItem", "replace", None)]

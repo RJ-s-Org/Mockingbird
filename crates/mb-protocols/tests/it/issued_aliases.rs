@@ -52,7 +52,7 @@ async fn an_issued_token_names_its_record_on_later_reads() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(headers["x-mockingbird-source"], "state", "{body}");
     assert_eq!(body["item"]["item_id"], ex["item_id"], "{body}");
-    assert_eq!(body["item"]["institution_id"], json!("ins_1"), "{body}");
+    assert_eq!(body["item"]["products"], json!(["auth"]), "{body}");
     // The token is the server's, not a member of the record it reads.
     assert!(body["item"].get("access_token").is_none(), "{body}");
 }
