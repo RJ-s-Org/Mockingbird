@@ -82,6 +82,8 @@ curl -s localhost:8080/graphql \
 
 The sources of the root fields are reported in the response, under `extensions.mockingbird.sources`.
 
+A field that looks one object up by a value of it (`repository(name: "deno")`, where `Repository` has a scalar `name`) is generated as found, never `null`, even where the schema lets it be null: the query names a record that exists, as a REST read of a named id does. Root fields are the exception, since two of them may look up the same thing under different types.
+
 ### Batched GraphQL requests
 
 A `POST` whose JSON body is an array of operations is a batch, answered `200` with an array of responses in the same order:
