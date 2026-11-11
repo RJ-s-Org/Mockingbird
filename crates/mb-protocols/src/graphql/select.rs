@@ -14,6 +14,7 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
@@ -397,10 +398,16 @@ fn properties(value: &Value, defs: &Map<String, Value>, sel: &Selection) -> Map<
         if let Value::Object(obj) = &mut narrowed
             && !child.args.is_empty()
         {
-            let note = format!(
+            let mut note = format!(
                 "Queried with arguments {}",
                 Value::Object(child.args.clone())
             );
+            if let Some(key) = lookup_argument(schema, defs, child) {
+                let _ = write!(
+                    note,
+                    ": it looks up the one with this `{key}`, which exists; answer it, not null"
+                );
+            }
             let description = match obj.get("description").and_then(Value::as_str) {
                 Some(d) => format!("{d} {note}"),
                 None => note,
@@ -410,6 +417,45 @@ fn properties(value: &Value, defs: &Map<String, Value>, sel: &Selection) -> Map<
         out.insert(key.clone(), narrowed);
     }
     out
+}
+
+/// The argument by which `child`, a field whose schema is `schema`, looks
+/// one record up, if it does: the field returns one object (not a list) and
+/// a string or number argument names a non-enum scalar field of that object
+/// (`repository(name: "deno")` → `name`). The model is told the record
+/// exists: left to itself it often answers such a nullable lookup `null`,
+/// which clients read as "not found". Only the prompt says so; the schema
+/// still allows `null`, so a scenario, the world or stored state can still
+/// answer one.
+fn lookup_argument<'a>(
+    schema: &Value,
+    defs: &Map<String, Value>,
+    child: &'a Selection,
+) -> Option<&'a str> {
+    let props = super::nested::def_ref(schema)
+        .and_then(|name| defs.get(name)?.get("properties")?.as_object())?;
+    child.args.iter().find_map(|(name, value)| {
+        (matches!(value, Value::String(_) | Value::Number(_))
+            && props
+                .get(name)
+                .is_some_and(|p| super::nested::is_scalar(p, defs) && !is_enum(p, defs)))
+        .then_some(name.as_str())
+    })
+}
+
+/// Whether a scalar property schema is an enum (through a nullable `anyOf`
+/// or a `$ref`).
+fn is_enum(schema: &Value, defs: &Map<String, Value>) -> bool {
+    if schema.get("enum").is_some() {
+        return true;
+    }
+    if let Some(def) = super::nested::def_ref(schema).and_then(|n| defs.get(n)) {
+        return def.get("enum").is_some();
+    }
+    schema
+        .get("anyOf")
+        .and_then(Value::as_array)
+        .is_some_and(|branches| branches.iter().any(|b| b.get("enum").is_some()))
 }
 
 /// A body keyed by field names (generated in full) re-keyed by response
@@ -583,6 +629,46 @@ mod tests {
         .as_object()
         .cloned()
         .unwrap_or_default()
+    }
+
+    /// A lookup by a value of its record tells the model the record exists;
+    /// the schema still allows `null`.
+    #[test]
+    fn a_lookup_by_a_value_of_its_record_is_said_to_exist() {
+        let mut defs = defs();
+        defs["User"]["properties"]["repo"] =
+            json!({"anyOf": [{"$ref": "#/$defs/Repo"}, {"type": "null"}]});
+        defs["Repo"]["properties"]["kind"] = json!({"enum": ["PUBLIC", "PRIVATE"]});
+        let narrowed = |args: Value| {
+            let child = aliased("repo", args, sel([("stars", leaf())]));
+            narrow(
+                &json!({"$ref": "#/$defs/User"}),
+                &defs,
+                &sel([("repo", child)]),
+            )["properties"]["repo"]
+                .clone()
+        };
+        let by_name = narrowed(json!({"name": "deno"}));
+        let note = by_name["description"].as_str().unwrap();
+        assert!(
+            note.contains("one with this `name`, which exists"),
+            "{note}"
+        );
+        let branches = by_name["anyOf"].as_array().unwrap();
+        assert!(branches.iter().any(|b| b["type"] == "null"), "{by_name}");
+        // Not lookups: an argument naming no field, a null, a list, an
+        // object, an enum member.
+        for args in [
+            json!({"first": 1}),
+            json!({"name": null}),
+            json!({"name": ["a"]}),
+            json!({"name": {"eq": "a"}}),
+            json!({"kind": "PUBLIC"}),
+        ] {
+            let out = narrowed(args.clone());
+            let note = out["description"].as_str().unwrap();
+            assert!(!note.contains("which exists"), "{args}: {note}");
+        }
     }
 
     #[test]

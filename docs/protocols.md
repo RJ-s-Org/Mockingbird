@@ -124,6 +124,10 @@ SSE (an OpenAPI operation answering `text/event-stream`):
 curl -N localhost:8080/ticks -H 'X-Mockingbird-Stream-Items: 3'
 ```
 
+## GraphQL nested lookups
+
+A field below the root that returns one object, with a string or number argument naming a scalar, non-enum field of that object (`repository(name: "deno")`, where `Repository` has a `name`), is described to the model as a record that exists, so it is answered rather than `null` (which clients read as "not found"). Only the prompt says so: the schema still allows `null`, so a scenario, the world description or stored state can answer one. Fields returning a list, an interface or a union are not lookups.
+
 ## Streaming
 
 SSE responses, GraphQL subscriptions and gRPC server- and bidi-streaming calls are generated as a stream of items, each validated as it completes (repaired once, or replaced by faker output). The number of items comes from, in order:
