@@ -1129,6 +1129,7 @@ fn overlay_type(mut b: TypeDesc, t: &TypeDesc) -> TypeDesc {
     set(&mut b.concurrency, &t.concurrency);
     set_map(&mut b.derived, &t.derived);
     set_map(&mut b.computed, &t.computed);
+    set_vec(&mut b.same_as, &t.same_as);
     merge_extra(&mut b.extra, &t.extra);
     b
 }
@@ -1338,6 +1339,25 @@ mod tests {
         let id = out.types["template"].identity.as_ref().unwrap();
         assert_eq!(id.alternates, Some(vec![]));
         assert_eq!(id.member.as_deref(), Some("TemplateId"));
+    }
+
+    #[test]
+    fn overlay_keeps_same_as_on_a_type_the_base_holds() {
+        let base: World =
+            serde_json::from_value(json!({"types": {"pulls": {"identity": {"member": "number"}}}}))
+                .unwrap();
+        let top: World =
+            serde_json::from_value(json!({"types": {"pulls": {"same_as": ["pullrequest"]}}}))
+                .unwrap();
+        let out = overlay(&base, &top);
+        assert_eq!(out.types["pulls"].same_as, vec!["pullrequest".to_owned()]);
+        assert_eq!(
+            out.types["pulls"]
+                .identity
+                .as_ref()
+                .and_then(|i| i.member.as_deref()),
+            Some("number")
+        );
     }
 
     #[test]
