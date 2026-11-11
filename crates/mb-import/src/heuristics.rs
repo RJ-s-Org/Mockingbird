@@ -1589,9 +1589,14 @@ fn is_scalar_schema(schema: &Value) -> bool {
 /// under which the path decides who is listed, and two types serving the items.
 ///
 /// Any other list read takes the type whose `GET` by path serves exactly what every
-/// listed array holds, the same schema and not a shorter or longer form of it: Notion's
+/// listed array holds: Notion's
 /// `POST /data_sources/{id}/query` lists pages, and Jira's `GET /search/jql` issues,
 /// whatever other routes its own type has.
+///
+/// A list whose items are no type's exact record, and whose own type has no `GET` by
+/// path, takes the type whose record they are a form of ([`summarized`]): TMDB's
+/// `/movie/popular` lists `movie` summaries, which go under that type's records, so a
+/// listed movie's detail read is that record.
 ///
 /// A create then takes the type that reads exactly what it stores ([`created_type`]).
 fn apply_lookups(operations: &mut [Operation], hints: &[ResourceHint], defs: &Map<String, Value>) {
@@ -1659,8 +1664,8 @@ fn apply_lookups(operations: &mut [Operation], hints: &[ResourceHint], defs: &Ma
     }
 }
 
-/// The type whose records a list of shorter forms lists, when the list's own type
-/// has no `GET` by path: TMDB's `GET /movie/popular` lists the movies
+/// The type whose records a list of another form of them lists (shorter or longer),
+/// when the list's own type has no `GET` by path: TMDB's `GET /movie/popular` lists the movies
 /// `GET /movie/{movie_id}` serves, each item a summary (`genre_ids` where the record
 /// has `genres`). An item is a form of a read's record when it has the record's key,
 /// with the same schema, and at least half its other members (and at least one) are

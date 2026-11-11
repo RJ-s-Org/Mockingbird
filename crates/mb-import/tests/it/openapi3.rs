@@ -3634,7 +3634,7 @@ components:
     MoviePage: {type: object, properties: {page: {type: integer}, results: {type: array, items: {$ref: "#/components/schemas/MovieItem"}}}}
     Show: {type: object, properties: {id: {type: integer}, name: {type: string}, overview: {type: string}, genres: {type: array, items: {type: object}}}}
     ShowItem: {type: object, properties: {id: {type: integer}, name: {type: string}, overview: {type: string}, genre_ids: {type: array, items: {type: integer}}}}
-    Hit: {type: object, properties: {id: {type: integer}, overview: {type: string}, media_type: {type: string}, score: {type: number}}}
+    Hit: {type: object, properties: {id: {type: integer}, overview: {type: string}, genres: {type: array, items: {type: object}}}}
 "##;
 
 #[test]
@@ -3646,4 +3646,22 @@ fn a_list_of_summaries_takes_the_type_whose_record_they_summarize() {
     assert_eq!(type_of("showRecommendations").as_deref(), Some("tv"));
     // Items as close to a movie as to a show are neither.
     assert_eq!(type_of("trending").as_deref(), Some("trending"));
+}
+
+/// A lone list of summaries, the only route of its type (a lookup), lists the type it
+/// summarizes too; items as close to two records leave it as it was.
+#[test]
+fn a_lone_list_of_summaries_takes_the_type_whose_record_they_summarize() {
+    let lone = |items: &str| {
+        let contract = SUMMARY_LISTS
+            .replace("  /tv/popular:", "  /tv/popular_unused:")
+            .replace(
+                "items: {$ref: \"#/components/schemas/MovieItem\"}",
+                &format!("items: {{$ref: \"#/components/schemas/{items}\"}}"),
+            );
+        let bundle = compile(contract.as_bytes()).unwrap();
+        op(&bundle, "popularMovies").resource_type.clone()
+    };
+    assert_eq!(lone("MovieItem").as_deref(), Some("movie"));
+    assert_eq!(lone("Hit").as_deref(), Some("popular"));
 }
