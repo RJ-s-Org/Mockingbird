@@ -745,12 +745,11 @@ fn id_member(values: &[InputValue], resource_type: Option<&str>) -> Option<Strin
         .map(|a| a.name.clone())
 }
 
-/// The argument a query field with no id argument looks its one record up by: the
-/// one argument named as a scalar field of the record's type and of that field's
-/// scalar type (`user(login: String!)` → `User.login`, `topic(name:)`), when every
-/// other argument is optional. A `Boolean` or `Float` looks nothing up. A required
-/// argument naming no such field (`repository(owner:, name:)`, where `name` alone
-/// names no repository) leaves none, as do two such arguments, an enum and a list.
+/// The argument a query field with no id argument looks its one record up by: its only
+/// argument, named as a scalar field of the record's type and of that field's scalar
+/// type (`user(login: String!)` → `User.login`, `topic(name:)`). Any other argument may
+/// change the answer (`rate(currency:, date:)`), so a field with two has none. A
+/// `Boolean`, a `Float`, an enum or a list looks nothing up.
 fn lookup_argument(schema: &Schema, f: &Field, fields: &[Field]) -> Option<String> {
     let scalar = |ty: &Type| match &ty.base {
         BaseType::Named(n) if matches!(n.as_str(), "Boolean" | "Float") => false,
@@ -763,26 +762,33 @@ fn lookup_argument(schema: &Schema, f: &Field, fields: &[Field]) -> Option<Strin
         }
         BaseType::List(_) => false,
     };
-    let names_field = |arg: &InputValue| {
-        scalar(&arg.ty)
-            && fields.iter().any(|field| {
-                field.name == arg.name
-                    && field.args.is_empty()
-                    && scalar(&field.ty)
-                    && named_type(&field.ty) == named_type(&arg.ty)
-            })
-    };
-    let mut lookups = f.args.iter().filter(|a| names_field(a));
-    let one = lookups.next()?;
-    if lookups.next().is_some() {
+    let [arg] = f.args.as_slice() else {
         return None;
-    }
-    let others_optional = f
-        .args
+    };
+    let names_field = scalar(&arg.ty)
+        && fields.iter().any(|field| {
+            field.name == arg.name
+                && field.args.is_empty()
+                && scalar(&field.ty)
+                && named_type(&field.ty) == named_type(&arg.ty)
+        });
+    names_field.then(|| arg.name.clone())
+}
+
+/// The member records of `ty`, an object type with no `id`, are keyed by: the one
+/// [`lookup_argument`] every query field returning one `ty` agrees on. Two fields
+/// looking it up by different members (`topic(name:)`, `topicBySlug(slug:)`) key it
+/// by neither, since one record would be stored under each.
+fn lookup_key(schema: &Schema, ty: &str) -> Option<String> {
+    let query = schema.roots[0].as_deref()?;
+    let fields = schema.object_fields(ty)?;
+    let mut keys = schema
+        .object_fields(query)?
         .iter()
-        .filter(|a| a.name != one.name)
-        .all(|a| a.ty.nullable || a.has_default);
-    others_optional.then(|| one.name.clone())
+        .filter(|f| matches!(f.ty.base, BaseType::Named(_)) && named_type(&f.ty) == ty)
+        .filter_map(|f| lookup_argument(schema, f, fields));
+    let first = keys.next()?;
+    keys.all(|k| k == first).then_some(first)
 }
 
 /// The identity of a create or a delete of `record`, as its name says
@@ -946,7 +952,8 @@ fn operation(
         .or_else(|| {
             let fields = object_fields
                 .filter(|_| returns_one && operation_type == GraphqlOperationType::Query)?;
-            let member = lookup_argument(schema, f, fields)?;
+            let member = lookup_argument(schema, f, fields)
+                .filter(|m| lookup_key(schema, named).as_ref() == Some(m))?;
             Some(Identity {
                 path_param: None,
                 field: member.clone(),

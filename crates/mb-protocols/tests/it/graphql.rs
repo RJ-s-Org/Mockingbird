@@ -2979,7 +2979,7 @@ async fn a_read_by_a_lookup_argument_is_answered_from_state() {
     let provider = scripted(vec![
         json!({"__typename": "User", "id": "U_1", "login": "octocat", "name": "The Octocat"}),
         // Generated again for the wider selection, under what the session holds.
-        json!({"__typename": "User", "id": "U_9", "name": "Someone Else", "followers": {"__typename": "Count", "totalCount": 12}}),
+        json!({"__typename": "User", "id": "U_9", "login": "octocat", "name": "Someone Else", "followers": {"__typename": "Count", "totalCount": 12}}),
     ]);
     let base = serve(MockRuntime::new(
         "gh",
@@ -3033,6 +3033,57 @@ async fn a_read_by_a_lookup_argument_is_answered_from_state() {
     assert_eq!(user["name"], "The Octocat", "{}", more.body);
     assert_eq!(user["followers"]["totalCount"], 12, "{}", more.body);
     assert_eq!(provider.requests().len(), 2);
+}
+
+/// A read by a lookup argument that selects neither the key nor the member still
+/// stores the record under its own id with the argument's value, never the value as
+/// its id.
+#[tokio::test]
+async fn a_lookup_read_not_selecting_the_member_keeps_its_own_id() {
+    let provider = scripted(vec![
+        json!({"__typename": "User", "id": "U_1", "login": "octocat", "name": "The Octocat"}),
+    ]);
+    let base = serve(MockRuntime::new(
+        "gh",
+        Arc::new(compile(USERS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    ))
+    .await;
+    let session = [("x-mockingbird-session", "s1")];
+    let first = post(
+        &base,
+        json!({"query": r#"{ user(login: "octocat") { name } }"#}),
+        &session,
+    )
+    .await;
+    assert_eq!(
+        first.body["data"]["user"],
+        json!({"name": "The Octocat"}),
+        "{}",
+        first.body
+    );
+    let again = post(
+        &base,
+        json!({"query": r#"{ user(login: "octocat") { id login name } }"#}),
+        &session,
+    )
+    .await;
+    assert_eq!(
+        again.headers["x-mockingbird-source"], "state",
+        "{}",
+        again.body
+    );
+    assert_eq!(
+        again.body["data"]["user"],
+        json!({"id": "U_1", "login": "octocat", "name": "The Octocat"}),
+        "{}",
+        again.body
+    );
+    assert_eq!(provider.requests().len(), 1);
 }
 
 /// A type with no `id` read by a lookup argument is stored under that member's value,

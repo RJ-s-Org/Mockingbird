@@ -285,6 +285,26 @@ impl NarrowCache {
     }
 }
 
+/// `sel` with `names`, top-level members of its object, selected where it leaves them
+/// out: a read by a lookup argument (`user(login:)`) generates the record's key and the
+/// member it was looked up by, which the stored record needs whatever the client reads.
+pub(crate) fn with_members(sel: &Selection, names: &[&str]) -> Selection {
+    let mut out = sel.clone();
+    for name in names {
+        let selected = out.fields.values().any(|c| c.names().any(|n| n == *name));
+        if !selected && !out.fields.contains_key(*name) {
+            out.fields.insert(
+                (*name).to_string(),
+                Selection {
+                    name: (*name).to_string(),
+                    ..Selection::default()
+                },
+            );
+        }
+    }
+    out
+}
+
 /// `sel` with the lookup keys (see [`LookupKeys`]) of the record a create
 /// answers added: the answer's own object when its type has an `id`, else
 /// each selected member of the payload that has one

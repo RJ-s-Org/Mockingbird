@@ -181,8 +181,8 @@ fn resource_id_argument_is_the_input_field() {
     );
 }
 
-/// A query field with no id argument is looked up by the one argument naming a scalar
-/// field of its type, when every other argument is optional.
+/// A query field with no id argument is looked up by its only argument when that names
+/// a scalar field of its type.
 #[test]
 fn a_lookup_argument_is_the_input_field() {
     let sdl = br#"
@@ -212,13 +212,13 @@ fn a_lookup_argument_is_the_input_field() {
     };
     assert_eq!(input("Query.user").as_deref(), Some("login"));
     assert_eq!(input("Query.resource").as_deref(), Some("url"));
-    assert_eq!(input("Query.flagged").as_deref(), Some("login"));
+    // Another argument may change the answer.
+    assert_eq!(input("Query.flagged"), None);
     // An enum, a required argument naming no field of its own, a list answer.
     assert_eq!(input("Query.byKind"), None);
     assert_eq!(input("Query.repository"), None);
     assert_eq!(input("Query.users"), None);
-    // `nick` is no field of `User`: `login` alone looks it up; two would not.
-    assert_eq!(input("Query.either").as_deref(), Some("login"));
+    assert_eq!(input("Query.either"), None);
     assert_eq!(input("Query.two"), None);
 }
 
@@ -241,6 +241,15 @@ fn a_type_with_no_id_is_keyed_by_its_lookup_member() {
             record: None,
         })
     );
+    // Two lookups by different members key the type by neither.
+    let sdl = br#"
+      type Topic { name: String! slug: String! }
+      type Query { topic(name: String!): Topic topicBySlug(slug: String!): Topic }
+      schema { query: Query }
+    "#;
+    let b = compile(sdl).unwrap();
+    assert_eq!(b.operation("Query.topic").unwrap().identity, None);
+    assert_eq!(b.operation("Query.topicBySlug").unwrap().identity, None);
 }
 
 #[test]

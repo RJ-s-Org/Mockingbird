@@ -147,9 +147,9 @@ Fields that share only an argument value (`book(id: 1)` and `author(id: 1)`), al
 
 ## GraphQL reads by a lookup argument
 
-A query root field that returns one object and has no `id` argument is looked up by the one argument named as a scalar field of that type, of the same scalar type, when its other arguments are optional: `user(login: String!)` by `User.login`, `topic(name:)` by `Topic.name`. Enums, lists, `Boolean` and `Float` arguments look nothing up, and neither does a field with two such arguments or with a required argument that names no field (`repository(owner:, name:)`). This needs no world description; a world's `target: {member: …}` still sets it.
+A query root field that returns one object and takes one argument, named as a scalar field of that type and of the same scalar type, is looked up by it: `user(login: String!)` by `User.login`, `topic(name:)` by `Topic.name`. A field with another argument (`rate(currency:, date:)`, which may change the answer), and an enum, list, `Boolean` or `Float` argument, look nothing up. This needs no world description; a world's `target: {member: …}` still sets it.
 
-The answer is stored under its `id`, with the argument's value in that member, so a later read with the same value is answered from session state with no model call, whatever its variables. A read that selects fields the stored record lacks is generated with the record overlaid, so the fields it holds keep their values. A type with no `id` field is stored under the lookup member's value instead (`user(login: "octocat")` as `user` `octocat`).
+Such a read is generated with the type's key and that member, whether or not the query selects them, and the answer is stored under its key with the argument's value in that member. A later read with the same value is answered from session state with no model call, whatever its variables. A read that selects fields the stored record lacks is generated with the record overlaid, so the fields it holds keep their values. A type with no `id` field is stored under the lookup member's value instead (`user(login: "octocat")` as `user` `octocat`), when every such query field of that type looks it up by the same member.
 
 ## Override mapping per protocol
 
