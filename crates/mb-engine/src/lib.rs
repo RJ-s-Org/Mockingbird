@@ -1698,8 +1698,13 @@ impl Engine {
         if !guards::declares_code(op, code) {
             return None;
         }
+        // A refusal that states its code and message leaves the model nothing to say:
+        // the faker's body carries them, with no wait on a model.
+        let write = !(matches!(cause, error_body::ErrorCause::Refused)
+            && facts.code().is_some()
+            && !facts.text().is_empty());
         let response = self
-            .error_answer_repeating(bundle, op, call, (code, cause), facts.members())
+            .error_answer_repeating(bundle, op, call, (code, cause), (facts.members(), write))
             .await?;
         let response = self.with_facts(bundle, op, response, (facts, cause));
         let mut response = self.with_own_status(bundle, op, response);
