@@ -1123,3 +1123,68 @@ async fn an_effect_adding_no_violation_under_a_union_read_is_applied() {
         "{fixture}"
     );
 }
+
+/// Orders whose items are held inside the order, with no type of their own.
+const HELD_ITEMS: &str = r##"
+openapi: 3.0.0
+info: {title: Orders, version: "1"}
+paths:
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+    put:
+      operationId: updateOrder
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Item"}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+components:
+  schemas:
+    Item:
+      type: object
+      required: [id, qty]
+      properties: {id: {type: string}, qty: {type: integer}}
+    Order:
+      type: object
+      required: [id, items]
+      properties:
+        id: {type: string}
+        items: {type: array, items: {$ref: "#/components/schemas/Item"}}
+"##;
+
+/// An effect on an item inside an update's own target is held to the protections an
+/// effect on the target has: it does not overwrite the items the request sent.
+#[tokio::test]
+async fn an_effect_on_an_item_of_an_updates_target_keeps_what_the_request_sent() {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store(
+        &state,
+        "orders",
+        "o1",
+        json!({"id": "o1", "items": [{"id": "i1", "qty": 1}]}),
+    )
+    .await;
+    let answer = json!({"response": {"id": "o1", "items": [{"id": "i1", "qty": 2}]}, "effects": [
+        {"type": "item", "id": "i1", "set": {"qty": 5}},
+    ]});
+    let edit = json!({"items": [{"id": "i1", "qty": 2}]});
+    let (status, effects) = call(
+        HELD_ITEMS,
+        &state,
+        answer,
+        ("PUT", "/orders/o1", Some(edit)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(effects[0]["outcome"], "rejected", "{effects}");
+    let order = stored(&state, "orders", "o1").await;
+    assert_eq!(order["items"][0]["qty"], 2, "{order}");
+}

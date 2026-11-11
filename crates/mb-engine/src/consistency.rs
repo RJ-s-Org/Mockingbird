@@ -163,6 +163,26 @@ pub(crate) fn deref<'a>(bundle: &'a Bundle, mut schema: &'a Value) -> &'a Value 
     schema
 }
 
+/// The one branch of `schema`'s `anyOf` or `oneOf` (through `$ref`s) that is not
+/// `null`, when its others are (a GraphQL nullable object); else `schema` itself.
+pub(crate) fn non_null<'a>(bundle: &'a Bundle, schema: &'a Value) -> &'a Value {
+    let derefed = deref(bundle, schema);
+    for key in ["anyOf", "oneOf"] {
+        if let Some(Value::Array(branches)) = derefed.get(key) {
+            let others: Vec<&Value> = branches
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) != Some("null"))
+                .collect();
+            if let [only] = others.as_slice()
+                && others.len() < branches.len()
+            {
+                return only;
+            }
+        }
+    }
+    schema
+}
+
 /// The members object `schema` requires, looking through `$ref`s and `allOf`
 /// members (which all apply), in order and once each.
 pub fn required_members(bundle: &Bundle, schema: &Value) -> Vec<String> {
@@ -228,6 +248,19 @@ pub(crate) fn declares_boolean(bundle: &Bundle, schema: &Value) -> bool {
         Some(t) => boolean(t),
         None => false,
     }
+}
+
+/// Whether `schema`, through `$ref`s, is an array that may be empty (no `minItems`
+/// above 0).
+pub(crate) fn declares_empty_array(bundle: &Bundle, schema: &Value) -> bool {
+    let schema = deref(bundle, schema);
+    let array = |t: &Value| t == "array";
+    let is_array = match schema.get("type") {
+        Some(Value::Array(types)) => types.iter().any(array),
+        Some(t) => array(t),
+        None => false,
+    };
+    is_array && schema.get("minItems").and_then(Value::as_u64).unwrap_or(0) == 0
 }
 
 /// The values `schema` allows, through `$ref`s, when it is an `enum`.

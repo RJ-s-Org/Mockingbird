@@ -955,11 +955,14 @@ pub(super) fn render(
         };
         // The envelope's required members nothing tells are drawn as a read's are
         // ([`mb_engine::Engine::envelope_draws`]), when each is a scalar (a `status`, a
-        // receipt): an object or array beside the record (Zendesk's `audit`) is another
-        // resource the write made, not metadata to draw.
+        // receipt) or an empty list (GraphQL's `userErrors`): an object or array beside
+        // the record (Zendesk's `audit`) is another resource the write made, not
+        // metadata to draw.
         return serve_held(rt, op, &held, None, response_schema).or_else(|| {
             let drawn = rt.engine.envelope_draws(&rt.bundle, op, response_schema);
-            let scalars = drawn.values().all(|v| !(v.is_object() || v.is_array()));
+            let scalars = drawn
+                .values()
+                .all(|v| !(v.is_object() || v.as_array().is_some_and(|a| !a.is_empty())));
             (scalars && !drawn.is_empty())
                 .then(|| serve_held(rt, op, &held, Some(&drawn), response_schema))
                 .flatten()

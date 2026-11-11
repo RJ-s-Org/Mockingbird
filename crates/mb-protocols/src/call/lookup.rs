@@ -48,8 +48,16 @@ pub(super) async fn read_context(
                     .filter(|_| delete && rt.consistency && !param_is_id)
                     .map(String::as_str)
                     .collect();
+                // A request member naming another member than the key (GraphQL's
+                // `product(handle:)`) finds the record holding that value there.
+                let by_member = identity
+                    .filter(|i| i.path_param.is_none())
+                    .and_then(|i| i.input_field.as_deref().filter(|f| *f != i.field));
                 let then: Vec<&str> = match identity.and_then(|i| i.path_field.as_deref()) {
                     Some(field) => vec![field],
+                    None if rt.consistency && by_member.is_some() => {
+                        by_member.into_iter().collect()
+                    }
                     None if rt.consistency
                         && param.is_some()
                         && (delete || identity.is_some())
