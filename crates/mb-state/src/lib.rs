@@ -54,7 +54,8 @@ pub mod sql;
 pub use self::redis::RedisStateStore;
 pub use bus::{Bus, BusEnvelope, BusEvent, LocalBus, MemoryBusHub, PgBus, RedisBus};
 pub use cache::{
-    CacheEpoch, CachedResponse, CachingStateStore, DEFAULT_CACHE_ENTRIES, ResponseCache,
+    CacheEpoch, CachedResponse, CachingStateStore, DEFAULT_CACHE_ENTRIES, MAX_RETRY_BACKOFF,
+    ResponseCache,
 };
 pub use leader::{LeaderBackend, Leadership};
 pub use memory::MemoryStore;

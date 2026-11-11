@@ -845,6 +845,46 @@ async fn a_fallback_does_not_stick() {
     assert_eq!(provider.requests().len(), 2);
 }
 
+/// A read the LLM keeps timing out on backs off: once a retry times out too,
+/// repeats are served the cached fallback without an LLM call until a
+/// generation's time limit has passed, and the retry after it can recover.
+#[tokio::test(start_paused = true)]
+async fn a_fallback_that_keeps_timing_out_backs_off() {
+    let store = mb_state::CachingStateStore::wrap(
+        memory(),
+        Duration::from_secs(3600),
+        mb_state::DEFAULT_CACHE_ENTRIES,
+    );
+    let real = order("o1");
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        Err(mb_llm::LlmError::Timeout),
+        Err(mb_llm::LlmError::Timeout),
+        Ok(real.to_string()),
+    ]));
+    let router = http_rest::router(Arc::new(runtime(Some(provider.clone()), store)));
+    let read = || send(&router, get_with("/orders/o1", &[]));
+    assert_eq!(read().await.headers()["x-mockingbird-source"], "fallback");
+    // The first repeat retries at once, and times out too.
+    assert_eq!(read().await.headers()["x-mockingbird-source"], "fallback");
+    assert_eq!(provider.requests().len(), 2);
+    // So the next one is answered from the cached fallback.
+    let backed_off = read().await;
+    assert_eq!(backed_off.headers()["x-mockingbird-source"], "fallback");
+    let reason = backed_off.headers()["x-mockingbird-fallback-reason"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(reason.contains("earlier"), "{reason}");
+    assert_eq!(provider.requests().len(), 2, "no LLM call while backed off");
+    // Once the window has passed, the next read retries, and recovers.
+    let config = EngineConfig::default();
+    tokio::time::advance(config.generation_timeout.unwrap_or(config.timeout)).await;
+    let recovered = read().await;
+    assert_eq!(recovered.headers()["x-mockingbird-source"], "llm");
+    assert_eq!(body_json(recovered).await, real);
+    assert_eq!(provider.requests().len(), 3);
+}
+
 /// Repeats arriving while a cached fallback is retried are served that
 /// fallback at once, still reported as one, instead of each waiting for the
 /// LLM too.

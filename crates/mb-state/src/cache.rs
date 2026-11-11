@@ -26,6 +26,10 @@ use crate::{
 /// Answers kept per session before the least recently used is evicted.
 pub const DEFAULT_CACHE_ENTRIES: usize = 500;
 
+/// The longest a fallback that retries keep timing out on waits before it is
+/// retried again (see [`ResponseCache::claim_retry`]).
+pub const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(300);
+
 /// A final response as the data plane sent it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CachedResponse {
@@ -48,6 +52,11 @@ struct Entry {
     /// When a call began generating this fallback's key again (see
     /// [`ResponseCache::claim_retry`]).
     retrying: Option<Instant>,
+    /// Retries in a row that cached a fallback again under this key: each
+    /// doubles the wait before the next (see [`ResponseCache::claim_retry`]).
+    failed_retries: u32,
+    /// When the value was cached.
+    cached: Instant,
 }
 
 struct SessionCache {
@@ -169,6 +178,19 @@ impl ResponseCache {
         }
         let used = cache.tick();
         let cache = &mut *cache;
+        // A fallback cached by a retry of one counts towards the backoff; a
+        // real answer clears it.
+        let failed_retries = match cache.entries.get(key.as_str()) {
+            Some(old)
+                if value.fallback_reason.is_some()
+                    && old.value.fallback_reason.is_some()
+                    && old.retrying.is_some() =>
+            {
+                old.failed_retries.saturating_add(1)
+            }
+            Some(old) if value.fallback_reason.is_some() => old.failed_retries,
+            _ => 0,
+        };
         let replaced = cache.entries.insert(
             key.clone(),
             Entry {
@@ -176,6 +198,8 @@ impl ResponseCache {
                 value,
                 used,
                 retrying: None,
+                failed_retries,
+                cached: now,
             },
         );
         if let Some(old) = replaced {
@@ -196,6 +220,12 @@ impl ResponseCache {
     /// have been dropped). Others are served the fallback meanwhile, so one
     /// slow answer is not paid by every concurrent repeat. False for a miss
     /// or an answer that is no fallback.
+    ///
+    /// A fallback cached again by a retry backs off: it is not retried until
+    /// `window` has passed since it was cached, doubling with each retry in
+    /// a row that failed again, up to [`MAX_RETRY_BACKOFF`]. So a one-off slow
+    /// answer is retried by the next repeat, and one that always times out
+    /// does not cost every repeat the full wait.
     #[must_use]
     pub fn claim_retry(&self, s: &SessionKey, key: &str, window: Duration) -> bool {
         let Some(mut cache) = self.sessions.get_mut(s) else {
@@ -208,7 +238,9 @@ impl ResponseCache {
         let free = entry
             .retrying
             .is_none_or(|since| now.duration_since(since) >= window);
-        if entry.value.fallback_reason.is_none() || !free {
+        let backed_off =
+            now.duration_since(entry.cached) < retry_backoff(window, entry.failed_retries);
+        if entry.value.fallback_reason.is_none() || !free || backed_off {
             return false;
         }
         entry.retrying = Some(now);
@@ -217,11 +249,15 @@ impl ResponseCache {
 
     /// Ends a claim of [`ResponseCache::claim_retry`] whose answer was not
     /// cached in the fallback's place, so the next repeat tries again.
-    pub fn release_retry(&self, s: &SessionKey, key: &str) {
+    /// `answered`: the retry got a real answer, which clears the backoff.
+    pub fn release_retry(&self, s: &SessionKey, key: &str, answered: bool) {
         if let Some(mut cache) = self.sessions.get_mut(s)
             && let Some(entry) = cache.entries.get_mut(key)
         {
             entry.retrying = None;
+            if answered {
+                entry.failed_retries = 0;
+            }
         }
     }
 
@@ -308,6 +344,17 @@ impl ResponseCache {
         self.clears.fetch_add(1, Ordering::SeqCst);
         self.sessions.clear();
     }
+}
+
+/// How long a fallback that `failed_retries` retries in a row cached again
+/// waits before the next retry: none after the first timeout, then `window`,
+/// 2x, 4x... up to [`MAX_RETRY_BACKOFF`].
+fn retry_backoff(window: Duration, failed_retries: u32) -> Duration {
+    let Some(doublings) = failed_retries.checked_sub(1) else {
+        return Duration::ZERO;
+    };
+    let factor = 1u32.checked_shl(doublings).unwrap_or(u32::MAX);
+    window.saturating_mul(factor).min(MAX_RETRY_BACKOFF)
 }
 
 /// A [`StateStore`] that owns a [`ResponseCache`] and clears it through

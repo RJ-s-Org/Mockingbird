@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mb_state::{
-    CachedResponse, CachingStateStore, MemoryStore, SessionKey, StateStore, StoredResource,
+    CachedResponse, CachingStateStore, MAX_RETRY_BACKOFF, MemoryStore, ResponseCache, SessionKey,
+    StateStore, StoredResource,
 };
 use serde_json::json;
 
@@ -176,12 +177,69 @@ async fn one_caller_at_a_time_retries_a_cached_fallback() {
     assert!(!c.claim_retry(&s, "k", window), "a retry is under way");
     tokio::time::advance(window).await;
     assert!(c.claim_retry(&s, "k", window), "an abandoned claim lapses");
-    c.release_retry(&s, "k");
+    c.release_retry(&s, "k", false);
     assert!(c.claim_retry(&s, "k", window), "a released claim is free");
     // An answer cached in the fallback's place is kept.
     c.put(&s, "k".into(), None, answer(3));
     assert!(!c.claim_retry(&s, "k", window));
     // A fallback cached again may be retried again.
+    c.put(&s, "k".into(), None, fallback);
+    assert!(c.claim_retry(&s, "k", window));
+}
+
+/// A fallback that retries keep timing out on backs off: the first repeat
+/// retries at once, then each retry that caches a fallback again doubles the
+/// wait (one window, two, four...) up to a cap, and a real answer clears it.
+#[tokio::test(start_paused = true)]
+async fn a_fallback_that_keeps_timing_out_backs_off() {
+    let st = store();
+    let c = st.response_cache().unwrap();
+    let s = key("a");
+    let window = Duration::from_secs(20);
+    let fallback = CachedResponse {
+        fallback_reason: Some("LLM request timed out".into()),
+        ..answer(1)
+    };
+    // A retry that timed out again, its fallback cached in the old one's place.
+    let fail_retry = |c: &ResponseCache| {
+        c.put(&s, "k".into(), None, fallback.clone());
+        c.release_retry(&s, "k", false);
+    };
+    c.put(&s, "k".into(), None, fallback.clone());
+    assert!(
+        c.claim_retry(&s, "k", window),
+        "a single timeout retries at once"
+    );
+    fail_retry(c);
+    assert!(!c.claim_retry(&s, "k", window), "backed off for one window");
+    tokio::time::advance(window - Duration::from_millis(1)).await;
+    assert!(!c.claim_retry(&s, "k", window));
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(c.claim_retry(&s, "k", window), "retried once it passed");
+    fail_retry(c);
+    tokio::time::advance(window).await;
+    assert!(!c.claim_retry(&s, "k", window), "the wait doubled");
+    tokio::time::advance(window).await;
+    assert!(c.claim_retry(&s, "k", window));
+    // The wait never exceeds the cap.
+    for _ in 0..20 {
+        fail_retry(c);
+        tokio::time::advance(MAX_RETRY_BACKOFF).await;
+        assert!(c.claim_retry(&s, "k", window), "capped");
+    }
+    // A real answer the retry got clears the backoff, cached or not.
+    c.release_retry(&s, "k", true);
+    assert!(c.claim_retry(&s, "k", window));
+    fail_retry(c);
+    c.put(&s, "k".into(), None, answer(2));
+    c.put(&s, "k".into(), None, fallback.clone());
+    assert!(
+        c.claim_retry(&s, "k", window),
+        "a new fallback retries at once"
+    );
+    // A fallback cached by a call that claimed no retry (a concurrent first
+    // read) does not count towards the backoff.
+    c.release_retry(&s, "k", false);
     c.put(&s, "k".into(), None, fallback);
     assert!(c.claim_retry(&s, "k", window));
 }
