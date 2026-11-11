@@ -47,6 +47,10 @@ type Answers = Arc<HashMap<String, Result<GeneratedResponse, String>>>;
 
 pub(crate) struct Batch {
     expected: usize,
+    /// The root fields' response keys in query order: root resolvers join
+    /// in whatever order they finish planning, and the parts are put back
+    /// in this one before they are generated.
+    order: Vec<String>,
     state: Mutex<State>,
     complete: Notify,
     done: watch::Sender<Option<Answers>>,
@@ -68,20 +72,22 @@ impl Batch {
         if operation.ty != OperationType::Query {
             return None;
         }
-        let mut expected = 0;
+        let mut order = Vec::new();
         for item in &operation.selection_set.node.items {
             match &item.node {
                 Selection::Field(f) if f.node.directives.is_empty() => {
                     if !f.node.name.node.starts_with("__") {
-                        expected += 1;
+                        order.push(f.node.response_key().node.to_string());
                     }
                 }
                 _ => return None,
             }
         }
+        let expected = order.len();
         (expected >= 2).then(|| {
             Arc::new(Self {
                 expected,
+                order,
                 state: Mutex::new(State::default()),
                 complete: Notify::new(),
                 done: watch::channel(None).0,
@@ -128,11 +134,12 @@ impl Batch {
             if !all_in {
                 let _ = tokio::time::timeout(GRACE, self.complete.notified()).await;
             }
-            let parts = {
+            let mut parts = {
                 let mut state = self.lock();
                 state.started = true;
                 std::mem::take(&mut state.parts)
             };
+            parts.sort_by_key(|p| self.order.iter().position(|k| *k == p.key));
             let _ = self.done.send(Some(Arc::new(generate(rt, parts).await)));
         }
         let answers = loop {
@@ -150,15 +157,43 @@ impl Batch {
     }
 }
 
+/// Each part's lookup group: parts called with the same arguments whose
+/// root fields look up one thing under different types (see
+/// [`super::schema::SharedLookups::same`]) share one.
+fn lookup_groups(rt: &MockRuntime, parts: &[Part]) -> Vec<Option<usize>> {
+    let shared = rt.narrowed().shared_lookups(&rt.bundle);
+    fn args(p: &Part) -> Option<&serde_json::Map<String, Value>> {
+        p.call.body.as_ref().and_then(Value::as_object)
+    }
+    let mut groups: Vec<Option<usize>> = vec![None; parts.len()];
+    for i in 0..parts.len() {
+        let Some(a) = args(&parts[i]) else {
+            continue;
+        };
+        for j in i + 1..parts.len() {
+            if groups[j].is_none()
+                && args(&parts[j]) == Some(a)
+                && shared.same(&parts[i].op_id, &parts[j].op_id, a)
+            {
+                let g = *groups[i].get_or_insert(i);
+                groups[j] = Some(g);
+            }
+        }
+    }
+    groups
+}
+
 async fn generate(
     rt: &MockRuntime,
     parts: Vec<Part>,
 ) -> HashMap<String, Result<GeneratedResponse, String>> {
+    let groups = lookup_groups(rt, &parts);
     let mut joint = Vec::with_capacity(parts.len());
     let mut unknown = Vec::new();
-    for part in &parts {
+    for (part, lookup_group) in parts.iter().zip(groups) {
         match rt.operation(&part.op_id) {
             Some(op) => joint.push(JointPart {
+                lookup_group,
                 key: &part.key,
                 op,
                 call: &part.call,

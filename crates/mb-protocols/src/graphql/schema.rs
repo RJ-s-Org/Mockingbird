@@ -436,6 +436,88 @@ pub(super) fn lookup_keys_of(bundle: &mb_mcm::Bundle) -> super::select::LookupKe
     }
 }
 
+/// What tells whether two root query fields look up one thing under
+/// different types, from the SDL: each `Query` field's object type (not a
+/// list, union or interface) and the interfaces each object type implements
+/// directly, with their fields.
+#[derive(Debug, Default)]
+pub(crate) struct SharedLookups {
+    /// `Query.<field>` → the object type it returns.
+    returns: HashMap<String, String>,
+    /// Object type → the interfaces it implements.
+    implements: HashMap<String, Vec<String>>,
+    /// Interface → its field names.
+    interface_fields: HashMap<String, HashSet<String>>,
+}
+
+impl SharedLookups {
+    /// Whether root fields `a` and `b` (operation ids), called with the
+    /// same arguments `args`, look up one thing: they return two different
+    /// object types implementing one interface that has a field for every
+    /// argument (GitHub's `User` and `Organization` are both a
+    /// `RepositoryOwner` with a `login`). Two types that merely share an
+    /// `id` argument (`book(id: 1)`, `author(id: 1)`) do not.
+    pub(crate) fn same(
+        &self,
+        a: &str,
+        b: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+    ) -> bool {
+        let (Some(ta), Some(tb)) = (self.returns.get(a), self.returns.get(b)) else {
+            return false;
+        };
+        if ta == tb || args.is_empty() {
+            return false;
+        }
+        let (Some(ia), Some(ib)) = (self.implements.get(ta), self.implements.get(tb)) else {
+            return false;
+        };
+        ia.iter().filter(|i| ib.contains(i)).any(|i| {
+            self.interface_fields
+                .get(i)
+                .is_some_and(|fields| args.keys().all(|k| fields.contains(k)))
+        })
+    }
+}
+
+/// [`SharedLookups`] of `bundle`'s SDL; empty when it has none or it does
+/// not parse.
+pub(super) fn shared_lookups_of(bundle: &mb_mcm::Bundle) -> SharedLookups {
+    let Some(ProtocolPayload::Graphql { sdl }) = &bundle.protocol_payload else {
+        return SharedLookups::default();
+    };
+    let Ok(sdl) = parse(sdl) else {
+        return SharedLookups::default();
+    };
+    let mut out = SharedLookups::default();
+    for (name, def) in &sdl.types {
+        match &def.kind {
+            Kind::Object { implements, .. } => {
+                out.implements.insert(name.clone(), implements.clone());
+            }
+            Kind::Interface { fields, .. } => {
+                out.interface_fields.insert(
+                    name.clone(),
+                    fields.iter().map(|f| f.name.node.to_string()).collect(),
+                );
+            }
+            _ => {}
+        }
+    }
+    let query = sdl.roots[0].as_deref().unwrap_or("Query");
+    if let Some(Kind::Object { fields, .. }) = sdl.types.get(query).map(|d| &d.kind) {
+        for f in fields {
+            if let BaseType::Named(n) = &f.ty.node.base
+                && out.implements.contains_key(n.as_str())
+            {
+                out.returns
+                    .insert(format!("Query.{}", f.name.node), n.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// The scalar fields each object type is looked up by: for every field
 /// returning one object (not a list) of a type, or of a union's or an
 /// interface's member types, each of its arguments that names a scalar or

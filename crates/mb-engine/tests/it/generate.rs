@@ -1331,12 +1331,14 @@ async fn joint_generation_answers_every_part_in_one_call() {
     .to_string())]);
     let parts = [
         JointPart {
+            lookup_group: None,
             key: "order",
             op: get,
             call: &call("getOrder"),
             ctx: ctx(),
         },
         JointPart {
+            lookup_group: None,
             key: "recent",
             op: list,
             call: &call("listOrders"),
@@ -1371,12 +1373,14 @@ async fn joint_generation_falls_back_to_separate_calls() {
     ]);
     let parts = [
         JointPart {
+            lookup_group: None,
             key: "order",
             op: get,
             call: &call("getOrder"),
             ctx: ctx(),
         },
         JointPart {
+            lookup_group: None,
             key: "recent",
             op: list,
             call: &call("listOrders"),
@@ -1441,12 +1445,14 @@ async fn joint_answer_may_omit_nullable_parts() {
     )]);
     let parts = [
         JointPart {
+            lookup_group: None,
             key: "order",
             op: get,
             call: &call("getOrder"),
             ctx: ctx(),
         },
         JointPart {
+            lookup_group: None,
             key: "maybe",
             op: get,
             call: &call("getOrder"),
@@ -1463,20 +1469,17 @@ async fn joint_answer_may_omit_nullable_parts() {
     assert_eq!(out[1].as_ref().unwrap().source, Source::Llm);
 }
 
-/// When every part may be null, an answer leaving all of them out finds
-/// nothing the query named (`user(login:)` and `organization(login:)` both
-/// null): it is repaired until one part is found.
+/// Two nullable parts of one lookup group: an answer finding neither (`{}`,
+/// or both explicitly null) is repaired until one is found. Parts in no
+/// group may all be null.
 #[tokio::test]
-async fn joint_answer_must_find_one_part_when_all_may_be_null() {
+async fn a_lookup_group_answer_must_find_one_part() {
     let bundle = orders();
     let get = bundle.operation("getOrder").unwrap();
     let nullable = json!({"anyOf": [{"type": "object"}, {"type": "null"}]});
-    let (provider, engine) = scripted(vec![
-        Ok(json!({}).to_string()),
-        Ok(json!({"first": valid_order_at_o1(), "second": null}).to_string()),
-    ]);
     let get_call = call("getOrder");
-    let part = |key| JointPart {
+    let part = |key, lookup_group| JointPart {
+        lookup_group,
         key,
         op: get,
         call: &get_call,
@@ -1485,46 +1488,74 @@ async fn joint_answer_must_find_one_part_when_all_may_be_null() {
             ..ctx()
         },
     };
+    for empty in [json!({}), json!({"user": null, "org": null})] {
+        let (provider, engine) = scripted(vec![
+            Ok(empty.to_string()),
+            Ok(json!({"user": valid_order_at_o1(), "org": null}).to_string()),
+        ]);
+        let out = engine
+            .generate_joint(&bundle, &[part("user", Some(0)), part("org", Some(0))])
+            .await;
+        assert_eq!(provider.requests().len(), 2, "{empty}: one repair call");
+        assert_eq!(out[0].as_ref().unwrap().body, Some(valid_order_at_o1()));
+        assert_eq!(out[1].as_ref().unwrap().body, Some(Value::Null));
+        let system = &provider.requests()[0].messages[0].content;
+        assert!(
+            !system.contains("\"not\""),
+            "the rule is not sent: {system}"
+        );
+        assert!(
+            system.contains("Fields `user`, `org` look up the same thing"),
+            "{system}"
+        );
+    }
+
+    let (provider, engine) = scripted(vec![Ok(json!({}).to_string())]);
     let out = engine
-        .generate_joint(&bundle, &[part("first"), part("second")])
+        .generate_joint(&bundle, &[part("a", None), part("b", None)])
         .await;
-    assert_eq!(provider.requests().len(), 2, "one repair call");
-    assert_eq!(out[0].as_ref().unwrap().body, Some(valid_order_at_o1()));
-    assert_eq!(out[1].as_ref().unwrap().body, Some(Value::Null));
-    let system = &provider.requests()[0].messages[0].content;
+    assert_eq!(provider.requests().len(), 1, "no group, no rule");
     assert!(
-        !system.contains("\"not\""),
-        "the rule is not sent: {system}"
+        out.iter()
+            .all(|r| r.as_ref().unwrap().body == Some(Value::Null))
     );
+    let system = &provider.requests()[0].messages[0].content;
+    assert!(!system.contains("look up the same thing"), "{system}");
 }
 
-/// Nullable parts called with the same arguments look up the same thing
-/// under different types (`user(login:)`, `organization(login:)`): of an
-/// answer finding both, only the first is kept, without a repair call.
-/// Parts with different arguments may both be found.
+/// Of a lookup group's parts all found, only one is kept, without a repair
+/// call: the one answered from session state, else the first. Parts in no
+/// group are all kept.
 #[tokio::test]
-async fn joint_lookups_with_the_same_arguments_find_one_thing() {
+async fn a_lookup_group_keeps_one_found_part() {
     let bundle = orders();
     let get = bundle.operation("getOrder").unwrap();
     let nullable = json!({"anyOf": [{"type": "object"}, {"type": "null"}]});
     let both = json!({"user": valid_order_at_o1(), "org": valid_order_at_o1()});
-    let mut vercel = call("getOrder");
-    vercel.body = Some(json!({"login": "vercel"}));
-    let mut other = call("getOrder");
-    other.body = Some(json!({"login": "octocat"}));
-    let part = |key, call| JointPart {
+    let get_call = call("getOrder");
+    let target = StoredResource {
+        resource_type: "order".into(),
+        id: "o1".into(),
+        data: valid_order_at_o1(),
+    };
+    let part = |key, lookup_group, target| JointPart {
+        lookup_group,
         key,
         op: get,
-        call,
+        call: &get_call,
         ctx: GenerationContext {
             response_schema: Some(&nullable),
+            target,
             ..ctx()
         },
     };
 
     let (provider, engine) = scripted(vec![Ok(both.to_string())]);
     let out = engine
-        .generate_joint(&bundle, &[part("user", &vercel), part("org", &vercel)])
+        .generate_joint(
+            &bundle,
+            &[part("user", Some(0), None), part("org", Some(0), None)],
+        )
         .await;
     assert_eq!(provider.requests().len(), 1, "no repair call");
     assert_eq!(out[0].as_ref().unwrap().body, Some(valid_order_at_o1()));
@@ -1532,7 +1563,27 @@ async fn joint_lookups_with_the_same_arguments_find_one_thing() {
 
     let (_, engine) = scripted(vec![Ok(both.to_string())]);
     let out = engine
-        .generate_joint(&bundle, &[part("user", &vercel), part("org", &other)])
+        .generate_joint(
+            &bundle,
+            &[
+                part("user", Some(0), None),
+                part("org", Some(0), Some(&target)),
+            ],
+        )
+        .await;
+    assert_eq!(
+        out[0].as_ref().unwrap().body,
+        Some(Value::Null),
+        "state wins"
+    );
+    assert_ne!(out[1].as_ref().unwrap().body, Some(Value::Null));
+
+    let (_, engine) = scripted(vec![Ok(both.to_string())]);
+    let out = engine
+        .generate_joint(
+            &bundle,
+            &[part("user", None, None), part("org", None, None)],
+        )
         .await;
     assert!(
         out.iter()
@@ -2467,12 +2518,14 @@ fn a_joint_prompt_shows_the_api_description_once() {
     let (a, b) = (call("getOrder"), call("listOrders"));
     let parts = [
         JointPart {
+            lookup_group: None,
             key: "order",
             op: get,
             call: &a,
             ctx: ctx(),
         },
         JointPart {
+            lookup_group: None,
             key: "recent",
             op: list,
             call: &b,

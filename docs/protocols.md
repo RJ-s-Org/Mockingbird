@@ -95,10 +95,6 @@ curl -s localhost:8080/graphql \
 
 A batch holds at most 10 operations; a larger or empty one is a `400` problem and nothing runs. The operations run one after another (a query after a mutation sees its write), each as if it had been sent on its own: checked against the root-field, depth and complexity limits, admitted (tenant, quota and, in `api_key` mode, the data-plane key), given its own chaos decision and recorded as its own request-log entry. An operation that is refused answers its own entry, `{"errors": [{"message", "extensions": {"code", "status"}}]}` (with `retryAfter` in seconds for a `429`), and the others still run. The response's `x-mockingbird-source` is the worst source over the batch, and the largest injected latency is waited once. The 1 MiB body limit applies to the whole batch.
 
-### Root fields that look up the same thing
-
-The root fields of one query are generated together, in one call. A query names what it looks up, so when every root field may be null, an answer that finds none of them is repaired. Nullable root fields called with the same arguments look up the same thing under different types (GitHub's `user(login: "vercel")` and `organization(login: "vercel")`): only the first one found in the query is kept, and the others answer `null`.
-
 gRPC (`mockingbird serve --offline helloworld.proto`):
 
 ```sh
@@ -139,6 +135,15 @@ SSE responses, GraphQL subscriptions and gRPC server- and bidi-streaming calls a
 The count is capped at `protocols.stream.max_items` (50). A scenario's `stream_item_interval`, or else `protocols.stream.item_interval` (0), is the pause between items.
 
 SSE streams and GraphQL subscriptions stay open after the generated items: they go on to deliver resources of the operation's type that are created or changed in the same session, until the client disconnects. A gRPC server stream completes after its last item. Generated stream items are never written to session state.
+
+## GraphQL root fields that look up one thing
+
+The root fields of one query are generated together, in one call. Two root fields called with the same arguments look up one thing under different types when they return two object types implementing one interface that has a field for every argument: GitHub's `user(login: "vercel")` and `organization(login: "vercel")` are both a `RepositoryOwner` with a `login`. Exactly one of such fields is found:
+
+- an answer finding none of them (`{}`, or every one `null`) is repaired;
+- of several found, the one answered from session state or a scenario is kept, else the first in the query, and the others answer `null`.
+
+Fields that share only an argument value (`book(id: 1)` and `author(id: 1)`), aliases of one field, and fields returning an interface or a union are answered on their own.
 
 ## Override mapping per protocol
 
