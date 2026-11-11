@@ -178,6 +178,9 @@ pub struct MockLimitsSchema {
     /// Tokens per UTC day across all replicas; at least 1.
     #[schema(minimum = 1)]
     daily_token_budget: Option<u64>,
+    /// Tokens the record pool may spend writing records ahead of any call (30000 when
+    /// unset); 0 keeps no pool.
+    record_pool_tokens: Option<u64>,
     /// In bytes, 1024–67108864.
     #[schema(minimum = 1024, maximum = 67108864)]
     max_request_bytes: Option<u64>,
@@ -297,6 +300,7 @@ impl From<MockLimitsSchema> for MockLimits {
         MockLimits {
             rate_limit: s.rate_limit.map(Into::into),
             daily_token_budget: s.daily_token_budget,
+            record_pool_tokens: s.record_pool_tokens,
             max_request_bytes: s.max_request_bytes,
             max_response_bytes: s.max_response_bytes,
         }

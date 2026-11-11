@@ -24,8 +24,8 @@ use mb_protocols::webhooks::log::SharedDeliveryLog;
 use mb_protocols::webhooks::sign::Signing;
 use mb_protocols::{
     ChaosRuntime, ChaosSpec, DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, MockRuntime,
-    ProtocolSettings, RateLimiter, RequestRecorder, RuntimeLimits, ScenarioRuntime, Shutdown,
-    UnknownIds,
+    ProtocolSettings, RateLimiter, RecordPool, RequestRecorder, RuntimeLimits, ScenarioRuntime,
+    Shutdown, UnknownIds,
 };
 use mb_state::StateStore;
 use mb_store::{
@@ -98,6 +98,32 @@ pub struct RuntimeDeps {
     pub mode: ServeMode,
     /// Every mock's recent webhook deliveries, shared with the Admin API.
     pub webhook_log: SharedDeliveryLog,
+    /// Every mock's record pool, kept across rebuilds of its runtime.
+    pub record_pools: RecordPools,
+}
+
+/// Each mock's [`RecordPool`], by workspace and name: a rebuilt runtime (a world or
+/// settings change) takes over its predecessor's pool.
+#[derive(Clone, Debug, Default)]
+pub struct RecordPools(Arc<std::sync::Mutex<PoolsByMock>>);
+
+/// Each mock's pool, by workspace and mock name.
+type PoolsByMock = HashMap<(String, String), Arc<RecordPool>>;
+
+impl RecordPools {
+    /// The pool of mock `name` in `workspace`, made empty on first use.
+    #[must_use]
+    pub fn of(&self, workspace: &str, name: &str) -> Arc<RecordPool> {
+        let mut pools = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(
+            pools
+                .entry((workspace.to_string(), name.to_string()))
+                .or_default(),
+        )
+    }
 }
 
 impl std::fmt::Debug for RuntimeDeps {
@@ -632,6 +658,7 @@ pub(crate) async fn build_runtime_tracked(
         StoredUnknownIds::NotFound => UnknownIds::NotFound,
     };
     rt.default_scenario = mock.behavior.default_scenario.clone();
+    rt.pool = deps.record_pools.of(&mock.workspace, &mock.name);
     rt.base_paths = mb_import::base_paths(&contract.source);
     rt.webhooks = webhook_dispatcher(deps, mock).await?;
     Ok(Some((rt, budget, used, loaded)))

@@ -77,6 +77,7 @@ mod base_url;
     allow(dead_code)
 )]
 mod call;
+pub use call::exec_pool::{MIN_POOL_TOKENS, POOL_SIZE, RecordPool, fill as fill_record_pool};
 pub mod chaos;
 #[cfg_attr(
     not(any(
@@ -425,6 +426,10 @@ pub struct MockRuntime {
     /// The operations whose target path parameter the world description writes (see
     /// [`MockRuntime::with_path_targets`]).
     path_targets: std::collections::BTreeSet<String>,
+    /// Records of each stored type the model wrote ahead of any call ([`fill_record_pool`]),
+    /// shared by the mock's sessions; empty until a fill adds to it. A rebuilt runtime
+    /// takes over the previous one's pool.
+    pub pool: Arc<RecordPool>,
     /// GraphQL root fields' narrowed schemas, by selection.
     #[cfg(feature = "graphql")]
     narrowed: graphql::NarrowCache,
@@ -551,6 +556,7 @@ impl MockRuntime {
             collections: call::Collections::default(),
             described: call::Described::default(),
             path_targets: std::collections::BTreeSet::new(),
+            pool: Arc::default(),
             #[cfg(feature = "graphql")]
             narrowed: graphql::NarrowCache::default(),
         }

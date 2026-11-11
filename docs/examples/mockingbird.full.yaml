@@ -194,6 +194,7 @@ mocks:
     limits:
       rate_limit: {requests_per_second: 50, burst: 100}
       daily_token_budget: 1000000
+      record_pool_tokens: 30000
       max_request_bytes: 65536
       max_response_bytes: 262144
     scenarios:

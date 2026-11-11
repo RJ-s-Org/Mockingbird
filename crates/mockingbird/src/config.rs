@@ -907,6 +907,7 @@ async fn build_app_inner(
             Role::All | Role::Data => ServeMode::Full,
         },
         webhook_log: Default::default(),
+        record_pools: Default::default(),
     };
     let snapshot = open_snapshot(args)?;
     crate::snapshot::install(snapshot.clone());

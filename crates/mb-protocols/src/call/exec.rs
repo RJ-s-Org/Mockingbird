@@ -83,6 +83,7 @@ mod embedded;
 mod fields;
 mod list;
 mod patches;
+pub(crate) mod pool;
 mod queue;
 mod writes;
 
@@ -324,16 +325,30 @@ async fn read(
     let within = embedded::current(state, plan, call, &held).await;
     // A missing record the session knows of (deleted, or unknown under
     // `unknown_ids: 404`) was refused before this; any other generates.
-    let Some(stored) = held.target.or(within.as_ref().map(|e| &e.child)) else {
-        fell_back(rt, plan, kind, Fallback::NotHeld.as_str());
-        return Ran::Generate(None);
+    let pooled: Option<StoredResource>;
+    let mut pooled_id: Option<String> = None;
+    let stored = match held.target.or(within.as_ref().map(|e| &e.child)) {
+        Some(stored) => stored,
+        None => {
+            // From the mock's record pool, when it holds the type.
+            pooled = pool::read(state, plan, call).await;
+            let Some(stored) = pooled.as_ref() else {
+                fell_back(rt, plan, kind, Fallback::NotHeld.as_str());
+                return Ran::Generate(None);
+            };
+            pooled_id = Some(stored.id.clone());
+            stored
+        }
     };
     let read = held_read(
         state,
         plan,
         call,
         stored,
-        held.target_id,
+        match &pooled_id {
+            Some(id) => Some(id.as_str()),
+            None => held.target_id,
+        },
         response_schema,
         true,
     );

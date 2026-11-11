@@ -73,6 +73,8 @@ struct Notes {
     fallback: Option<(String, Option<String>)>,
     /// Each expression that failed: `{pointer, error}`.
     failed: Vec<Value>,
+    /// How many records the call took from the mock's record pool.
+    pooled: usize,
 }
 
 /// How many failed expressions a request record lists at most.
@@ -90,6 +92,11 @@ impl CallExprs {
     /// Notes that the executor went on to generation for `reason`, caused by `on`.
     pub(super) fn fell_back(&self, reason: &str, on: Option<&str>) {
         self.with_notes(|n| n.fallback = Some((reason.to_string(), on.map(str::to_string))));
+    }
+
+    /// Notes that the call took `count` records from the mock's record pool.
+    pub(super) fn pooled(&self, count: usize) {
+        self.with_notes(|n| n.pooled += count);
     }
 
     /// Notes that the expression at `pointer` failed with `error`, once per pointer
@@ -127,6 +134,9 @@ impl CallExprs {
         }
         if !notes.failed.is_empty() {
             out.insert("expr_failed".into(), Value::Array(notes.failed.clone()));
+        }
+        if notes.pooled > 0 {
+            out.insert("pool".into(), Value::from(notes.pooled));
         }
         out
     }

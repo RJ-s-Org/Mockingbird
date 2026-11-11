@@ -532,6 +532,16 @@ impl Shape {
     }
 
     /// The answer's schema.
+    /// The most items the array admits (`maxItems`, in any part of its schema).
+    pub(super) fn max_items(&self, rt: &MockRuntime) -> Option<usize> {
+        let (parts, _) = schema_parts(rt.bundle(), Some(&self.array));
+        parts
+            .iter()
+            .filter_map(|p| p.get("maxItems")?.as_u64())
+            .min()
+            .and_then(|n| usize::try_from(n).ok())
+    }
+
     pub(super) fn schema(&self) -> &Value {
         &self.schema
     }
@@ -860,7 +870,15 @@ pub(super) async fn page(
             body = more;
         }
     }
-    let mut served = valid(&body).ok_or(Unserved::Render)?;
+    let Some(mut served) = valid(&body) else {
+        if tracing::enabled!(tracing::Level::DEBUG)
+            && let Some(schema) = op.success_output().and_then(|v| v.schema.as_ref())
+        {
+            let violations = plan.engine.schema_violations(bundle, schema, &body);
+            tracing::debug!(operation = %op.id, ?violations, "a page from state does not validate");
+        }
+        return Err(Unserved::Render);
+    };
     served.headers.extend(header);
     if no_end {
         served.world_gaps.push(NO_PAGE_END.to_string());

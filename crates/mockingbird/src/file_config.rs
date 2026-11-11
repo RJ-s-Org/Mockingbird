@@ -1336,6 +1336,8 @@ pub struct FileMockLimits {
     pub rate_limit: Option<FileRateLimit>,
     /// Tokens per UTC day, across all replicas.
     pub daily_token_budget: Option<u64>,
+    /// Tokens the record pool may spend; `0` keeps no pool.
+    pub record_pool_tokens: Option<u64>,
     /// Overrides `limits.max_request_bytes` for this mock.
     pub max_request_bytes: Option<u64>,
     /// Overrides `limits.max_response_bytes` for this mock.
@@ -1351,6 +1353,7 @@ impl FileMockLimits {
                 burst: r.burst,
             }),
             daily_token_budget: self.daily_token_budget,
+            record_pool_tokens: self.record_pool_tokens,
             max_request_bytes: self.max_request_bytes,
             max_response_bytes: self.max_response_bytes,
         }

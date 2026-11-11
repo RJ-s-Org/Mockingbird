@@ -1329,6 +1329,21 @@ async fn build_mounted(
     let protocol = runtime.bundle().protocol();
     let channels = runtime.bundle().channels.clone();
     let runtime = Arc::new(runtime);
+    // The record pool fills in the background, never in the way of mounting the mock.
+    // At most a tenth of a daily token budget, which requests need more.
+    let pool_cap = match mock.limits.daily_token_budget {
+        Some(daily) => mock.limits.record_pool_cap().min(daily / 10),
+        None => mock.limits.record_pool_cap(),
+    };
+    if pool_cap >= mb_protocols::MIN_POOL_TOKENS
+        && runtime.consistency
+        && runtime.engine.has_provider()
+    {
+        tokio::spawn(mb_protocols::fill_record_pool(
+            Arc::downgrade(&runtime),
+            pool_cap,
+        ));
+    }
     let events = if channels.is_empty() {
         None
     } else {

@@ -1319,6 +1319,7 @@ mod tests {
                 burst: 100_000,
             }),
             daily_token_budget: Some(1),
+            record_pool_tokens: None,
             max_request_bytes: Some(67_108_864),
             max_response_bytes: Some(1024),
         };
@@ -1340,6 +1341,7 @@ mod tests {
             (
                 MockLimits {
                     daily_token_budget: Some(0),
+                    record_pool_tokens: None,
                     ..MockLimits::default()
                 },
                 "limits.daily_token_budget",
