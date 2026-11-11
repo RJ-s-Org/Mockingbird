@@ -2679,7 +2679,7 @@ impl Engine {
         checks: &Checks<'_>,
         usage: &mut Usage,
         deadline: Instant,
-    ) -> Result<(Reply, (Checked, bool, guards::AnswerEffects)), String> {
+    ) -> Result<CheckedReply, String> {
         let check = |reply: &Reply| {
             tracing::info_span!("mb.validate")
                 .in_scope(|| self.check_reply(validator, reply, checks))
@@ -2707,8 +2707,7 @@ impl Engine {
         let mut first_pending = true;
         let mut second_pending = false;
         // What came back that did not pass: the first call's, then the second's.
-        let mut failed: [Option<Result<(Reply, (Checked, bool, guards::AnswerEffects)), String>>;
-            2] = [None, None];
+        let mut failed: [Option<Result<CheckedReply, String>>; 2] = [None, None];
         loop {
             tokio::select! {
                 (reply, spent) = &mut first, if first_pending => {
@@ -2906,6 +2905,9 @@ struct Refusal<'a> {
     /// The error body the LLM wrote for it, when it did: not checked yet.
     written: Option<Value>,
 }
+
+/// An LLM reply with its check: what [`Engine::check_reply`] made of it.
+type CheckedReply = (Reply, (Checked, bool, guards::AnswerEffects));
 
 /// An LLM reply: its text, and, when the provider stopped it at
 /// `max_tokens`, the error saying so (the text is then the part received).
