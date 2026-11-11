@@ -12,7 +12,10 @@
 //!    out (`append_to_response=videos,credits` keeps `videos` and `credits`,
 //!    and `type=track` keeps `tracks`: a word names a member sharing its stem),
 //!    except where a list holds its records ([`Listing`]): the arrays of its items
-//!    and the members holding all of them, which only get the steps below;
+//!    and the members holding all of them, which only get the steps below, and
+//!    an item's content: its one object member holding more of the item's scalar
+//!    members than the rest of the item (a GeoJSON feature's `properties`), as an
+//!    item without it is hollow;
 //! 2. arrays get a `maxItems`: top-level lists 5, 3, 2, then 1 item, nested
 //!    arrays 3, 2, then 1;
 //! 3. required object and array members below the top level are left out,
@@ -229,6 +232,7 @@ fn plan(
         let optional = |m: &Member| {
             !m.required
                 && !m.keeps
+                && !m.content
                 && (named || m.holds.is_empty())
                 && !requested.contains(&m.property)
         };
@@ -377,6 +381,9 @@ struct Member {
     holds: HashSet<String>,
     /// A kept array, or a member holding every kept array: step 1 leaves it in.
     keeps: bool,
+    /// An array item's content: its object member holding more of the item's
+    /// scalar members than the rest of the item. Step 1 leaves it in.
+    content: bool,
 }
 
 /// How an array schema occurs in the estimated answer.
@@ -624,6 +631,24 @@ impl Walk<'_> {
         } else {
             None
         };
+        // An item's content, by the schema: its one object member holding more of its
+        // scalar members than the rest of it.
+        let content = if as_item {
+            let counts: Vec<(&str, usize, bool)> = props
+                .iter()
+                .map(|(name, schema)| {
+                    let object = leaf_type(schema).is_none() && self.is_object(schema, 0);
+                    (name.as_str(), self.scalars(schema, 0), object)
+                })
+                .collect();
+            let total: usize = counts.iter().map(|(_, n, _)| n).sum();
+            counts
+                .iter()
+                .find(|(_, n, object)| *object && *n * 2 > total)
+                .map(|(name, _, _)| *name)
+        } else {
+            None
+        };
         let mut chars = 2.0;
         for (name, schema) in props {
             let child_location = format!("{location}/properties/{}", escape(name));
@@ -663,6 +688,7 @@ impl Walk<'_> {
                 member.page |= page;
                 member.kept |= kept;
                 member.identity |= identity == Some(name.as_str());
+                member.content |= content == Some(name.as_str());
                 member.tokens += mult * each;
                 member.each = member.each.max(each);
             }
@@ -697,6 +723,60 @@ impl Walk<'_> {
                 .get("required")
                 .and_then(Value::as_array)
                 .is_some_and(|r| r.iter().any(|n| n == "id" || n == "uri"))
+    }
+
+    /// Whether `node` is an object schema (through `$ref`s and combinators).
+    fn is_object(&self, node: &Value, hops: usize) -> bool {
+        let Some(obj) = node.as_object().filter(|_| hops < MAX_DEPTH) else {
+            return false;
+        };
+        if let Some(target) = ref_target(obj) {
+            return self
+                .doc
+                .pointer(&target)
+                .is_some_and(|def| self.is_object(def, hops + 1));
+        }
+        if ["allOf", "anyOf", "oneOf"]
+            .iter()
+            .filter_map(|k| obj.get(*k).and_then(Value::as_array))
+            .flatten()
+            .any(|branch| self.is_object(branch, hops + 1))
+        {
+            return true;
+        }
+        schema_type(obj) == Some("object") || obj.contains_key("properties")
+    }
+
+    /// The scalar members `node` holds, through objects (`$ref`s and combinators
+    /// followed, a definition holding itself not); a scalar or an array is one.
+    fn scalars(&self, node: &Value, hops: usize) -> usize {
+        let Some(obj) = node.as_object().filter(|_| hops < 8) else {
+            return 1;
+        };
+        if let Some(target) = ref_target(obj) {
+            return self
+                .doc
+                .pointer(&target)
+                .map_or(1, |def| self.scalars(def, hops + 1));
+        }
+        let parts: usize = ["allOf", "anyOf", "oneOf"]
+            .iter()
+            .filter_map(|k| obj.get(*k).and_then(Value::as_array))
+            .flatten()
+            .filter(|part| part.get("type").and_then(Value::as_str) != Some("null"))
+            .map(|part| self.scalars(part, hops + 1))
+            .max()
+            .unwrap_or(0);
+        match obj.get("properties").and_then(Value::as_object) {
+            Some(props) => {
+                parts
+                    + props
+                        .values()
+                        .map(|member| self.scalars(member, hops + 1))
+                        .sum::<usize>()
+            }
+            None => parts.max(1),
+        }
     }
 
     /// Where the array schema `node` (at `location`) is, by its `$ref`s, if it is one.
@@ -1199,6 +1279,77 @@ mod tests {
     fn a_small_answer_is_left_alone() {
         let doc = json!({"type": "object", "properties": {"id": {"type": "integer"}}});
         assert!(shape(&doc, &HashSet::new(), false, 100, None, Listing::default()).is_none());
+    }
+
+    /// A GeoJSON-style collection: each feature's scalars sit in its optional
+    /// `properties`, beside an optional `geometry`.
+    fn features() -> Value {
+        let text = |n: usize| -> Value {
+            (0..n)
+                .map(|i| (format!("field_{i}"), json!({"type": "string"})))
+                .collect::<Map<String, Value>>()
+                .into()
+        };
+        json!({
+            "type": "object",
+            "required": ["features"],
+            "properties": {"features": {"type": "array", "items": {
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "type": {"type": "string"},
+                    "geometry": {"type": "object", "properties": {
+                        "type": {"type": "string"},
+                        "coordinates": {"type": "array", "items": {"type": "number"}}
+                    }},
+                    "properties": {"type": "object", "properties": text(12)}
+                }
+            }}}
+        })
+    }
+
+    #[test]
+    fn an_items_content_member_outlasts_the_page_size() {
+        let shaped = shape(
+            &features(),
+            &HashSet::new(),
+            false,
+            400,
+            Some(PageLimit::from(10)),
+            Listing {
+                list: true,
+                records: None,
+            },
+        )
+        .unwrap();
+        let item = &shaped.schema["properties"]["features"]["items"]["properties"];
+        assert!(item.get("properties").is_some(), "{}", shaped.schema);
+        let cap = shaped.schema["properties"]["features"]["maxItems"].as_u64();
+        assert!(cap.is_some_and(|n| n < 10), "{}", shaped.schema);
+    }
+
+    #[test]
+    fn a_sub_object_holding_less_than_its_item_is_still_left_out_first() {
+        let mut doc = features();
+        let item = &mut doc["properties"]["features"]["items"]["properties"];
+        for i in 0..14 {
+            item[format!("own_{i}")] = json!({"type": "string"});
+        }
+        let shaped = shape(
+            &doc,
+            &HashSet::new(),
+            false,
+            600,
+            Some(PageLimit::from(10)),
+            Listing {
+                list: true,
+                records: None,
+            },
+        )
+        .unwrap();
+        let item = &shaped.schema["properties"]["features"]["items"]["properties"];
+        assert!(item.get("properties").is_none(), "{}", shaped.schema);
     }
 
     #[test]
