@@ -290,7 +290,13 @@ impl Walk<'_> {
         parent: Option<&Parent>,
         depth: usize,
     ) {
-        if depth > MAX_DEPTH || sel.fields.is_empty() || value.is_null() {
+        if depth > MAX_DEPTH || sel.fields.is_empty() {
+            return;
+        }
+        // A null object read by arguments may still be one the session holds.
+        if value.is_null()
+            && (sel.args.is_empty() || !matches!(shape(self.bundle, schema), Shape::One(_)))
+        {
             return;
         }
         match shape(self.bundle, schema) {
@@ -302,7 +308,7 @@ impl Walk<'_> {
                     && let Some((ty, record)) =
                         self.find(&types, &sel.args, parent, generated.as_deref())
                 {
-                    let base = Some(&*value).filter(|v| typename_is(v, &ty));
+                    let base = Some(&*value).filter(|v| v.is_object() && typename_is(v, &ty));
                     *value = self.render(&ty, &record, sel, base);
                 } else if !sel.args.is_empty()
                     && let Value::Object(obj) = value
@@ -470,7 +476,9 @@ impl Walk<'_> {
         generated: Option<&str>,
     ) -> Option<(String, StoredResource)> {
         for ty in types {
-            for record in self.held.get(ty).into_iter().flatten() {
+            // Oldest first: a later record with the same arguments is one
+            // the model made up since.
+            for record in self.held.get(ty).into_iter().flatten().rev() {
                 if generated == Some(record.id.as_str()) {
                     continue;
                 }
@@ -925,5 +933,80 @@ pub(crate) async fn link_args(
                 }
             }
         }
+    }
+}
+
+/// Gives the records a mutation answers without their ids (gh's
+/// `addComment { commentEdge { node { url } } }`) an id, unseen by the
+/// client, so that they are stored with what the input says: the objects
+/// of a type with an `id` nearest the answer's top.
+pub(crate) fn name_written(
+    bundle: &Bundle,
+    op: &mb_mcm::Operation,
+    sel: &Selection,
+    body: &mut Value,
+) {
+    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return;
+    };
+    let mut nearest = None;
+    keyed_depth(bundle, schema, sel, body, 0, &mut |_, depth| {
+        if nearest.is_none_or(|n| depth < n) {
+            nearest = Some(depth);
+        }
+    });
+    let Some(nearest) = nearest else {
+        return;
+    };
+    keyed_depth(bundle, schema, sel, body, 0, &mut |obj, depth| {
+        if depth == nearest && !obj.contains_key("id") {
+            obj.insert(
+                "id".into(),
+                json!(format!("mb_{:016x}", rand::random::<u64>())),
+            );
+        }
+    });
+}
+
+/// Calls `f` with every object of a type with an `id` in `value` (answered
+/// for `schema` and `sel`) and its depth in objects.
+fn keyed_depth(
+    bundle: &Bundle,
+    schema: &Value,
+    sel: &Selection,
+    value: &mut Value,
+    depth: usize,
+    f: &mut dyn FnMut(&mut Map<String, Value>, usize),
+) {
+    if depth > MAX_DEPTH || sel.fields.is_empty() {
+        return;
+    }
+    match value {
+        Value::Array(items) => {
+            if let Some(item) = list_item(schema) {
+                for v in items {
+                    keyed_depth(bundle, item, sel, v, depth, f);
+                }
+            }
+        }
+        Value::Object(obj) => {
+            let Some((_, def)) = object_type(bundle, schema, obj) else {
+                return;
+            };
+            let Some(props) = def.get("properties").and_then(Value::as_object) else {
+                return;
+            };
+            if props.contains_key("id") {
+                f(obj, depth);
+            }
+            for (key, child) in &sel.fields {
+                if let (Some(member), Some(field)) =
+                    (obj.get_mut(key), child.names().find_map(|n| props.get(n)))
+                {
+                    keyed_depth(bundle, field, child, member, depth + 1, f);
+                }
+            }
+        }
+        _ => {}
     }
 }

@@ -62,8 +62,10 @@ pub(crate) fn objects(
     walk.value(schema, sel, body, 0, None);
     if mode(op) == Some(Store::Merge) {
         let inputs = scalar_args(args);
+        // The records nearest the payload's top are what the input writes.
+        let nearest = walk.found.iter().map(|(_, d)| *d).min().unwrap_or(0).max(1);
         for (resource, depth) in &mut walk.found {
-            if *depth <= 1 {
+            if *depth <= nearest {
                 fill_from_args(bundle, resource, &inputs);
             }
         }

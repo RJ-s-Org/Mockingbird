@@ -135,7 +135,7 @@ async fn nested_fields_answer_from_state() {
         json!({"__typename": "Repository", "id": "R_x", "issue": issue("I_8", 2, "Wrong", "OPEN")}),
         json!({"__typename": "Repository", "id": "R_x",
                "issueOrPullRequest": pull("PR_5", 2, "main")}),
-        json!({"__typename": "AddCommentPayload", "comment": {"__typename": "IssueComment", "id": "C_1", "body": "Reproduced"}}),
+        json!({"__typename": "AddCommentPayload", "comment": {"__typename": "IssueComment"}}),
         json!({"__typename": "Repository", "id": "R_x",
                "issue": {"__typename": "Issue", "id": "I_2", "comments": {"__typename": "IssueCommentConnection", "totalCount": 3, "nodes": [
                    {"__typename": "IssueComment", "id": "C_9", "body": "Made up"}]}}}),
@@ -194,7 +194,8 @@ async fn nested_fields_answer_from_state() {
 
     gql(
         &base,
-        r#"mutation { addComment(input: {subjectId: "I_2", body: "Reproduced"}) { comment { id } } }"#,
+        // gh selects no id of the comment it adds.
+        r#"mutation { addComment(input: {subjectId: "I_2", body: "Reproduced"}) { comment { __typename } } }"#,
     )
     .await;
     let comments = gql(

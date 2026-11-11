@@ -636,6 +636,15 @@ async fn store_answer(
     let (Some(body), Some(Value::Object(args))) = (&generated.body, &call.body) else {
         return;
     };
+    let named;
+    let body = if seeding {
+        body
+    } else {
+        let mut copy = body.clone();
+        super::nested::name_written(&rt.bundle, op, selection, &mut copy);
+        named = copy;
+        &named
+    };
     let mut objects = super::state::objects(&rt.bundle, op, selection, body, args);
     if !seeding {
         super::nested::link_args(rt, &plan.session, &mut objects, args).await;
