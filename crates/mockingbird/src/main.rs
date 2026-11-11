@@ -248,7 +248,14 @@ async fn llm(
 async fn server_cmd(cmd: ServerCommand) -> Result<(), Failure> {
     match cmd {
         ServerCommand::Start(args) => {
-            let out = daemon::start(&args).await?;
+            let out = match daemon::start(&args).await {
+                Ok(out) => out,
+                Err(e) => {
+                    print_json(Ok(daemon::start_error(&e)))?;
+                    eprintln!("error: {e:#}");
+                    return Err(Failure::Silent);
+                }
+            };
             print_json(Ok(out.clone()))?;
             if out["ready"] == true {
                 return Ok(());
