@@ -307,9 +307,6 @@ async fn record_then_replay_answers_without_an_llm() {
     );
 }
 
-/// A stub holds the admin port and answers `/readyz` with 503, so the
-/// server never becomes ready: `server start` must exit 1, whether it sees
-/// the 503s until `--wait` runs out or `serve` exiting on the busy port.
 /// `server start` on a port another process holds fails with the bind
 /// error and spawns no server, whatever answers on that port.
 fn assert_start_refused(ports: &Ports, listener: &str, port: u16) {
