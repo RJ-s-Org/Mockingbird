@@ -3987,6 +3987,59 @@ async fn a_create_its_slimmer_closed_list_item_renders_once_projected_executes()
     assert_eq!(h.stored_ids(&t).await, vec![id]);
 }
 
+/// A create that fills what its read requires and then falls back to generation: the
+/// request log counts the fill's call as well as the generation's.
+#[tokio::test]
+async fn a_create_that_fills_then_generates_logs_both_calls_usage() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Exec, version: "1"}
+paths:
+  /receipts:
+    post:
+      operationId: createReceipt
+      requestBody: {content: {application/json: {schema: {type: object, properties: {total: {type: integer}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {type: object, required: [id], properties: {id: {type: string}}, not: {}}}}}}
+  /receipts/{id}:
+    get:
+      operationId: getReceipt
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, required: [id, total, memo], properties: {id: {type: string}, total: {type: integer}, memo: {type: string}}}}}}}
+"##;
+    let (capture, _guard) = Capture::install();
+    let per_call = mb_llm::Usage {
+        prompt_tokens: 100,
+        completion_tokens: 10,
+        reasoning_tokens: 0,
+    };
+    let h = support::harness(
+        contract,
+        vec![json!({"memo": "lunch"}), json!({"id": "r-gen"})],
+        &HarnessOptions {
+            usage: Some(per_call),
+            ..HarnessOptions::default()
+        },
+        |rt| rt,
+    );
+    let (_, _, body) = h
+        .send("POST", "/receipts", Some(json!({"total": 3})), &[])
+        .await;
+    assert_eq!(
+        capture.of("createReceipt"),
+        vec![create_line("createReceipt", Some("render_failed"))],
+        "{body}"
+    );
+    // Two answered calls, the fill and the generation (any repair after them finds the
+    // script spent and reports nothing).
+    let records = h.records();
+    let record = records.last().unwrap();
+    assert_eq!(
+        (record.prompt_tokens, record.completion_tokens),
+        (200, 20),
+        "the fill and the generation both counted"
+    );
+}
+
 #[tokio::test]
 async fn a_create_whose_answer_does_not_render_falls_back_as_render_failed() {
     let (capture, _guard) = Capture::install();

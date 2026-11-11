@@ -184,7 +184,7 @@ async fn update(
         .or_else(|| written(rt, plan, call, (id, &data), response_schema));
     let Some(mut answer) = answer else {
         fell_back(rt, plan, kind, Fallback::RenderFailed.as_str());
-        return Ran::Generate(None);
+        return Ran::Filled(usage);
     };
     answer.usage = usage;
     let rendered = Rendered {

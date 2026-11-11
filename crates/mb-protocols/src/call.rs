@@ -375,7 +375,9 @@ pub(crate) async fn generate_pending(
             .and_then(|d| d.answer.as_ref())
             .and_then(|a| a.records.as_ref()),
     };
-    let generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
+    let mut generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
+    // The request log counts the executor's fill as well as the generation.
+    generated.usage = generated.usage + pending.fill_usage;
     if generated.source == Source::Fallback {
         write_memory::failed_attempt(&mut pending.state, plan, &mut pending.earlier).await;
     }
@@ -455,6 +457,8 @@ pub(crate) struct Pending<'a> {
     /// The write is a client's retry of the session's latest (see
     /// [`write_memory::is_retry`]).
     retry: bool,
+    /// What a fill the executor ran before falling back to generation spent.
+    fill_usage: Usage,
 }
 
 /// Whether a GraphQL delete that removed record `id` of type `t` here leaves the marker
@@ -669,13 +673,15 @@ pub(crate) async fn prepare<'a>(
         target: target.as_ref(),
         target_id: target_id.as_deref().filter(|_| !foreign_key),
     };
-    let recalled = match exec::run(&mut state, plan, call, held, response_schema).await {
-        exec::Ran::Answered(served) => {
-            state.touch(session).instrument(state_span()).await;
-            return Prepared::Answered(served);
-        }
-        exec::Ran::Generate(recalled) => recalled,
-    };
+    let (recalled, fill_usage) =
+        match exec::run(&mut state, plan, call, held, response_schema).await {
+            exec::Ran::Answered(served) => {
+                state.touch(session).instrument(state_span()).await;
+                return Prepared::Answered(served);
+            }
+            exec::Ran::Generate(recalled) => (recalled, Usage::default()),
+            exec::Ran::Filled(usage) => (None, usage),
+        };
     if target.is_none()
         && let Some(served) = member_read(&mut state, plan, call, response_schema)
             .instrument(state_span())
@@ -844,6 +850,7 @@ pub(crate) async fn prepare<'a>(
         same_values,
         tokens,
         retry: false,
+        fill_usage,
     }))
 }
 

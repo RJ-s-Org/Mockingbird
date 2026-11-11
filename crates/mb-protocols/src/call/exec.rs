@@ -95,6 +95,9 @@ pub(super) enum Ran {
     /// The call generates, with what was recalled of the writes its held target does not
     /// show yet, when that was read.
     Generate(Option<Earlier>),
+    /// The call generates after a fill it already spent these tokens on, which the
+    /// generated answer's usage counts too.
+    Filled(mb_llm::Usage),
 }
 
 /// The call's target as [`super::prepare`] found it.

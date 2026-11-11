@@ -372,14 +372,15 @@ pub(super) async fn run(
     // A record a later read would not render is never stored: the create generates.
     if let Some(why) = unreadable(rt, t, &data, filled.as_ref().map(|f| &f.data)) {
         invalid(rt, plan, &why);
-        return Ran::Generate(None);
+        return Ran::Filled(usage);
     }
     let answer = filled
         .and_then(|f| written(rt, plan, call, (&key, &f.data), response_schema))
         .or_else(|| written(rt, plan, call, (&key, &data), response_schema))
         .or_else(|| enveloped(rt, op, (&key, t, &data), response_schema));
     let Some(mut answer) = answer else {
-        return fall(Fallback::RenderFailed.as_str());
+        fell_back(rt, plan, kind, Fallback::RenderFailed.as_str());
+        return Ran::Filled(usage);
     };
     answer.usage = usage;
     if minted_headers.is_empty() {
