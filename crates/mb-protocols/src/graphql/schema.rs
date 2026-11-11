@@ -429,6 +429,15 @@ pub(super) fn input_value(v: &InputValueDefinition) -> InputValue {
 /// returning one object (not a list) of a type, or of a union's or an
 /// interface's member types, each of its arguments that names a scalar or
 /// enum field of that type (`Repository.issue(number:)` → `Issue.number`).
+pub(super) fn lookup_keys_of(bundle: &mb_mcm::Bundle) -> super::select::LookupKeys {
+    match &bundle.protocol_payload {
+        Some(ProtocolPayload::Graphql { sdl }) => {
+            parse(sdl).map(|sdl| lookup_keys(&sdl)).unwrap_or_default()
+        }
+        _ => super::select::LookupKeys::new(),
+    }
+}
+
 fn lookup_keys(sdl: &Sdl) -> super::select::LookupKeys {
     let fields_of = |name: &str| match sdl.types.get(name).map(|d| &d.kind) {
         Some(Kind::Object { fields, .. } | Kind::Interface { fields, .. }) => Some(fields),
@@ -528,7 +537,6 @@ pub(crate) fn build_schema(rt: &Arc<MockRuntime>) -> Result<Served, GraphqlError
         }
     }
 
-    rt.narrowed().set_lookup_keys(lookup_keys(&sdl));
     let adjusted = implementation_types(&sdl)?;
     let mut builder = Schema::build(query, mutation.as_deref(), subscription.as_deref());
     for (name, def) in &sdl.types {

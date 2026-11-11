@@ -328,7 +328,13 @@ async fn generate_in(
     let selection = match (op.kind, op.success_output().and_then(|o| o.schema.as_ref())) {
         (OperationKind::Command(mb_mcm::Effect::Create), Some(schema)) => {
             widened = super::select::with_lookup_keys(selection, schema, &rt.bundle.defs, |ty| {
-                Some(rt.narrowed().lookup_keys(ty)?.iter().cloned().collect())
+                Some(
+                    rt.narrowed()
+                        .lookup_keys(&rt.bundle, ty)?
+                        .iter()
+                        .cloned()
+                        .collect(),
+                )
             });
             &widened
         }

@@ -368,7 +368,7 @@ impl Walk<'_> {
         obj: &Map<String, Value>,
         parent: &Parent,
     ) -> Option<String> {
-        let keys = self.narrowed.lookup_keys(ty)?;
+        let keys = self.narrowed.lookup_keys(self.bundle, ty)?;
         let mut values = Map::new();
         for key in keys {
             let value = sel
@@ -709,10 +709,25 @@ impl Walk<'_> {
         sel: &Selection,
         base: Option<&Value>,
     ) -> Value {
-        let mut out = match base {
-            Some(Value::Object(obj)) => obj.clone(),
-            _ => self.fake(ty, sel),
-        };
+        // Every selected field gets a value: the faker's, under the fullest
+        // record of the type the session holds (a model's answer, so dates
+        // read as dates), under `base`, under the record's own members.
+        let mut out = self.fake(ty, sel);
+        if let Some(template) = self
+            .held
+            .get(ty)
+            .into_iter()
+            .flatten()
+            .filter(|r| r.id != record.id)
+            .max_by_key(|r| r.data.as_object().map_or(0, Map::len))
+        {
+            overlay(&mut out, &template.data, sel);
+        }
+        if let Some(Value::Object(base)) = base {
+            for (key, value) in base {
+                out.insert(key.clone(), value.clone());
+            }
+        }
         out.insert("__typename".into(), json!(ty));
         overlay(&mut out, &record.data, sel);
         for (key, _) in sel.fields.iter().filter(|(_, c)| c.name == "id") {
