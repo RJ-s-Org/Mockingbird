@@ -19,7 +19,7 @@ The format is the JSON Schema `get_world_schema` answers (`mockingbird world sch
    - `refused`: an entry of the newest revision that did not validate (often after a contract change).
 
    The next four point at behaviour the contract signals that the description does not state yet. Read the docs for each and write the entry they describe; when they say nothing, leave it:
-   - `undescribed_param`: list query parameters the executor reads nothing for. A request that sends one is answered by the model, not from the records. Describe each as the docs define it (a filter, the scope, the `paging` parameter or `fields`), or list it in `ignores` when it asks nothing of the items. A sort parameter has no description yet: leave it.
+   - `undescribed_param`: list query parameters the executor reads nothing for. A request that sends one is answered by the model, not from the records. Describe each as the docs define it (a filter, the scope, the `paging` parameter or `fields`), or list it in `ignores` when it asks nothing of the items. A sort parameter is a `list.sort` ([Expressions](#expressions), pattern 6).
    - The advisory gaps (`advisory: true`) are checks. Write an entry only when the docs state the behaviour; otherwise leave the gap.
      - `no_effect`: an action that the description gives nothing to change. If the docs say what it does to the record, write its `set` (members it sets, as [expressions](#expressions) over the request and the record) or a `transition` of the type's lifecycle; when it writes another record, its `effects`. An action the docs say changes nothing (a send, a test) needs neither.
      - `no_unique`: a create can answer 409 and the type has no `unique`.
@@ -62,6 +62,7 @@ Operations (`operations.<operation id>`):
 - `set: {<member path>: <expression>}`: members a create, update, replace or action writes onto the record it stores. An action that writes request values onto the record lists them here beside its `transition`, or the record keeps the old values: `POST /orders/{id}/cancel {reason}` is `transition: {status: cancelled}`, `set: {cancel_reason: "request.body.reason"}`. On a create, a member `set` names is never generated. (`changes`, the older form, still loads.)
 - `refuse: [{when: <expression>, status, code?, message?}]`: refusals the docs state, checked in order before anything is stored; the answer is the operation's declared error body for `status`, with `code` and `message` placed in it.
 - `effects: [{op: create|update|delete, type, id?, when?, set?}]`: writes to other records after the target's write (at most 8; they do not cascade).
+- `list: {where?, sort?: {param, by}}` on a list: a default item filter, and a sort parameter turned into an order.
 - `request.instructions: {at, kind, kinds: {<kind>: {changes}}}`: an update whose request sends instructions instead of a record (a semantic patch, `{instructions: [{kind: addTags, values: [...]}]}`). `at` points to the array, `kind` names the member saying each instruction's kind, and each kind's `changes` take `{value}`, `{from_instruction: <pointer>}`, `{from_request: <pointer>}`, or `{append | remove: <pointer>}` for an array member; a braced step (`environments.{environmentKey}.on`) is that member's value in the instruction, else in the body. Describe every kind the documentation gives: an undescribed kind is generated. JSON Patch, SCIM PatchOp and merge-patch bodies need no entry.
 - Lists: `scope: {param, member, kind?, recursive?}`, `filters: [{param, member?, kind}]` (`eq`, `contains`, `gte`, `lte`, `flag`, `text`), `order: {member, descending?}`, `paging: {style, request?, response?, response_header?, size?}` (`cursor`, `page`, `offset`, `next_url`, `header_cursor`). `scope.kind: prefix` for a list of a folder's entries by its path (`path_lower` directly under `path`), with `recursive` naming the switch that lists every depth. Give a list or search its `type` when tier 0 has none, and `answer.records` when the items sit below the top level (`{results: {widgets: [...]}}` is `/results/widgets`). Describe every filter parameter the documentation gives; an undescribed one is generated unless an item member shares its name. When the docs page by a `Link` header (`<…?max_id=…>; rel="next"`), write `{style: next_url, request: <the cursor parameter the URL carries>, response_header: Link}`: the answer's `Link` names the next page's URL.
 - A list asked by a body (a `POST` search, a SOAP request): a `param` may be a body pointer (`/q`, `/ActiveList/Pagination/PageNumber`), or a plain name the body declares (`limit`). Describe every body member the documentation gives, and list those that ask nothing of the items (an API version, a detail level) in `ignores: [param]`: an undescribed member the request sends is generated.
@@ -81,7 +82,7 @@ GraphQL, gRPC, SOAP and AsyncAPI operations use the same keys, keyed by operatio
 
 ## Expressions
 
-`set`, `computed`, `refuse` (`when`; `code` and `message` are literal text, or `{expr: …}`), `effects` and `list` take expressions in a subset of CEL, the language Kubernetes admission policies use. Write one only for behaviour the documentation states, as a JSON or YAML string. Text inside an expression is quoted with `'…'`; text is joined with `+` (there is no other template syntax).
+`set`, `computed`, `refuse` (`when`; `code` and `message` are literal text, or `{expr: …}`), `effects` and `list` (`where`, `sort.by`) take expressions in a subset of CEL, the language Kubernetes admission policies use. Write one only for behaviour the documentation states, as a JSON or YAML string. Text inside an expression is quoted with `'…'`; text is joined with `+` (there is no other template syntax).
 
 What an expression can read:
 
@@ -93,7 +94,7 @@ What an expression can read:
 | `it` | Each item inside `count`, `exists`, `sum` and the list macros; in an effect's `when` and `set`, the record it found |
 | `value` | In `list.sort.by`, the sort parameter's value as sent |
 
-Functions: `held(type, id)` (a stored record of a type by its id, else `null`), `count(type, cond)`, `exists(type, cond)`, `sum(list, expr)`, `seq(scope)` (a counter per session, from 1), `mint(regex)` (a fresh id matching it), `md5`, `sha1`, `sha256`, `lower`, `upper`, `slug`, `size`, `string`, `int`, `double`, `startsWith`, `endsWith`, `contains`, `matches`, `has(a.b)`, and `list.all/exists/map/filter(x, …)`. Operators: `?:`, `&&`, `||`, `!`, comparisons, `+ - * / %`, `in`. A member of `null` or a missing member is `null`, not an error. A value is written as its member's schema declares it (a number into a `string` member as its text).
+Functions: `held(type, id)` (a stored record of a type by its id, else `null`), `count(type, cond)`, `exists(type, cond)`, `sum(list, expr)`, `seq(scope)` (a counter per session, from 1), `mint(regex)` (a fresh id matching it), `md5`, `sha1`, `sha256`, `lower`, `upper`, `slug`, `size`, `string`, `int`, `double`, `startsWith`, `endsWith`, `contains`, `matches`, `split`, `substring`, `trim`, `replace`, `has(a.b)`, and `list.all/exists/map/filter(x, …)`. Operators: `?:`, `&&`, `||`, `!`, comparisons, `+ - * / %`, `in`. A member of `null` or a missing member is `null`, not an error. A value is written as its member's schema declares it (a number into a `string` member as its text).
 
 The six patterns below cover most of what documentation asks for. Each is generic: replace the names with the contract's.
 
@@ -147,7 +148,17 @@ The six patterns below cover most of what documentation asks for. Each is generi
            set: { project_count: "it.project_count + 1" }
    ```
    A conditional state change is a `set` with `?:`: `set: { status: "record.refunded + request.body.amount >= record.amount ? 'refunded' : 'partially_refunded'" }`.
-6. **Sort parameter: a list ordered by what the request asks.** SORT_PATTERN
+6. **Sort parameter: a list ordered by what the request asks.** "`sort` takes comma-separated members, `-` before one for descending (`sort=-price,name`); archived items are not listed." `by` turns the parameter's text (`value`) into a list of `{member, desc}`; `where` keeps only the stored records it holds for (`it`), before filters and paging.
+   ```yaml
+   operations:
+     listProducts:
+       list:
+         where: "it.status != 'archived'"
+         sort:
+           param: sort
+           by: "value.split(',').map(s, s.startsWith('-') ? {'member': s.substring(1), 'desc': true} : {'member': s, 'desc': false})"
+   ```
+   For `sort=price:desc` it is `[{'member': value.split(':')[0], 'desc': value.endsWith(':desc')}]`. Without the parameter the list keeps its `order`.
 
 Check every expression you write on the mock. `patch_world` refuses one that does not compile (code `invalid`, the message quoting the error at its line and column) or that reads a member, parameter or type the contract does not have (`unresolved`): fix it at the pointer it names. An expression that fails when it runs (a type mismatch, a `null` it did not expect) never fails the call; the engine answers as it would without it, and `call_mock`'s answer lists it under `expr_failed` (`[{pointer, error}]`, the request record keeps it too). When you see `expr_failed`, fix the expression at that pointer and call again.
 
