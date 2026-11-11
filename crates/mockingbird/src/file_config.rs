@@ -1165,7 +1165,7 @@ pub struct FileMock {
     /// entries differ from the newest revision's.
     #[serde(default)]
     pub world: Option<PathBuf>,
-    /// Defaults to `/<name>`.
+    /// Defaults to `/<name>`, or `/` when `hosts` is given.
     #[serde(default)]
     pub route_prefix: Option<String>,
     #[serde(default)]
@@ -1421,11 +1421,11 @@ impl FileMock {
         }
     }
 
-    /// The route prefix, defaulting to `/<name>`.
+    /// The route prefix, defaulting to `/<name>`, or `/` for a mock bound to `hosts`.
     pub fn effective_prefix(&self, name: &str) -> String {
         self.route_prefix
             .clone()
-            .unwrap_or_else(|| format!("/{name}"))
+            .unwrap_or_else(|| mb_store::default_route_prefix(name, &self.hosts))
     }
 }
 

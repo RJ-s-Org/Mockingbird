@@ -1698,8 +1698,13 @@ impl Engine {
         if !guards::declares_code(op, code) {
             return None;
         }
+        // A refusal that states its code and message leaves the model nothing to say:
+        // the faker's body carries them, with no wait on a model.
+        let write = !(matches!(cause, error_body::ErrorCause::Refused)
+            && facts.code().is_some()
+            && !facts.text().is_empty());
         let response = self
-            .error_answer_repeating(bundle, op, call, (code, cause), facts.members())
+            .error_answer_repeating(bundle, op, call, (code, cause), (facts.members(), write))
             .await?;
         let response = self.with_facts(bundle, op, response, (facts, cause));
         let mut response = self.with_own_status(bundle, op, response);
@@ -2872,7 +2877,7 @@ impl Engine {
         match (one, two) {
             (Some(Ok(answer)), _) | (_, Some(Ok(answer))) => Ok(answer),
             (Some(Err(e)), _) | (None, Some(Err(e))) => Err(e),
-            (None, None) => Err("LLM request timed out".into()),
+            (None, None) => Err(TIMED_OUT.into()),
         }
     }
 
@@ -2963,10 +2968,15 @@ impl Engine {
                 charge(e.spent());
                 Err(e.to_string())
             }
-            Err(_) => Err("LLM request timed out".into()),
+            Err(_) => Err(TIMED_OUT.into()),
         }
     }
 }
+
+/// The fallback reason of an answer the model did not give in time. It names the
+/// setting to raise, which a developer would otherwise have to look for.
+const TIMED_OUT: &str = "LLM request timed out: a served answer waits at most \
+limits.generation_timeout (20s by default) or the profile's timeout";
 
 /// Times the estimated size of an answer its text may reach before the reply is
 /// stopped (see [`answer_cap`]).

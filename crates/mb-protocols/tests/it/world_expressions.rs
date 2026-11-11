@@ -617,3 +617,53 @@ async fn an_alternate_key_set_writes_is_refused_when_another_record_holds_it() {
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(h.stored_ids("members").await, vec!["m1".to_string()]);
 }
+
+#[tokio::test]
+async fn a_refusal_stating_its_code_and_message_asks_no_model() {
+    let world = json!({"operations": {"addMember": {"kind": "create", "refuse": [
+        {"when": "request.body.amount > 1000", "status": 422,
+         "code": "amount_too_large", "message": "amount is over 1000"},
+        {"when": "request.body.amount < 0", "status": 422, "code": "amount_negative"}
+    ]}}});
+    let h = members(world, vec![]);
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "a@x.io", "name": "A", "amount": 5000})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"]["code"], "amount_too_large", "{body}");
+    assert_eq!(body["error"]["message"], "amount is over 1000", "{body}");
+    assert!(
+        h.provider.requests().is_empty(),
+        "{:?}",
+        h.provider.requests()
+    );
+    assert_eq!(
+        h.records()[0].source.as_deref(),
+        Some("state"),
+        "{:?}",
+        h.records()
+    );
+
+    // With no message the model still writes the body's text.
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "a@x.io", "name": "A", "amount": -5})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"]["code"], "amount_negative", "{body}");
+    assert_eq!(
+        h.provider.requests().len(),
+        1,
+        "{:?}",
+        h.provider.requests()
+    );
+}

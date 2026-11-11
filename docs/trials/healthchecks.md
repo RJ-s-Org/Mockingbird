@@ -156,3 +156,62 @@ The app's own integration tests (`manage.py test hc.integrations.{sms,call,slack
 - **Rejected requests:** now logged as `rejected` with their validation reason, no longer as `fallback`.
 - **Creates read back from state:** worked for Twilio and GitHub (the record stored, filled once).
 - **Token aliases and scoped lists (#415):** not exercised, because no read-backs.
+
+## Holdout rerun (2026-11-11): a fresh Claude Code given one prompt
+
+`main` at `0d591b1b`, model `deepseek/deepseek-v4.1-flash-1017`. The earlier holdout's four findings (lenient doc imports, `null` in optional members, the `example` source, `edit_contract`) were fixed. This time the mock was built by a fresh, headless Claude Code (`claude -p`, default model) in a clean clone of healthchecks, given only this prompt:
+
+> I want to test healthchecks' notification integrations without real credentials. Use Mockingbird to mock the APIs that `manage.py sendalerts` calls for the SMS, phone call, Slack, Telegram, Opsgenie and GitHub integrations. Serve the mocks with the OpenRouter model deepseek/deepseek-v4.1-flash-1017; my key is in OPENROUTER_API_KEY. My test script is mb-rerun/flow.sh: it seeds a check with one channel of each kind, takes it down and back up, runs sendalerts and prints each notification's error (settings are in mb-rerun/env.sh). Make it pass against the mocks without changing the app.
+
+### Install, the README way
+
+- **Steps:** `claude plugin marketplace add rj-s-org/mockingbird` (7 s), then `claude plugin install mockingbird@mockingbird --scope project` (1 s). The skills came from `main`.
+- **Release binary is stale:** with no `mockingbird` on `PATH`, the plugin's launcher installs the latest release, `v0.1.0` (2026-10-29). That binary predates every fix since, including tools the skills name (`edit_contract`, `get_world` with `operations`). The trial put `main`'s binary on `PATH` instead. A user following the README today gets skills and a binary that disagree.
+- **Default ports taken:** another Mockingbird server on the machine held the default ports. The agent found this (`doctor`, `lsof`) and picked its own: data 8390, admin 9390, proxy 8899. It cost a few steps and nothing else.
+
+### How the agent built it
+
+- **57 turns:** 49 `Bash` calls (the `mockingbird` CLI), one `Skill` (`mockingbird`) and one MCP call (`doctor`).
+- **Contracts:** it read the six transports in `hc/integrations/*/transport.py` and wrote five small OpenAPI files covering only the operations `sendalerts` calls. It used neither the catalog nor a documentation import, so the doc-import fixes were not exercised.
+- **The rest:** it ran `mockingbird init` with the profile, set `hosts`, started the server with `--proxy`, described the creates with `mockingbird world patch`, and ran the flow under `proxy env`.
+- **Time:**
+  - 7.8 min from the prompt to the first passing flow.
+  - 20.4 min in all. About 12 min of that was the trial's own `flow.sh`, whose wait loop never matched: Django prints a banner line before the count. That is fixed in the trial script, not in Mockingbird.
+  - Agent cost: $3.00 at API prices (on the subscription here).
+
+### Results
+
+| Run | Down flow | Up flow | Notes |
+| --- | --- | --- | --- |
+| Agent's run | 6 of 6 | 4 of 4 | `Notification.error` empty everywhere |
+| Measured run (fixed `flow.sh`) | **6 of 6** | **4 of 4** | 46 s for the whole script |
+
+The app's own integration tests still patch `curl.request` and never reach a mock (see the first holdout).
+
+### Scorecard (measured run)
+
+| # | Measure | Result |
+| --- | --- | --- |
+| 1 | Flows pass | 10 of 10 notifications, with no contract edits after the first build |
+| 2 | Consistency the flows check | nothing to check: healthchecks never reads back. The Opsgenie close by alias answers 202 |
+| 3 | Agent build | **7.8 min** from one prompt to a passing flow, through the plugin's skills and the CLI only (target ≤ 15 min) |
+| 4 | State-served latency | p50 1.2 s, p95 2.7 s (5 creates). Each create still makes its fill call (open, as before) |
+| 5 | Model-served latency | p50 1.8 s, p95 2.9 s (4 calls: Telegram ×2, Opsgenie create and close) |
+| 6 | Spend per session | $0.0006 for the run (8.3k prompt / 1.0k completion tokens) |
+| 7 | Errors | invalid input gets the declared status and body: Telegram `{"ok": false, "error_code": 400, …}`, Twilio `{"code": 21211, …}`, Opsgenie 400 `{"message": …}`, Slack 400 `no_text`. The agent's contracts have no reads, so unknown ids do not arise |
+
+**Sources:** 11 calls.
+- 5 `state` (45%): Twilio ×3, the GitHub token and the GitHub issue.
+- 4 `llm`: Telegram ×2, Opsgenie ×2.
+- 2 `fallback`: Slack's `ok`.
+
+### Failures
+
+| # | Repro (request → expected / got) | Class | Status |
+| --- | --- | --- | --- |
+| 1 | The plugin installs release `v0.1.0`, 13 days behind the skills it ships with. | release | open: needs a release |
+| 2 | A mock given `hosts` but no `route_prefix` is mounted at `/<name>`. The proxy forwards the app's own paths (`POST /v2/alerts`), so nothing reaches it: 404 "No mock mounted at this path". The proxy-mode steps in the mock-api skill said to set only `hosts`. The agent found `route_prefix: /` by experiment. | engine default, skills | fixed in #474: a host-bound mock with no prefix is mounted at `/` |
+| 3 | `set` on a create is not reflected in the answer. GitHub `issuesCreate` with `set: {comments: "0", number: "seq(…)", repository_url: "'https://…' + …", closed_at: "null", …}` answers `comments: 72`, `number: 98` and faker words for the URLs. The request record has no `expr_failed` and no fallback reason. `closed_at: null` is logged as "no value its member's schema takes", although the schema is `nullable: true`. With a read operation added for the type, `number` follows `seq` but `comments` still does not. | engine | open. Not blocking: `sendalerts` checks only the status |
+| 4 | The Telegram `sendMessage` create falls back with `render_failed` and no `render_error`; reads carry one. The agent could not see why, and the call was answered by the model (2–3 s). | engine (diagnostics) | open |
+| 5 | Slack's `text/plain` answer, a one-value `enum` (`ok`), is source `fallback` ("the response media type is not JSON: answered by the faker"). `verify --no-fallbacks` fails on a correct answer. The earlier fix covered a declared `example`, not an `enum`. | engine (reporting) | open |
+| 6 | Creates answered from `state` take 0.6–2.7 s because of the fill call. Measure 4 fails for write-heavy apps (first holdout's failure 8). | engine (latency) | open |

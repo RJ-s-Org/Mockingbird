@@ -116,7 +116,7 @@ pub struct Mock {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct NewMock {
     pub name: String,
-    /// Defaults to `/<name>`.
+    /// Defaults to `/<name>`, or `/` when `hosts` is given.
     pub route_prefix: Option<String>,
     pub persona: Option<String>,
     pub llm_profile: Option<String>,
