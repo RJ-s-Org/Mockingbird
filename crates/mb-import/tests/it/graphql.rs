@@ -546,7 +546,10 @@ fn date_and_time_scalars_import_as_formatted_strings() {
         "When something happened, as an ISO 8601 date."
         scalar When
         scalar Url
-        type Query { a: DateTime b: Date c: Time d: ISO8601DateTime e: GitTimestamp f: Timestamp g: When h: Url }
+        scalar Update
+        "An ISO 8601 date-time with milliseconds precision."
+        scalar Precise
+        type Query { a: DateTime b: Date c: Time d: ISO8601DateTime e: GitTimestamp f: Timestamp g: When h: Url i: Update j: Precise }
     "#;
     let b = mb_import::compile(sdl.as_bytes()).unwrap();
     let format = |name: &str| {
@@ -557,7 +560,9 @@ fn date_and_time_scalars_import_as_formatted_strings() {
     };
     assert_eq!(format("DateTime").as_deref(), Some("date-time"));
     assert_eq!(format("Date").as_deref(), Some("date"));
-    assert_eq!(format("Time").as_deref(), Some("time"));
+    assert_eq!(format("Time"), None);
+    assert_eq!(format("Update"), None);
+    assert_eq!(format("Precise"), Some("date-time".to_string()));
     assert_eq!(format("ISO8601DateTime").as_deref(), Some("date-time"));
     assert_eq!(format("GitTimestamp").as_deref(), Some("date-time"));
     assert_eq!(format("Timestamp"), None);
