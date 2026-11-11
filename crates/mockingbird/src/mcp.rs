@@ -839,6 +839,7 @@ fn tools() -> Vec<Tool> {
             description: "Send an HTTP request to the data plane (REST, GraphQL at <prefix>/graphql, SOAP) and return status, x-mockingbird-* headers and body, with `expr_failed` (the pointers of world expressions that failed in the call) when one did, or `expr_failed_unknown` when the call's request record could not be read. Override fields map to X-Mockingbird-* headers.",
             schema: obj(
                 json!({
+                    "mock": s("The mock called. When it is mounted for named hosts (`hosts`), the call sends its first host as `Host` unless `headers` has one."),
                     "method": s("HTTP method; default GET."),
                     "path": s("Path including the mock's prefix, e.g. /orders/orders/42."),
                     "body": { "description": "JSON body, or a string sent as is." },
@@ -848,7 +849,7 @@ fn tools() -> Vec<Tool> {
                     "latency": s("X-Mockingbird-Latency, e.g. 250ms."),
                     "scenario": s("X-Mockingbird-Scenario."),
                     "stream_items": n("X-Mockingbird-Stream-Items."),
-                    "base_url": s("Data-plane URL; default the background server's or http://127.0.0.1:8080."),
+                    "base_url": s("Data-plane URL; default the one the Admin API's server reports, else the background server's, else http://127.0.0.1:8080."),
                 }),
                 &["path"],
             ),
@@ -2065,19 +2066,61 @@ impl McpServer {
         next_steps(answer, mock, version, gaps);
     }
 
-    /// The data-plane base URL: the argument, the background server's, or
-    /// the default.
-    fn data_plane(&self, a: &Value) -> String {
-        opt_str(a, "base_url")
+    /// The data-plane base URL: the argument, `MB_DATA_URL`, the one the
+    /// Admin API's server reports on `/readyz` (on the admin URL's host),
+    /// the background server's recorded one, or the default.
+    async fn data_plane(&self, a: &Value) -> String {
+        if let Some(url) = opt_str(a, "base_url")
             .filter(|_| self.local_tools)
             .or_else(|| std::env::var("MB_DATA_URL").ok())
-            .or_else(|| {
-                std::fs::read(self.state_for(None).state_dir.join("server.json"))
-                    .ok()
-                    .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-                    .and_then(|v| v["data_plane"].as_str().map(String::from))
-            })
+        {
+            return url;
+        }
+        if let Some(url) = self.reported_data_plane().await {
+            return url;
+        }
+        std::fs::read(self.state_for(None).state_dir.join("server.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|v| v["data_plane"].as_str().map(String::from))
             .unwrap_or_else(|| "http://127.0.0.1:8080".into())
+    }
+
+    /// The data plane the server behind `admin_url` reports on `/readyz`,
+    /// as a URL on the admin URL's host.
+    async fn reported_data_plane(&self) -> Option<String> {
+        let admin = reqwest::Url::parse(&self.admin_url).ok()?;
+        let mut req = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok()?
+            .get(admin.join("/readyz").ok()?);
+        // With auth on, `/readyz` reports the data plane to callers it
+        // authenticates only.
+        if let Some(token) = &self.token {
+            req = req.bearer_auth(token);
+        }
+        let body: Value = req.send().await.ok()?.json().await.ok()?;
+        let port = body["data_plane"]["port"].as_u64()?;
+        let scheme = if body["data_plane"]["tls"].as_bool() == Some(true) {
+            "https"
+        } else {
+            "http"
+        };
+        // `host_str` keeps an IPv6 address's brackets.
+        let host = admin.host_str()?;
+        Some(format!("{scheme}://{host}:{port}"))
+    }
+
+    /// The `Host` a call to `mock` needs: its first `hosts` entry, when it
+    /// is mounted only for named hosts.
+    async fn mock_host(&self, mock: &str) -> Result<Option<String>, ToolError> {
+        let m = self.ws(Method::GET, &["mocks", mock], &[], None).await?;
+        Ok(m["hosts"]
+            .as_array()
+            .and_then(|h| h.first())
+            .and_then(Value::as_str)
+            .map(String::from))
     }
 
     async fn call_mock(&self, a: &Value) -> ToolResult {
@@ -2090,7 +2133,15 @@ impl McpServer {
         if !path.starts_with('/') {
             return Err(ToolError("path must start with /".into()));
         }
-        let url = format!("{}{path}", self.data_plane(a).trim_end_matches('/'));
+        let url = format!("{}{path}", self.data_plane(a).await.trim_end_matches('/'));
+        let sends_host = a
+            .get("headers")
+            .and_then(Value::as_object)
+            .is_some_and(|h| h.keys().any(|k| k.eq_ignore_ascii_case("host")));
+        let host = match opt_str(a, "mock") {
+            Some(mock) if !sends_host => self.mock_host(&mock).await?,
+            _ => None,
+        };
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
@@ -2100,6 +2151,9 @@ impl McpServer {
             for (k, v) in h {
                 req = req.header(k, v.as_str().unwrap_or_default());
             }
+        }
+        if let Some(host) = host {
+            req = req.header(reqwest::header::HOST, host);
         }
         for (key, header) in [
             ("session", "x-mockingbird-session"),
@@ -2759,6 +2813,59 @@ mod tests {
             mock_for_path(&hosted, "/x", "c.test").as_deref(),
             Some("any")
         );
+    }
+
+    #[tokio::test]
+    async fn call_mock_finds_the_data_plane_and_sends_the_mocks_host() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        let admin = wiremock::MockServer::start().await;
+        let data = wiremock::MockServer::start().await;
+        let port = data.address().port();
+        Mock::given(method("GET"))
+            .and(path("/readyz"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"status": "ready", "data_plane": {"port": port, "tls": false}}),
+            ))
+            .mount(&admin)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/mocks/plaid")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"name": "plaid", "route_prefix": "/", "hosts": ["sandbox.plaid.com"]}),
+            ))
+            .mount(&admin)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/item/get"))
+            .and(header("host", "sandbox.plaid.com"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"item": {}})))
+            .mount(&data)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/item/get"))
+            .and(header("host", "other.example"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({})))
+            .mount(&data)
+            .await;
+        let s = against(&admin);
+        let out = call_tool(
+            &s,
+            "call_mock",
+            json!({"mock": "plaid", "method": "POST", "path": "/item/get", "body": {}}),
+        )
+        .await;
+        assert_eq!(out["status"], 200, "{out}");
+        assert_eq!(out["url"], format!("http://127.0.0.1:{port}/item/get"));
+        // A Host the caller sends wins.
+        let out = call_tool(
+            &s,
+            "call_mock",
+            json!({"mock": "plaid", "method": "POST", "path": "/item/get",
+                   "headers": {"Host": "other.example"}}),
+        )
+        .await;
+        assert_eq!(out["status"], 201, "{out}");
     }
 
     #[tokio::test]
