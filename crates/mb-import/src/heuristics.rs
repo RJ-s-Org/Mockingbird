@@ -285,6 +285,93 @@ pub(crate) fn infer_kind(method: HttpMethod, path: &str) -> OperationKind {
     }
 }
 
+/// Makes a `POST` to a route ending in its record's own parameter
+/// (`POST /customers/{customer}`, `POST /Messages/{Sid}.json`), which [`infer_kind`]
+/// leaves an [`Effect::Other`], an update when it writes the record its route names:
+/// a `GET` on the same route answers the same record ([`same_record`]), and its
+/// request body is an object declaring a member that record declares. Form APIs
+/// update a record so. Names are compared by [`member_key`] (`SmsUrl` is `sms_url`),
+/// inside a one-member envelope the answer holds the record in, and members that say
+/// nothing of an update do not count ([`update_members`]). Otherwise it stays an
+/// action: a route ending in a parameter may name a parent (`POST /rooms/{room_id}`
+/// posting a message).
+fn apply_post_updates(operations: &mut [Operation], defs: &Map<String, Value>) {
+    let updates: Vec<usize> = (0..operations.len())
+        .filter(|&index| writes_its_route(&operations[index], operations, defs))
+        .collect();
+    for index in updates {
+        operations[index].kind = OperationKind::Command(Effect::Update);
+    }
+}
+
+/// [`apply_post_updates`]'s test of one operation.
+fn writes_its_route(op: &Operation, operations: &[Operation], defs: &Map<String, Value>) -> bool {
+    let Some((HttpMethod::Post, path)) = http_path(op) else {
+        return false;
+    };
+    if trailing_param(path).is_none() || op.kind != OperationKind::Command(Effect::Other) {
+        return false;
+    }
+    let Some(answered) = answer(op).filter(|a| !is_opaque(Some(*a), defs)) else {
+        return false;
+    };
+    let segs = segments(path);
+    let read_back = gets(operations, |route| same_route(route, &segs))
+        .filter_map(answer)
+        .any(|read| same_record(answered, read, defs));
+    let Some(body) = op
+        .input
+        .body
+        .as_ref()
+        .filter(|b| matches!(held(b, defs), Held::Object(_)))
+    else {
+        return false;
+    };
+    let record = update_members(path, answered, defs);
+    read_back
+        && schema_properties(Some(body), defs)
+            .is_some_and(|body| body.keys().any(|m| record.contains(&member_key(m))))
+}
+
+/// The [`member_key`]s of the record `answered` is, or holds in a one-member
+/// envelope ([`answered_things`]), that an update may send: not its key (`id`, an
+/// [`ID_FALLBACKS`] member, one named for a path parameter) nor a `readOnly` member.
+fn update_members(path: &str, answered: &Value, defs: &Map<String, Value>) -> HashSet<String> {
+    let params: HashSet<String> = segments(path)
+        .into_iter()
+        .filter_map(param_name)
+        .map(member_key)
+        .collect();
+    let record = answered_things(answered, defs).pop();
+    let Some(props) = record
+        .as_ref()
+        .and_then(|r| schema_properties(Some(r), defs))
+    else {
+        return HashSet::new();
+    };
+    props
+        .iter()
+        .filter(|(_, schema)| {
+            resolve(schema, defs)
+                .and_then(|s| s.get("readOnly"))
+                .and_then(Value::as_bool)
+                != Some(true)
+        })
+        .map(|(member, _)| member_key(member))
+        .filter(|key| key != "id" && !ID_FALLBACKS.contains(&key.as_str()) && !params.contains(key))
+        .collect()
+}
+
+/// A member name with case, `_` and `-` left out: `SmsUrl`, `sms_url` and `sms-url`
+/// are one member.
+fn member_key(member: &str) -> String {
+    member
+        .chars()
+        .filter(|c| !matches!(c, '_' | '-'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
 /// The last static segment before any trailing `{param}`; for an
 /// RPC-style read or write (`/accounts/get`, `users.list`, `/files/delete_v2`),
 /// what it reads or writes. A version segment ([`version_at`]) is never the
@@ -2445,6 +2532,7 @@ pub(crate) fn apply_action_routes(
     defs: &Map<String, Value>,
     ctx: &mut Ctx,
 ) {
+    apply_post_updates(operations, defs);
     let creates = type_parameter_paths(operations, hints, defs);
     let keys = record_keys(operations, defs);
     for index in creates {
@@ -3117,6 +3205,7 @@ pub(crate) fn resource_from_name(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mb_mcm::world::OpKind;
     use serde_json::json;
 
     #[test]
@@ -3604,6 +3693,126 @@ mod tests {
         assert_eq!(resource_from_name("addAddress").as_deref(), Some("address"));
         assert_eq!(resource_from_name("search"), None);
         assert_eq!(kind_from_name("ébauche", other()), other());
+    }
+
+    /// The world kind of a `POST` to `path` sending `body` as a form and answering
+    /// `answer`, beside a `GET` on the same route answering `read`, over `schemas`.
+    fn post_kind(
+        path: &str,
+        body: Option<Value>,
+        answer: &Value,
+        read: Option<&Value>,
+        schemas: &Value,
+    ) -> Option<OpKind> {
+        let params: Vec<Value> = segments(path)
+            .into_iter()
+            .filter_map(param_name)
+            .map(|p| path_param(p)[0].clone())
+            .collect();
+        let mut post = answering("post", answer);
+        if let Some(body) = body {
+            post["requestBody"] =
+                json!({"content": {"application/x-www-form-urlencoded": {"schema": body}}});
+        }
+        let mut item = json!({"parameters": params, "post": post});
+        if let Some(read) = read {
+            item["get"] = answering("get", read);
+        }
+        let bundle = compiled(&json!({path: item}), schemas);
+        let op = bundle.operations.iter().find(|op| op.id == "post").unwrap();
+        OpKind::of(op)
+    }
+
+    fn props(names: &[&str]) -> Value {
+        let props: Map<String, Value> = names
+            .iter()
+            .map(|n| ((*n).to_owned(), json!({"type": "string"})))
+            .collect();
+        json!({"type": "object", "properties": props})
+    }
+
+    fn schema_ref(name: &str) -> Value {
+        json!({"$ref": format!("#/components/schemas/{name}")})
+    }
+
+    #[test]
+    fn a_post_to_a_record_sending_its_members_is_an_update() {
+        let record = schema_ref("Record");
+        let twilio = "/2010-04-01/Accounts/{AccountSid}/IncomingPhoneNumbers/{Sid}.json";
+        let number = json!({"Record": props(&["sid", "account_sid", "friendly_name", "sms_url"])});
+        // PascalCase form members name the record's snake_case ones.
+        let body = props(&["FriendlyName", "SmsUrl"]);
+        let kind = post_kind(twilio, Some(body), &record, Some(&record), &number);
+        assert_eq!(kind, Some(OpKind::Update));
+        let stripe = "/v1/customers/{customer}";
+        let customer = json!({"Record": props(&["id", "email", "metadata"])});
+        let body = props(&["email"]);
+        let kind = post_kind(stripe, Some(body), &record, Some(&record), &customer);
+        assert_eq!(kind, Some(OpKind::Update));
+        // A `$ref` to an `allOf` body is read through.
+        let schemas = json!({
+            "Record": props(&["id", "email", "metadata"]),
+            "Base": props(&["description"]),
+            "Body": {"allOf": [schema_ref("Base"), props(&["metadata"])]},
+        });
+        let body = schema_ref("Body");
+        let kind = post_kind(stripe, Some(body), &record, Some(&record), &schemas);
+        assert_eq!(kind, Some(OpKind::Update));
+        // An answer holding the record in an envelope is compared inside it.
+        let schemas = json!({
+            "Record": props(&["id", "email"]),
+            "Wrapped": {"type": "object", "properties": {"data": schema_ref("Record")}},
+        });
+        let wrapped = schema_ref("Wrapped");
+        let body = props(&["email"]);
+        let kind = post_kind(stripe, Some(body), &wrapped, Some(&wrapped), &schemas);
+        assert_eq!(kind, Some(OpKind::Update));
+    }
+
+    #[test]
+    fn a_post_to_a_record_that_may_not_write_it_stays_an_action() {
+        let record = schema_ref("Record");
+        let stripe = "/v1/customers/{customer}";
+        let customer = json!({
+            "Record": {"type": "object", "properties": {
+                "id": {"type": "string"},
+                "customer": {"type": "string"},
+                "email": {"type": "string"},
+                "created": {"type": "integer", "readOnly": true},
+            }},
+            "Other": props(&["id", "email"]),
+        });
+        let action = Some(OpKind::Action);
+        // No body, or a body sharing no member with the record.
+        assert_eq!(
+            post_kind(stripe, None, &record, Some(&record), &customer),
+            action
+        );
+        let body = props(&["reason"]);
+        let kind = post_kind(stripe, Some(body), &record, Some(&record), &customer);
+        assert_eq!(kind, action);
+        // Only its key, a member named for the path parameter or a `readOnly` member.
+        let body = props(&["id", "customer", "created"]);
+        let kind = post_kind(stripe, Some(body), &record, Some(&record), &customer);
+        assert_eq!(kind, action);
+        // An array body.
+        let body = json!({"type": "array", "items": props(&["email"])});
+        let kind = post_kind(stripe, Some(body), &record, Some(&record), &customer);
+        assert_eq!(kind, action);
+        // The route may name a parent: no `GET` on it, or one answering another record.
+        let rooms = "/rooms/{room_id}";
+        let body = props(&["email"]);
+        assert_eq!(
+            post_kind(rooms, Some(body.clone()), &record, None, &customer),
+            action
+        );
+        let other = schema_ref("Other");
+        let kind = post_kind(rooms, Some(body.clone()), &record, Some(&other), &customer);
+        assert_eq!(kind, action);
+        // A route ending in a static segment is an action on its parent as before.
+        let capture = "/v1/charges/{charge}/capture";
+        let kind = post_kind(capture, Some(body), &record, None, &customer);
+        assert_eq!(kind, action);
     }
 
     /// A contract of `paths` over `schemas`, compiled.
