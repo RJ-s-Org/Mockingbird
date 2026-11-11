@@ -159,3 +159,51 @@ fn run_warns_when_its_server_flags_do_not_apply() {
     let first = String::from_utf8_lossy(&first.stderr);
     assert!(!first.contains("already answers"), "{first}");
 }
+
+/// A server started with another config that holds this config's admin
+/// port is never used: `run` names it and runs nothing.
+#[tokio::test]
+async fn run_refuses_another_configs_server_on_its_admin_port() {
+    use wiremock::matchers::path;
+    let stub = wiremock::MockServer::start().await;
+    wiremock::Mock::given(path("/readyz"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ready",
+                "role": "all",
+                "config": "/elsewhere/other/mockingbird.yaml",
+                "dir": "/elsewhere/other",
+            })),
+        )
+        .mount(&stub)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let admin = stub.address().port();
+    std::fs::write(
+        dir.path().join("mockingbird.yaml"),
+        format!(
+            "storage:\n  url: \"sqlite::memory:\"\nserver:\n  port: {}\n  admin_port: {admin}\n  grpc_port: {}\nproxy:\n  port: {}\nmocks:\n  orders:\n    contract: {}\n",
+            free_port(),
+            free_port(),
+            free_port(),
+            fixture("openapi/orders-3.0.yaml").display()
+        ),
+    )
+    .unwrap();
+    let marker = dir.path().join("ran");
+    let out = tokio::task::spawn_blocking({
+        let dir = dir.path().to_path_buf();
+        let marker = marker.clone();
+        move || run(&dir, &["touch", marker.to_str().unwrap()])
+    })
+    .await
+    .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("started with config /elsewhere/other/mockingbird.yaml"),
+        "{stderr}"
+    );
+    assert!(!marker.exists(), "the command did not run");
+    assert!(!dir.path().join("state/server.pid").exists());
+}

@@ -19,6 +19,20 @@ pub struct ProxyEnvOptions {
     pub ca_dir: PathBuf,
 }
 
+/// `config`, else `./mockingbird.yaml` when it exists: the config whose
+/// `proxy` section `proxy env`, `proxy browser` and `proxy` use, so they
+/// find the port `init` or `server start` wrote there.
+#[must_use]
+pub fn config_or_local(config: Option<&Path>) -> Option<PathBuf> {
+    match config {
+        Some(path) => Some(path.to_path_buf()),
+        None => {
+            let local = PathBuf::from(crate::client::DEFAULT_CONFIG);
+            local.is_file().then_some(local)
+        }
+    }
+}
+
 /// The options for the proxy `config` (a config file, with the `MB_*`
 /// environment applied; defaults without one) describes:
 /// - port: `port`, else `proxy.port` (8888 by default);

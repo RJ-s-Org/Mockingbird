@@ -56,7 +56,7 @@ pub enum ProxyCommand {
 #[derive(clap::Args, Debug)]
 pub struct ProxyEnvArgs {
     /// Config file whose `server.host`, `proxy.port` and `proxy.ca_dir`
-    /// apply.
+    /// apply [default: ./mockingbird.yaml when it exists].
     #[arg(short = 'c', long)]
     pub config: Option<PathBuf>,
     /// The proxy's port [default: proxy.port, else 8888].
@@ -70,7 +70,8 @@ pub struct ProxyEnvArgs {
 
 #[derive(clap::Args, Debug, Default)]
 pub struct ProxyRunArgs {
-    /// Config file whose `server` and `proxy` sections apply.
+    /// Config file whose `server` and `proxy` sections apply [default:
+    /// ./mockingbird.yaml when it exists].
     #[arg(short = 'c', long)]
     pub config: Option<PathBuf>,
     /// Bind address [default: proxy.host, else 127.0.0.1]; off loopback the
@@ -254,7 +255,8 @@ pub async fn run(args: ProxyArgs, admin_url: &str) -> anyhow::Result<()> {
         return super::browser::run(browser).await;
     }
     if let Some(ProxyCommand::Env(env)) = args.cmd {
-        let vars = proxy_env(&options_for(env.config.as_deref(), env.port)?)?;
+        let config = super::env::config_or_local(env.config.as_deref());
+        let vars = proxy_env(&options_for(config.as_deref(), env.port)?)?;
         if env.json {
             println!("{}", serde_json::to_string_pretty(&vars)?);
         } else {
@@ -263,8 +265,8 @@ pub async fn run(args: ProxyArgs, admin_url: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     let run = args.run;
-    let mut cfg = match &run.config {
-        Some(path) => file_config::load(path)?,
+    let mut cfg = match super::env::config_or_local(run.config.as_deref()) {
+        Some(path) => file_config::load(&path)?,
         None => FileConfig::default(),
     };
     file_config::apply_env(&mut cfg)?;
