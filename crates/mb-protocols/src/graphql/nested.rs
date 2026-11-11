@@ -866,6 +866,7 @@ impl Walk<'_> {
         }
         out.insert("__typename".into(), json!(ty));
         overlay(&mut out, &record.data, sel);
+        self.expand_references(ty, sel, &record.data, &mut out);
         for (key, _) in sel.fields.iter().filter(|(_, c)| c.name == "id") {
             out.insert(key.clone(), json!(record.id));
         }
@@ -875,6 +876,71 @@ impl Walk<'_> {
             out.insert("id".into(), json!(record.id));
         }
         Value::Object(out)
+    }
+
+    /// Each member of `out` (an object of type `ty` rendered for `sel` from
+    /// `data`) that `data` holds as a reference by id alone (`headRepository:
+    /// {id}`, a stored link where an answer said `null`) while `sel` asks for
+    /// more of it: the record the session holds under that id, rendered for
+    /// its selection, else one faked under that id.
+    fn expand_references(
+        &self,
+        ty: &str,
+        sel: &Selection,
+        data: &Value,
+        out: &mut Map<String, Value>,
+    ) {
+        let id_or_type = |name: &str| name == "id" || name == "__typename";
+        for (key, child) in &sel.fields {
+            if child.fields.values().all(|c| id_or_type(&c.name)) {
+                continue;
+            }
+            let Some(Value::Object(reference)) = child.names().find_map(|n| data.get(n)) else {
+                continue;
+            };
+            if !reference.keys().all(|k| id_or_type(k)) {
+                continue;
+            }
+            let Some(id) = reference.get("id").and_then(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let declared = self
+                .bundle
+                .defs
+                .get(ty)
+                .and_then(|d| d.get("properties")?.get(&child.name))
+                .and_then(def_ref);
+            let Some(member_ty) = reference
+                .get("__typename")
+                .and_then(Value::as_str)
+                .or(declared)
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let held = self
+                .held
+                .get(&member_ty)
+                .into_iter()
+                .flatten()
+                .find(|r| r.id == id);
+            let expanded = match held {
+                Some(record) => self.render(&member_ty, record, child, None),
+                None => {
+                    let mut faked = self.fake(&member_ty, child);
+                    faked.insert("__typename".into(), json!(member_ty));
+                    for (k, _) in child.fields.iter().filter(|(_, c)| c.name == "id") {
+                        faked.insert(k.clone(), json!(id));
+                    }
+                    Value::Object(faked)
+                }
+            };
+            out.insert(key.clone(), expanded);
+        }
     }
 
     fn fake(&self, ty: &str, sel: &Selection) -> Map<String, Value> {
