@@ -119,5 +119,5 @@ Then add `https://<host>/mcp` as a connector (in ChatGPT: Settings → Apps & Co
 
 - The MCP server has the Admin API rights of its token. Give remote agents an API key with the least role they need (`viewer` for `--read-only` use).
 - API keys never pass through the agent: profiles hold `env:` or `file:` references, `agent install` writes variable names only, and the key setup page sends nothing back.
-- `call_mock` and `import_contract` with a URL make requests from the machine the MCP server runs on; URL imports go through the server's [URL fetching](import.md#url-fetching) guards.
+- `call_mock` returns the answer's status, `x-mockingbird-*` headers and body, and `expr_failed` when a [world expression](world.md#expressions) failed in the call (read from the call's request record, which it finds by an `x-mockingbird-call` header it sends; nothing is added when the request log is off). `call_mock` and `import_contract` with a URL make requests from the machine the MCP server runs on; URL imports go through the server's [URL fetching](import.md#url-fetching) guards.
 - Over the Admin API, an LLM profile's secret references must match `server.api_secret_refs`, and only a sysadmin may point them at a new `base_url`; this applies to `${…}` references in headers too.
