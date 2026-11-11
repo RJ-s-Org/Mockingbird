@@ -130,6 +130,7 @@ async fn within_own(
 /// the item with its id that a record holds (a cart's line). Only those values:
 /// whatever else the answer holds (a line it added) stays. A record one effect wrote
 /// and another was refused on is left as the answer has it.
+#[cfg(feature = "graphql")]
 pub(crate) fn lay_effects(
     objects: &mut [StoredResource],
     effects: &[ResourceEffect],
