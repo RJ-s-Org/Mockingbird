@@ -391,8 +391,9 @@ pub struct MockRuntime {
     /// The name the mocks of one API keep their sessions under together
     /// (see `call::shared`); `None` keeps this mock's own.
     pub shares: Option<String>,
-    /// Validate requests strictly even when [`mb_mcm::Bundle::inferred`] says the
-    /// contract's request schemas are guesses.
+    /// Validate requests strictly: refuse a member the request schema does not
+    /// declare, which is otherwise let through, and validate a contract the smart
+    /// import inferred (whose request schemas are guesses, see [`mb_mcm::Bundle::inferred`]) as any other.
     pub strict_requests: bool,
     /// Sends webhook events after successful writes; `None` sends none.
     pub webhooks: Option<Arc<webhooks::deliver::WebhookDispatcher>>,

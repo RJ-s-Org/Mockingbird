@@ -378,9 +378,9 @@ pub struct MockBehavior {
     /// and GraphQL over one store): sessions are kept under it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shares: Option<String>,
-    /// Validate requests strictly even when the contract was inferred by the smart
-    /// import, whose request schemas are guesses and are otherwise validated
-    /// leniently (see `mb_mcm::Bundle::inferred`).
+    /// Validate requests strictly: refuse a member the request schema does not
+    /// declare, which is otherwise let through, and validate a contract the smart
+    /// import inferred (whose request schemas are guesses, see `mb_mcm::Bundle::inferred`) as any other.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub strict_requests: bool,
 }

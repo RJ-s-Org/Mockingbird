@@ -10,7 +10,8 @@ use axum::response::Response;
 use futures::StreamExt;
 use mb_engine::error_body::{self, Violation};
 use mb_engine::{
-    EngineError, GeneratedResponse, GenerationContext, OperationCall, SchemaValidator, Source,
+    EngineError, GeneratedResponse, GenerationContext, Leniency, OperationCall, SchemaValidator,
+    Source,
 };
 use mb_ext::{Rejection, Tenancy};
 use mb_llm::Usage;
@@ -434,22 +435,30 @@ async fn serve(
     if let Some(v) = validators {
         check(
             &mut errors,
-            ("path", false),
+            ("path", Leniency::Strict),
             v.path.as_ref(),
             Some(&Value::Object(path_params.clone())),
         );
-        // A contract the smart import inferred guesses at its request schemas: its
-        // body and query are not refused for what such a guess gets wrong.
-        let lenient = rt.bundle.inferred && !rt.strict_requests;
+        // A member the contract does not declare is let through (an app's SDK may
+        // be pinned to another version of the API); a contract the smart import
+        // inferred guesses at its request schemas, so its body and query are not
+        // refused for what such a guess gets wrong either.
+        let leniency = if rt.strict_requests {
+            Leniency::Strict
+        } else if rt.bundle.inferred {
+            Leniency::Inferred
+        } else {
+            Leniency::Undeclared
+        };
         check(
             &mut errors,
-            ("query", lenient),
+            ("query", leniency),
             v.query.as_ref(),
             Some(&Value::Object(query.clone())),
         );
         // A body may send `null` for a member it need not send at all.
         if let (Some(v), Some(body)) = (body_validator, body.as_ref())
-            && let Err(found) = v.validate_request_located(body, lenient)
+            && let Err(found) = v.validate_request_located(body, leniency)
         {
             errors.extend(found.into_iter().map(|(pointer, e)| Violation {
                 location: "body".to_string(),
@@ -1007,16 +1016,12 @@ async fn multipart_fields(
 
 fn check(
     errors: &mut Vec<Violation>,
-    (location, lenient): (&str, bool),
+    (location, leniency): (&str, Leniency),
     validator: Option<&SchemaValidator>,
     value: Option<&Value>,
 ) {
     if let (Some(v), Some(value)) = (validator, value)
-        && let Err(found) = if lenient {
-            v.validate_lenient_located(value)
-        } else {
-            v.validate_located(value)
-        }
+        && let Err(found) = v.validate_located_with(value, leniency)
     {
         errors.extend(found.into_iter().map(|(pointer, e)| Violation {
             location: location.to_string(),

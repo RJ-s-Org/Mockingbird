@@ -31,6 +31,10 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### Undeclared request members are let through
+
+No migration. A request is no longer refused only because it carries a member its schema does not declare (`additionalProperties: false`, `unevaluatedProperties: false`), for every HTTP contract; set `mocks.<name>.strict_requests: true` to keep refusing it ([configuration](configuration.md#mocks)). The Rust method `SchemaValidator::validate_lenient_located` is gone: use `validate_located_with(instance, Leniency::Inferred)`.
+
 ### Seeded repairs and PII replacements follow the call
 
 No migration or configuration. With a `faker_seed` (or `X-Mockingbird-Seed`), the values the engine refills in an LLM answer and the PII replacements in it, including the effects of a write answering no body, are drawn from the seed, the operation, the request with its PII masked and the value's place, never at random; without a seed they stay random ([configuration](configuration.md#mocks)).

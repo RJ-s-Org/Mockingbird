@@ -77,6 +77,22 @@ const MAX_OVERLAID_CHARS: usize = 256;
 /// Misplaced members [`SchemaValidator::hoist`] moves up in one answer.
 const MAX_HOISTS: usize = 16;
 
+/// What a request's validation lets through (see
+/// [`SchemaValidator::validate_request_located`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Leniency {
+    /// Every violation refuses.
+    Strict,
+    /// A member the schema does not declare (`additionalProperties: false`,
+    /// `unevaluatedProperties: false`), at any depth, is no violation: an app's SDK
+    /// pinned to another version of a versioned API sends members the contract's
+    /// version no longer declares.
+    Undeclared,
+    /// As [`Self::Undeclared`], and a missing member and a scalar of another type are
+    /// no violation either: what a contract the smart import inferred guesses wrong.
+    Inferred,
+}
+
 /// JSON Schema (draft 2020-12) validator over a schema that carries its own
 /// `$defs`.
 pub struct SchemaValidator {
@@ -593,6 +609,41 @@ impl SchemaValidator {
         any
     }
 
+    /// Whether `e` is tolerated under `leniency` (see [`Leniency`]).
+    fn is_tolerated(
+        &self,
+        e: &jsonschema::ValidationError<'_>,
+        instance: &Value,
+        leniency: Leniency,
+    ) -> bool {
+        match leniency {
+            Leniency::Strict => false,
+            Leniency::Undeclared => self.is_undeclared(e),
+            Leniency::Inferred => self.is_guesswork(e, instance),
+        }
+    }
+
+    /// Whether `e` is only about members the schema does not declare: an object
+    /// closed by `additionalProperties: false` or `unevaluatedProperties: false` (a
+    /// schema there still checks the members it lets in), or a failed `anyOf`/`oneOf`
+    /// one of whose branches failed only on such members.
+    fn is_undeclared(&self, e: &jsonschema::ValidationError<'_>) -> bool {
+        if let ValidationErrorKind::AnyOf { context }
+        | ValidationErrorKind::OneOfNotValid { context } = e.kind()
+        {
+            return context
+                .iter()
+                .any(|branch| !branch.is_empty() && branch.iter().all(|b| self.is_undeclared(b)));
+        }
+        let keyword = e.kind().keyword();
+        matches!(keyword, "additionalProperties" | "unevaluatedProperties")
+            && self
+                .location(e.evaluation_path().as_str())
+                .and_then(|l| self.at(&l))
+                .and_then(|node| node.get(keyword))
+                == Some(&Value::Bool(false))
+    }
+
     /// Whether `e` is what an inferred request schema gets wrong: a required member,
     /// a closed object, or the scalar type of a member that holds a scalar.
     fn is_guesswork(&self, e: &jsonschema::ValidationError<'_>, instance: &Value) -> bool {
@@ -989,33 +1040,35 @@ impl SchemaValidator {
     /// member or a lone unexpected one, that member under it (`/name` for a body
     /// without its required `name`). `""` names the instance itself.
     pub fn validate_located(&self, instance: &Value) -> Result<(), Vec<(String, String)>> {
-        self.located(instance, false, false)
+        self.located(instance, Leniency::Strict, false)
     }
 
-    /// [`Self::validate_located`] for a request to a contract whose request schemas
-    /// are guesses (see `mb_mcm::Bundle::inferred`): a missing or an undeclared
-    /// member, and a scalar where the schema wants a scalar of another type, are not
-    /// violations. A wrong shape (an object for a string), an enum or a bound still is.
-    pub fn validate_lenient_located(&self, instance: &Value) -> Result<(), Vec<(String, String)>> {
-        self.located(instance, true, false)
+    /// [`Self::validate_located`] letting through what `leniency` tolerates: for a
+    /// request's query or path.
+    pub fn validate_located_with(
+        &self,
+        instance: &Value,
+        leniency: Leniency,
+    ) -> Result<(), Vec<(String, String)>> {
+        self.located(instance, leniency, false)
     }
 
-    /// [`Self::validate_located`] for a request body (leniently, as
-    /// [`Self::validate_lenient_located`], when `lenient`): `null` in a member its object
-    /// does not require is accepted even where the schema does not allow it, as real
-    /// APIs commonly treat it as absent (Telegram's `"message_thread_id": null`).
+    /// [`Self::validate_located`] for a request body, letting through what
+    /// `leniency` tolerates: `null` in a member its object does not require is also
+    /// accepted even where the schema does not allow it, as real APIs commonly treat
+    /// it as absent (Telegram's `"message_thread_id": null`).
     pub fn validate_request_located(
         &self,
         instance: &Value,
-        lenient: bool,
+        leniency: Leniency,
     ) -> Result<(), Vec<(String, String)>> {
-        self.located(instance, lenient, true)
+        self.located(instance, leniency, true)
     }
 
     fn located(
         &self,
         instance: &Value,
-        lenient: bool,
+        leniency: Leniency,
         optional_null: bool,
     ) -> Result<(), Vec<(String, String)>> {
         let tolerated = if optional_null {
@@ -1027,7 +1080,7 @@ impl SchemaValidator {
             .inner
             .iter_errors(instance)
             .filter(|e| !tolerated.contains(e.instance_path().as_str()))
-            .filter(|e| !(lenient && self.is_guesswork(e, instance)))
+            .filter(|e| !self.is_tolerated(e, instance, leniency))
             .take(MAX_SCANNED)
             .collect();
         // Stable: errors at one depth keep the validator's order.
@@ -2217,5 +2270,75 @@ mod tests {
         // Moved up, `7` would break the root's `type`: no move, and the
         // missing member stays an error a repair must fix.
         assert_eq!(v.patch(&answer, fill), None);
+    }
+
+    /// A closed request schema with a nested closed object, an `unevaluatedProperties`
+    /// one and a closed `oneOf`.
+    fn closed() -> SchemaValidator {
+        SchemaValidator::new(&json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["amount"],
+            "properties": {
+                "amount": {"type": "integer"},
+                "meta": {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string"}}},
+                "card": {"type": "object", "properties": {"n": {"type": "string"}}, "unevaluatedProperties": false},
+                "shipping": {"$ref": "#/$defs/Shipping"},
+                "tags": {"type": "object", "properties": {"k": {"type": "string"}}, "unevaluatedProperties": {"type": "string"}},
+                "pm": {"oneOf": [
+                    {"type": "object", "additionalProperties": false, "required": ["card"], "properties": {"card": {"type": "string"}}},
+                    {"type": "object", "additionalProperties": false, "required": ["iban"], "properties": {"iban": {"type": "string"}}}
+                ]}
+            },
+            "$defs": {
+                "Shipping": {"type": "object", "additionalProperties": false, "properties": {"city": {"type": "string"}}}
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn undeclared_members_pass_only_when_tolerated() {
+        let v = closed();
+        let body = json!({
+            "amount": 5,
+            "payment_method_types": ["card"],
+            "meta": {"a": "x", "b": 1},
+            "card": {"n": "4242", "brand": "visa"},
+            "pm": {"card": "tok", "wallet": "w"},
+            "shipping": {"city": "Oslo", "line2": "x"},
+            "tags": {"k": "a", "extra": "b"}
+        });
+        assert!(
+            v.validate_request_located(&body, Leniency::Undeclared)
+                .is_ok()
+        );
+        let strict = v
+            .validate_request_located(&body, Leniency::Strict)
+            .unwrap_err();
+        assert!(strict.iter().any(|(p, _)| p == "/payment_method_types"));
+        assert!(
+            v.validate_request_located(&body, Leniency::Inferred)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn tolerating_undeclared_members_still_refuses_the_rest() {
+        let v = closed();
+        for body in [
+            json!({"extra": 1}),
+            json!({"amount": "5", "extra": 1}),
+            json!({"amount": 5, "meta": {"a": 1, "b": 1}}),
+            json!({"amount": 5, "pm": {"other": "x"}}),
+            // A schema in `unevaluatedProperties` still checks the members it lets in.
+            json!({"amount": 5, "tags": {"x": 5}}),
+        ] {
+            assert!(
+                v.validate_request_located(&body, Leniency::Undeclared)
+                    .is_err(),
+                "{body}"
+            );
+        }
     }
 }

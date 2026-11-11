@@ -12,7 +12,7 @@ Mocks come from the config file (`source = file`, read-only through the API) or 
 
 ## How an answer is made
 
-For each request, the adapter decodes it and validates it against the operation (a request that fails validation gets an error in the contract's declared error shape, and an `X-Mockingbird-Validation` header saying why). Then the engine answers from the first source that can:
+For each request, the adapter decodes it and validates it against the operation (a request that fails validation gets an error in the contract's declared error shape, and an `X-Mockingbird-Validation` header saying why; a member the schema does not declare, in the body or nested in a query parameter, is let through unless the mock sets `strict_requests`). Then the engine answers from the first source that can:
 
 | `X-Mockingbird-Source` | Where the answer came from |
 | --- | --- |

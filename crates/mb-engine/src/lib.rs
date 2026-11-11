@@ -90,7 +90,7 @@ pub use pool::{POOL_CALL_TIMEOUT, Pooled};
 pub use prompt::{build_message_messages, build_messages, build_stream_messages};
 pub use scenario::{ScenarioSpec, apply_set};
 pub use seed::{DEFAULT_FAKER_SEED, SEED_HEADER};
-pub use validate::SchemaValidator;
+pub use validate::{Leniency, SchemaValidator};
 
 /// Why the engine could not answer at all (a contract problem, not an LLM
 /// failure: those fall back to the faker).
