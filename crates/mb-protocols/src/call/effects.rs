@@ -44,7 +44,9 @@ pub(super) async fn apply_effects(
             && acted != (effect.resource_type.as_str(), effect.id.as_str())
             && let Some(within) = within_own(state, session, acted, effect).await
         {
-            result = apply_effect(state, session, rt, &within, None)
+            // Into an update's own target, under the protections it has there.
+            let guarded = (own == Some(acted)).then_some(source);
+            result = apply_effect(state, session, rt, &within, guarded)
                 .await
                 .map(|(merged, _)| (merged, effect.set.clone()));
         }
