@@ -4612,17 +4612,50 @@ fn force_identity(
     if mb_mcm::member_at(record, field) == Some(id) {
         return body;
     }
-    for forced in id_candidates(id) {
-        let mut forced_body = body.clone();
-        if let Some(record) = identity.record_in_mut(&mut forced_body) {
-            mb_mcm::set_member_at(record, field, forced);
-        }
-        if validator.is_valid(&forced_body) {
-            return forced_body;
-        }
+    let candidates: Vec<(Value, Value)> = id_candidates(id)
+        .into_iter()
+        .map(|forced| {
+            let mut forced_body = body.clone();
+            if let Some(record) = identity.record_in_mut(&mut forced_body) {
+                mb_mcm::set_member_at(record, field, forced.clone());
+            }
+            (forced, forced_body)
+        })
+        .collect();
+    if let Some((_, valid)) = candidates.iter().find(|(_, b)| validator.is_valid(b)) {
+        return valid.clone();
     }
-    body
+    // The identity the request named stands even where the schema bounds it otherwise
+    // (`/person/99999999` under a `maximum`): a bound gives way. A type, `pattern` or
+    // `enum` does not, as breaking one says the value is another kind of identifier
+    // than the member holds. What the forced value breaks counts whether or not the
+    // answer's own value broke it too; anything else must have been broken before.
+    let before = validator.violations(&body);
+    candidates
+        .into_iter()
+        .find(|(forced, b)| {
+            validator.violations(b).iter().all(|(pointer, keyword)| {
+                if b.pointer(pointer) == Some(forced) {
+                    VALUE_CONSTRAINTS.contains(&keyword.as_str())
+                } else {
+                    before.contains(&(pointer.clone(), keyword.clone()))
+                }
+            })
+        })
+        .map_or(body, |(_, b)| b)
 }
+
+/// The keywords that bound a value of the right kind, which an identity the request
+/// named overrides (see [`force_identity`]).
+const VALUE_CONSTRAINTS: &[&str] = &[
+    "maximum",
+    "minimum",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "multipleOf",
+    "maxLength",
+    "minLength",
+];
 
 /// The member of a record whose schema declares `declared` that takes the value meant
 /// for `member`: `member` itself where the schema declares it (a dotted one by its
@@ -5566,6 +5599,113 @@ components:
         let (op, v, call) = acknowledged_put("{type: object}");
         let out = force_identity(&v, &op, &call, None, json!({"ok": true}));
         assert_eq!(out, json!({"ok": true, "_id": "order-001"}));
+    }
+
+    /// A read's answer carries the id its path named even past the schema's bound
+    /// (TMDB's `/person/99999999` under `maximum: 5000000`), as a number where the
+    /// member is one.
+    #[test]
+    fn a_read_keeps_the_path_id_past_a_schema_bound() {
+        let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /person/{person_id}:
+    get:
+      operationId: getPerson
+      parameters: [{name: person_id, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {type: integer, minimum: 0, maximum: 5000000}
+                  name: {type: string}
+"##;
+        let bundle = mb_import::compile(contract.as_bytes()).unwrap();
+        let mut op = bundle.operation("getPerson").unwrap().clone();
+        op.identity = Some(mb_mcm::Identity {
+            field: "id".into(),
+            path_param: Some("person_id".into()),
+            input_field: None,
+            path_field: None,
+            record: None,
+        });
+        let schema = op.success_output().unwrap().schema.as_ref().unwrap();
+        let v = SchemaValidator::for_output(&bundle.with_reachable_defs(schema)).unwrap();
+        let mut path_params = Map::new();
+        path_params.insert("person_id".into(), json!("99999999"));
+        let call = OperationCall {
+            operation_id: "getPerson".into(),
+            path_params,
+            ..OperationCall::default()
+        };
+        let answer = json!({"id": 5_000_000, "name": "x"});
+        let out = force_identity(&v, &op, &call, None, answer);
+        assert_eq!(out, json!({"id": 99_999_999, "name": "x"}));
+        // A number past the bound, not the string the answer's own wrong value would
+        // otherwise excuse.
+        let answer = json!({"id": "5000000", "name": "x"});
+        let out = force_identity(&v, &op, &call, None, answer);
+        assert_eq!(out, json!({"id": 99_999_999, "name": "x"}));
+    }
+
+    /// A path value of another kind than the identity member (a word for an integer, a
+    /// value its `pattern` or `enum` refuses) is not forced, even past an answer whose
+    /// own value broke the same rule.
+    #[test]
+    fn a_read_does_not_force_a_path_value_of_another_kind() {
+        let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /things/{thing_id}:
+    get:
+      operationId: getThing
+      parameters: [{name: thing_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {type: integer, maximum: 100}
+                  code: {type: string, pattern: "^[0-9]+$"}
+                  kind: {type: string, enum: [a, b]}
+"##;
+        let bundle = mb_import::compile(contract.as_bytes()).unwrap();
+        let mut op = bundle.operation("getThing").unwrap().clone();
+        let schema = op.success_output().unwrap().schema.as_ref().unwrap();
+        let v = SchemaValidator::for_output(&bundle.with_reachable_defs(schema)).unwrap();
+        let mut path_params = Map::new();
+        path_params.insert("thing_id".into(), json!("foo"));
+        let call = OperationCall {
+            operation_id: "getThing".into(),
+            path_params,
+            ..OperationCall::default()
+        };
+        for (field, answer) in [
+            ("id", json!({"id": 7})),
+            ("code", json!({"code": "12"})),
+            ("code", json!({"code": "abc"})),
+            ("kind", json!({"kind": "a"})),
+            ("kind", json!({"kind": "zz"})),
+        ] {
+            op.identity = Some(mb_mcm::Identity {
+                field: field.into(),
+                path_param: Some("thing_id".into()),
+                input_field: None,
+                path_field: None,
+                record: None,
+            });
+            let out = force_identity(&v, &op, &call, None, answer.clone());
+            assert_eq!(out, answer, "{field}");
+        }
     }
 
     #[test]
