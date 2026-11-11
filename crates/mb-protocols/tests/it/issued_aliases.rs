@@ -72,3 +72,21 @@ async fn a_token_the_server_never_issued_is_not_found() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
+
+#[tokio::test]
+async fn issued_tokens_are_unique_among_the_types_records() {
+    // The token is a plain string, drawn from a small pool: without a uniqueness check
+    // two creates mint the same token once in a few dozen pairs, and the second item is
+    // then named by the first's token. Each taken draw is drawn again (8 times), so a
+    // repeat is out of reach.
+    for _ in 0..200 {
+        let fill = json!({"institution_id": "ins_1", "products": ["auth"]});
+        let h = support::described(CONTRACT, world(), vec![fill.clone(), fill]);
+        let first = exchanged(&h).await;
+        let second = exchanged(&h).await;
+        assert_ne!(
+            first["access_token"], second["access_token"],
+            "{first} {second}"
+        );
+    }
+}
