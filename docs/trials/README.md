@@ -35,3 +35,10 @@ The three earlier trials, re-run unmodified on the same build:
 Every run passed `verify --no-fallbacks --no-unmapped` except `gh` (2 fallbacks). The bar missed three real failures: two Plaid routes that 404'd (a path the contract lacks is a 4xx, not an unmapped host), the invented Commerce cart, and the torvalds/linux pin card (a valid answer the app cannot use).
 
 All runs together used about 650k prompt and 100k completion tokens (the first field trials spent about $1 on roughly 5M prompt tokens). Most of the prompt went to Stripe's 17k-token `PaymentIntent` schema, gh's two oversized mutations and the Storefront cart types.
+
+## Holdout trials (2026-11-11)
+
+Apps the fixes were not tuned on, each mocked by a Claude Code agent from one prompt:
+
+- [github-readme-stats](github-readme-stats.md): GitHub GraphQL and REST.
+- [Mapbox MCP server](mapbox-mcp.md): maps (search, geocoding, routing, isochrones). Hollow answers fixed in #480 and #476; the plugin's MCP reaching another project's server is open.

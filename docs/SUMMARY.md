@@ -61,3 +61,4 @@
   - [github-readme-stats (holdout)](trials/github-readme-stats.md)
   - [Twilio CLI (holdout, messaging)](trials/twilio-cli.md)
   - [django-anymail on Postmark (holdout, email)](trials/anymail-postmark.md)
+  - [Mapbox MCP server (holdout, maps)](trials/mapbox-mcp.md)

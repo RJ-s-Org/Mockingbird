@@ -2376,7 +2376,7 @@ fn schema_descriptions_are_redacted_too() {
         "{system}"
     );
     assert!(
-        system.contains(r#""description":{"description":"Free text.","type":"string"}"#),
+        system.contains(r#"{"description":"Free text.","type":"string"}"#),
         "{system}"
     );
 }
