@@ -301,7 +301,16 @@ impl BundleIndex {
                     // holds are not of its type (a weather reading's conditions).
                     let own = op.identity.as_ref().is_some_and(|i| i.record.is_none());
                     rank_defs(op, (t, own), by_path, &lists, &mut ranked_defs);
-                    record_shapes(op, i, (t, own), by_path, &members, &lists, &mut shapes);
+                    record_shapes(
+                        bundle,
+                        op,
+                        i,
+                        (t, own),
+                        by_path,
+                        &members,
+                        &lists,
+                        &mut shapes,
+                    );
                 }
             }
             list_members_of.push(members);
@@ -823,10 +832,11 @@ pub(super) type TypeShapes = HashMap<String, (u8, usize, Value)>;
 /// Records in `shapes` what query `op` (at position `i`, of type `t`) says a
 /// resource looks like (see [`BundleIndex::other_shapes`]): a list's items
 /// describe the type the member names and, for the root, an envelope or an
-/// only member, `t`; with no list, its success schema describes `t`.
+/// only member, `t`; with no list, its success schema describes `t`, or the
+/// record its identity says the answer holds.
 pub(super) fn record_shapes(
-    op: &Operation,
-    i: usize,
+    bundle: &mb_mcm::Bundle,
+    (op, i): (&Operation, usize),
     (t, own): (&str, bool),
     by_path: bool,
     members: &[String],
@@ -862,7 +872,17 @@ pub(super) fn record_shapes(
         && !by_path
         && let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref())
     {
-        record(t, SINGLETON, schema);
+        // A read that names its record otherwise than by path (a body member: Plaid's
+        // `POST /item/get {access_token}`) and holds it in an envelope (`{item,
+        // request_id}`) answers the record's own schema there, not the envelope's.
+        match op
+            .identity
+            .as_ref()
+            .and_then(|identity| record_schema_of(bundle, identity, schema))
+        {
+            Some(held) => record(t, SINGLETON, &held),
+            None => record(t, SINGLETON, schema),
+        }
     }
 }
 
