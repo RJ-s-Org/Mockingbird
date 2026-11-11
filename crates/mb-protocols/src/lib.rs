@@ -391,6 +391,9 @@ pub struct MockRuntime {
     /// The name the mocks of one API keep their sessions under together
     /// (see `call::shared`); `None` keeps this mock's own.
     pub shares: Option<String>,
+    /// Validate requests strictly even when [`mb_mcm::Bundle::inferred`] says the
+    /// contract's request schemas are guesses.
+    pub strict_requests: bool,
     /// Sends webhook events after successful writes; `None` sends none.
     pub webhooks: Option<Arc<webhooks::deliver::WebhookDispatcher>>,
     /// Path prefixes the contract's HTTP operations are also served under,
@@ -547,6 +550,7 @@ impl MockRuntime {
             unknown_ids: UnknownIds::default(),
             default_scenario: None,
             shares: None,
+            strict_requests: false,
             webhooks: None,
             base_paths: Vec::new(),
             credential_names,

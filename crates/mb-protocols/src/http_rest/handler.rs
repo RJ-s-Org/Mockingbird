@@ -434,17 +434,25 @@ async fn serve(
     if let Some(v) = validators {
         check(
             &mut errors,
-            "path",
+            ("path", false),
             v.path.as_ref(),
             Some(&Value::Object(path_params.clone())),
         );
+        // A contract the smart import inferred guesses at its request schemas: its
+        // body and query are not refused for what such a guess gets wrong.
+        let lenient = rt.bundle.inferred && !rt.strict_requests;
         check(
             &mut errors,
-            "query",
+            ("query", lenient),
             v.query.as_ref(),
             Some(&Value::Object(query.clone())),
         );
-        check(&mut errors, "body", body_validator, body.as_ref());
+        check(
+            &mut errors,
+            ("body", lenient),
+            body_validator,
+            body.as_ref(),
+        );
     }
     if !errors.is_empty() {
         // The entered span is not held across the await.
@@ -994,12 +1002,16 @@ async fn multipart_fields(
 
 fn check(
     errors: &mut Vec<Violation>,
-    location: &str,
+    (location, lenient): (&str, bool),
     validator: Option<&SchemaValidator>,
     value: Option<&Value>,
 ) {
     if let (Some(v), Some(value)) = (validator, value)
-        && let Err(found) = v.validate_located(value)
+        && let Err(found) = if lenient {
+            v.validate_lenient_located(value)
+        } else {
+            v.validate_located(value)
+        }
     {
         errors.extend(found.into_iter().map(|(pointer, e)| Violation {
             location: location.to_string(),

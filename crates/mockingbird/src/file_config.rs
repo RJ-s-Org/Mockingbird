@@ -1207,6 +1207,11 @@ pub struct FileMock {
     /// others read, by type name and identity.
     #[serde(default)]
     pub shares: Option<String>,
+    /// Validate requests strictly even when the contract was inferred by the smart
+    /// import (from documentation pages), whose request schemas are guesses and are
+    /// otherwise validated leniently.
+    #[serde(default)]
+    pub strict_requests: bool,
     /// Host names the mock answers for (by `Host`); empty answers for any
     /// host. With hosts, two mocks may share a route prefix.
     #[serde(default)]
@@ -1407,6 +1412,7 @@ impl FileMock {
             unknown_ids: UnknownIds::default(),
             default_scenario: None,
             shares: None,
+            strict_requests: false,
             hosts: Vec::new(),
             path_rewrite: mb_store::PathRewrite::default(),
             graphql_path: None,

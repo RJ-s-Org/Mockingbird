@@ -166,6 +166,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Fixed
 
+- A contract the smart import inferred from documentation (or text, or recorded traffic) validates requests leniently: its request schemas are guesses, so a request is no longer refused for a missing or undeclared member or a scalar of another type (Slack's `attachments`, Opsgenie's numeric `details`). Wrong shapes, enums and bounds are still refused, and `mocks.<name>.strict_requests: true` validates strictly. Drafts are marked with `info.x-mockingbird-inferred: true`.
 - A generated or repaired answer to a read carries the id its path named even when that id breaks the schema's numeric bound or length: `GET /person/99999999` under `maximum: 5000000` answered a record with `"id": 5000000`. A value of another type is still not forced.
 - A response in a non-JSON media type answered from the contract's declared example (Slack's literal `ok`) has source `example`, no longer `fallback`, so `verify --no-fallbacks` and `report` no longer count a correct answer as a fallback.
 - A model answer whose only fault is a required member left out of a nested object (a list item, a member's object) is completed by the faker and served as `patched`, instead of costing a repair call and then falling back to a whole faker answer. A root lacking a member is still repaired, as it usually means the wrong shape.

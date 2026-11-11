@@ -593,6 +593,42 @@ impl SchemaValidator {
         any
     }
 
+    /// Whether `e` is what an inferred request schema gets wrong: a required member,
+    /// a closed object, or the scalar type of a member that holds a scalar.
+    fn is_guesswork(&self, e: &jsonschema::ValidationError<'_>, instance: &Value) -> bool {
+        // A failed `anyOf`/`oneOf` (the smart import writes one for a nullable or mixed
+        // member) is a guess when one of its branches failed only on guesses.
+        if let ValidationErrorKind::AnyOf { context }
+        | ValidationErrorKind::OneOfNotValid { context } = e.kind()
+        {
+            return context.iter().any(|branch| {
+                !branch.is_empty() && branch.iter().all(|b| self.is_guesswork(b, instance))
+            });
+        }
+        match e.kind().keyword() {
+            "required" | "additionalProperties" | "unevaluatedProperties" => true,
+            "type" => {
+                let scalar = |v: &Value| !matches!(v, Value::Object(_) | Value::Array(_));
+                let held = instance.pointer(e.instance_path().as_str());
+                let wanted = self
+                    .location(e.evaluation_path().as_str())
+                    .and_then(|l| self.at(&l))
+                    .and_then(|node| node.get("type"));
+                // Wanting `null` is no guess at a scalar's type.
+                let wants_scalar = |t: &Value| {
+                    t.as_str()
+                        .is_some_and(|t| !matches!(t, "object" | "array" | "null"))
+                };
+                held.is_some_and(|v| scalar(v) && !v.is_null())
+                    && wanted.is_some_and(|t| match t {
+                        Value::Array(ts) => ts.iter().all(wants_scalar),
+                        t => wants_scalar(t),
+                    })
+            }
+            _ => false,
+        }
+    }
+
     /// The location of the schema holding the keyword that failed at
     /// `evaluation_path`: a JSON pointer into the schema that restarts at a
     /// `$ref`'s target.
@@ -897,7 +933,24 @@ impl SchemaValidator {
     /// member or a lone unexpected one, that member under it (`/name` for a body
     /// without its required `name`). `""` names the instance itself.
     pub fn validate_located(&self, instance: &Value) -> Result<(), Vec<(String, String)>> {
-        let mut found: Vec<_> = self.inner.iter_errors(instance).take(MAX_SCANNED).collect();
+        self.located(instance, false)
+    }
+
+    /// [`Self::validate_located`] for a request to a contract whose request schemas
+    /// are guesses (see `mb_mcm::Bundle::inferred`): a missing or an undeclared
+    /// member, and a scalar where the schema wants a scalar of another type, are not
+    /// violations. A wrong shape (an object for a string), an enum or a bound still is.
+    pub fn validate_lenient_located(&self, instance: &Value) -> Result<(), Vec<(String, String)>> {
+        self.located(instance, true)
+    }
+
+    fn located(&self, instance: &Value, lenient: bool) -> Result<(), Vec<(String, String)>> {
+        let mut found: Vec<_> = self
+            .inner
+            .iter_errors(instance)
+            .filter(|e| !(lenient && self.is_guesswork(e, instance)))
+            .take(MAX_SCANNED)
+            .collect();
         // Stable: errors at one depth keep the validator's order.
         found.sort_by_key(|e| e.instance_path().as_str().matches('/').count());
         let errors: Vec<(String, String)> = found

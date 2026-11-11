@@ -336,5 +336,6 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
         channels: Vec::new(),
         webhooks: Vec::new(),
         api_key_names: Some(crate::security::api_key_names(doc, "/securityDefinitions")),
+        inferred: false,
     })
 }

@@ -660,6 +660,7 @@ pub(crate) async fn build_runtime_tracked(
     rt.default_scenario = mock.behavior.default_scenario.clone();
     rt.pool = deps.record_pools.of(&mock.workspace, &mock.name);
     rt.shares = mock.behavior.shares.clone();
+    rt.strict_requests = mock.behavior.strict_requests;
     rt.base_paths = mb_import::base_paths(&contract.source);
     rt.webhooks = webhook_dispatcher(deps, mock).await?;
     Ok(Some((rt, budget, used, loaded)))
