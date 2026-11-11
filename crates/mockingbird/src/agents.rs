@@ -32,16 +32,16 @@ macro_rules! skill {
 /// and the entry skill names the level it was written for, so an agent whose
 /// skills are newer than its binary (skills from `main`, a binary from an older
 /// release) sees it and is told how to get a matching binary. Raised whenever
-/// the agent surface ([`agent_surface`]) changes; a test holds the surface's
-/// fingerprint ([`SURFACE_FINGERPRINT`]) to this level.
+/// the agent surface (the MCP tools and CLI subcommands) changes; a test holds
+/// the surface's fingerprint to this level.
 pub const SKILLS_LEVEL: u32 = 1;
 
 /// The FNV-1a fingerprint of [`agent_surface`] at [`SKILLS_LEVEL`].
 #[cfg(test)]
 const SURFACE_FINGERPRINT: u64 = 570_844_583_176_563_329;
 
-/// What skills can name: every MCP tool and every CLI subcommand path
-/// (`world show`), sorted.
+/// The agent surface the level tracks: every MCP tool and every CLI subcommand
+/// path (`world show`), sorted. Flags and tool parameters are not in it.
 #[cfg(test)]
 fn agent_surface() -> Vec<String> {
     fn walk(cmd: &clap::Command, path: &str, out: &mut Vec<String>) {
@@ -68,7 +68,7 @@ fn agent_surface() -> Vec<String> {
 #[cfg(test)]
 fn fingerprint(items: &[String]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in items.iter().flat_map(|i| i.bytes().chain([b'\n'])) {
+    for byte in items.iter().flat_map(|i| i.bytes().chain(*b"\n")) {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
@@ -566,6 +566,8 @@ pub fn skills(dir: &Path) -> anyhow::Result<Value> {
 #[cfg(test)]
 mod tests {
 
+    use super::*;
+
     /// A change to the agent surface raises [`SKILLS_LEVEL`]: otherwise skills that
     /// name a new tool would not tell a binary without it apart from one with it.
     #[test]
@@ -583,8 +585,6 @@ mod tests {
             "the mockingbird skill should name `skills_level` {SKILLS_LEVEL}"
         );
     }
-
-    use super::*;
 
     #[test]
     fn passthrough_uses_each_agents_syntax() {

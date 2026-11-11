@@ -124,6 +124,9 @@ install_source() {
     rm -rf "$tmp"
 }
 
+if [ "${MOCKINGBIRD_VERSION:-}" = main ] && ! have cargo; then
+    fail "MOCKINGBIRD_VERSION=main builds from source and needs cargo: install Rust (https://rustup.rs) and rerun"
+fi
 if ! install_release; then
     install_source || fail "could not install: no release binary for this platform and no cargo.
   Install Rust (https://rustup.rs) and rerun, or use Docker: docker run ghcr.io/$REPO --help"

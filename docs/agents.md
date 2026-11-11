@@ -28,7 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.s
 irm https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.ps1 | iex           # Windows
 ```
 
-The scripts install the release binary for the platform into `~/.mockingbird/bin` after checking its SHA-256 (`MOCKINGBIRD_VERSION` pins a release, `MOCKINGBIRD_VERSION=main` builds the main branch with cargo, `MOCKINGBIRD_INSTALL_DIR` changes the directory), and build from source with `cargo install` when no release binary fits.
+The scripts install the release binary for the platform into `~/.mockingbird/bin` after checking its SHA-256 (`MOCKINGBIRD_VERSION` pins a release, `MOCKINGBIRD_INSTALL_DIR` changes the directory; with `install.sh`, `MOCKINGBIRD_VERSION=main` builds the main branch with cargo), and build from source with `cargo install` when no release binary fits.
 
 The skills come from `main` and may be newer than a release binary. `doctor` reports the binary's `skills_level`, and the `mockingbird` skill names the level it was written for; when the binary's is lower or missing, the skill tells the agent to install a binary built from `main`.
 
