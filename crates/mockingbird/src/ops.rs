@@ -45,6 +45,29 @@ pub struct OpsState {
     /// of the admin port (the MCP server's `call_mock`) can find it; `None`
     /// on a control node.
     pub data_plane: Option<DataPlane>,
+    /// Which project this server was started for, which `/readyz` reports
+    /// so that a local client (the MCP server) acts only on its own
+    /// project's server.
+    pub origin: Origin,
+}
+
+/// Where a server was started from, as `/readyz` reports it: its config
+/// file (absolute; `None` without one) and its working folder.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Origin {
+    pub config: Option<std::path::PathBuf>,
+    pub dir: Option<std::path::PathBuf>,
+}
+
+impl Origin {
+    /// The origin of this process, started with `config`.
+    #[must_use]
+    pub fn current(config: Option<&std::path::Path>) -> Self {
+        Self {
+            config: config.map(|c| std::fs::canonicalize(c).unwrap_or_else(|_| c.to_path_buf())),
+            dir: std::env::current_dir().ok(),
+        }
+    }
 }
 
 /// Where a node's data plane listens, as `/readyz` reports it.
@@ -63,6 +86,7 @@ impl std::fmt::Debug for OpsState {
             .field("bus", &self.bus.is_some())
             .field("reload", &self.reload)
             .field("data_plane", &self.data_plane)
+            .field("origin", &self.origin)
             .finish_non_exhaustive()
     }
 }
@@ -79,7 +103,7 @@ impl std::fmt::Debug for OpsState {
 ///   serving statelessly or a mock's daily token budget is exhausted
 ///   (`mock <label>: daily token budget exhausted`), or the cross-node bus
 ///   is disconnected (`bus: <reason>`); else `200 ready`. The body always
-///   carries the node's `role`, whether it is the `leader` and, on a node with a data plane, its `data_plane` (`port`, `tls`), which, like `reasons`, only authenticated callers see when auth is on. Each store ping is bounded by
+///   carries the node's `role`, whether it is the `leader`, the `config` file and working `dir` it was started with ([`Origin`]) and, on a node with a data plane, its `data_plane` (`port`, `tls`); like `reasons`, these three only authenticated callers see when auth is on. Each store ping is bounded by
 ///   [`PING_TIMEOUT`]. With [`OpsState::readyz_auth`] set, `reasons` are
 ///   left out for callers without valid credentials.
 /// - `/metrics`: Prometheus text exposition.
@@ -185,6 +209,10 @@ async fn readyz(State(st): State<OpsState>, headers: HeaderMap) -> Response {
     }
     if let Some(dp) = st.data_plane.filter(|_| authorized) {
         body["data_plane"] = json!(dp);
+    }
+    if authorized {
+        body["config"] = json!(st.origin.config);
+        body["dir"] = json!(st.origin.dir);
     }
     (code, axum::Json(body)).into_response()
 }

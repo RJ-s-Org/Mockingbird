@@ -6,8 +6,9 @@
 //! Two transports: stdio (newline-delimited JSON-RPC, for agents that start
 //! the process) and streamable HTTP (`POST /mcp`, for remote agents such as
 //! ChatGPT). The server is stateless: every call goes to the Admin API at
-//! `--admin-url`, or runs locally (doctor, init, provider tests, the
-//! background server).
+//! `--admin-url` (over stdio without one, to the server of the project in
+//! its working folder, refusing another project's), or runs locally
+//! (doctor, init, provider tests, the background server).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -118,7 +119,14 @@ pub struct McpArgs {
 
 /// The tool handler: Admin API target and options.
 pub struct McpServer {
+    /// The Admin API: `--admin-url`/`MB_ADMIN_URL`, else the default one
+    /// resolved at launch. Outside project mode every call goes there.
     admin_url: String,
+    /// Project mode (stdio, no `--admin-url`/`MB_ADMIN_URL`): the folder the
+    /// MCP server started in. Calls then go to this project's server (see
+    /// [`McpServer::target`]) and are refused when another project's server
+    /// answers there.
+    project_dir: Option<PathBuf>,
     token: Option<String>,
     workspace: String,
     read_only: bool,
@@ -135,6 +143,7 @@ impl std::fmt::Debug for McpServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpServer")
             .field("admin_url", &self.admin_url)
+            .field("project_dir", &self.project_dir)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
             .field("workspace", &self.workspace)
             .field("read_only", &self.read_only)
@@ -1240,12 +1249,25 @@ fn invalid_draft(body: &str) -> String {
 }
 
 impl McpServer {
-    /// A server for the Admin API at `admin_url` (with `token` as its bearer
-    /// token) and `workspace`. Tools that touch this machine are exposed over
+    /// A server for the Admin API at `admin_url` (`--admin-url` /
+    /// `MB_ADMIN_URL`; with `token` as its bearer token) and `workspace`.
+    /// Over stdio without `admin_url` it is in project mode: it acts on the
+    /// server of the project in its working folder (see
+    /// `target`). Tools that touch this machine are exposed over
     /// stdio, or over HTTP with `--allow-local-tools`.
-    pub fn new(admin_url: &str, token: Option<&str>, workspace: &str, args: &McpArgs) -> Self {
+    pub fn new(
+        admin_url: Option<&str>,
+        token: Option<&str>,
+        workspace: &str,
+        args: &McpArgs,
+    ) -> Self {
+        let admin_url = admin_url.filter(|u| !u.trim().is_empty());
+        let project_dir = (admin_url.is_none() && args.transport == Transport::Stdio)
+            .then(std::env::current_dir)
+            .and_then(Result::ok);
         Self {
-            admin_url: admin_url.to_string(),
+            admin_url: client::resolve_admin_url(admin_url, None),
+            project_dir,
             token: token.map(String::from),
             workspace: workspace.to_string(),
             read_only: args.read_only,
@@ -1279,7 +1301,7 @@ impl McpServer {
             (_, b) => b,
         };
         let out = client::api(
-            &self.admin_url,
+            &self.admin_url(),
             self.token.as_deref(),
             Some(&self.workspace),
             method,
@@ -1293,8 +1315,13 @@ impl McpServer {
 
     /// Sends a workspace request with headers or a non-JSON media type.
     async fn ws_with(&self, req: client::ApiRequest<'_>) -> ToolResult {
-        let out =
-            client::api_with(&self.admin_url, self.token.as_deref(), &self.workspace, req).await?;
+        let out = client::api_with(
+            &self.admin_url(),
+            self.token.as_deref(),
+            &self.workspace,
+            req,
+        )
+        .await?;
         Ok(out.unwrap_or_else(|| json!({ "ok": true })))
     }
 
@@ -1376,6 +1403,40 @@ impl McpServer {
         }))
     }
 
+    /// Why `start_server` failed: when a port is taken, also whose
+    /// Mockingbird server holds it, and how to pick other ports.
+    async fn start_failed(&self, error: anyhow::Error) -> ToolError {
+        let Some(bind) = error.downcast_ref::<daemon::BindError>() else {
+            return error.into();
+        };
+        let mut address = bind.address;
+        if address.ip().is_unspecified() {
+            address.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+        }
+        let body = match bind.listener {
+            "admin" => self.readyz(&format!("http://{address}")).await,
+            _ => None,
+        };
+        let holder = match body {
+            None => "another process holds it".to_owned(),
+            Some(body) => {
+                let dir = self
+                    .project_dir
+                    .clone()
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_default();
+                match server_owner(&body, &dir, self.recorded_config().as_deref()) {
+                    Owner::Project => "a Mockingbird server of this project already runs there (the other tools use it; stop_server or stop it where it was started to restart it)".to_owned(),
+                    Owner::Other(whose) => format!("the Mockingbird server of another project holds it ({whose}); leave it alone"),
+                    Owner::Unknown => "another Mockingbird server holds it".to_owned(),
+                }
+            }
+        };
+        ToolError(format!(
+            "{error:#}: {holder}. To run this project's server beside it, pass free ports (port, admin_port, grpc_port) or set server.port, server.admin_port and server.grpc_port in its mockingbird.yaml"
+        ))
+    }
+
     /// [`Self::state_for`] the tool's `config` argument.
     fn server_state(&self, a: &Value) -> daemon::StateArgs {
         self.state_for(opt_str(a, "config").map(PathBuf::from).as_deref())
@@ -1389,6 +1450,12 @@ impl McpServer {
         if self.read_only && !tool.read_only {
             return Err(ToolError("this MCP server is read-only".into()));
         }
+        let on_server = (!LOCAL_TOOLS.contains(&name)
+            && !matches!(name, "list_llm_providers" | "list_examples"))
+            || (name == "configure_llm" && opt_str(a, "target").as_deref() == Some("server"));
+        if on_server {
+            self.target().await?;
+        }
         match name {
             "doctor" => {
                 let config = opt_str(a, "config").map(PathBuf::from);
@@ -1396,7 +1463,13 @@ impl McpServer {
                     state: self.state_for(config.as_deref()),
                     config,
                 };
-                Ok(daemon::doctor(&args, &self.admin_url, self.token.as_deref()).await)
+                let mut out = daemon::doctor(&args, &self.admin_url(), self.token.as_deref()).await;
+                if let (Err(foreign), Some(problems)) =
+                    (self.target().await, out["problems"].as_array_mut())
+                {
+                    problems.push(json!(foreign.0));
+                }
+                Ok(out)
             }
             "list_llm_providers" => Ok(onboard::providers_json()),
             "init_config" => {
@@ -1498,7 +1571,10 @@ impl McpServer {
                         )));
                     }
                 }
-                let mut started = daemon::start(&args).await?;
+                let mut started = match daemon::start(&args).await {
+                    Ok(started) => started,
+                    Err(e) => return Err(self.start_failed(e).await),
+                };
                 if args.proxy {
                     started["proxy_env"] = self.proxy_env(args.config.as_deref(), None)?;
                 }
@@ -1919,7 +1995,7 @@ impl McpServer {
                     (_, b) => b,
                 };
                 let out = client::api_path(
-                    &self.admin_url,
+                    &self.admin_url(),
                     self.token.as_deref(),
                     method,
                     str_arg(a, "path")?,
@@ -2204,8 +2280,13 @@ impl McpServer {
             timeout: duration(a, "timeout")?
                 .unwrap_or_else(|| std::time::Duration::from_secs(600).into()),
         });
-        let result =
-            client::run(&self.admin_url, self.token.as_deref(), &self.workspace, cmd).await;
+        let result = client::run(
+            &self.admin_url(),
+            self.token.as_deref(),
+            &self.workspace,
+            cmd,
+        )
+        .await;
         if let Some(dir) = scratch {
             let _ = std::fs::remove_dir_all(dir);
         }
@@ -2329,18 +2410,9 @@ impl McpServer {
     /// The data plane the server behind `admin_url` reports on `/readyz`,
     /// as a URL on the admin URL's host.
     async fn reported_data_plane(&self) -> Option<String> {
-        let admin = reqwest::Url::parse(&self.admin_url).ok()?;
-        let mut req = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .ok()?
-            .get(admin.join("/readyz").ok()?);
-        // With auth on, `/readyz` reports the data plane to callers it
-        // authenticates only.
-        if let Some(token) = &self.token {
-            req = req.bearer_auth(token);
-        }
-        let body: Value = req.send().await.ok()?.json().await.ok()?;
+        let url = self.admin_url();
+        let admin = reqwest::Url::parse(&url).ok()?;
+        let body = self.readyz(&url).await?;
         let port = body["data_plane"]["port"].as_u64()?;
         let scheme = if body["data_plane"]["tls"].as_bool() == Some(true) {
             "https"
@@ -2350,6 +2422,85 @@ impl McpServer {
         // `host_str` keeps an IPv6 address's brackets.
         let host = admin.host_str()?;
         Some(format!("{scheme}://{host}:{port}"))
+    }
+
+    /// The `/readyz` body of the server at `admin_url`; `None` when it does
+    /// not answer with JSON.
+    async fn readyz(&self, admin_url: &str) -> Option<Value> {
+        let url = reqwest::Url::parse(admin_url).ok()?.join("/readyz").ok()?;
+        let mut req = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .no_proxy()
+            .build()
+            .ok()?
+            .get(url);
+        // With auth on, `/readyz` reports the data plane and origin to
+        // callers it authenticates only.
+        if let Some(token) = &self.token {
+            req = req.bearer_auth(token);
+        }
+        req.send().await.ok()?.json().await.ok()
+    }
+
+    /// The Admin API calls go to. In project mode: the running background
+    /// server of the config `start_server` used, else of this project's
+    /// folder, else the admin listener `./mockingbird.yaml` describes (read
+    /// on each call, so a config written after launch counts).
+    fn admin_url(&self) -> String {
+        self.resolve_admin().0
+    }
+
+    /// [`Self::admin_url`], and whether it is the running background server
+    /// this project's state directory records (so this project's).
+    fn resolve_admin(&self) -> (String, bool) {
+        let Some(dir) = &self.project_dir else {
+            return (self.admin_url.clone(), false);
+        };
+        let started = self.recorded_config();
+        let state = daemon::resolve_state_dir(&self.state_dir, started.as_deref(), dir);
+        match daemon::running_admin(&state) {
+            Some(url) => (url, true),
+            None => (
+                client::resolve_admin_url(None, Some(&dir.join(client::DEFAULT_CONFIG))),
+                false,
+            ),
+        }
+    }
+
+    /// The config of the last successful `start_server`.
+    fn recorded_config(&self) -> Option<PathBuf> {
+        self.started_config
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_default()
+    }
+
+    /// [`Self::admin_url`], once the server there is known to be this
+    /// project's (always outside project mode). A server that does not
+    /// answer passes: the call then fails as unreachable.
+    ///
+    /// # Errors
+    ///
+    /// The server there belongs to another project, or does not say whose
+    /// it is.
+    async fn target(&self) -> Result<String, ToolError> {
+        let (url, recorded) = self.resolve_admin();
+        let Some(dir) = self.project_dir.as_ref().filter(|_| !recorded) else {
+            return Ok(url);
+        };
+        let Some(body) = self.readyz(&url).await else {
+            return Ok(url);
+        };
+        match server_owner(&body, dir, self.recorded_config().as_deref()) {
+            Owner::Project => Ok(url),
+            Owner::Other(whose) => Err(ToolError(format!(
+                "the Mockingbird server at {url} belongs to another project ({whose}), not to this one ({}); nothing was sent to it. Start this project's own server with start_server on free ports (port, admin_port, grpc_port, or server.* in its mockingbird.yaml); to use that server on purpose, start the MCP server with MB_ADMIN_URL={url}",
+                dir.display()
+            ))),
+            Owner::Unknown => Err(ToolError(format!(
+                "the Mockingbird server at {url} does not say which project it belongs to (an older version, or its auth hides it), so nothing was sent to it. Start this project's own server with start_server, or, to use that server on purpose, start the MCP server with MB_ADMIN_URL={url}"
+            ))),
+        }
     }
 
     /// The `Host` a call to `mock` needs: its first `hosts` entry, when it
@@ -2585,6 +2736,58 @@ impl McpServer {
     }
 }
 
+/// Whose server a `/readyz` body describes, seen from a project.
+#[derive(Debug, PartialEq, Eq)]
+enum Owner {
+    /// The project's own.
+    Project,
+    /// Another project's, described by its config or folder.
+    Other(String),
+    /// The body does not say (an older server, or auth hides it).
+    Unknown,
+}
+
+/// Whose server `/readyz` body `body` describes for the project in `dir`
+/// that last started a server with `started`: the project's when the config
+/// it was started with is `started` or lies under `dir`, or, started
+/// without a config, when its working folder lies under `dir`. When `dir`
+/// is the filesystem root or the home folder (where some agents start MCP
+/// servers), which holds every project, only `dir` itself counts, not the
+/// folders under it.
+fn server_owner(body: &Value, dir: &std::path::Path, started: Option<&std::path::Path>) -> Owner {
+    let Some(server_dir) = body.get("dir").and_then(Value::as_str) else {
+        return Owner::Unknown;
+    };
+    let dir = daemon::same_file_key(dir);
+    let home = ["HOME", "USERPROFILE"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(|h| daemon::same_file_key(std::path::Path::new(&h)))
+        .any(|h| h == dir);
+    let broad = home || dir.parent().is_none();
+    let inside = |folder: &std::path::Path| {
+        if broad {
+            folder == dir
+        } else {
+            folder.starts_with(&dir)
+        }
+    };
+    match body.get("config").and_then(Value::as_str) {
+        Some(config) => {
+            let config = daemon::same_file_key(std::path::Path::new(config));
+            if config.parent().is_some_and(inside)
+                || started.is_some_and(|s| daemon::same_file_key(s) == config)
+            {
+                Owner::Project
+            } else {
+                Owner::Other(format!("config {}", config.display()))
+            }
+        }
+        None if inside(&daemon::same_file_key(std::path::Path::new(server_dir))) => Owner::Project,
+        None => Owner::Other(format!("started without a config in {server_dir}")),
+    }
+}
+
 fn tool_result(value: Value, is_error: bool) -> Value {
     let text = serde_json::to_string_pretty(&value).unwrap_or_default();
     let mut out = json!({ "content": [{ "type": "text", "text": text }], "isError": is_error });
@@ -2715,7 +2918,7 @@ fn get_prompt(params: &Value) -> Result<Value, (i64, String)> {
 /// Fails when the stdio transport fails.
 pub async fn run(
     args: McpArgs,
-    admin_url: &str,
+    admin_url: Option<&str>,
     token: Option<&str>,
     workspace: &str,
 ) -> anyhow::Result<()> {
@@ -3174,6 +3377,7 @@ mod tests {
     fn server(read_only: bool) -> McpServer {
         McpServer {
             admin_url: "http://127.0.0.1:1".into(),
+            project_dir: None,
             token: None,
             workspace: "default".into(),
             read_only,
@@ -3834,6 +4038,182 @@ mod tests {
             .await
             .unwrap_or_default();
         assert_eq!(r["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn a_server_is_the_projects_when_its_config_or_folder_is_inside_it() {
+        let dir = std::path::Path::new("/work/app");
+        let at = |config: Value, server_dir: &str| json!({"config": config, "dir": server_dir});
+        assert_eq!(
+            server_owner(
+                &at(json!("/work/app/mockingbird.yaml"), "/work/app"),
+                dir,
+                None
+            ),
+            Owner::Project
+        );
+        assert_eq!(
+            server_owner(
+                &at(json!("/work/app/mocks/m.yaml"), "/elsewhere"),
+                dir,
+                None
+            ),
+            Owner::Project
+        );
+        assert_eq!(
+            server_owner(&at(Value::Null, "/work/app"), dir, None),
+            Owner::Project
+        );
+        // A config outside the project counts when start_server used it.
+        let shared = std::path::Path::new("/shared/mockingbird.yaml");
+        assert_eq!(
+            server_owner(
+                &at(json!("/shared/mockingbird.yaml"), "/work/app"),
+                dir,
+                Some(shared)
+            ),
+            Owner::Project
+        );
+        assert_eq!(
+            server_owner(
+                &at(json!("/work/other/mockingbird.yaml"), "/work/app"),
+                dir,
+                None
+            ),
+            Owner::Other("config /work/other/mockingbird.yaml".into())
+        );
+        // A sibling whose name starts like the project's is not inside it.
+        assert!(matches!(
+            server_owner(&at(Value::Null, "/work/app2"), dir, None),
+            Owner::Other(_)
+        ));
+        assert_eq!(
+            server_owner(&json!({"status": "ready"}), dir, None),
+            Owner::Unknown
+        );
+    }
+
+    #[test]
+    fn from_the_root_folder_only_its_own_config_is_the_projects() {
+        let root = std::path::Path::new("/");
+        let at = |config: &str| json!({"config": config, "dir": "/"});
+        assert_eq!(
+            server_owner(&at("/mockingbird.yaml"), root, None),
+            Owner::Project
+        );
+        assert!(matches!(
+            server_owner(&at("/work/other/mockingbird.yaml"), root, None),
+            Owner::Other(_)
+        ));
+        assert!(matches!(
+            server_owner(&json!({"config": null, "dir": "/work/other"}), root, None),
+            Owner::Other(_)
+        ));
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            let config = home.join("some-project/mockingbird.yaml");
+            assert!(matches!(
+                server_owner(&json!({"config": config, "dir": home}), &home, None),
+                Owner::Other(_)
+            ));
+        }
+    }
+
+    /// A project-mode server in `dir` whose `./mockingbird.yaml` puts the
+    /// admin port on `admin`.
+    fn in_project(dir: &std::path::Path, admin: &wiremock::MockServer) -> McpServer {
+        let port = admin.address().port();
+        std::fs::write(
+            dir.join("mockingbird.yaml"),
+            format!("server:\n  admin_port: {port}\n"),
+        )
+        .unwrap();
+        McpServer {
+            project_dir: Some(dir.to_path_buf()),
+            state_dir: ".mockingbird".into(),
+            ..server(false)
+        }
+    }
+
+    async fn readyz_says(admin: &wiremock::MockServer, body: Value) {
+        use wiremock::matchers::{method, path};
+        wiremock::Mock::given(method("GET"))
+            .and(path("/readyz"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(body))
+            .mount(admin)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn another_projects_server_is_refused_and_named() {
+        use wiremock::matchers::{method, path};
+        let admin = wiremock::MockServer::start().await;
+        let project = tempfile::tempdir().unwrap();
+        let s = in_project(project.path(), &admin);
+        readyz_says(
+            &admin,
+            json!({"status": "ready", "config": "/elsewhere/other/mockingbird.yaml", "dir": "/elsewhere/other"}),
+        )
+        .await;
+        wiremock::Mock::given(method("PUT"))
+            .and(path(format!("{WS}/llm-profiles/p")))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(0)
+            .mount(&admin)
+            .await;
+        for (tool, args) in [
+            ("list_mocks", json!({})),
+            ("put_llm_profile", json!({"name": "p", "profile": {}})),
+        ] {
+            let error = call_tool_error(&s, tool, args).await;
+            assert!(
+                error.contains("belongs to another project")
+                    && error.contains("/elsewhere/other/mockingbird.yaml")
+                    && error.contains("MB_ADMIN_URL="),
+                "{tool}: {error}"
+            );
+        }
+        let doctor = call_tool(&s, "doctor", json!({})).await;
+        assert!(
+            doctor["problems"]
+                .to_string()
+                .contains("belongs to another project"),
+            "{doctor}"
+        );
+        // Local tools still work.
+        call_tool(&s, "list_llm_providers", json!({})).await;
+    }
+
+    #[tokio::test]
+    async fn the_projects_own_server_is_used() {
+        use wiremock::matchers::{method, path};
+        let admin = wiremock::MockServer::start().await;
+        let project = tempfile::tempdir().unwrap();
+        let s = in_project(project.path(), &admin);
+        let config = project.path().join("mockingbird.yaml");
+        readyz_says(
+            &admin,
+            json!({"status": "ready", "config": config, "dir": project.path()}),
+        )
+        .await;
+        wiremock::Mock::given(method("GET"))
+            .and(path(format!("{WS}/mocks")))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(json!([{"name": "orders"}])),
+            )
+            .mount(&admin)
+            .await;
+        let mocks = call_tool(&s, "list_mocks", json!({})).await;
+        assert_eq!(mocks[0]["name"], "orders");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_does_not_say_whose_it_is_is_refused() {
+        let admin = wiremock::MockServer::start().await;
+        let project = tempfile::tempdir().unwrap();
+        let s = in_project(project.path(), &admin);
+        readyz_says(&admin, json!({"status": "ready"})).await;
+        let error = call_tool_error(&s, "list_mocks", json!({})).await;
+        assert!(error.contains("does not say which project"), "{error}");
     }
 
     #[tokio::test]

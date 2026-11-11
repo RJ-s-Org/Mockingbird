@@ -539,6 +539,7 @@ fn ops_state(
         leader: tokio::sync::watch::channel(true).1,
         reload: Default::default(),
         data_plane: None,
+        origin: Default::default(),
     }
 }
 
@@ -915,13 +916,17 @@ async fn readyz_ready() {
 }
 
 #[tokio::test]
-async fn readyz_reports_the_data_plane() {
+async fn readyz_reports_the_data_plane_and_origin() {
     let store: Arc<dyn ControlStore> = stub_store().await;
     let base = serve(ops::router(OpsState {
         data_plane: Some(ops::DataPlane {
             port: 43080,
             tls: false,
         }),
+        origin: ops::Origin {
+            config: Some("/work/app/mockingbird.yaml".into()),
+            dir: Some("/work/app".into()),
+        },
         ..ops_state(store, memory_state(), MockRegistry::new())
     }))
     .await;
@@ -932,6 +937,8 @@ async fn readyz_reports_the_data_plane() {
         .await
         .unwrap();
     assert_eq!(body["data_plane"], json!({"port": 43080, "tls": false}));
+    assert_eq!(body["config"], "/work/app/mockingbird.yaml");
+    assert_eq!(body["dir"], "/work/app");
 }
 
 #[tokio::test]
@@ -1085,6 +1092,7 @@ async fn metrics_exposes_request_counters() {
         leader: tokio::sync::watch::channel(true).1,
         reload: Default::default(),
         data_plane: None,
+        origin: Default::default(),
     }))
     .await;
     let r = reqwest::get(format!("{base}/metrics")).await.unwrap();

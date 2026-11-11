@@ -1051,6 +1051,7 @@ async fn build_app_inner(
                 port: cfg.server.port,
                 tls: cfg.server.tls.is_some(),
             }),
+            origin: ops::Origin::current(args.config.as_deref()),
         },
         metrics_gate,
     );

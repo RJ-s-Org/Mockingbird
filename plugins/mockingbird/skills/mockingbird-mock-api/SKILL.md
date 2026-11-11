@@ -5,7 +5,7 @@ description: Create and drive Mockingbird mocks - import an OpenAPI/Swagger, Gra
 
 # Mock an API
 
-Prerequisite: a running server (`server_status`; start one with `start_server` or `mockingbird server start -c mockingbird.yaml`). Without a config file, `mockingbird server start --offline api.yaml` serves a contract directly at `/`.
+Prerequisite: a running server of this project (`server_status`; start one with `start_server` or `mockingbird server start -c mockingbird.yaml`). If a tool says the server it found belongs to another project, or `start_server` says a port is held by one, start this project's server on other free ports instead of using or stopping that one. Without a config file, `mockingbird server start --offline api.yaml` serves a contract directly at `/`.
 
 ## 1. Get the contract in
 

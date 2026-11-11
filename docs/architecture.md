@@ -88,7 +88,7 @@ Work that must run once per cluster is leader-gated: the startup reconcile of `m
 - with Redis, the key `mockingbird:leader:control`, a lease of 15 s renewed every 5 s;
 - with an in-process bus, the node always leads.
 
-A node that loses its connection stops leader work within 5 s, and another takes over within 15 s. `mb_leader` is 1 on the leader, and `/readyz` shows `"role"` and `"leader"`, and on a node that serves mocks its `"data_plane"` (`port`, `tls`), which the MCP server's `call_mock` uses to find the data plane of the Admin API it talks to.
+A node that loses its connection stops leader work within 5 s, and another takes over within 15 s. `mb_leader` is 1 on the leader, and `/readyz` shows `"role"`, `"leader"`, the `"config"` file and working `"dir"` the node was started with (which a project's MCP server checks to act only on its own project's server, see [agents.md](agents.md)) and, on a node that serves mocks, its `"data_plane"` (`port`, `tls`), which the MCP server's `call_mock` uses to find the data plane of the Admin API it talks to.
 
 With Postgres, leadership can briefly overlap. The lock is released the moment the holder's session ends on the server (a terminated backend, a server restart, a dropped connection), so another node may acquire it at once, while the old holder only notices at its next renew (a `SELECT 1` every 5 s, itself timing out after 5 s). For up to one renew interval, and up to 10 s when the connection hangs rather than fails, both nodes may run leader work. Reconcile writes the same desired state from either node and the retention jobs are idempotent deletes, so an overlap costs duplicate work and, at worst, a logged conflict.
 
