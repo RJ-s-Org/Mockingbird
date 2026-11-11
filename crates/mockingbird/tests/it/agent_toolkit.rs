@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 
-use crate::support::{free_port, logged_admin, on_free_ports, read, repo};
+use crate::support::{free_port, logged_admin, on_free_ports, read, repo, spawn_serve};
 use assert_cmd::cargo::CommandCargoExt;
 use mockingbird::agents::SKILLS;
 use serde_json::{Value, json};
@@ -400,10 +400,15 @@ impl McpClient {
         admin_url: &str,
         setup: impl FnOnce(&mut std::process::Command),
     ) -> Self {
+        Self::spawn(dir, &["--admin-url", admin_url, "mcp"], setup)
+    }
+
+    /// Starts `mockingbird <args>` in `dir` after `setup`.
+    fn spawn(dir: &Path, args: &[&str], setup: impl FnOnce(&mut std::process::Command)) -> Self {
         let mut cmd = bin();
         setup(&mut cmd);
         let mut child = cmd
-            .args(["--admin-url", admin_url, "mcp"])
+            .args(args)
             .current_dir(dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1109,6 +1114,133 @@ fn start_server_refuses_a_profile_whose_key_is_missing() {
     );
     assert!(err.contains("MB_TEST_NOWHERE_API_KEY"), "{err}");
     assert!(err.contains("offline"), "says how to start anyway: {err}");
+}
+
+/// Kills a child process when dropped.
+struct KillOnDrop(Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The MCP server an agent starts in a project (no `MB_ADMIN_URL`) acts on
+/// that project's server only. Another project's server on the admin port
+/// this project's config names is refused and named, `start_server` says
+/// who holds that port, and once it started the project's own server on
+/// other ports every tool uses that one.
+#[test]
+fn mcp_acts_only_on_its_projects_server() {
+    let other = tempdir();
+    std::fs::copy(fixture(), other.path().join("orders.yaml")).unwrap();
+    run_json(
+        other.path(),
+        &["init", "--offline", "--contract", "orders.yaml"],
+    );
+    let (child, bound) = spawn_serve(
+        bin()
+            .current_dir(other.path())
+            .env_remove("MB_LLM_API_KEY")
+            .args(["serve", "-c", "mockingbird.yaml", "--offline"])
+            .args(["--port", "0", "--admin-port", "0", "--grpc-port", "0"]),
+    );
+    let _other_server = KillOnDrop(child);
+    let foreign_url = bound.admin_url();
+    let foreign_port = bound.admin.unwrap().port().to_string();
+    let other_config = std::fs::canonicalize(other.path().join("mockingbird.yaml")).unwrap();
+    let other_config = other_config.to_str().unwrap();
+
+    // This project's config names the same admin port, as two default
+    // configs would.
+    let project = tempdir();
+    std::fs::copy(fixture(), project.path().join("orders.yaml")).unwrap();
+    let data_port = free_port().to_string();
+    run_json(
+        project.path(),
+        &[
+            "init",
+            "--offline",
+            "--contract",
+            "orders.yaml",
+            "--port",
+            &data_port,
+            "--admin-port",
+            &foreign_port,
+        ],
+    );
+    let mut mcp = McpClient::spawn(project.path(), &["mcp"], |cmd| {
+        mcp_env(cmd);
+        cmd.env_remove("MB_ADMIN_URL").env_remove("MB_ADMIN_PORT");
+    });
+    for (tool, args) in [
+        ("list_mocks", json!({})),
+        (
+            "import_contract",
+            json!({ "mock": "hello", "content": "type Query { hello: String }\n", "filename": "schema.graphql" }),
+        ),
+    ] {
+        let error = mcp.tool_error(tool, args);
+        assert!(
+            error.contains("belongs to another project") && error.contains(other_config),
+            "{tool}: {error}"
+        );
+    }
+    let error = mcp.tool_error("start_server", json!({ "config": "mockingbird.yaml" }));
+    assert!(
+        error.contains("another project holds it") && error.contains(other_config),
+        "{error}"
+    );
+
+    let started = on_free_ports(|| {
+        let admin = free_port();
+        let r = mcp.rpc(
+            "tools/call",
+            json!({ "name": "start_server", "arguments": {
+                "config": "mockingbird.yaml",
+                "port": free_port(),
+                "admin_port": admin,
+                "grpc_port": free_port(),
+            } }),
+        );
+        let text = r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        if r["result"]["isError"] == true {
+            return Err(text);
+        }
+        let started: Value = serde_json::from_str(&text).unwrap();
+        let log = project.path().join(started["log"].as_str().unwrap());
+        logged_admin(&log, admin).map(|()| started)
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_eq!(started["ready"], true, "{started}");
+        let imported = mcp.tool(
+            "import_contract",
+            json!({ "mock": "hello", "content": "type Query { hello: String }\n", "filename": "schema.graphql" }),
+        );
+        assert_eq!(imported["status"], "active", "{imported}");
+        let mocks = mcp.tool("list_mocks", json!({}));
+        let names: Vec<&str> = mocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["name"].as_str())
+            .collect();
+        assert!(names.contains(&"hello"), "{mocks}");
+    }));
+    let stopped = mcp.tool("stop_server", json!({}));
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+    // The other project's server never saw the import.
+    let mut theirs = McpClient::start(other.path(), &foreign_url);
+    let mocks = theirs.tool("list_mocks", json!({}));
+    assert_eq!(mocks.as_array().unwrap().len(), 1, "{mocks}");
+    assert_eq!(mocks[0]["name"], "orders", "{mocks}");
 }
 
 #[test]

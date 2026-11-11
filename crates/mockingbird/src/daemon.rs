@@ -702,9 +702,18 @@ pub fn resolve_state_dir(state_dir: &Path, config: Option<&Path>, cwd: &Path) ->
         .unwrap_or_else(|| config_dir.join(state_dir))
 }
 
+/// The admin URL the background server of state directory `dir` recorded,
+/// while that server runs.
+#[must_use]
+pub fn running_admin(dir: &Path) -> Option<String> {
+    read_pid(dir).filter(|&pid| alive(pid))?;
+    let info: Value = serde_json::from_slice(&std::fs::read(info_file(dir)).ok()?).ok()?;
+    info["admin"].as_str().map(String::from)
+}
+
 /// `path` canonicalized when it exists, else made absolute: for comparing
 /// two spellings of one config path.
-fn same_file_key(path: &Path) -> PathBuf {
+pub(crate) fn same_file_key(path: &Path) -> PathBuf {
     std::fs::canonicalize(path)
         .or_else(|_| std::path::absolute(path))
         .unwrap_or_else(|_| path.to_path_buf())

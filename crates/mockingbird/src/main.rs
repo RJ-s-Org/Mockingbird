@@ -79,9 +79,14 @@ async fn run(invocation: Invocation) -> ExitCode {
                 daemon::doctor(&args, &admin_url, cli.token.as_deref()).await
             ))
         }
-        Command::Mcp(args) => mcp::run(args, &admin_url, cli.token.as_deref(), &cli.workspace)
-            .await
-            .map_err(Failure::Other),
+        Command::Mcp(args) => mcp::run(
+            args,
+            cli.admin_url.as_deref(),
+            cli.token.as_deref(),
+            &cli.workspace,
+        )
+        .await
+        .map_err(Failure::Other),
         Command::Agent(cmd) => print_json(match cmd {
             AgentCommand::Install(args) => agents::install(&args),
             AgentCommand::Print { client } => Ok(agents::print(client)),
