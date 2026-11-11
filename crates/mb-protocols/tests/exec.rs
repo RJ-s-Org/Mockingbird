@@ -4503,8 +4503,8 @@ components:
       properties: {id: {type: string}, version: {type: integer}, currency: {type: string}}
     Workspace:
       type: object
-      required: [id, name]
-      properties: {id: {type: string}, name: {type: string}, locked: {type: boolean, nullable: true}, "@odata.etag": {type: string}}
+      required: [id, name, settings]
+      properties: {id: {type: string}, name: {type: string}, locked: {type: boolean, nullable: true}, "@odata.etag": {type: string}, settings: {type: object, nullable: true, properties: {theme: {type: string}}}, extras: {type: object, nullable: true, properties: {note: {type: string}}}}
     Pull:
       type: object
       required: [id, title]
@@ -4689,7 +4689,7 @@ async fn a_nullable_boolean_fill_leaves_null_stays_null() {
     let (_capture, _guard) = Capture::install();
     let h = support::harness(
         SERVER_SET,
-        vec![json!({"locked": null, "@odata.etag": "W/\"1\""})],
+        vec![json!({"locked": null, "@odata.etag": "W/\"1\"", "settings": null})],
         &HarnessOptions::default(),
         |rt| rt,
     );
@@ -4698,6 +4698,23 @@ async fn a_nullable_boolean_fill_leaves_null_stays_null() {
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["locked"], json!(null), "{body}");
+}
+
+#[tokio::test]
+async fn a_required_nullable_object_is_the_model_s_and_an_optional_one_null() {
+    let (_capture, _guard) = Capture::install();
+    let h = support::harness(
+        SERVER_SET,
+        vec![json!({"settings": {"theme": "dark"}, "locked": null, "@odata.etag": "W/\"1\""})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let (status, _, body) = h
+        .send("POST", "/workspaces", Some(json!({"name": "w"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["settings"], json!({"theme": "dark"}), "{body}");
+    assert_eq!(body["extras"], json!(null), "{body}");
 }
 
 #[tokio::test]

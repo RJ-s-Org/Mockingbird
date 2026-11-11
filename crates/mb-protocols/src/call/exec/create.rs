@@ -343,7 +343,7 @@ pub(super) async fn run(
             .engine
             .fill(
                 rt.bundle(),
-                &fill_schema(&missing),
+                &fill_schema(&missing, &required),
                 known,
                 &names,
                 FillContext { op, call },
@@ -1467,10 +1467,15 @@ pub(super) fn fill_into(record: &mut Map<String, Value>, filled: Map<String, Val
     }
 }
 
-/// An object schema declaring `members`, which fill writes by.
-pub(super) fn fill_schema(members: &[(String, Value)]) -> Value {
+/// An object schema declaring `members`, which fill writes by, those named in
+/// `required` required: fill leaves a nullable object null only when it is optional.
+pub(super) fn fill_schema(members: &[(String, Value)], required: &[String]) -> Value {
     let properties: Map<String, Value> = members.iter().cloned().collect();
-    serde_json::json!({"type": "object", "properties": properties})
+    let required: Vec<&String> = required
+        .iter()
+        .filter(|name| properties.contains_key(*name))
+        .collect();
+    serde_json::json!({"type": "object", "properties": properties, "required": required})
 }
 
 /// `record` in the envelope `op`'s answer holds it in, the envelope's members nothing
