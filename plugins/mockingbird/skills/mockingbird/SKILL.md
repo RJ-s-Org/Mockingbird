@@ -42,7 +42,7 @@ curl -s localhost:8080/<path> -H 'Host: api.example.com'     # a mock with hosts
 mockingbird server stop
 ```
 
-Every response carries `X-Mockingbird-Source: llm | patched | repaired | fallback` (`fallback` = faker). Ports: data plane `:8080`, Admin API + console `:9090` (console at http://127.0.0.1:9090/), gRPC `:50051`.
+Every response carries `X-Mockingbird-Source: llm | patched | repaired | fallback` (`fallback` = faker). Ports: data plane `:8080`, Admin API + console `:9090` (console at http://127.0.0.1:9090/), gRPC `:50051` by default. When another server holds a default, `init` and `server start -c` pick free ports and write them into `mockingbird.yaml` (`ports_chosen` in their output). Read the ports from the config.
 
 ## MCP tools
 

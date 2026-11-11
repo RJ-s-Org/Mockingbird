@@ -347,9 +347,9 @@ fn tools() -> Vec<Tool> {
                         "output": s("File to write; default mockingbird.yaml."),
                         "profile_name": s("Profile name; default the preset id."),
                         "force": b("Overwrite an existing file."),
-                        "port": { "type": "integer", "description": "Data-plane port (server.port); default 8080." },
-                        "admin_port": { "type": "integer", "description": "Admin API port (server.admin_port); default 9090. Point MB_ADMIN_URL at it." },
-                        "grpc_port": { "type": "integer", "description": "gRPC port (server.grpc_port); default 50051." },
+                        "port": { "type": "integer", "description": "Data-plane port (server.port); default 8080, or a free port above it written into the config when 8080 is taken." },
+                        "admin_port": { "type": "integer", "description": "Admin API port (server.admin_port); default 9090, or a free port above it written into the config when 9090 is taken. Point MB_ADMIN_URL at it." },
+                        "grpc_port": { "type": "integer", "description": "gRPC port (server.grpc_port); default 50051, or a free port above it written into the config when 50051 is taken." },
                     }),
                 ),
                 &[],
@@ -441,9 +441,9 @@ fn tools() -> Vec<Tool> {
                     "config": s("Config file (preferred)."),
                     "contracts": { "type": "array", "items": { "type": "string" }, "description": "Contracts to serve without a config file." },
                     "offline": b("Faker only, no LLM."),
-                    "port": n("Data-plane port; default 8080."),
-                    "admin_port": n("Admin API port; default 9090."),
-                    "grpc_port": n("gRPC port; default 50051."),
+                    "port": n("Data-plane port; default the config's server.port. A port the config leaves at its default (8080) that is taken is replaced by a free one, written into the config."),
+                    "admin_port": n("Admin API port; default the config's server.admin_port (9090, or a free port as for port)."),
+                    "grpc_port": n("gRPC port; default the config's server.grpc_port (50051, or a free port as for port)."),
                     "proxy": b("Also start the HTTP(S) proxy; the result carries proxy_env."),
                 }),
                 &[],
@@ -457,7 +457,7 @@ fn tools() -> Vec<Tool> {
             description: "The environment variables that send an app's HTTP(S) traffic through Mockingbird's proxy (start_server with proxy: true) and make it trust the local CA: vars, ca_path, bundle_path, and export (shell lines). Mocks with hosts: [api.example.com] then answer for those hosts with no change to the app.",
             schema: obj(
                 json!({
-                    "config": s("Config file (proxy.host, proxy.port, proxy.ca_dir); default: the one start_server used, else defaults."),
+                    "config": s("Config file (proxy.host, proxy.port, proxy.ca_dir); default: the one start_server used, else ./mockingbird.yaml when it exists, else defaults."),
                     "port": n("Proxy port; default proxy.port (8888)."),
                 }),
                 &[],
@@ -1423,7 +1423,10 @@ impl McpServer {
             _ => None,
         };
         let holder = match body {
-            None => "another process holds it".to_owned(),
+            None => bind.holder.as_ref().map_or_else(
+                || "another process holds it".to_owned(),
+                |h| format!("{h} holds it"),
+            ),
             Some(body) => {
                 let dir = self
                     .project_dir
@@ -1438,7 +1441,8 @@ impl McpServer {
             }
         };
         ToolError(format!(
-            "{error:#}: {holder}. To run this project's server beside it, pass free ports (port, admin_port, grpc_port) or set server.port, server.admin_port and server.grpc_port in its mockingbird.yaml"
+            "cannot bind the {} listener on {}: {}: {holder}. To run this project's server beside it, pass free ports (port, admin_port, grpc_port) or set server.port, server.admin_port, server.grpc_port (and proxy.port) in its mockingbird.yaml; ports it leaves at their defaults are picked free automatically",
+            bind.listener, bind.address, bind.source
         ))
     }
 
@@ -1599,6 +1603,7 @@ impl McpServer {
                         .map(|c| c.clone())
                         .unwrap_or_default()
                 });
+                let config = crate::proxy::env::config_or_local(config.as_deref());
                 self.proxy_env(config.as_deref(), opt_port(a, "port")?)
             }
             "open_key_setup" => self.open_key_setup(a).await,

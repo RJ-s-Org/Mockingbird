@@ -12,7 +12,7 @@ use super::env::{options_for, proxy_env};
 #[derive(clap::Args, Debug)]
 pub struct ProxyBrowserArgs {
     /// Config file whose `proxy.port`, `proxy.host` and `proxy.ca_dir`
-    /// apply.
+    /// apply [default: ./mockingbird.yaml when it exists].
     #[arg(short = 'c', long)]
     pub config: Option<PathBuf>,
     /// The proxy's port [default: proxy.port, else 8888].
@@ -138,7 +138,8 @@ fn find_browser() -> anyhow::Result<PathBuf> {
 /// Fails when the proxy options or environment cannot be set up, or the
 /// browser cannot be started or exits with an error.
 pub async fn run(args: ProxyBrowserArgs) -> anyhow::Result<()> {
-    let opts = options_for(args.config.as_deref(), args.port)?;
+    let config = super::env::config_or_local(args.config.as_deref());
+    let opts = options_for(config.as_deref(), args.port)?;
     let env = proxy_env(&opts)?;
     let profile = opts.ca_dir.join("chromium-profile");
     let browser = match args.browser {

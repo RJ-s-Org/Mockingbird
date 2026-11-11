@@ -339,6 +339,38 @@ async fn server_start_fails_on_a_busy_admin_port_that_answers_ready() {
     assert_start_refused(&ports, "admin", ports.admin);
 }
 
+/// A port another project's Mockingbird server holds: the failure names
+/// that server's config and folder, from its `/readyz`.
+#[tokio::test]
+async fn server_start_names_the_mockingbird_server_holding_its_port() {
+    let stub = MockServer::start().await;
+    Mock::given(path("/readyz"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "ready",
+            "config": "/elsewhere/other/mockingbird.yaml",
+            "dir": "/elsewhere/other",
+        })))
+        .mount(&stub)
+        .await;
+    let mut ports = Ports::new();
+    ports.admin = stub.address().port();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = tmp.path().join("state");
+    let out = start(&state, &ports, &["--offline", "--wait", "5s"], &[]);
+    let _server = Server(state.clone());
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let body = json_out(&out);
+    let holder = "the Mockingbird server started with config /elsewhere/other/mockingbird.yaml (in /elsewhere/other)";
+    assert_eq!(body["holder"], holder, "{body}");
+    assert!(
+        body["hint"].as_str().unwrap().contains("--admin-port"),
+        "{body}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(holder), "{stderr}");
+    assert!(!state.join("server.pid").exists(), "no server was spawned");
+}
+
 #[test]
 fn server_start_fails_on_a_busy_data_port() {
     let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

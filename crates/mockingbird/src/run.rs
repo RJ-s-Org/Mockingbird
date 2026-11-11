@@ -128,6 +128,12 @@ pub async fn run(args: RunArgs) -> anyhow::Result<ExitCode> {
     )
     .await;
     let code = match result {
+        // A server `run` started may have taken free ports in place of busy
+        // defaults (written into the config): the proxy is read again.
+        Ok(()) if started.server.is_some() => match options_for(Some(&config), None) {
+            Ok(opts) => run_command(&args.command, &opts).await,
+            Err(error) => Err(error),
+        },
         Ok(()) => run_command(&args.command, &opts).await,
         Err(error) => Err(error),
     };
@@ -153,7 +159,17 @@ async fn prepare(
     proxy_addr: SocketAddr,
     started: &mut Started,
 ) -> anyhow::Result<()> {
-    if !answers(admin_url).await {
+    let foreign = match readyz(admin_url).await {
+        None => None,
+        Some(body) => foreign_server(&body, config),
+    };
+    if let Some(holder) = &foreign {
+        eprintln!(
+            "mockingbird: {admin_url} is {holder}, not the server of {}; starting this config's own server",
+            config.display()
+        );
+    }
+    if foreign.is_some() || !answers(admin_url).await {
         let state = StateArgs {
             state_dir: args.state_dir.clone(),
         };
@@ -243,6 +259,31 @@ fn http() -> reqwest::Client {
         .no_proxy()
         .build()
         .unwrap_or_default()
+}
+
+/// The JSON `/readyz` at `admin_url` answers with, if any.
+async fn readyz(admin_url: &str) -> Option<serde_json::Value> {
+    http()
+        .get(format!("{admin_url}/readyz"))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()
+}
+
+/// Who runs the server whose `/readyz` body is `body` when it is not the
+/// server of `config`: one that reports its origin (config and folder)
+/// and was started with another config, or without one. A server that does
+/// not report its origin (an older version) counts as `config`'s.
+fn foreign_server(body: &serde_json::Value, config: &std::path::Path) -> Option<String> {
+    body["dir"].as_str()?;
+    let theirs = body["config"].as_str().map(std::path::Path::new);
+    if theirs.is_some_and(|c| daemon::same_file_key(c) == daemon::same_file_key(config)) {
+        return None;
+    }
+    daemon::describe_holder(body)
 }
 
 /// Whether anything answers `/readyz` at `admin_url`.

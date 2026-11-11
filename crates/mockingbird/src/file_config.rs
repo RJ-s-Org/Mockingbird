@@ -2009,36 +2009,46 @@ fn resolve_sqlite_url(url: &str, dir: &Path) -> String {
     }
 }
 
-/// Which optional ports a config document sets.
-#[derive(Default)]
-struct ExplicitPorts {
-    admin_port: bool,
-    grpc_port: bool,
+/// Which ports a config document sets.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExplicitPorts {
+    /// `server.port`.
+    pub port: bool,
+    /// `server.admin_port`.
+    pub admin_port: bool,
+    /// `server.grpc_port`.
+    pub grpc_port: bool,
+    /// `proxy.port`.
+    pub proxy_port: bool,
 }
 
-/// Whether a config document sets `server.admin_port` and
-/// `server.grpc_port`.
-fn explicit_ports(text: &str) -> ExplicitPorts {
+/// Which of `server.port`, `server.admin_port`, `server.grpc_port` and
+/// `proxy.port` a config document sets.
+pub(crate) fn explicit_ports(text: &str) -> ExplicitPorts {
     #[derive(Deserialize, Default)]
     struct Probe {
         #[serde(default)]
-        server: Option<ProbeServer>,
+        server: Option<ProbePorts>,
+        #[serde(default)]
+        proxy: Option<ProbePorts>,
     }
     #[derive(Deserialize, Default)]
-    struct ProbeServer {
+    struct ProbePorts {
+        #[serde(default)]
+        port: Option<serde::de::IgnoredAny>,
         #[serde(default)]
         admin_port: Option<serde::de::IgnoredAny>,
         #[serde(default)]
         grpc_port: Option<serde::de::IgnoredAny>,
     }
-    serde_saphyr::from_str::<Probe>(text)
-        .ok()
-        .and_then(|p| p.server)
-        .map(|s| ExplicitPorts {
-            admin_port: s.admin_port.is_some(),
-            grpc_port: s.grpc_port.is_some(),
-        })
-        .unwrap_or_default()
+    let probe = serde_saphyr::from_str::<Probe>(text).unwrap_or_default();
+    let server = probe.server.unwrap_or_default();
+    ExplicitPorts {
+        port: server.port.is_some(),
+        admin_port: server.admin_port.is_some(),
+        grpc_port: server.grpc_port.is_some(),
+        proxy_port: probe.proxy.is_some_and(|p| p.port.is_some()),
+    }
 }
 
 /// Applies the `MB_*` environment variables (see [`apply_env_from`]).
