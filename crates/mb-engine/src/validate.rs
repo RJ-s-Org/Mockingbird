@@ -561,6 +561,38 @@ impl SchemaValidator {
         filled.then_some(out)
     }
 
+    /// Whether every required member `instance` lacks is missing from a nested
+    /// object that holds at least one member its schema declares: an attempt at
+    /// that object that left a member out, not the wrong shape (a wrapper, another
+    /// resource) or a root lacking a member. `false` when nothing is missing.
+    pub(crate) fn lacks_only_nested_members(&self, instance: &Value) -> bool {
+        let mut any = false;
+        for e in self.inner.iter_errors(instance) {
+            if !matches!(e.kind(), ValidationErrorKind::Required { .. }) {
+                continue;
+            }
+            any = true;
+            let pointer = e.instance_path().as_str();
+            if pointer.is_empty() {
+                return false;
+            }
+            let declared = self
+                .location(e.evaluation_path().as_str())
+                .and_then(|location| self.at(&format!("{location}/properties")))
+                .and_then(Value::as_object);
+            let attempt = match (instance.pointer(pointer), declared) {
+                (Some(Value::Object(held)), Some(declared)) => {
+                    held.keys().any(|k| declared.contains_key(k))
+                }
+                _ => false,
+            };
+            if !attempt {
+                return false;
+            }
+        }
+        any
+    }
+
     /// The location of the schema holding the keyword that failed at
     /// `evaluation_path`: a JSON pointer into the schema that restarts at a
     /// `$ref`'s target.

@@ -273,7 +273,9 @@ impl Engine {
     /// [`crate::budget`]), then validate. A value breaking an asserted format
     /// (see [`SchemaValidator::for_output`]) is refilled locally unless
     /// `echoes` holds it; a format error alone never makes the answer
-    /// `Invalid`.
+    /// `Invalid`. A required member the answer left out is filled by the
+    /// faker, so an answer that lacks only those is `Patched` and costs no
+    /// repair call.
     pub(crate) fn check_output(
         &self,
         validator: &SchemaValidator,
@@ -286,7 +288,7 @@ impl Engine {
                 AnswerEffects::default(),
             );
         };
-        self.check_parsed(validator, value, text.len(), checks, false)
+        self.check_parsed(validator, value, text.len(), checks, Missing::Nested)
     }
 
     /// LLM output cut short (see [`crate::salvage`]), closed, then checked
@@ -305,7 +307,8 @@ impl Engine {
                 AnswerEffects::default(),
             );
         };
-        let (checked, effects) = self.check_parsed(validator, value, text.len(), checks, true);
+        let (checked, effects) =
+            self.check_parsed(validator, value, text.len(), checks, Missing::All);
         let checked = match checked {
             Checked::Valid(v) | Checked::Patched(v) => {
                 tracing::info!("salvaged an answer cut short");
@@ -326,7 +329,7 @@ impl Engine {
         value: Value,
         text_len: usize,
         checks: &Checks<'_>,
-        fill_missing: bool,
+        fill_missing: Missing,
     ) -> (Checked, AnswerEffects) {
         let value = match take_refusal(value, checks.refusals) {
             Ok((status, mut body)) => {
@@ -421,16 +424,16 @@ impl Engine {
         }
     }
 
-    /// The checks of an answer out of any effects envelope; with
-    /// `fill_missing`, every missing required member is filled when the value
-    /// does not validate without that.
+    /// The checks of an answer out of any effects envelope; the missing
+    /// required members `fill_missing` names are filled when the value does
+    /// not validate without that, and the answer is then `Patched`.
     fn check_answer(
         &self,
         validator: &SchemaValidator,
         mut value: Value,
         text_len: usize,
         checks: &Checks<'_>,
-        fill_missing: bool,
+        fill_missing: Missing,
     ) -> Checked {
         let fill = checks.fill;
         if checks.items_envelope {
@@ -451,25 +454,27 @@ impl Engine {
         {
             value = filled;
         }
-        let checked = if fill_missing {
-            // Filled only when the value is not valid as it is (or
-            // unwrapped), and never around a wrapper: a wrapped answer has
-            // its inner value filled, so its own data stays the answer.
-            match self.check_value(validator, value.clone(), checks) {
-                Checked::Invalid(errors) => {
-                    let target = wrapped(validator, &value).cloned().unwrap_or(value);
-                    if !answers_root(validator, &target) {
-                        return Checked::Invalid(errors);
-                    }
-                    match self.fill_missing(validator, &target, checks.seed) {
-                        Some(filled) => self.check_value(validator, filled, checks),
-                        None => Checked::Invalid(errors),
-                    }
+        // Filled only when the value is not valid as it is (or unwrapped), and
+        // never around a wrapper: a wrapped answer has its inner value filled,
+        // so its own data stays the answer.
+        let checked = match self.check_value(validator, value.clone(), checks) {
+            Checked::Invalid(errors) => {
+                let target = wrapped(validator, &value).cloned().unwrap_or(value);
+                if !answers_root(validator, &target)
+                    || (fill_missing == Missing::Nested
+                        && !validator.lacks_only_nested_members(&target))
+                {
+                    return Checked::Invalid(errors);
                 }
-                checked => checked,
+                match self.fill_missing(validator, &target, checks.seed) {
+                    Some(filled) => match self.check_value(validator, filled, checks) {
+                        Checked::Valid(v) => Checked::Patched(v),
+                        checked => checked,
+                    },
+                    None => Checked::Invalid(errors),
+                }
             }
-        } else {
-            self.check_value(validator, value, checks)
+            checked => checked,
         };
         match checked {
             Checked::Valid(v) => match validator.truncate_runaway(&v) {
@@ -1649,6 +1654,19 @@ fn unwrap_items(validator: &SchemaValidator, value: Value) -> Value {
     } else {
         value
     }
+}
+
+/// Which missing required members [`Engine::check_answer`] fills with the faker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Missing {
+    /// Those of nested objects (an item, a member's object) that hold at least
+    /// one member their schema declares, when the root lacks none: a root or an
+    /// object lacking a member and holding none of its own is more likely the
+    /// wrong shape (a wrapper, an object for an array, another resource) than an
+    /// oversight, so it is repaired.
+    Nested,
+    /// Every one: what a cut answer lost.
+    All,
 }
 
 impl Engine {

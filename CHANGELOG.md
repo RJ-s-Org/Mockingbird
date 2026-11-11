@@ -165,6 +165,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Fixed
 
+- A model answer whose only fault is a required member left out of a nested object (a list item, a member's object) is completed by the faker and served as `patched`, instead of costing a repair call and then falling back to a whole faker answer. A root lacking a member is still repaired, as it usually means the wrong shape.
 - `mockingbird mcp` waits up to 15 seconds (was 5) for the login shell's environment, and logs a warning when it gives up: a login shell that loads version managers or a framework no longer silently loses its variables, such as the LLM key a profile references.
 - A mock built from config under load no longer fails, and then answers 503 until the next change, because the in-memory store's one connection was busy: a call on the in-memory store waits up to 30 seconds for it (`MEMORY_ACQUIRE_TIMEOUT`), where a database server still fails after 2.
 - A mock whose build fails (a transient store error, say) is rebuilt after 1 second, then after a delay that doubles up to 60 seconds, until a build succeeds, instead of staying failed (and answering 503 when nothing else was mounted) until the next change of its config. A successful build, a change that removes or rebuilds the mock, or the registry stopping cancels the retry.
