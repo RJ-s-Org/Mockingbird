@@ -31,6 +31,10 @@
 //!   each anew). That the session took them is a record of its own ([`SERVED_TYPE`]),
 //!   so a reset of the session forgets it with the records.
 //!
+//! - [`create_fill`]: a create's members the request did not send (and the executor does
+//!   not mint) are a pool record's values, with that record's id written as the new
+//!   record's wherever a value embeds it; the model fills only what the pool record lacks.
+//!
 //! A record taken from a pool is a seeded record of the session, as a generated answer's
 //! mention is; the request record notes `pool` (how many records the call took).
 
