@@ -13,9 +13,11 @@
 //!    and `type=track` keeps `tracks`: a word names a member sharing its stem),
 //!    except where a list holds its records ([`Listing`]): the arrays of its items
 //!    and the members holding all of them, which only get the steps below, and
-//!    an item's content: its one object member holding more of the item's scalar
-//!    members than the rest of the item (a GeoJSON feature's `properties`), as an
-//!    item without it is hollow;
+//!    an item's content: its one object member, with no identity of its own,
+//!    holding more of the item's scalar members than the rest of the item (a
+//!    GeoJSON feature's `properties`), as an item without it is hollow. Like an
+//!    item's identity, it goes only when nothing else brings the estimate within
+//!    budget;
 //! 2. arrays get a `maxItems`: top-level lists 5, 3, 2, then 1 item, nested
 //!    arrays 3, 2, then 1;
 //! 3. required object and array members below the top level are left out,
@@ -59,6 +61,11 @@ const MIN_DROP_TOKENS: f64 = 12.0;
 
 /// `$ref` hops followed by the estimate.
 const MAX_DEPTH: usize = 24;
+
+/// `$ref`, combinator and member steps [`Walk::scalars`] follows: an item's
+/// content is a few objects deep, and the count runs for every item member on
+/// every estimate, so it stays far below [`MAX_DEPTH`].
+const MAX_SCALAR_HOPS: usize = 8;
 
 /// Schema nodes the estimate visits before shaping gives up.
 const MAX_VISITS: usize = 200_000;
@@ -198,12 +205,13 @@ struct Plan {
     /// See [`Shaped::fills`].
     dropped: HashSet<(String, String)>,
     tokens: f64,
-    /// An item's identity member was kept that could have gone.
+    /// An item's identity or content member was kept that could have gone.
     spared: bool,
 }
 
 /// The steps of shaping, with the page's arrays held as `held` says; `spare` keeps
-/// an array item's identity member (see [`Member::identity`]).
+/// an array item's identity and content members (see [`Member::identity`] and
+/// [`Member::content`]).
 fn plan(
     doc: &Value,
     requested: &HashSet<String>,
@@ -232,7 +240,7 @@ fn plan(
         let optional = |m: &Member| {
             !m.required
                 && !m.keeps
-                && !m.content
+                && !(spare && m.content)
                 && (named || m.holds.is_empty())
                 && !requested.contains(&m.property)
         };
@@ -269,7 +277,12 @@ fn plan(
             )?;
         }
     }
-    let spared = spare && !selected && stats.members.values().any(|m| m.identity && m.required);
+    let spared = spare
+        && !selected
+        && stats
+            .members
+            .values()
+            .any(|m| (m.identity && m.required) || m.content);
     Some(Plan {
         schema: doc,
         dropped,
@@ -637,7 +650,11 @@ impl Walk<'_> {
             let counts: Vec<(&str, usize, bool)> = props
                 .iter()
                 .map(|(name, schema)| {
-                    let object = leaf_type(schema).is_none() && self.is_object(schema, 0);
+                    // A member with an identity of its own is a related record, not
+                    // the item's content.
+                    let object = leaf_type(schema).is_none()
+                        && self.is_object(schema, 0)
+                        && !self.has_identity(schema, 0);
                     (name.as_str(), self.scalars(schema, 0), object)
                 })
                 .collect();
@@ -748,9 +765,10 @@ impl Walk<'_> {
     }
 
     /// The scalar members `node` holds, through objects (`$ref`s and combinators
-    /// followed, a definition holding itself not); a scalar or an array is one.
+    /// followed, at most [`MAX_SCALAR_HOPS`] deep, which also stops a definition
+    /// holding itself); a scalar or an array is one.
     fn scalars(&self, node: &Value, hops: usize) -> usize {
-        let Some(obj) = node.as_object().filter(|_| hops < 8) else {
+        let Some(obj) = node.as_object().filter(|_| hops < MAX_SCALAR_HOPS) else {
             return 1;
         };
         if let Some(target) = ref_target(obj) {
@@ -1327,6 +1345,67 @@ mod tests {
         assert!(item.get("properties").is_some(), "{}", shaped.schema);
         let cap = shaped.schema["properties"]["features"]["maxItems"].as_u64();
         assert!(cap.is_some_and(|n| n < 10), "{}", shaped.schema);
+    }
+
+    #[test]
+    fn a_related_record_bigger_than_its_item_is_no_content() {
+        let fields = |prefix: &str, n: usize| -> Map<String, Value> {
+            (0..n)
+                .map(|i| (format!("{prefix}_{i}"), json!({"type": "string"})))
+                .collect()
+        };
+        let mut repository = fields("repo", 90);
+        repository.insert("id".into(), json!({"type": "integer"}));
+        let mut issue = fields("issue", 30);
+        issue.insert(
+            "repository".into(),
+            json!({"type": "object", "required": ["id"], "properties": repository}),
+        );
+        let doc = json!({"type": "object", "properties": {"items": {
+            "type": "array", "items": {"type": "object", "properties": issue}
+        }}});
+        let shaped = shape(
+            &doc,
+            &HashSet::new(),
+            false,
+            1500,
+            Some(PageLimit::from(10)),
+            Listing {
+                list: true,
+                records: None,
+            },
+        )
+        .unwrap();
+        let item = &shaped.schema["properties"]["items"]["items"]["properties"];
+        assert!(item.get("repository").is_none(), "{}", shaped.schema);
+    }
+
+    #[test]
+    fn content_too_big_for_the_budget_still_goes_last() {
+        let text: Map<String, Value> = (0..500)
+            .map(|i| (format!("field_{i}"), json!({"type": "string"})))
+            .collect();
+        let doc = json!({"type": "object", "properties": {"features": {
+            "type": "array",
+            "items": {"type": "object", "required": ["id"], "properties": {
+                "id": {"type": "string"},
+                "properties": {"type": "object", "properties": text}
+            }}
+        }}});
+        let shaped = shape(
+            &doc,
+            &HashSet::new(),
+            false,
+            1500,
+            Some(PageLimit::from(10)),
+            Listing {
+                list: true,
+                records: None,
+            },
+        )
+        .unwrap();
+        let item = &shaped.schema["properties"]["features"]["items"]["properties"];
+        assert!(item.get("properties").is_none(), "{}", shaped.schema);
     }
 
     #[test]
