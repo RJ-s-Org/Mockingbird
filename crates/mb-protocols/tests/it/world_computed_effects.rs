@@ -631,3 +631,74 @@ async fn a_create_effect_places_its_record_under_the_parent_its_path_names() {
     let served = send(&h, "GET", &format!("/orders/{id}/lines/{line}"), None).await;
     assert_eq!(served["sku"], json!("auto"), "{served}");
 }
+
+#[tokio::test]
+async fn an_effect_advances_its_records_token_under_a_forced_status() {
+    let mut w = world();
+    w["types"]["orders"]["concurrency"] =
+        json!({"member": "etag", "header": "If-Match", "conflict": 412});
+    let h = support::described(SHOP, w, vec![line_answer("l2")]);
+    let held = json!({"id": "o1", "customer": "Ada", "status": "draft", "etag": "e1"});
+    h.hold("orders", &[held]).await;
+    // A generated create forced to 201 still stores its line: its effect opens the
+    // order, and the order's token advances, as the token is the record's.
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/orders/o1/lines",
+            Some(json!({"sku": "s", "quantity": 1})),
+            &[("x-mockingbird-status", "201")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let read = send(&h, "GET", "/orders/o1", None).await;
+    assert_eq!(read["status"], json!("open"), "{read}");
+    assert_ne!(read["etag"], json!("e1"), "{read}");
+    let (status, _, body) = h
+        .send(
+            "PATCH",
+            "/orders/o1",
+            Some(json!({"customer": "Bo"})),
+            &[("If-Match", "\"e1\"")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+}
+
+#[tokio::test]
+async fn an_executor_update_runs_its_effects_once() {
+    let h = shop();
+    let (order, _) = new_order(&h, "Ada").await;
+    send(
+        &h,
+        "PATCH",
+        &format!("/orders/{order}"),
+        Some(json!({"customer": "Bo"})),
+    )
+    .await;
+    let ev = events(&h).await;
+    assert_eq!(kinds(&ev), vec!["updated"], "{ev:?}");
+}
+
+#[tokio::test]
+async fn a_generated_update_runs_its_effects_once() {
+    let answer = json!({"effects": [],
+        "response": {"id": "o1", "customer": "Bo", "status": "draft"}});
+    let h = support::described(SHOP, world(), vec![answer]);
+    h.hold(
+        "orders",
+        &[json!({"id": "o1", "customer": "Ada", "status": "draft"})],
+    )
+    .await;
+    let (status, _, body) = h
+        .send(
+            "PATCH",
+            "/orders/o1",
+            Some(json!({"customer": "Bo"})),
+            &[("x-mockingbird-status", "200")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ev = events(&h).await;
+    assert_eq!(kinds(&ev), vec!["updated"], "{ev:?}");
+}

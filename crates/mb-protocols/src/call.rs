@@ -1418,17 +1418,6 @@ pub(crate) async fn complete(
                     },
                 )
                 .await;
-                // The operation's effects, once its own write of its target landed, as
-                // the executor's commit runs them: here, the one place a generated
-                // answer's target is written. The answer's computed members are filled
-                // below, reading the session as the effects left it.
-                if origin == WriteOrigin::Call
-                    && let Some(written) = &outcome.target
-                    && state.available()
-                {
-                    let (wt, wid) = (written.resource_type.as_str(), written.id.as_str());
-                    side_writes::apply(&mut state, (plan, call), wt, (wid, &written.data)).await;
-                }
                 // A described list's collection is listed now: later lists of it are
                 // answered from state.
                 if origin == WriteOrigin::Seeded {
@@ -1460,6 +1449,20 @@ pub(crate) async fn complete(
                     && (state.tracks_deleted || graphql_marks(rt, plan, t, id, &generated))
                 {
                     deleted::mark(&mut state, session, (op, call), t, id, target.as_ref()).await;
+                }
+                // The operation's effects, once its own write of its target landed (a
+                // removal marked deleted), as the executor's commit runs them: here, the
+                // one place a generated answer's target is written. The answer's
+                // computed members are filled below, reading the session as the effects
+                // left it. Unlike the executor's update, whose tokens advance before it
+                // stores, a generated update's tokens are minted after its effects run
+                // (`tokens::after_update`, below): its effects read them as held before.
+                if origin == WriteOrigin::Call
+                    && let Some(written) = &outcome.target
+                    && state.available()
+                {
+                    let (wt, wid) = (written.resource_type.as_str(), written.id.as_str());
+                    side_writes::apply(&mut state, (plan, call), wt, (wid, &written.data)).await;
                 }
             }
         }

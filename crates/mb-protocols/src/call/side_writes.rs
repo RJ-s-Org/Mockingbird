@@ -150,15 +150,14 @@ async fn one(
             create(state, at, (t, target_id), ty, &values).await
         }
         (EffectOp::Update, Some(found)) => {
+            let op = route(rt, ty, false).unwrap_or(plan.op);
+            // Its tokens advance as an executed update's do: a stale one is refused next.
+            let advancing = tokens::for_effect(state, (plan, op), &found, &values).await;
             let mut data = found.data.clone();
-            let set: Vec<&str> = values.iter().map(|(member, _)| *member).collect();
             for (member, value) in values {
                 mb_mcm::set_member_at(&mut data, member, value);
             }
-            // Its tokens advance as an executed update's do: a stale one is refused next.
-            let advancing = tokens::for_effect(state, plan, &found, &set).await;
             tokens::advance(rt, (ty, &found.id), &advancing, &found.data, &mut data);
-            let op = route(rt, ty, false).unwrap_or(plan.op);
             let place = (None, None, true);
             store_one(state, session, (op, ty), (found.id.clone(), data), place).await;
             tokens::after_update(state, session, &found, &advancing, None).await;

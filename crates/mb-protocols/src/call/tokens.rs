@@ -137,19 +137,14 @@ pub(super) struct Tokens {
 
 /// Whether this call keeps and honours tokens.
 pub(super) fn applies(rt: &MockRuntime, plan: &CallPlan<'_>) -> bool {
-    kept_by(rt, plan)
-        && matches!(
-            plan.op.kind,
-            OperationKind::Command(Effect::Update | Effect::Delete)
-        )
-}
-
-/// Whether `plan`'s writes, its own and its effects' ([`for_effect`]), keep tokens.
-fn kept_by(rt: &MockRuntime, plan: &CallPlan<'_>) -> bool {
     rt.consistency
         && plan.engine.has_provider()
         && plain(plan)
         && matches!(plan.op.binding, Binding::Http { .. })
+        && matches!(
+            plan.op.kind,
+            OperationKind::Command(Effect::Update | Effect::Delete)
+        )
 }
 
 /// What the session keeps of one record's tokens (see [`Tokens`]).
@@ -187,18 +182,21 @@ async fn kept_of(state: &mut StateAccess<'_>, session: &SessionKey, t: &str, id:
 
 /// What an effect's update of stored `target` advances, as an update sending no token
 /// would ([`check`]): its described token, and the member `If-Match` was seen paired
-/// with for it, each minted anew ([`advance`]) unless the effect sets it (`set`).
-/// Nothing when `plan` keeps no tokens. The effect stores the record with
-/// [`advance`]'s values, then [`after_update`] confirms them, as the executor's update
-/// does: a later write sending the old value is stale.
+/// with for it when that pairing is confirmed and `op` (the update that stores it) may
+/// carry it, each minted anew ([`advance`]) unless the effect sets it to a new value
+/// (`values`). The tokens are the record's, not the call's: they advance whatever the
+/// calling operation, its binding, forced status or scenario. Nothing when the mock
+/// keeps no tokens. The effect stores the record with [`advance`]'s values, then
+/// [`after_update`] confirms them, as the executor's update does: a later write
+/// sending the old value is stale.
 pub(super) async fn for_effect(
     state: &mut StateAccess<'_>,
-    plan: &CallPlan<'_>,
+    (plan, op): (&CallPlan<'_>, &Operation),
     target: &StoredResource,
-    set: &[&str],
+    values: &[(&str, Value)],
 ) -> Tokens {
     let rt = state.rt;
-    if !kept_by(rt, plan) {
+    if !rt.consistency || !plan.engine.has_provider() {
         return Tokens::default();
     }
     let t = target.resource_type.as_str();
@@ -209,18 +207,28 @@ pub(super) async fn for_effect(
         tracked,
         kept,
     } = kept_of(state, &plan.session, t, &target.id).await;
+    let current = |member: &str| member_at(&target.data, member).filter(|v| as_text(v).is_some());
+    // The effect sets it anew: a value other than the one held.
+    let set_anew = |member: &str| {
+        values
+            .iter()
+            .any(|(m, value)| *m == member && compared(value) != current(member).and_then(compared))
+    };
     let mut headers_after = headers.clone();
     let mut advancing: Vec<String> = Vec::new();
     let described = described(rt, t);
-    let paired = headers.get(IF_MATCH).and_then(Value::as_str);
+    let paired = headers
+        .get(IF_MATCH)
+        .and_then(Value::as_str)
+        .filter(|m| confirmed.iter().any(|c| c == m) && if_match_member(rt, op, t, m));
     let members = described
         .as_ref()
         .and_then(|(member, _, _)| member.as_deref())
         .into_iter()
         .chain(paired);
     for member in members {
-        let held = member_at(&target.data, member).is_some_and(|v| as_text(v).is_some());
-        if held && !set.contains(&member) && !advancing.iter().any(|m| m == member) {
+        if current(member).is_some() && !set_anew(member) && !advancing.iter().any(|m| m == member)
+        {
             advancing.push(member.to_string());
         }
     }
