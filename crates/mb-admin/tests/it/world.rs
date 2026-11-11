@@ -277,7 +277,7 @@ async fn runtime_world_equals_effective_world_without_authors() {
             let eff = effective_world(store.as_ref(), mock, version, &bundle)
                 .await
                 .unwrap();
-            let (world, revision) = runtime_world(store.as_ref(), mock, version, &bundle, &base)
+            let (world, revision, _) = runtime_world(store.as_ref(), mock, version, &bundle, &base)
                 .await
                 .unwrap();
             assert_eq!((&world, revision), (&eff.world, eff.revision), "{label}");
@@ -315,7 +315,7 @@ async fn runtime_world_equals_effective_world_without_authors() {
     )
     .await;
     check("a revision that is not a world").await;
-    let (world, revision) = runtime_world(store.as_ref(), mock, version, &bundle, &base)
+    let (world, revision, _) = runtime_world(store.as_ref(), mock, version, &bundle, &base)
         .await
         .unwrap();
     assert_eq!((world, revision), (base.clone(), 3));

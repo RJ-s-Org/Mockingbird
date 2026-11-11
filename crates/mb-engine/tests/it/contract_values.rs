@@ -533,3 +533,24 @@ paths:
     assert_eq!(body["code"], "name_in_use", "{body}");
     assert_ne!(body["conflict"]["name"], "name_in_use", "{body}");
 }
+
+/// A contract that declares its errors only as `default` refuses a repeated value with
+/// the status the world gives it, in the `default` response's shape.
+#[test]
+fn a_default_error_response_declares_a_repeats_refusal() {
+    let src = r##"
+openapi: 3.1.0
+info: {title: Shop, version: "1"}
+paths:
+  /things:
+    post:
+      operationId: createThing
+      requestBody: {content: {application/json: {schema: {type: object, properties: {sku: {type: string}}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {type: object, properties: {id: {type: string}}}}}}
+        default: {description: error, content: {application/json: {schema: {type: object, required: [error], properties: {error: {type: object, required: [type], properties: {type: {type: string}}}}}}}}
+"##;
+    let bundle = compile(src.as_bytes()).unwrap();
+    let body = repeat_body(&bundle, 409, "sku");
+    assert!(body["error"]["type"].is_string(), "{body}");
+}

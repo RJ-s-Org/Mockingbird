@@ -308,12 +308,17 @@ pub fn with_effective(
     world: serde_json::Value,
     allow_refusals: bool,
 ) -> mb_protocols::MockRuntime {
-    let (base, effective, refused) = effective_world(rt.bundle(), world);
+    let doc: mb_mcm::world::World = serde_json::from_value(world).unwrap();
+    let base = mb_mcm::world::tier0(rt.bundle());
+    let (effective, v) = mb_mcm::world::effective_validated(rt.bundle(), &base, &doc);
     assert!(
-        allow_refusals || refused.is_empty(),
-        "the test world has refused entries: {refused:?}"
+        allow_refusals || v.refused.is_empty(),
+        "the test world has refused entries: {:?}",
+        v.refused
     );
+    let written = mb_mcm::world::written_path_targets(&v.applied, &effective);
     rt.with_world(&base, &effective, 1)
+        .with_path_targets(&written)
 }
 
 #[cfg(feature = "http-rest")]

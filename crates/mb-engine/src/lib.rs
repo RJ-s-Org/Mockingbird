@@ -1622,10 +1622,10 @@ impl Engine {
 
     /// The refusal `code` of a create that repeats the value of request member `member`
     /// a stored record holds, decided by the caller from what the contract says of it:
-    /// `op`'s response declared for `code` by that very status, rendered as an LLM's
-    /// refusal is, its body taking what the contract says of that repeat (see
+    /// `op`'s response declared for `code`, by that status or `default`, rendered as an
+    /// LLM's refusal is, its body taking what the contract says of that repeat (see
     /// [`contract_values`]), with `answered`'s source and usage. `None` when `op`
-    /// declares no response for `code` itself.
+    /// declares no response for `code`.
     #[must_use]
     pub fn refuse_repeated_value(
         &self,
@@ -1636,17 +1636,14 @@ impl Engine {
         answered: &GeneratedResponse,
     ) -> Option<GeneratedResponse> {
         let repeated = [member.to_string()];
-        op.outputs
-            .iter()
-            .any(|o| o.status == StatusSelector::Code(code))
-            .then(|| {
-                let refusal = Refusal {
-                    code,
-                    repeated: &repeated,
-                    written: None,
-                };
-                self.refused(bundle, op, call, refusal, (answered.source, answered.usage))
-            })
+        guards::declares_code(op, code).then(|| {
+            let refusal = Refusal {
+                code,
+                repeated: &repeated,
+                written: None,
+            };
+            self.refused(bundle, op, call, refusal, (answered.source, answered.usage))
+        })
     }
 
     /// A refusal decided from state alone, before generating (a unique value

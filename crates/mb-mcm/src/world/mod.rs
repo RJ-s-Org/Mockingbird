@@ -38,7 +38,7 @@ pub use compiled::{
     ComputedEntry, EffectEntry, Expressions, ListSort, ListWhere, MAX_DERIVED_CHILD_TYPES,
     OpExpressions, RefuseEntry, SetEntry, SetValue, TextValue, TypeExpressions, changes_as_set,
 };
-pub use effective::{effective, effective_validated};
+pub use effective::{effective, effective_validated, written_path_targets};
 pub use tier0::{record_pointer, tier0};
 pub use validate::{Refusal, RefusalCode, Validation, check_size, validate};
 

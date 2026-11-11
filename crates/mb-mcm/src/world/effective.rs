@@ -5,6 +5,8 @@
 //! reads: the Admin API's effective view and the runtime both call it, so
 //! they never disagree on what a revision means.
 
+use std::collections::BTreeSet;
+
 use crate::Bundle;
 
 use super::{OpKind, Refusal, RefusalCode, TypeDesc, Validation, World, overlay, validate};
@@ -63,6 +65,29 @@ pub fn effective_validated(bundle: &Bundle, base: &World, doc: &World) -> (World
         }
     }
     (world, v)
+}
+
+/// The operations whose effective target is a path parameter the description writes,
+/// not tier 0's guess: each operation of `applied` (a revision's entries that apply,
+/// as [`effective_validated`] answers them) whose target names the path parameter
+/// `effective`, the effective world, keeps.
+#[must_use]
+pub fn written_path_targets(applied: &World, effective: &World) -> BTreeSet<String> {
+    applied
+        .operations
+        .iter()
+        .filter_map(|(id, desc)| {
+            let param = desc.target.as_ref()?.path_param.as_deref()?;
+            let kept = effective
+                .operations
+                .get(id)?
+                .target
+                .as_ref()?
+                .path_param
+                .as_deref();
+            (kept == Some(param)).then(|| id.clone())
+        })
+        .collect()
 }
 
 /// Drops from `world` the path parameter of each operation `applied` makes a

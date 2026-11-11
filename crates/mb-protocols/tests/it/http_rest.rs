@@ -1598,7 +1598,8 @@ async fn create_never_reuses_a_stored_id() {
 }
 
 /// `/users/{username}` reads by login while state is keyed by `id`: a
-/// missing entry says nothing, so `unknown_ids: 404` keeps generating.
+/// missing entry says nothing, so `unknown_ids: 404` keeps generating, with tier 0's
+/// world attached as the runtime attaches it (its target restates `{username}`).
 #[tokio::test]
 async fn unknown_ids_404_only_when_the_path_names_the_identity() {
     let src = r#"
@@ -1614,12 +1615,15 @@ paths:
         "404": {description: Not found}
 "#;
     let bundle = Arc::new(compile(src.as_bytes()).unwrap());
+    let base = mb_mcm::world::tier0(&bundle);
+    assert!(base.operations["getUser"].target.is_some());
     let mut rt = MockRuntime::new(
         "users",
         bundle,
         Arc::new(Engine::new(None, EngineConfig::default())),
         memory_state(),
-    );
+    )
+    .with_world(&base, &base, 0);
     rt.unknown_ids = UnknownIds::NotFound;
     let router = http_rest::router(Arc::new(rt));
     let resp = router.oneshot(get("/users/octocat")).await.unwrap();

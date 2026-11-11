@@ -1,7 +1,7 @@
 //! A contract that declares its errors only as `default` (Stripe's): a world refusal,
 //! `not_found` and `unknown_ids: 404` answer their status with the `default` response;
-//! a read whose world target names its path parameter, whatever the name, is a read by
-//! id for `unknown_ids: 404`.
+//! a read whose world description writes its target's path parameter, whatever the
+//! name, is a read by id for `unknown_ids: 404`.
 #![cfg(feature = "http-rest")]
 
 use axum::http::StatusCode;
@@ -83,7 +83,7 @@ async fn a_default_error_response_declares_a_refusal_and_not_found() {
             "code": "payment_intent_invalid_currency",
             "message": "au_becs_debit takes aud"
         }]},
-        "GetPaymentIntentsIntent": {"not_found": 404}
+        "GetPaymentIntentsIntent": {"target": {"path_param": "intent"}, "not_found": 404}
     }});
     let (_, _, refused) = support::effective_world(
         &mb_import::compile(PAYMENTS.as_bytes()).unwrap(),
