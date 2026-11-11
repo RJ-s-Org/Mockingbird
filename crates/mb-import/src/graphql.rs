@@ -691,6 +691,50 @@ fn write_identity(
     })
 }
 
+/// The record a mutation's payload holds, when the mutation names it: `payload` (a
+/// type with no `id` of its own) has exactly one member holding an object type with an
+/// `id`, not as a list (`CartLinesAddPayload`'s `cart`), and `f` has a `<type>Id`
+/// argument naming that record (`cartId`). Its member, its type (lowercased) and that
+/// argument.
+fn held_record(schema: &Schema, f: &Field, payload: &str) -> Option<(String, String, String)> {
+    if !matches!(f.ty.base, BaseType::Named(_)) {
+        return None;
+    }
+    let fields = schema.object_fields(payload)?;
+    if fields.iter().any(|x| x.name == "id") {
+        return None;
+    }
+    let identified = |t: &str| {
+        schema
+            .object_fields(t)
+            .is_some_and(|fields| fields.iter().any(|x| x.name == "id"))
+    };
+    let holding: Vec<&Field> = fields
+        .iter()
+        .filter(|x| matches!(x.ty.base, BaseType::Named(_)) && identified(named_type(&x.ty)))
+        .collect();
+    let [one] = holding.as_slice() else {
+        return None;
+    };
+    let held = named_type(&one.ty).to_lowercase();
+    // A bare `id` may name the part the name names (`productVariantDelete(id:)`
+    // answering the product that stays); `cartId` names the cart.
+    let argument = id_argument(f, Some(&held)).filter(|a| a != "id")?;
+    Some((one.name.clone(), held, argument))
+}
+
+/// `op` as an action on `resource_type`, named by `identity`.
+fn with_identity(
+    mut op: Operation,
+    resource_type: Option<String>,
+    identity: Identity,
+) -> Operation {
+    op.kind = OperationKind::Command(Effect::Other);
+    op.resource_type = resource_type;
+    op.identity = Some(identity);
+    op
+}
+
 fn operation(
     schema: &Schema,
     operation_type: GraphqlOperationType,
@@ -717,6 +761,12 @@ fn operation(
         GraphqlOperationType::Subscription => OperationKind::StreamServer,
     };
     let named = named_type(&f.ty);
+    // A mutation on part of a record its payload holds (`cartLinesAdd(cartId:)`
+    // answering `{cart}`) is an action on that record.
+    let held = (operation_type == GraphqlOperationType::Mutation)
+        .then(|| held_record(schema, f, named))
+        .flatten()
+        .filter(|(_, held, _)| write.as_ref().is_none_or(|(_, record)| record != held));
     let object_fields = schema.object_fields(named);
     let write_effect = write.as_ref().map(|(effect, _)| *effect);
     let record = write.map(|(_, record)| record);
@@ -745,7 +795,7 @@ fn operation(
             write_identity(schema, f, effect, record_of_write.as_deref()?, named)
         });
     let (body, body_required) = input_values_schema(&f.args);
-    Operation {
+    let op = Operation {
         id: format!("{label}.{}", f.name),
         protocol: Protocol::Graphql,
         binding: Binding::Graphql {
@@ -778,6 +828,20 @@ fn operation(
             .into_iter()
             .collect(),
         security: Vec::new(),
+    };
+    match held {
+        Some((member, held, argument)) => with_identity(
+            op,
+            Some(held),
+            Identity {
+                path_param: None,
+                field: "id".into(),
+                input_field: Some(argument),
+                path_field: None,
+                record: Some(mb_mcm::RecordAt::Member(member)),
+            },
+        ),
+        None => op,
     }
 }
 
