@@ -61,7 +61,7 @@ Compiling a contract never fails over what the mock cannot represent exactly; it
 | `invalid_resource_extension` | A value of an operation's [`x-mockingbird-resource`](import.md#correcting-it-x-mockingbird-resource) is not valid; it is ignored and inference stands. |
 | `response_header_unresolved` | A response header's `$ref` does not resolve; the header is left out. |
 | `security_scheme_unsupported` | A security requirement uses a scheme the mock cannot check (see [the console guide](console.md)). |
-| `schema_too_large` | A response schema is over the 64 KiB prompt budget; the prompt shows a trimmed schema. |
+| `schema_too_large` | A response schema is over the 64 KiB prompt budget; the prompt shows a trimmed schema. The schema of an answer the model writes is fitted to 24 KiB: a member that is either an id string or a related object (Stripe's expandable fields) shows only the id unless the request's `expand` names it, the definitions behind members that may be null become stubs first, and descriptions are cut. |
 | `xsd_wildcard_ignored` | An XSD uses `xs:any` or `xs:anyAttribute`; the elements and attributes they allow are never generated. |
 | `response_body_omitted` | A response declares only a binary media type (`application/octet-stream`, …) and no example, so it is served without a body (see [response media types](#response-media-types)). |
 | `wsdl_import_ignored` | A `wsdl:import` names a document that is not in the upload (a URL, say), so it is not followed; only the uploaded definitions are served. A document that needs the missing definitions fails instead, with an error naming the import. Imports of uploaded files are followed (see [Known limits](#known-limits)). |

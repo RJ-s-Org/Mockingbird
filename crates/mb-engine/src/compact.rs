@@ -164,10 +164,10 @@ fn drop_unreachable_defs(doc: &mut Value) {
     };
     let mut reached: HashSet<String> = HashSet::new();
     while let Some(name) = pending.pop() {
-        if reached.insert(name.clone()) {
-            if let Some(def) = defs.get(&name) {
-                refs(def, &mut pending);
-            }
+        if reached.insert(name.clone())
+            && let Some(def) = defs.get(&name)
+        {
+            refs(def, &mut pending);
         }
     }
     if let Some(defs) = doc.get_mut("$defs").and_then(Value::as_object_mut) {
