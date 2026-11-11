@@ -182,3 +182,82 @@ async fn a_graphql_create_fills_its_own_scalars_and_no_nested_record() {
         assert!(data.get(nested).is_none(), "{nested}: {data}");
     }
 }
+
+/// A create left to generation (here a seeded call) whose answer holds the
+/// record below its top (`/commentEdge/node`), with only the members its
+/// selection asks for, still takes what the world `set`s on it, in the answer
+/// and in what is stored.
+#[tokio::test]
+async fn a_generated_create_takes_its_set_where_the_answer_holds_the_record() {
+    const COMMENTS: &str = r#"
+type IssueComment { id: ID! body: String! isMinimized: Boolean! url: String! }
+type IssueCommentEdge { node: IssueComment }
+input AddCommentInput { subjectId: ID! body: String! }
+type AddCommentPayload { commentEdge: IssueCommentEdge }
+type Query { comment(id: ID!): IssueComment }
+type Mutation { addComment(input: AddCommentInput!): AddCommentPayload }
+"#;
+    let doc: mb_mcm::world::World = serde_json::from_value(json!({
+        "version": 1,
+        "operations": {
+            "Mutation.addComment": {"kind": "create", "type": "issuecomment",
+                "answer": {"record": "/commentEdge/node"}, "set": {"isMinimized": "false"}}
+        }
+    }))
+    .unwrap();
+    let bundle = compile(COMMENTS.as_bytes()).unwrap();
+    let base_world = mb_mcm::world::tier0(&bundle);
+    let (world, refused) = mb_mcm::world::effective(&bundle, &base_world, &doc);
+    assert!(refused.is_empty(), "{refused:?}");
+    let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let provider = Arc::new(mb_llm::ScriptedProvider::new(vec![Ok(json!({
+        "__typename": "AddCommentPayload", "commentEdge": {"__typename": "IssueCommentEdge",
+        // Only what the selection asks for: no `body` or `url`, which the type requires.
+        "node": {"__typename": "IssueComment", "id": "IC_1", "isMinimized": true}}})
+    .to_string())]));
+    let rt = MockRuntime::new(
+        "gh",
+        Arc::new(bundle),
+        Arc::new(Engine::new(
+            Some(provider as Arc<dyn mb_llm::Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::clone(&store),
+    )
+    .with_world(&base_world, &world, 1);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = graphql::try_router(Arc::new(rt)).unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let query = r#"mutation { addComment(input: {subjectId: "I_1", body: "Reproduced"}) {
+        commentEdge { node { id isMinimized } } } }"#;
+    let body: Value = reqwest::Client::new()
+        .post(format!("http://{addr}/graphql"))
+        .header("content-type", "application/json")
+        .header("x-mockingbird-session", "s1")
+        .header("x-mockingbird-seed", "1")
+        .body(json!({ "query": query }).to_string())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(body.get("errors").is_none(), "{body}");
+    assert_eq!(
+        body["data"]["addComment"]["commentEdge"]["node"]["isMinimized"], false,
+        "{body}"
+    );
+    let key = SessionKey {
+        workspace: "default".into(),
+        mock: "gh".into(),
+        session: "s1".into(),
+    };
+    let held = store.export(&key).await.unwrap();
+    let comment = held
+        .iter()
+        .find(|r| r.resource_type == "issuecomment")
+        .unwrap_or_else(|| panic!("{held:?}"));
+    assert_eq!(comment.data["isMinimized"], false, "{}", comment.data);
+}
