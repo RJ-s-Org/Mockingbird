@@ -784,9 +784,9 @@ fn typed_code(code: &Value, prop: &Value, defs: &Map<String, Value>) -> Option<V
 }
 
 /// `body`, valid against `validator`, with `code` in the member of the error `schema`
-/// that holds its code ([`code_path`]: `code`, `error_code`, `type`, at the top
+/// that holds its code (`code_path`: `code`, `error_code`, `type`, at the top
 /// level, under an `error` object or in the first of an `errors` array), as that
-/// member declares it ([`typed_code`]). The change is kept only while the body still
+/// member declares it (`typed_code`). The change is kept only while the body still
 /// validates; with no such member, or a body not valid to begin with, it is left as it
 /// is.
 #[must_use]
@@ -843,9 +843,9 @@ fn cause_words(cause: ErrorCause) -> &'static [&'static str] {
 }
 
 /// The code the error `schema` itself gives for `cause`: a value of its code member
-/// ([`code_path`]) its `const` or `enum` declares, whose letters and digits name the
+/// (`code_path`) its `const` or `enum` declares, whose letters and digits name the
 /// cause (`not_found` for a missing record, `ALREADY_EXISTS` for a taken value), the
-/// one naming it most closely ([`cause_words`] lists the words most specific first)
+/// one naming it most closely (`cause_words` lists the words most specific first)
 /// when several do. `None`
 /// when it declares none: a code is never made up. An example is no such value: a
 /// schema shared by several statuses shows one that speaks for none of them.
