@@ -4026,7 +4026,10 @@ paths:
         .await;
     assert_eq!(
         capture.of("createReceipt"),
-        vec![create_line("createReceipt", Some("render_failed"))],
+        vec![ExecLine {
+            render_error: Some("<root> not".into()),
+            ..create_line("createReceipt", Some("render_failed"))
+        }],
         "{body}"
     );
     // Two answered calls, the fill and the generation (any repair after them finds the
@@ -4052,10 +4055,14 @@ async fn a_create_whose_answer_does_not_render_falls_back_as_render_failed() {
     let (_, _, body) = h
         .send("POST", "/receipts", Some(json!({"total": 3})), &[])
         .await;
-    // The record would render into its read; the answer never does.
+    // The record would render into its read; the answer never does, and the log says
+    // why.
     assert_eq!(
         capture.of("createReceipt"),
-        vec![create_line("createReceipt", Some("render_failed"))],
+        vec![ExecLine {
+            render_error: Some("<root> not".into()),
+            ..create_line("createReceipt", Some("render_failed"))
+        }],
         "{body}"
     );
     let t = type_of(&h, "getReceipt");

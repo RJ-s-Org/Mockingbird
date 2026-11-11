@@ -9,7 +9,10 @@
 //!   it declares (undescribed, a member named for the type whose read by id the route
 //!   runs through: `deal_id` under `/deals/{id}/lines`). A path value is set at its member's dotted path
 //!   ([`super::super::path_set`]): one naming an object member goes into the member the
-//!   description names below it, and wins over anything fill would write.
+//!   description names below it, and wins over anything fill would write. A `null` sent
+//!   for a member the record neither requires nor takes `null` in (Telegram's
+//!   `"message_thread_id": null`) is left out, as real APIs treat it, and never filled
+//!   ([`Shape::left_out_nulls`]).
 //! - Its id is the one the request asks for (a client-chosen id, a path value naming the
 //!   record), else one minted in the identity header the answer names it in, else one
 //!   drawn as the type declares its identity, in its pattern.
@@ -50,7 +53,7 @@
 //!   reference where the read holds an object, an array item lacking a required id)
 //!   is never stored, and the create generates (`record_invalid`, with `render_error`
 //!   naming the first violation). So does one whose answer does not render
-//!   (`render_failed`).
+//!   (`render_failed`, with `render_error` naming the answer's first violation).
 //! - The answer is [`super::render`]'s (no body, the record, or an acknowledgement
 //!   drawn from its own schema with the record's members laid over it); a described
 //!   long-running answer holds the record as its result, and is done: the record is
@@ -69,7 +72,10 @@ use serde_json::{Map, Value};
 use tracing::Instrument;
 
 use super::writes::written;
-use super::{Fallback, Held, Ran, Rendered, Write, answered, commit, fell_back};
+use super::{
+    Fallback, Held, Ran, Rendered, Write, answered, commit, fell_back, fell_back_unrendered,
+    unrendered,
+};
 use crate::call::bundle_index::record_schema_of;
 use crate::call::entities::type_check;
 use crate::call::owners::{Compound, schema_members};
@@ -146,6 +152,10 @@ pub(super) async fn run(
     };
     // A record member the query names is set as the body sets it, as an update's is.
     shape.query_members(rt, op, call, &mut record);
+    // A `null` sent for a member the record neither requires nor takes `null` in is
+    // left out, as real APIs treat it (Telegram's `"message_thread_id": null`): never
+    // stored, never filled.
+    let nulled = shape.left_out_nulls(rt, &mut record);
     // A member sent in another shape than the record holds it (input lines naming
     // variants, where the record holds a connection of lines) is the API's to turn into
     // the record: generated knowing the request, never filled blind.
@@ -234,6 +244,11 @@ pub(super) async fn run(
 
     // The members nobody else decides, then the initial state.
     let mut owned = server_owned(rt, t, field, request);
+    for name in nulled {
+        if !owned.contains(&name) {
+            owned.push(name);
+        }
+    }
     if let Some((member, value)) = initial(rt, t, request) {
         mb_mcm::set_member_at(&mut data, &member, value);
     }
@@ -424,12 +439,21 @@ pub(super) async fn run(
     if from_pool {
         plan.exprs.pooled(1);
     }
-    let answer = filled
-        .and_then(|f| written(rt, plan, call, (&key, &f.data), response_schema))
+    let filled_data = filled.map(|f| f.data);
+    let answer = filled_data
+        .as_ref()
+        .and_then(|f| written(rt, plan, call, (&key, f), response_schema))
         .or_else(|| written(rt, plan, call, (&key, &data), response_schema))
         .or_else(|| enveloped(rt, op, (&key, t, &data), response_schema));
     let Some(mut answer) = answer else {
-        fell_back(rt, plan, kind, Fallback::RenderFailed.as_str());
+        let why = unanswered(
+            rt,
+            op,
+            (&key, t),
+            filled_data.as_ref().unwrap_or(&data),
+            response_schema,
+        );
+        fell_back_unrendered(rt, plan, kind, Fallback::RenderFailed, &why);
         return Ran::Filled(usage);
     };
     answer.usage = usage;
@@ -1074,6 +1098,43 @@ impl Shape {
             }
         }
         Some(record)
+    }
+
+    /// Removes from `record` each `null` the record leaves out ([`Shape::omits_null`]);
+    /// their names.
+    fn left_out_nulls(
+        &self,
+        rt: &crate::MockRuntime,
+        record: &mut Map<String, Value>,
+    ) -> Vec<String> {
+        let names: Vec<String> = record
+            .iter()
+            .filter(|(name, value)| value.is_null() && self.omits_null(rt, name))
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in &names {
+            record.remove(name);
+        }
+        names
+    }
+
+    /// Whether member `name` holds no `null`: a schema of the record declares it, and
+    /// none requires it or takes `null` in it.
+    fn omits_null(&self, rt: &crate::MockRuntime, name: &str) -> bool {
+        let bundle = rt.bundle();
+        let mut declared = false;
+        for schema in &self.schemas {
+            if required_members(bundle, schema).iter().any(|r| r == name) {
+                return false;
+            }
+            if let Some(member) = property_schema(bundle, schema, name) {
+                if fits(rt, &member, &Value::Null) {
+                    return false;
+                }
+                declared = true;
+            }
+        }
+        declared
     }
 
     /// The top-level members besides identity `field` that a path may name a record
@@ -1803,15 +1864,27 @@ pub(in crate::call) fn unreadable(
 
 /// Logs that a create's record is not stored ([`Fallback::RecordInvalid`]), and why.
 fn invalid(rt: &crate::MockRuntime, plan: &CallPlan<'_>, why: &str) {
-    plan.exprs.fell_back(Fallback::RecordInvalid.as_str(), None);
-    tracing::info!(
-        mock = %rt.name,
-        operation = %plan.op.id,
-        exec = "create",
-        exec_fallback = Fallback::RecordInvalid.as_str(),
-        render_error = %why,
-        "not answered by the executor"
-    );
+    fell_back_unrendered(rt, plan, OpKind::Create, Fallback::RecordInvalid, why);
+}
+
+/// Why the created `record` (stored as `id` of type `t`) does not render into `op`'s
+/// answer, as a read's `render_error` gives it ([`unrendered`]): the answer's envelope
+/// members drawn as [`enveloped`] draws them.
+fn unanswered(
+    rt: &crate::MockRuntime,
+    op: &Operation,
+    (id, t): (&str, &str),
+    record: &Value,
+    response_schema: Option<&Value>,
+) -> String {
+    let drawn = rt.engine.envelope_draws(rt.bundle(), op, response_schema);
+    let held = mb_state::StoredResource {
+        resource_type: t.to_owned(),
+        id: id.to_owned(),
+        data: record.clone(),
+    };
+    let drawn = (!drawn.is_empty()).then_some(&drawn);
+    unrendered(rt, op, &held, drawn, response_schema)
 }
 
 /// Sets in `value` what `schema` decides of the members it lacks ([`decided`]), and

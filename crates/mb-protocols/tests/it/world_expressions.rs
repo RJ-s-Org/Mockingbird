@@ -238,6 +238,7 @@ async fn a_create_the_executor_gives_up_on_reads_the_generated_record_s_id() {
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let request = record_of(&h, "addMember");
     assert_eq!(request["exec_fallback"], "record_invalid", "{request}");
+    assert_eq!(request["render_error"], "/number type", "{request}");
     let id = body["id"].as_str().expect("an id").to_owned();
     assert_eq!(body["label"], format!("https://x/{id}"), "{body}");
 }
