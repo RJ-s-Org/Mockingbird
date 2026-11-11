@@ -12,7 +12,7 @@ Mockingbird imports an API contract and serves a running mock that answers with 
 A mock is ready for an app only after its world description is reviewed. Importing is the first step, not the last:
 
 1. `import_contract`. Its answer lists `next_steps` and the new version's `world_gaps`.
-2. **Load the `mockingbird-world` skill and follow it.** Work through the gaps: describe what the contract and its documentation state about what actions change, list filters, scope and paging, unique members and soft deletes. Gaps marked advisory are checks: leave them when the docs say nothing. What the description does not state is answered by the model, not from the records.
+2. **Load the `mockingbird-world` skill and follow it.** Work through the gaps: describe what the contract and its documentation state about what actions change, list filters, scope and paging, unique members and soft deletes. Gaps marked advisory are checks: leave them when the docs say nothing. Behaviour the docs state beyond that (a member computed or copied from another record, a generated id format, a refusal under a condition, a write to another record, a sort parameter) is written as an expression: `set` (with `mint`/`seq` for ids), `computed`, `refuse`, `effects` and `list`, in that skill's **Expressions** section. What the description does not state is answered by the model, not from the records.
 3. Check it with `call_mock`: create a record, read it back and list it; run an action on it when the API has one. Fix what answered wrongly.
 4. Add scenarios or seed data only when the user's app needs them (`mockingbird-mock-api`).
 
@@ -22,7 +22,7 @@ A mock is ready for an app only after its world description is reviewed. Importi
 | --- | --- | --- |
 | Install Mockingbird, pick an LLM (OpenRouter, Google AI Studio, Cloudflare AI Gateway, OpenAI, Anthropic, local, any OpenAI-compatible endpoint) | `mockingbird-setup` skill | `install.sh`, `mockingbird init`, `mockingbird llm configure/test` |
 | Mock an API from a contract, docs page, HAR or Postman collection; add scenarios, state, fixtures, chaos, events | `mockingbird-mock-api` skill | `import_contract`, `put_scenario`, `call_mock` |
-| Review or fix how a mock's contract behaves as a world (record identity, where answers hold the record, lifecycles, soft deletes, unique members, paging), after every import | `mockingbird-world` skill | `get_world`, `patch_world` |
+| Review or fix how a mock's contract behaves as a world (record identity, where answers hold the record, lifecycles, soft deletes, unique members, paging; computed members, generated ids, conditional refusals and side effects as expressions), after every import | `mockingbird-world` skill | `get_world`, `patch_world` |
 | Self-host for a team: Docker, Compose, Kubernetes/Helm, auth, expose to ChatGPT | `mockingbird-deploy` skill | `mockingbird server start`, Helm chart |
 | Use mocks in tests or CI | `mockingbird-testing` skill | `--offline`, sessions, request log |
 

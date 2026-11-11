@@ -1,6 +1,6 @@
 ---
 name: mockingbird-world
-description: Review and write a Mockingbird mock's world description - how its contract behaves as a world (record identity, where requests and answers hold the record, parents, lifecycles and soft deletes, unique members, concurrency tokens, list scope, filters, order and paging). Use after every contract import, or when a mock loses records, cannot read back what it created, or pages, filters or deletes differently from the API's documentation.
+description: Review and write a Mockingbird mock's world description - how its contract behaves as a world (record identity, where requests and answers hold the record, parents, lifecycles and soft deletes, unique members, concurrency tokens, list scope, filters, order and paging; expressions for computed members, generated ids (set, mint, seq), conditional refusals, side effects on other records and sort parameters). Use after every contract import, or when a mock loses records, cannot read back what it created, or pages, filters or deletes differently from the API's documentation.
 ---
 
 # Describe a mock's world
@@ -113,7 +113,7 @@ The six patterns below cover most of what documentation asks for. Each is generi
      plots:
        computed: { label: "record.name + ' (' + record.number + ')'" }
    ```
-3. **Hash id: an identity the docs define as a hash.** "A device's id is the SHA-256 of its lower-cased serial." Setting the identity member names the record by it, so a read by that hash finds it.
+3. **Hash id: an identity the docs define as a hash.** "A device's id is the SHA-256 of its lower-cased serial." Setting the identity member names the record by it, so a read by that hash finds it. An id format the docs give without a hash (a `dev_` prefix and 24 lower-case letters or digits) is `set: { id: "'dev_' + mint('[a-z0-9]{24}')" }`.
    ```yaml
    operations:
      registerDevice:

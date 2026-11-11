@@ -500,7 +500,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "update_mock",
             title: "Update a mock",
-            description: "PATCH a mock. Fields: route_prefix, persona, llm_profile, header_overrides, data_plane_auth {mode: none|api_key|passthrough_validate, header}, chaos {error_rate, latency_jitter {min_ms, max_ms}, drop_stream_rate} (null clears), limits, faker_seed (0 to 2^64-1; null clears). Only the given fields change.",
+            description: "PATCH a mock. Fields: route_prefix, persona, llm_profile, header_overrides, unknown_ids (generate|404: how a read of an id the session does not hold is answered), data_plane_auth {mode: none|api_key|passthrough_validate, header}, chaos {error_rate, latency_jitter {min_ms, max_ms}, drop_stream_rate} (null clears), limits, faker_seed (0 to 2^64-1; null clears). Only the given fields change.",
             schema: obj(
                 json!({ "name": mock(), "patch": o("Fields to change.") }),
                 &["name", "patch"],
