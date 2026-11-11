@@ -85,7 +85,7 @@ mod patches;
 mod queue;
 mod writes;
 
-pub(super) use create::unreadable;
+pub(super) use create::{initial_token, unreadable};
 pub(super) use queue::forget as forget_queue;
 
 /// What [`run`] did with a call.
@@ -660,8 +660,8 @@ pub(super) async fn commit(
         let session = &plan.session;
         let collection = collection_of(op, call);
         // What the operation's effects see of its target, when it has any: the record
-        // as the write leaves it (as it was held, for a removal or a write within its
-        // parent), and its type.
+        // as the write leaves it (as it was held, for a removal; the child as written,
+        // or as held when removed, for a write within its parent), and its type.
         let effected = rt
             .described()
             .expressions(&op.id)

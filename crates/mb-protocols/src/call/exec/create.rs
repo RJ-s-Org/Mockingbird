@@ -695,7 +695,7 @@ fn token_members(rt: &crate::MockRuntime, t: &str) -> Vec<String> {
 /// when the request sent none and a read declares the member: an integer's `1` (its
 /// `minimum`, if higher), else a value drawn as the member declares it, as a minted id
 /// is.
-fn initial_token(
+pub(in crate::call) fn initial_token(
     rt: &crate::MockRuntime,
     (seed, t): (crate::call::header_ids::MintSeed<'_>, &str),
     record: &mut Value,

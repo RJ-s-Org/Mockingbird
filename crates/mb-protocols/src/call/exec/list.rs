@@ -248,6 +248,8 @@ async fn answer(
     });
     let field = item_identity(bundle, op, &envelope);
     let mut items = Vec::new();
+    // The record as held, beside its item, only for computed members to read.
+    let computes = crate::call::computed::describes(rt, t);
     let mut in_scope = false;
     for r in &records {
         if !(placed.contains_key(r.id.as_str())
@@ -266,7 +268,12 @@ async fn answer(
             .iter()
             .all(|(param, f)| knows(param) || lists::holds_wanted(&item, f));
         if kept {
-            items.push((item, r.data.clone()));
+            let held = if computes {
+                r.data.clone()
+            } else {
+                Value::Null
+            };
+            items.push((item, held));
         }
     }
     // Records of the type are held, none in this collection, which was never listed and

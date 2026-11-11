@@ -39,25 +39,48 @@ pub(super) struct WriteRequest<'a> {
 }
 
 /// What [`write_state`] did with an answer: how many records it located and handed to
-/// the store (whatever the store then answered), and whether a create or update found
-/// no record of its type in the answer or the request (the `no_record` world gap).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// the store (whatever the store then answered), whether a create or update found no
+/// record of its type in the answer or the request (the `no_record` world gap), and the
+/// call's target as it wrote it, for its operation's effects ([`side_writes::apply`]).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct WriteOutcome {
     pub(super) stored: usize,
     pub(super) no_record: bool,
+    /// The one record a call's create, update, action or soft delete stored (as
+    /// stored), or its delete removed (as it was held): its operation's target. `None`
+    /// when it wrote none, or several.
+    pub(super) target: Option<StoredResource>,
 }
 
 impl WriteOutcome {
-    /// One record located and handed to the store.
-    const ONE: Self = Self {
-        stored: 1,
-        no_record: false,
-    };
     /// No record of the type found where one was written.
     const NO_RECORD: Self = Self {
         stored: 0,
         no_record: true,
+        target: None,
     };
+
+    /// One record located and handed to the store: the target, `t` `id` as `data`.
+    fn one(t: &str, id: String, data: Value) -> Self {
+        Self {
+            stored: 1,
+            no_record: false,
+            target: Some(StoredResource {
+                resource_type: t.to_string(),
+                id,
+                data,
+            }),
+        }
+    }
+
+    /// The target written as `target`, with no record counted as stored: a removed
+    /// one as it was held, a soft-deleted one as stored.
+    fn removed(gone: Option<StoredResource>) -> Self {
+        Self {
+            target: gone,
+            ..Self::default()
+        }
+    }
 }
 
 /// Writes a 2xx answer to state: a call's create, update or delete, or
@@ -115,7 +138,7 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
         // The list's items read back in its order.
         let outcome = WriteOutcome {
             stored: seeded.len(),
-            no_record: false,
+            ..WriteOutcome::default()
         };
         let stored = state.insert_seeded_all(session, seeded.clone()).await;
         for (stored, inserted) in seeded.into_iter().zip(stored) {
@@ -152,11 +175,15 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
         if !made.is_empty() {
             let field = records::identity_member(rt, op, resource_type);
             let mut outcome = WriteOutcome::default();
+            let one = made.len() == 1;
             for data in made {
                 let Some(id) = mb_mcm::member_at(&data, field).and_then(id_string) else {
                     continue;
                 };
                 outcome.stored += 1;
+                if one {
+                    outcome = WriteOutcome::one(resource_type, id.clone(), data.clone());
+                }
                 state_lists::mark_created(
                     state,
                     session,
@@ -216,12 +243,20 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
                         data,
                     };
                     let stored = resource.clone();
-                    if state.insert_seeded(session, resource).await
-                        && let Some(collection) = collection
-                    {
+                    let inserted = state.insert_seeded(session, resource).await;
+                    if inserted && let Some(collection) = collection {
                         rt.collections().remember(session, &stored, collection);
                     }
-                    return WriteOutcome::ONE;
+                    // Its effects run on what this create stored; one held already
+                    // stays as it was, and is no target this create wrote.
+                    let StoredResource { id, data, .. } = stored;
+                    return match inserted {
+                        true => WriteOutcome::one(resource_type, id, data),
+                        false => WriteOutcome {
+                            stored: 1,
+                            ..WriteOutcome::default()
+                        },
+                    };
                 }
             }
         }
@@ -322,8 +357,12 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
                 let none = Map::new();
                 if lifecycle::delete_softly(rt, resource_type, &mut data, query.unwrap_or(&none)) {
                     let place = (collection, None, true);
+                    let held = StoredResource {
+                        data: data.clone(),
+                        ..held
+                    };
                     store_one(state, session, (op, resource_type), (id, data), place).await;
-                    return WriteOutcome::default();
+                    return WriteOutcome::removed(Some(held));
                 }
             }
             (id, None)
@@ -346,18 +385,19 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
                 .await;
             }
             let place = (collection, query, was_held);
+            let written = (id.clone(), data.clone());
             store_one(state, session, (op, resource_type), (id, data), place).await;
-            WriteOutcome::ONE
+            WriteOutcome::one(resource_type, written.0, written.1)
         }
         None => {
             let gone = state.get(session, resource_type, &id).await;
             state.delete(session, resource_type, &id).await;
-            if let Some(gone) = gone {
-                rt.collections().forget(session, &gone);
+            if let Some(gone) = &gone {
+                rt.collections().forget(session, gone);
             }
             // A queue's messages go with it.
             exec::forget_queue(state, session, resource_type, &id).await;
-            WriteOutcome::default()
+            WriteOutcome::removed(gone)
         }
     }
 }

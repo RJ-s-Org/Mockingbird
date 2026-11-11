@@ -1,10 +1,13 @@
 //! An operation's `effects`: writes to other records after its own write of its target.
 //!
-//! [`apply`] runs from [`super::exec::commit`], once the executor has stored (or
-//! removed) the target, before the call's answer is kept and published. That is the
-//! rule for when effects run: **only when the executor wrote the target in this call**.
-//! A refused call, one the executor leaves to generation (whatever write memory then
-//! keeps of the generated answer), and one that stores nothing run none.
+//! [`apply`] runs once the call's own write of its target landed, whichever path wrote
+//! it: from [`super::exec::commit`], once the executor stored (or removed) the target,
+//! and from [`super::complete`], once [`super::write_state`] stored (or removed) the
+//! target of a generated answer (a create, update, replace, action or delete), before
+//! the answer's computed members are filled. That is the rule for when effects run:
+//! **only when this call wrote its target**. A refused call, a generated answer write
+//! memory keeps without storing it, a create held already or held elsewhere, and a
+//! forced status or scenario whose answer stores nothing run none.
 //!
 //! Each effect, in order:
 //! - `update` and `delete` find their record with `held`'s lookup by key
@@ -12,16 +15,20 @@
 //!   soft-deleted, is skipped;
 //! - `when`, if any, must be `true`;
 //! - its `set` values are evaluated with `record` the target as the write left it (as
-//!   it was held, for a removal; the item as held before, for a write within its
-//!   parent) and `it` the record found (`null` for a create); each is written as its
-//!   member declares it ([`exprs::written_back`]), and a `null` sets nothing;
+//!   it was held, for a removal; the item as written, or as held when removed, for a
+//!   write within its parent) and `it` the record found (`null` for a create); each
+//!   is written as its member declares it ([`exprs::written_back`]), and a `null`
+//!   sets nothing;
 //! - a `create` stores a new record of its type (one a read of the type would not
 //!   render is not stored, and is noted under `expr_failed`), under the id `set` gives its identity
 //!   member, else one minted as a create mints it ([`records::mint_one`]), in the
 //!   collection its parent's path parameter makes (the parent named by the record's
 //!   `parent.member`, else the target when the target is of the parent type), noted as
-//!   created in the session; an id already held skips it;
-//! - an `update` stores the found record with its `set` members;
+//!   created in the session, its concurrency tokens starting at their first values as
+//!   an executed create's do; an id already held skips it;
+//! - an `update` stores the found record with its `set` members, its concurrency
+//!   tokens advanced as an executed update's are ([`tokens::for_effect`]): a later
+//!   write sending the old value is refused with its declared conflict;
 //! - a `delete` moves the found record to its type's soft-deleted state, or removes it
 //!   and marks it deleted as a delete by its read's route would.
 //!
@@ -143,13 +150,17 @@ async fn one(
             create(state, at, (t, target_id), ty, &values).await
         }
         (EffectOp::Update, Some(found)) => {
+            let op = route(rt, ty, false).unwrap_or(plan.op);
+            // Its tokens advance as an executed update's do: a stale one is refused next.
+            let advancing = tokens::for_effect(state, (plan, op), &found, &values).await;
             let mut data = found.data.clone();
             for (member, value) in values {
                 mb_mcm::set_member_at(&mut data, member, value);
             }
-            let op = route(rt, ty, false).unwrap_or(plan.op);
+            tokens::advance(rt, (ty, &found.id), &advancing, &found.data, &mut data);
             let place = (None, None, true);
             store_one(state, session, (op, ty), (found.id.clone(), data), place).await;
+            tokens::after_update(state, session, &found, &advancing, None).await;
             write_memory::settled(state, session, ty, &found.id).await;
             true
         }
@@ -172,6 +183,9 @@ async fn create(
     for (member, value) in values {
         mb_mcm::set_member_at(&mut data, member, value.clone());
     }
+    // Its tokens' first values, as an executed create's.
+    let seed = super::header_ids::MintSeed::new(rt, session, call);
+    super::exec::initial_token(rt, (seed, ty), &mut data);
     let field = exprs::identity_member(rt, ty);
     let id = match mb_mcm::member_at(&data, &field).and_then(id_string) {
         Some(id) => id,
