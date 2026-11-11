@@ -985,7 +985,7 @@ impl Shape {
             || schema_members(rt, answered.as_ref())
                 .iter()
                 .all(|m| typed.iter().any(|d| d == m));
-        let mut schemas = read_schemas(rt, t);
+        let mut schemas: Vec<Value> = fill_shapes(rt, t).into_iter().map(|(s, _)| s).collect();
         schemas.extend(answered.filter(|_| answers_record));
         let schemas: Vec<Value> = schemas.iter().map(|s| non_null(bundle, s)).collect();
         Self {
@@ -1304,10 +1304,18 @@ fn read_shapes(rt: &crate::MockRuntime, t: &str) -> Vec<(Value, bool)> {
     {
         schemas.push((schema, false));
     }
-    // A GraphQL record holds its own scalars: what a selection asks below it is
-    // another record (its repository, its comments), answered from state or
-    // generated. So a create's fill writes no nested record of another type
-    // (GitHub's `Issue` reaches hundreds), and its check asks for none.
+    schemas
+}
+
+/// [`read_shapes`] as a create fills and checks the record: a GraphQL record
+/// holds its own scalars, and what a selection asks below it is another record
+/// (its repository, its comments), answered from state or generated. So a
+/// create's fill writes no nested record of another type (GitHub's `Issue`
+/// reaches hundreds), and its check asks for none. Child records a request
+/// sends are still seen by [`unkept`], which reads the whole shapes.
+fn fill_shapes(rt: &crate::MockRuntime, t: &str) -> Vec<(Value, bool)> {
+    let bundle = rt.bundle();
+    let mut schemas = read_shapes(rt, t);
     if graphql(bundle) {
         for (schema, _) in &mut schemas {
             if let Some(name) = own_def(bundle, schema)
@@ -1451,13 +1459,8 @@ pub(super) fn unread(
     record: &Value,
 ) -> Vec<(String, Value)> {
     let owned = server_owned(rt, t, field, Some(record));
-    gaps(
-        rt,
-        (t, &read_schemas(rt, t)),
-        record,
-        &owned,
-        Unsent::Required,
-    )
+    let schemas: Vec<Value> = fill_shapes(rt, t).into_iter().map(|(s, _)| s).collect();
+    gaps(rt, (t, &schemas), record, &owned, Unsent::Required)
 }
 
 /// The deepest an object member's own requirements are followed.
@@ -1732,7 +1735,7 @@ pub(in crate::call) fn unreadable(
 ) -> Option<String> {
     let engine = &rt.engine;
     let bundle = rt.bundle();
-    for (schema, item) in read_shapes(rt, t) {
+    for (schema, item) in fill_shapes(rt, t) {
         let as_read = |value: &Value| match item {
             true => crate::call::lists::projected(bundle, Some(&schema), value, 0),
             false => value.clone(),
