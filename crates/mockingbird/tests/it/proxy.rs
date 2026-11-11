@@ -750,3 +750,109 @@ fn proxy_browser_prints_the_chromium_flags() {
     assert_eq!(args.last(), Some(&"https://movies.test/"));
     assert_eq!(json["pac"], "http://127.0.0.1:9999/proxy.pac");
 }
+
+/// A mock created through the Admin API at its default prefix, then moved to
+/// `/` and bound to a host by a PATCH, is remounted at once on the running
+/// server: the old prefix stops answering, the new one answers for the
+/// host, and the proxy's host list names it, without a restart.
+#[tokio::test]
+async fn patching_prefix_and_hosts_remounts_the_mock_live() {
+    let app = build_app(
+        &ServeArgs {
+            offline: true,
+            ..ServeArgs::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let (data, admin) = (ephemeral().await, ephemeral().await);
+    let (data_url, admin_url) = (
+        format!("http://{}", data.local_addr().unwrap()),
+        format!("http://{}", admin.local_addr().unwrap()),
+    );
+    let (_stop, stop_rx) = watch::channel(false);
+    tokio::spawn(serve_app(
+        app,
+        Listeners {
+            data: Some(data),
+            admin: Some(admin),
+            grpc: None,
+            proxy: None,
+        },
+        stop_rx,
+    ));
+    let http = reqwest::Client::new();
+    let w = format!("{admin_url}/api/v1/workspaces/default");
+    let r = http
+        .post(format!("{w}/mocks"))
+        .json(&json!({"name": "plaid"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "{}", r.text().await.unwrap());
+    let r = http
+        .post(format!("{w}/mocks/plaid/contracts?activate=true"))
+        .header("content-type", "application/yaml")
+        .body(std::fs::read(fixture("openapi/orders-3.0.yaml")).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+
+    let status = |path: &'static str, host: Option<&'static str>| {
+        let http = http.clone();
+        let url = format!("{data_url}{path}");
+        async move {
+            let mut req = http.get(url);
+            if let Some(host) = host {
+                req = req.header("host", host);
+            }
+            req.send().await.unwrap().status().as_u16()
+        }
+    };
+    let mut answered = false;
+    for _ in 0..250 {
+        if status("/plaid/orders", None).await == 200 {
+            answered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(answered, "the new mock never answered at /plaid");
+
+    let r = http
+        .patch(format!("{w}/mocks/plaid"))
+        .json(&json!({"route_prefix": "/", "hosts": ["sandbox.plaid.test"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+    let view: Value = r.json().await.unwrap();
+    assert_eq!(view["route_prefix"], "/", "{view}");
+    assert_eq!(view["hosts"], json!(["sandbox.plaid.test"]), "{view}");
+
+    let mut moved = false;
+    for _ in 0..250 {
+        if status("/orders", Some("sandbox.plaid.test")).await == 200
+            && status("/plaid/orders", None).await == 404
+        {
+            moved = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        moved,
+        "after the PATCH: /orders on the host answered {}, /plaid/orders {}",
+        status("/orders", Some("sandbox.plaid.test")).await,
+        status("/plaid/orders", None).await
+    );
+    let hosts: Value = reqwest::get(format!("{admin_url}/proxy/hosts"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(hosts, json!({"hosts": ["sandbox.plaid.test"]}));
+}
