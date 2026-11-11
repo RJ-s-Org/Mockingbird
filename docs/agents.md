@@ -99,7 +99,7 @@ mockingbird llm configure --provider google-ai-studio --apply           # into a
 mockingbird llm test -c mockingbird.yaml --profile openrouter            # ok, latency, hint
 ```
 
-Over MCP, `put_llm_profile` saves a profile into a running server in one call in the config file's shape: `{"name": "openrouter", "profile": {"provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash-1017", "api_key": "env:OPENROUTER_API_KEY"}}`. `provider` fills what the profile leaves out from the preset (`base_url`, the default model, `output_mode`, headers and the key's reference; `account_id`, `gateway_id` and `resource` fill a preset's base URL), and `api_key` is an alias of `secret_ref`. Either holds a reference such as `env:OPENROUTER_API_KEY`, never the key: a literal key is refused.
+Over MCP, `put_llm_profile` saves a profile into a running server in one call in the config file's shape: `{"name": "openrouter", "profile": {"provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash-1017", "api_key": "env:OPENROUTER_API_KEY"}}`. `provider` fills what the profile leaves out from the preset (`base_url`, the default model, `output_mode`, headers and the key's reference; `account_id`, `gateway_id` and `resource` fill a preset's base URL; `no_gateway_token` drops Cloudflare AI Gateway's token header), and `api_key` is an alias of `secret_ref`. Either holds a reference such as `env:OPENROUTER_API_KEY`, never the key: a literal key is refused.
 
 Profiles can carry extra provider headers (`llm.profiles.<name>.headers`, see the [configuration reference](configuration.md#llm)); secrets in them are `${env:NAME}` references, resolved when the mock is built. Keys never pass through the agent: the output lists the variables the user must export.
 

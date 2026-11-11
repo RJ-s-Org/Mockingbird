@@ -273,9 +273,7 @@ fn take_key_alias(obj: &mut serde_json::Map<String, Value>, allowed: &[String]) 
             Some(_) => {
                 return Err(Problem::invalid(
                     INVALID_PROFILE,
-                    format!(
-                        "`{field}` is an alias of secret_ref; set one of them, not both with different values"
-                    ),
+                    "api_key, apiKey and secret_ref name the same secret reference; give one, or the same reference in each",
                 ));
             }
         }

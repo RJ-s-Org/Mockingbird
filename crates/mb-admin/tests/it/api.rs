@@ -1344,6 +1344,20 @@ async fn api_key_is_an_alias_of_secret_ref_when_it_holds_a_reference() {
     assert_eq!(r.status, StatusCode::OK, "{}", r.text);
     assert_eq!(r.json()["secret_ref"], Value::Null, "{}", r.text);
 
+    // api_key and apiKey with different references are refused too.
+    let p = put(with(json!({
+        "api_key": "env:OPENROUTER_API_KEY",
+        "apiKey": "env:MB_LLM_KEY",
+    })))
+    .await
+    .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        p["detail"]
+            .as_str()
+            .unwrap()
+            .contains("api_key, apiKey and secret_ref"),
+        "{p}"
+    );
     // Different values under the two names are refused.
     let p = put(with(json!({
         "api_key": "env:OPENROUTER_API_KEY",
@@ -1355,9 +1369,17 @@ async fn api_key_is_an_alias_of_secret_ref_when_it_holds_a_reference() {
 
     // A literal key is refused, never echoed, and the rejection says to use
     // a reference.
-    for literal in [json!("sk-or-v1-literal"), json!(42), json!("env:")] {
-        let r = put(with(json!({ "api_key": literal }))).await;
-        assert!(!r.text.contains("sk-or-v1-literal"), "{}", r.text);
+    for literal in [
+        json!("sk-or-v1-literal"),
+        json!(4242424242u64),
+        json!("env:"),
+    ] {
+        let r = put(with(json!({ "api_key": literal.clone() }))).await;
+        let shown = literal.to_string();
+        let shown = shown.trim_matches('"');
+        if shown != "env:" {
+            assert!(!r.text.contains(shown), "{}", r.text);
+        }
         let p = r.assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(p["title"], "Raw API key not accepted", "{p}");
         let detail = p["detail"].as_str().unwrap();

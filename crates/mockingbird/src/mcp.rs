@@ -267,6 +267,7 @@ fn profile_schema() -> Value {
             "account_id": s("Cloudflare presets: account ID (default: CLOUDFLARE_ACCOUNT_ID)."),
             "gateway_id": s("cloudflare-ai-gateway: gateway ID (default: default)."),
             "resource": s("azure-openai: resource name."),
+            "no_gateway_token": b("cloudflare-ai-gateway with authentication off: send no cf-aig-authorization header."),
         },
     })
 }
@@ -1148,13 +1149,20 @@ fn provider_args(args: &Value) -> Result<ProviderArgs, ToolError> {
 
 /// Keys of a `put_llm_profile` profile that only feed its `provider`
 /// preset and are not sent to the Admin API.
-const PRESET_KEYS: [&str; 4] = ["provider", "account_id", "gateway_id", "resource"];
+const PRESET_KEYS: [&str; 5] = [
+    "provider",
+    "account_id",
+    "gateway_id",
+    "resource",
+    "no_gateway_token",
+];
 
 /// A `put_llm_profile` profile with its `provider` preset (if any) expanded
 /// into the fields the Admin API takes: `base_url`, `model`, `output_mode`,
 /// the key's reference (`secret_ref`) and headers, each only where the
 /// profile does not set it (its headers win name by name). `account_id`,
-/// `gateway_id` and `resource` fill the preset's base URL. The key alias
+/// `gateway_id` and `resource` fill the preset's base URL, and
+/// `no_gateway_token` drops Cloudflare AI Gateway's token header. The key alias
 /// `api_key` is left to the Admin API, which refuses a raw key.
 fn expand_preset(mut profile: Value) -> Result<Value, ToolError> {
     let Some(obj) = profile.as_object_mut() else {
@@ -1184,6 +1192,10 @@ fn expand_preset(mut profile: Value) -> Result<Value, ToolError> {
         account_id: text("account_id"),
         gateway_id: text("gateway_id"),
         resource: text("resource"),
+        no_gateway_token: obj
+            .get("no_gateway_token")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         ..ProviderArgs::default()
     };
     let preset = args.profile().map_err(|e| {
@@ -3406,6 +3418,21 @@ mod tests {
             "https://gateway.ai.cloudflare.com/v1/acct/gw/compat"
         );
         assert!(body.get("account_id").is_none(), "{body}");
+        assert!(
+            body["headers"].get("cf-aig-authorization").is_some(),
+            "{body}"
+        );
+        let body = expand_preset(json!({
+            "provider": "cloudflare-ai-gateway",
+            "account_id": "acct",
+            "no_gateway_token": true,
+        }))
+        .unwrap();
+        assert!(
+            body["headers"].get("cf-aig-authorization").is_none(),
+            "{body}"
+        );
+        assert!(body.get("no_gateway_token").is_none(), "{body}");
 
         // Without a provider the profile passes through as written.
         let plain = json!({ "base_url": "https://x", "model": "m", "api_key": "env:K_API_KEY" });
