@@ -469,6 +469,9 @@ pub(crate) struct Pending<'a> {
     /// A read in another language than its held target (see [`variants`]): its record
     /// is kept as that language's variant, and the target stays.
     variant: bool,
+    /// This call claimed the retry of a fallback cached under its key (see
+    /// [`mb_state::ResponseCache::claim_retry`]).
+    retrying_fallback: bool,
 }
 
 /// Whether a GraphQL delete that removed record `id` of type `t` here leaves the marker
@@ -788,8 +791,18 @@ pub(crate) async fn prepare<'a>(
             cache_key(&rt.bundle, op, call, response_schema)
         )
     });
+    let mut retrying_fallback = false;
     if let (Some(cache), Some(key)) = (cache, &key)
         && let Some(hit) = cache.get(session, key)
+        // A fallback for an answer the model did not give in time does not
+        // stick: the next repeat generates again, while repeats arriving
+        // during that retry are answered with it. Other fallbacks (a provider
+        // that is down, an answer that never validates) stay, so they do not
+        // cost a call per read.
+        && !(hit.fallback_reason.as_deref().is_some_and(timed_out) && {
+            retrying_fallback = cache.claim_retry(session, key, retry_window(plan));
+            retrying_fallback
+        })
     {
         // A repeat of a fallback is answered at once, and still told apart.
         let (source, fallback_reason) = match hit.fallback_reason {
@@ -904,6 +917,7 @@ pub(crate) async fn prepare<'a>(
         created_since,
         foreign_key,
         cache: since.zip(key),
+        retrying_fallback,
         earlier,
         earlier_answers,
         unlisted,
@@ -1087,6 +1101,7 @@ pub(crate) async fn complete(
         tokens,
         retry,
         variant,
+        retrying_fallback,
         ..
     } = pending;
     let acted_on = target_id.clone();
@@ -1930,29 +1945,47 @@ pub(crate) async fn complete(
     crate::webhooks::emit::emit_effects(rt, op, &generated.effect_outcomes, session);
 
     // Seeded first, then cached: a later list never clears a cached one.
-    // A fallback is cached too: a schema the LLM cannot answer in time
-    // would otherwise make every identical repeat wait as long again. Not one
-    // of a read still owing earlier requests, which is to try again.
-    if let (Some(response_cache), Some((since, key))) = (rt.state.response_cache(), cache)
-        && (200..300).contains(&generated.status)
-        && earlier.cacheable(&generated)
-    {
-        response_cache.put_if_current(
-            session,
-            key,
-            resource_type,
-            CachedResponse {
-                status: generated.status,
-                content_type: generated.content_type.clone(),
-                body: generated.body.clone(),
-                fallback_reason: transient_fallback(&generated)
-                    .then(|| generated.fallback_reason.clone())
-                    .flatten(),
-            },
-            since,
-        );
+    // A fallback is cached too: repeats are answered with it at once, except
+    // that a timed-out one is retried by the next repeat (see `prepare`), so
+    // only repeats arriving during that retry are. Not one of a read still
+    // owing earlier requests, which is to try again.
+    if let (Some(response_cache), Some((since, key))) = (rt.state.response_cache(), cache) {
+        if (200..300).contains(&generated.status) && earlier.cacheable(&generated) {
+            response_cache.put_if_current(
+                session,
+                key.clone(),
+                resource_type,
+                CachedResponse {
+                    status: generated.status,
+                    content_type: generated.content_type.clone(),
+                    body: generated.body.clone(),
+                    fallback_reason: transient_fallback(&generated)
+                        .then(|| generated.fallback_reason.clone())
+                        .flatten(),
+                },
+                since,
+            );
+        }
+        // A retry of a cached fallback that cached nothing in its place
+        // leaves the next repeat to try again.
+        if retrying_fallback {
+            response_cache.release_retry(session, &key);
+        }
     }
     generated
+}
+
+/// Whether a fallback reason says the model did not answer in time: the
+/// engine's reasons for a timed-out request, stream or repair all say so.
+fn timed_out(reason: &str) -> bool {
+    reason.contains("timed out")
+}
+
+/// How long a retry of a cached fallback holds its claim (see
+/// [`mb_state::ResponseCache::claim_retry`]): one generation's time limit.
+fn retry_window(plan: &CallPlan<'_>) -> std::time::Duration {
+    let config = plan.engine.config();
+    config.generation_timeout.unwrap_or(config.timeout)
 }
 
 /// The records a prompt showed (see [`shown_types`]), in the order it showed them.

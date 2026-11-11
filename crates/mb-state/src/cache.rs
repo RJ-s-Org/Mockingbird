@@ -45,6 +45,9 @@ struct Entry {
     value: CachedResponse,
     /// Recency: higher is more recent.
     used: u64,
+    /// When a call began generating this fallback's key again (see
+    /// [`ResponseCache::claim_retry`]).
+    retrying: Option<Instant>,
 }
 
 struct SessionCache {
@@ -172,6 +175,7 @@ impl ResponseCache {
                 resource_type: resource_type.map(str::to_string),
                 value,
                 used,
+                retrying: None,
             },
         );
         if let Some(old) = replaced {
@@ -183,6 +187,41 @@ impl ResponseCache {
                 break;
             };
             cache.entries.remove(&oldest);
+        }
+    }
+
+    /// Whether the caller is to generate `key` again instead of serving the
+    /// fallback cached under it: true for the first caller since the fallback
+    /// was cached, and again once that caller's claim is `window` old (it may
+    /// have been dropped). Others are served the fallback meanwhile, so one
+    /// slow answer is not paid by every concurrent repeat. False for a miss
+    /// or an answer that is no fallback.
+    #[must_use]
+    pub fn claim_retry(&self, s: &SessionKey, key: &str, window: Duration) -> bool {
+        let Some(mut cache) = self.sessions.get_mut(s) else {
+            return false;
+        };
+        let Some(entry) = cache.entries.get_mut(key) else {
+            return false;
+        };
+        let now = Instant::now();
+        let free = entry
+            .retrying
+            .is_none_or(|since| now.duration_since(since) >= window);
+        if entry.value.fallback_reason.is_none() || !free {
+            return false;
+        }
+        entry.retrying = Some(now);
+        true
+    }
+
+    /// Ends a claim of [`ResponseCache::claim_retry`] whose answer was not
+    /// cached in the fallback's place, so the next repeat tries again.
+    pub fn release_retry(&self, s: &SessionKey, key: &str) {
+        if let Some(mut cache) = self.sessions.get_mut(s)
+            && let Some(entry) = cache.entries.get_mut(key)
+        {
+            entry.retrying = None;
         }
     }
 

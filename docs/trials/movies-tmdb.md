@@ -94,3 +94,9 @@ The same app and method, on a binary with #442 (list typing by item schema, filt
 - 0 fallbacks, 0 errors. Sources: 25 `llm`, 21 `cache`, 4 `state`, 3 `patched`.
 
 H1/H2 no longer show on the movie lists, because the lists now store movie records. The genre lists are still typed `movie` and `tv` by their path (`/genre/movie/list`), so genres can still be stored as movie records; that stays with H2.
+
+## The language test after #467
+
+The language test (`tests/e2e/homepage.spec.ts`, "switches the UI and TMDB content language without reloading") asserts TMDB's real French title, "New York Police Judiciaire", for the hard-coded TV id 549. That checks live TMDB data: matching real-world id-to-title mappings is out of scope (H4). The mock's bar is consistency: every read of an id, in any language, returns the same record, and since #467 a read in another language returns a stable variant of it (H3).
+
+The remaining failure in that rerun was not H3: the first `fr-FR` read of `tv/549` hit `limits.generation_timeout`, the faker answered it (`fallback`), and the response cache served that answer to every repeat, so the page never recovered. A timed-out fallback no longer sticks: the next identical read asks the model again, and only repeats that arrive while it does get the fallback.
