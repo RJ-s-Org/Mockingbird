@@ -401,11 +401,13 @@ impl Host for SessionHost<'_> {
 }
 
 /// `request` as expressions see it: `{body, path, query, headers}`, header names
-/// lower case.
+/// lower case. `headers` includes the call's credential headers, which only
+/// expressions see.
 fn request_value(call: &OperationCall) -> Value {
     let headers: Map<String, Value> = call
         .headers
         .iter()
+        .chain(&call.credentials.0)
         .map(|(name, value)| (name.to_ascii_lowercase(), value.clone()))
         .collect();
     json!({

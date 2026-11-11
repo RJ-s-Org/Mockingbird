@@ -174,7 +174,7 @@ impl<'p> Eval<'p, '_, '_> {
                     };
                     let val = self.eval(v)?;
                     if out.insert(key.clone(), val).is_some() {
-                        return Err(Fail::new(k.pos, format!("duplicate map key '{key}'")));
+                        return Err(Fail::new(k.pos, "duplicate map key"));
                     }
                 }
                 Ok(Value::Object(out))

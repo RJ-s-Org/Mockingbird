@@ -72,6 +72,7 @@ async fn a_nullable_reference_or_optional_object_nothing_set_is_null_and_not_ask
             .to_string(),
     )]);
     let call = OperationCall {
+        credentials: Default::default(),
         operation_id: op.id.clone(),
         path_params: Map::new(),
         query: Map::new(),
@@ -129,6 +130,7 @@ async fn only_nullable_references_and_optional_objects_ask_no_model() {
     let schema = op.success_output().unwrap().schema.clone().unwrap();
     let (provider, engine) = scripted(vec![]);
     let call = OperationCall {
+        credentials: Default::default(),
         operation_id: op.id.clone(),
         path_params: Map::new(),
         query: Map::new(),
@@ -164,6 +166,7 @@ async fn an_optional_object_that_may_not_be_null_is_left_out() {
         json!({"status": "open", "method_types": ["card"]}).to_string(),
     )]);
     let call = OperationCall {
+        credentials: Default::default(),
         operation_id: op.id.clone(),
         path_params: Map::new(),
         query: Map::new(),
@@ -212,6 +215,7 @@ async fn a_failed_call_leaves_a_nullable_object_null() {
     let schema = op.success_output().unwrap().schema.clone().unwrap();
     let (_provider, engine) = scripted(vec![Err(LlmError::Transport("down".into()))]);
     let call = OperationCall {
+        credentials: Default::default(),
         operation_id: op.id.clone(),
         path_params: Map::new(),
         query: Map::new(),

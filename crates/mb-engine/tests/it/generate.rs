@@ -28,6 +28,7 @@ fn call(op: &str) -> OperationCall {
     let mut path_params = Map::new();
     path_params.insert("orderId".into(), json!("o1"));
     OperationCall {
+        credentials: Default::default(),
         operation_id: op.into(),
         path_params,
         query: Map::new(),
@@ -2508,6 +2509,7 @@ fn entries() -> Bundle {
 
 fn entry_call(headers: &[(&str, &str)], query: &[(&str, &str)]) -> OperationCall {
     OperationCall {
+        credentials: Default::default(),
         operation_id: "putEntry".into(),
         path_params: Map::from_iter([("entry_id".to_string(), json!("e1"))]),
         query: query
@@ -3278,6 +3280,7 @@ fn thing_call(id: &str, owner: Option<&str>) -> OperationCall {
         query.insert("owner".into(), json!(owner));
     }
     OperationCall {
+        credentials: Default::default(),
         operation_id: "getThing".into(),
         path_params,
         query,
@@ -3408,6 +3411,7 @@ async fn root_members_nested_in_a_child_are_patched_without_repair() {
     let mut path_params = Map::new();
     path_params.insert("id".into(), json!(id));
     let call = OperationCall {
+        credentials: Default::default(),
         operation_id: "getPlaylist".into(),
         path_params,
         query: Map::new(),
@@ -3467,6 +3471,7 @@ fn series_call(id: i64, page: i64) -> OperationCall {
     let mut query = Map::new();
     query.insert("page".into(), json!(page));
     OperationCall {
+        credentials: Default::default(),
         operation_id: "getSeries".into(),
         path_params,
         query,
@@ -5482,6 +5487,7 @@ async fn a_served_page_cursor_reaches_the_prompt_and_a_credential_does_not() {
             .collect()
     };
     let call = OperationCall {
+        credentials: Default::default(),
         operation_id: "listMeetings".into(),
         path_params: Map::new(),
         query: query(&[
@@ -5533,6 +5539,7 @@ async fn a_served_page_cursor_reaches_the_prompt_and_a_credential_does_not() {
     assert!(!user.contains("cursor-value-1"), "{user}");
     assert!(!user.contains("The token of the next page."), "{user}");
     let call = OperationCall {
+        credentials: Default::default(),
         operation_id: "getReport".into(),
         path_params: Map::new(),
         query: query(&[("next_page_token", "report-secret-4")]),
@@ -5566,6 +5573,7 @@ async fn a_bare_or_twice_paired_cursor_stays_hidden() {
     .enumerate()
     {
         let call = OperationCall {
+            credentials: Default::default(),
             operation_id: op.into(),
             path_params: Map::new(),
             query: Map::from_iter([(param.to_string(), json!(value))]),

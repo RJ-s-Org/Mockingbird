@@ -36,7 +36,8 @@ use tracing::{Instrument, Span};
 use super::resolve::{Failure, HttpCall, Shapes, forced_message, project};
 use super::schema::{input_value, type_ref};
 use crate::call::{
-    self, CallPlan, DEFAULT_SESSION, Presented, Report, forwarded_headers, recorded_headers,
+    self, CallPlan, DEFAULT_SESSION, Presented, Report, credential_headers, forwarded_headers,
+    recorded_headers,
 };
 use crate::ws::{ChannelConfig, ChannelIo, Outbound, serve_channel};
 use crate::{DataPlaneAuthMode, MockRuntime};
@@ -733,6 +734,7 @@ async fn open(
     let call = OperationCall {
         operation_id: op.id.clone(),
         headers: forwarded_headers(&rt, &conn.headers),
+        credentials: credential_headers(&rt, &conn.headers),
         body: Some(Value::Object(args)),
         ..Default::default()
     };

@@ -3131,6 +3131,7 @@ mod tests {
     #[test]
     fn the_request_echoes_are_its_strings_and_numbers() {
         let call = OperationCall {
+            credentials: Default::default(),
             operation_id: "op".into(),
             path_params: Map::from_iter([("id".to_owned(), json!("p1"))]),
             query: Map::from_iter([("tag".to_owned(), json!(["q1", "q2"]))]),

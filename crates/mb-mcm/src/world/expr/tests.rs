@@ -354,6 +354,14 @@ fn string_functions() {
     assert!(eval_err("int('x')").contains("cannot parse"));
     assert!(eval_err("int(1e19)").contains("out of range"));
     assert!(eval_err("double('inf')").contains("cannot parse"));
+    // A failure never quotes the value: it may be a credential header.
+    for e in [
+        "int('s3cret')",
+        "double('s3cret')",
+        "{'s3cret': 1, 's3cret': 2}",
+    ] {
+        assert!(!eval_err(e).contains("s3cret"), "{e}: {}", eval_err(e));
+    }
     assert!(eval_err("string(null)").contains("cannot convert"));
     assert!(eval_err("lower(1)").contains("lower() needs a string, got int"));
     assert!(eval_err("size(1)").contains("size() needs"));
@@ -555,6 +563,8 @@ fn session_functions() {
     assert_eq!(ok("seq('pr:' + request.path.repo)"), json!(1));
     assert_eq!(ok("mint('[0-9]{12}')"), json!("minted:[0-9]{12}"));
     assert!(eval_err("mint('bad')").contains("mint() cannot generate"));
+    // Its pattern may be a credential header: the note never quotes it.
+    assert!(!eval_err("mint('bad')").contains("bad"));
     assert!(eval_err("seq(1)").contains("seq() needs a string"));
 }
 

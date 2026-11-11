@@ -21,8 +21,8 @@ use tracing::field::Empty;
 use super::error_code;
 use crate::MockRuntime;
 use crate::call::{
-    self, DEFAULT_SESSION, PlanError, PlanFailure, Presented, Report, forwarded_headers,
-    recorded_headers,
+    self, DEFAULT_SESSION, PlanError, PlanFailure, Presented, Report, credential_headers,
+    forwarded_headers, recorded_headers,
 };
 
 /// How a named type's values are turned into field values.
@@ -397,6 +397,7 @@ async fn generate_in(
                     let call = OperationCall {
                         operation_id: op.id.clone(),
                         headers: forwarded_headers(rt, &http.headers),
+                        credentials: credential_headers(rt, &http.headers),
                         body: Some(Value::Object(args)),
                         ..Default::default()
                     };

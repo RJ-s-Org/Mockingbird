@@ -72,10 +72,15 @@ pub(super) fn call(
             }
         }),
         Func::Int => match arg(0) {
-            Value::String(s) => Value::from(
-                s.parse::<i64>()
-                    .map_err(|_| Fail::new(pos, format!("int() cannot parse {s:?}")))?,
-            ),
+            Value::String(s) => Value::from(s.parse::<i64>().map_err(|_| {
+                Fail::new(
+                    pos,
+                    format!(
+                        "int() cannot parse a string of {} characters",
+                        s.chars().count()
+                    ),
+                )
+            })?),
             v => match Num::of(v) {
                 Some(Num::I(i)) => Value::from(i),
                 Some(Num::D(d)) => {
@@ -97,7 +102,15 @@ pub(super) fn call(
         Func::Double => match arg(0) {
             Value::String(s) => match s.parse::<f64>() {
                 Ok(d) if d.is_finite() => double(d, pos)?,
-                _ => return Err(Fail::new(pos, format!("double() cannot parse {s:?}"))),
+                _ => {
+                    return Err(Fail::new(
+                        pos,
+                        format!(
+                            "double() cannot parse a string of {} characters",
+                            s.chars().count()
+                        ),
+                    ));
+                }
             },
             v => match Num::of(v) {
                 Some(Num::I(i)) => double(i as f64, pos)?,
@@ -186,7 +199,13 @@ pub(super) fn call(
         Func::Mint => {
             let pattern = string(0)?;
             Value::String(host.mint(pattern).ok_or_else(|| {
-                Fail::new(pos, format!("mint() cannot generate from {pattern:?}"))
+                Fail::new(
+                    pos,
+                    format!(
+                        "mint() cannot generate from a pattern of {} characters",
+                        pattern.chars().count()
+                    ),
+                )
             })?)
         }
     })
