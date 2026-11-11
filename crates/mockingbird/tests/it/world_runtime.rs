@@ -114,6 +114,10 @@ struct FlakyStore {
     fail_latest: AtomicI64,
     /// Failures left for `active_contract` (negative: always).
     fail_active: AtomicI64,
+    /// Failures left for `get_mock` (negative: always).
+    fail_get: AtomicI64,
+    /// Failures left for `list_all_mocks` (negative: always).
+    fail_list: AtomicI64,
     /// `active_contract` answers that the mock has no active version.
     no_active: AtomicBool,
     /// `active_contract` calls: one per build.
@@ -151,12 +155,18 @@ impl ControlStore for FlakyStore {
         self.inner.delete_workspace(name, force).await
     }
     async fn list_all_mocks(&self) -> Result<Vec<Mock>, StoreError> {
+        if take_failure(&self.fail_list) {
+            return Err(StoreError::Db("pool timed out".into()));
+        }
         self.inner.list_all_mocks().await
     }
     async fn list_mocks(&self, ws: &str) -> Result<Vec<Mock>, StoreError> {
         self.inner.list_mocks(ws).await
     }
     async fn get_mock(&self, ws: &str, name: &str) -> Result<Option<Mock>, StoreError> {
+        if take_failure(&self.fail_get) {
+            return Err(StoreError::Db("pool timed out".into()));
+        }
         self.inner.get_mock(ws, name).await
     }
     async fn create_mock(&self, ws: &str, m: NewMock) -> Result<Mock, StoreError> {
@@ -528,6 +538,8 @@ impl Env {
                 .unwrap(),
             fail_latest: AtomicI64::new(0),
             fail_active: AtomicI64::new(0),
+            fail_get: AtomicI64::new(0),
+            fail_list: AtomicI64::new(0),
             no_active: AtomicBool::new(false),
             active_calls: AtomicUsize::new(0),
             latest_calls: AtomicUsize::new(0),
@@ -842,6 +854,88 @@ async fn a_failed_first_build_is_retried() {
     assert_eq!(env.builds(), 2, "one failed build and its retry");
     assert!(env.registry.failed_mocks().is_empty());
     assert_eq!(env.create_widget_gap().await, Some(json!(["no_identity"])));
+}
+
+/// A change whose mock cannot be loaded from the store (a transient store error) is
+/// applied by a retry, without another change.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_load_is_retried() {
+    let env = Env::stored(NO_ID_CONTRACT, &[]).await.start().await;
+    assert_eq!(env.builds(), 1);
+    env.store.fail_get.store(1, Ordering::SeqCst);
+    revise(env.store(), &env.mock, 1, widget_identity()).await;
+    env.wait_status(Some((1, false)), Duration::from_secs(10))
+        .await;
+    assert_eq!(
+        env.store.fail_get.load(Ordering::SeqCst),
+        0,
+        "the load failed once"
+    );
+    assert_eq!(env.create_widget_gap().await, None);
+}
+
+/// A reload of every mock that fails (a transient store error) is tried again
+/// without another change.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_reload_of_all_is_retried() {
+    let env = Env::stored(NO_ID_CONTRACT, &[]).await;
+    env.registry.reload_all(&env.deps).await.unwrap();
+    let (tx, rx) = broadcast::channel(16);
+    let _watcher = env.registry.spawn_watcher(env.deps.clone(), rx);
+    // A change the watcher is not told of, then a resync whose reload fails.
+    revise(env.store(), &env.mock, 1, widget_identity()).await;
+    env.store.fail_list.store(1, Ordering::SeqCst);
+    tx.send(HubEvent::Resync).unwrap();
+    env.wait_status(Some((1, false)), Duration::from_secs(10))
+        .await;
+    assert_eq!(
+        env.store.fail_list.load(Ordering::SeqCst),
+        0,
+        "the first reload failed"
+    );
+}
+
+/// A config reload that fails applying the config (a transient store error) is
+/// tried again without another edit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_config_reload_is_retried() {
+    let env = Env::stored(NO_ID_CONTRACT, &[]).await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("w.yaml"), NO_ID_CONTRACT).unwrap();
+    let config = dir.path().join("mockingbird.yaml");
+    std::fs::write(
+        &config,
+        "mocks:\n  w:\n    contract: w.yaml\n    route_prefix: /w\n",
+    )
+    .unwrap();
+    // The watch's first read of the config fails to apply it.
+    env.store.fail_list.store(1, Ordering::SeqCst);
+    let _watch = mockingbird::watch::spawn_with(
+        config,
+        env.deps.store.clone(),
+        env.deps.state.clone(),
+        Arc::new(|_: &mut mockingbird::file_config::FileConfig| Ok(())),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while env
+        .store()
+        .get_mock(DEFAULT_WORKSPACE, "w")
+        .await
+        .unwrap()
+        .is_none()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the failed reload was not retried"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        env.store.fail_list.load(Ordering::SeqCst),
+        0,
+        "the first apply failed"
+    );
 }
 
 /// A rebuild that fails keeps the previous runtime and is retried until it
