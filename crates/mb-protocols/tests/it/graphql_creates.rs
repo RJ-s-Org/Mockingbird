@@ -331,3 +331,89 @@ type Mutation { addComment(input: AddCommentInput!): AddCommentPayload }
         .any(|r| r.data["isMinimized"] == false);
     assert!(!set, "{held:?}");
 }
+
+/// A `set` writing a whole GraphQL connection need not spell `__typename` at every
+/// level: the schema fixes it, so the value is stored and answered with it, not
+/// dropped for not fitting.
+#[tokio::test]
+async fn a_set_object_takes_the_typenames_its_schema_fixes() {
+    const CARTS: &str = r#"
+type CartLine { id: ID! quantity: Int! }
+type CartLineEdge { node: CartLine! }
+type CartLineConnection { edges: [CartLineEdge!]! }
+type Cart { id: ID! totalQuantity: Int! lines: CartLineConnection! }
+type CartCreatePayload { cart: Cart }
+type Query { cart(id: ID!): Cart }
+type Mutation { cartCreate: CartCreatePayload }
+"#;
+    let doc: mb_mcm::world::World = serde_json::from_value(json!({
+        "version": 1,
+        "operations": {
+            "Mutation.cartCreate": {"kind": "create", "type": "cart",
+                "answer": {"record": "/cart"},
+                "set": {
+                    "totalQuantity": "2",
+                    "lines": "{'edges': [{'node': {'id': 'gid://shopify/CartLine/1', 'quantity': 2}}]}"
+                }}
+        }
+    }))
+    .unwrap();
+    let bundle = compile(CARTS.as_bytes()).unwrap();
+    let base_world = mb_mcm::world::tier0(&bundle);
+    let (world, refused) = mb_mcm::world::effective(&bundle, &base_world, &doc);
+    assert!(refused.is_empty(), "{refused:?}");
+    let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let provider = Arc::new(mb_llm::ScriptedProvider::new(vec![Ok(json!({
+        "__typename": "CartCreatePayload", "cart": {"__typename": "Cart", "id": "gid://shopify/Cart/c1",
+        "totalQuantity": 0, "lines": {"__typename": "CartLineConnection", "edges": []}}})
+    .to_string())]));
+    let rt = MockRuntime::new(
+        "shop",
+        Arc::new(bundle),
+        Arc::new(Engine::new(
+            Some(provider as Arc<dyn mb_llm::Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::clone(&store),
+    )
+    .with_world(&base_world, &world, 1);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = graphql::try_router(Arc::new(rt)).unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let query = "mutation { cartCreate { cart { id totalQuantity lines { edges { node { id quantity } } } } } }";
+    let body: Value = reqwest::Client::new()
+        .post(format!("http://{addr}/graphql"))
+        .header("content-type", "application/json")
+        .header("x-mockingbird-session", "s1")
+        .header("x-mockingbird-seed", "1")
+        .body(json!({ "query": query }).to_string())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(body.get("errors").is_none(), "{body}");
+    let cart = &body["data"]["cartCreate"]["cart"];
+    assert_eq!(cart["totalQuantity"], 2, "{body}");
+    assert_eq!(cart["lines"]["edges"][0]["node"]["quantity"], 2, "{body}");
+    let key = SessionKey {
+        workspace: "default".into(),
+        mock: "shop".into(),
+        session: "s1".into(),
+    };
+    let held = store.export(&key).await.unwrap();
+    let stored = held
+        .iter()
+        .find(|r| r.resource_type == "cart")
+        .unwrap_or_else(|| panic!("{held:?}"));
+    let lines = &stored.data["lines"];
+    assert_eq!(lines["__typename"], "CartLineConnection", "{lines}");
+    assert_eq!(lines["edges"][0]["__typename"], "CartLineEdge", "{lines}");
+    assert_eq!(
+        lines["edges"][0]["node"]["__typename"], "CartLine",
+        "{lines}"
+    );
+}

@@ -195,3 +195,38 @@ Still open (none blocks the flow):
 - Model answers left out of scope: thin lists (2 products), and a homepage grid with 2 of 3 items.
 
 Session spend for all runs: about $0.06 of the $2 cap.
+
+## Run 6: a fresh agent on the real install path (2026-11-11)
+
+**Setup.**
+- Main at `95fd7682`. The plugin was installed the way [agents.md](../agents.md) tells Claude Code users: `claude plugin marketplace add rj-s-org/mockingbird --scope local`, then `claude plugin install mockingbird@mockingbird --scope local`.
+- A build of `main` came first on `PATH`.
+- A fresh headless Claude Code got one prompt: mock the Storefront API so the app builds, and so home, search and collections, product pages and the cart (add, change quantity, remove) work with no code change. Serve with DeepSeek Flash. The prompt also named the ports, since other servers share this machine.
+- The harness is `mockingbird-trials/agentbuild/run-commerce.sh`.
+
+**Result.**
+- Every flow works in a headless Chrome the agent drove:
+  - `next build` produced all 11 static pages.
+  - The home grid, carousel and menus render.
+  - `/search` lists 8 products, `?q=beanie` finds one, `?sort=price-desc` is ordered, and `/search/apparel` lists 3.
+  - The product page shows its options and gallery.
+  - Cart totals were right through each step: add ($32), quantity 2 ($64), a second product ($92), decrease ($60) and remove ($28). The cart survives a reload.
+- The agent wrote a Storefront SDL for the operations the app uses, since the catalog has no Shopify Storefront example. It also wrote a world description with cart expressions (merge lines, quantity 0 removes, totals from lines) and a seeded catalog of 8 products.
+
+| # | Measure | Result |
+| --- | --- | --- |
+| 1 | Flows | ✓ all the prompt named |
+| 2 | Consistency | ✓ the cart is stateful, and its totals are computed from its lines. Lists are model-written from the seeded catalog: early answers had 2 items and a wrong price, until the agent turned off hedging (see below) |
+| 3 | Agent build ≤ 15 min | ✗ **28.1 min**, 107 turns, $6.56 of Claude Code usage |
+| 4 | State latency | ✓ p50 2 ms, p95 12 ms (n = 150) |
+| 5 | Model latency | ✗ p50 4.8 s, p95 21.2 s, max 50 s (n = 55; lists and searches) |
+| 6 | Spend | ≈ $0.06 for the whole build and checks: 612k prompt / 87k completion tokens. A session after the build spends a fraction of that |
+| 7 | Errors | ✗ `product(handle: "no-such-thing")`, `collection(handle: "zzz")` and an unknown `cart(id:)` answer invented records, where Shopify answers `null` |
+
+**Where the 28 minutes went.**
+- **About 9 min (2.1–11.1): getting the cart `set` expressions to stick.** A `set` of `lines` (a connection of edges and nodes) was dropped as not fitting its member's schema, because the objects lacked `__typename`, which every GraphQL object's schema fixes. The agent found the rule by bisecting. **Fixed here:** a `set` value's objects get the members their schema fixes with a `const`, so `{'edges': [{'node': {...}}]}` is stored and answered with its typenames. Since #494, a drop is also noted on the request.
+- **About 4 min: the app's own build and caches.** pnpm's install check, then Next's caches kept the first build's data.
+- **About 3.5 min (18.4–21.8): inconsistent lists.** A hedged second model call that finishes first wins, and a shorter list finishes first: one sort answered 1 item. The agent turned hedging off. Class: engine, still open.
+- **About 1 min: an SDL by hand.** There is no Storefront example in the catalog.
+
+**Install path.** The marketplace refresh failed (cloning `rj-s-org/mockingbird` over HTTPS was refused), and Claude Code installed the plugin "from the cached catalog, so the version may be stale". With skills checking `skills_level` (#490), a stale plugin is now detectable.
