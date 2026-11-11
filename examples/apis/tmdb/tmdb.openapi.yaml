@@ -587,11 +587,13 @@ components:
         crew: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/multi-item" } }
     appended-credits:
       type: object
+      required: [cast, crew]
       properties:
         cast: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/cast-member" } }
         crew: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/crew-member" } }
     appended-videos:
       type: object
+      required: [results]
       properties:
         results:
           type: array
@@ -615,12 +617,14 @@ components:
         videos: { $ref: "#/components/schemas/appended-videos" }
         images:
           type: object
+          required: [backdrops, posters]
           properties:
             backdrops: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/image" } }
             posters: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/image" } }
         external_ids: { $ref: "#/components/schemas/appended-external-ids" }
         release_dates:
           type: object
+          required: [results]
           properties:
             results: { type: array, maxItems: 3, items: { type: object, properties: { iso_3166_1: { type: string }, release_dates: { type: array, items: { type: object, properties: { certification: { type: string }, release_date: { type: string } } } } } } }
     tv-appended:
@@ -631,12 +635,14 @@ components:
         videos: { $ref: "#/components/schemas/appended-videos" }
         images:
           type: object
+          required: [backdrops, posters]
           properties:
             backdrops: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/image" } }
             posters: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/image" } }
         external_ids: { $ref: "#/components/schemas/appended-external-ids" }
         content_ratings:
           type: object
+          required: [results]
           properties:
             results: { type: array, maxItems: 3, items: { type: object, properties: { iso_3166_1: { type: string }, rating: { type: string } } } }
     person-appended:
@@ -646,6 +652,7 @@ components:
         combined_credits: { $ref: "#/components/schemas/combined-credits" }
         images:
           type: object
+          required: [profiles]
           properties:
             profiles: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/image" } }
         external_ids: { $ref: "#/components/schemas/appended-external-ids" }
