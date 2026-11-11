@@ -742,13 +742,17 @@ pub(super) fn sets(rt: &MockRuntime, op_id: &str) -> bool {
 /// `value` written as type `t`'s `member` declares it: an integral number into an
 /// `integer` member as an integer, a number or boolean into a `string` member as its
 /// text, a text holding a number into a `number` or `integer` member as that number,
-/// `"true"`/`"false"` into a `boolean` member. A value of a type the member declares
-/// (or one with no declared type) stays as it is.
+/// `"true"`/`"false"` into a `boolean` member; an object or list with the members its
+/// schema fixes filled in ([`with_fixed`]). A value of a type the member declares (or
+/// one with no declared type) stays as it is otherwise.
 pub(super) fn written_back(rt: &MockRuntime, t: &str, member: &str, value: Value) -> Value {
     let bundle = rt.bundle();
     let Some(schema) = read_schema(rt, t).and_then(|r| property_schema(bundle, r, member)) else {
         return value;
     };
+    if value.is_object() || value.is_array() {
+        return with_fixed(bundle, &schema, value, 0);
+    }
     let kinds = declared_types(bundle, &schema, 0);
     if kinds.is_empty() {
         return value;
@@ -795,6 +799,89 @@ pub(super) fn written_back(rt: &MockRuntime, t: &str, member: &str, value: Value
         }
         _ => value,
     }
+}
+
+/// `value` with each object in it given the required members its schema fixes (a
+/// `const`) and it leaves out: a GraphQL object's `__typename`, which an expression writing a whole
+/// connection (`{'edges': [{'node': {...}}]}`) should not have to spell at every level.
+/// An object whose schema is a choice of several (a union) is left as it is: which
+/// one it is, the value says.
+fn with_fixed(bundle: &mb_mcm::Bundle, schema: &Value, value: Value, depth: usize) -> Value {
+    if depth > 16 {
+        return value;
+    }
+    let Some(schema) = one_shape(bundle, schema) else {
+        return value;
+    };
+    match value {
+        Value::Array(items) => match schema.get("items") {
+            Some(item) => Value::Array(
+                items
+                    .into_iter()
+                    .map(|v| with_fixed(bundle, item, v, depth + 1))
+                    .collect(),
+            ),
+            None => Value::Array(items),
+        },
+        Value::Object(mut members) => {
+            let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+                return Value::Object(members);
+            };
+            let required = |name: &str| {
+                schema
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .is_some_and(|r| r.iter().any(|n| n == name))
+            };
+            for (name, member) in props {
+                match members.remove(name) {
+                    Some(held) => {
+                        members.insert(name.clone(), with_fixed(bundle, member, held, depth + 1));
+                    }
+                    None if required(name) => {
+                        if let Some(fixed) = one_shape(bundle, member).and_then(|m| m.get("const"))
+                        {
+                            members.insert(name.clone(), fixed.clone());
+                        }
+                    }
+                    None => {}
+                }
+            }
+            Value::Object(members)
+        }
+        other => other,
+    }
+}
+
+/// `schema` through its `$ref`s, and through a nullable's one other branch
+/// (`anyOf: [X, {type: null}]`); `None` for a choice of several shapes.
+fn one_shape<'a>(bundle: &'a mb_mcm::Bundle, schema: &'a Value) -> Option<&'a Value> {
+    let mut at = schema;
+    for _ in 0..16 {
+        if let Some(name) = at
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+        {
+            at = bundle.defs.get(name)?;
+            continue;
+        }
+        let branches = ["anyOf", "oneOf"]
+            .iter()
+            .find_map(|k| at.get(*k).and_then(Value::as_array));
+        let Some(branches) = branches else {
+            return Some(at);
+        };
+        let mut shapes = branches
+            .iter()
+            .filter(|b| b.get("type") != Some(&json!("null")));
+        let only = shapes.next()?;
+        if shapes.next().is_some() {
+            return None;
+        }
+        at = only;
+    }
+    None
 }
 
 /// The JSON types `schema` declares, through `$ref`s and compositions.
