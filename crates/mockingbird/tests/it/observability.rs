@@ -537,6 +537,7 @@ fn ops_state(
         role: mockingbird::file_config::Role::All,
         leader: tokio::sync::watch::channel(true).1,
         reload: Default::default(),
+        data_plane: None,
     }
 }
 
@@ -913,6 +914,26 @@ async fn readyz_ready() {
 }
 
 #[tokio::test]
+async fn readyz_reports_the_data_plane() {
+    let store: Arc<dyn ControlStore> = stub_store().await;
+    let base = serve(ops::router(OpsState {
+        data_plane: Some(ops::DataPlane {
+            port: 43080,
+            tls: false,
+        }),
+        ..ops_state(store, memory_state(), MockRegistry::new())
+    }))
+    .await;
+    let body: Value = reqwest::get(format!("{base}/readyz"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["data_plane"], json!({"port": 43080, "tls": false}));
+}
+
+#[tokio::test]
 async fn readyz_reports_degraded_state_store() {
     let store: Arc<dyn ControlStore> = stub_store().await;
     orders_mock(&store).await;
@@ -1062,6 +1083,7 @@ async fn metrics_exposes_request_counters() {
         role: mockingbird::file_config::Role::All,
         leader: tokio::sync::watch::channel(true).1,
         reload: Default::default(),
+        data_plane: None,
     }))
     .await;
     let r = reqwest::get(format!("{base}/metrics")).await.unwrap();

@@ -27,7 +27,7 @@ After every import (and every `approve_draft`), call `get_world {mock, version}`
 
 ## 2. Call it
 
-`call_mock {method: "POST", path: "/orders/orders", body: {...}, session: "alice"}` (or curl `localhost:8080/...`). The result includes status, body and the `x-mockingbird-*` headers:
+`call_mock {mock: "orders", method: "POST", path: "/orders/orders", body: {...}, session: "alice"}` (or curl `localhost:8080/...`). The result includes status, body and the `x-mockingbird-*` headers. A mock with `hosts` (proxy mode, often `route_prefix: /`) answers only requests for those hosts: `call_mock` sends the mock's first host as `Host` when you name the `mock`, and with curl send it yourself (`curl -s localhost:8080/v1/items -H 'Host: api.example.com'`), or the data plane answers 404 "No mock mounted at this path":
 
 - `X-Mockingbird-Source`: `llm`, `patched` (LLM output fixed locally to fit the schema), `repaired` (fixed by a second LLM call) or `fallback` (faker).
 - `X-Mockingbird-Validation`: on a request that failed validation, why. The reasons are also in the error body's message field and in the request log (`request.validation`).
