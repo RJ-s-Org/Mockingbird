@@ -1463,6 +1463,83 @@ async fn joint_answer_may_omit_nullable_parts() {
     assert_eq!(out[1].as_ref().unwrap().source, Source::Llm);
 }
 
+/// When every part may be null, an answer leaving all of them out finds
+/// nothing the query named (`user(login:)` and `organization(login:)` both
+/// null): it is repaired until one part is found.
+#[tokio::test]
+async fn joint_answer_must_find_one_part_when_all_may_be_null() {
+    let bundle = orders();
+    let get = bundle.operation("getOrder").unwrap();
+    let nullable = json!({"anyOf": [{"type": "object"}, {"type": "null"}]});
+    let (provider, engine) = scripted(vec![
+        Ok(json!({}).to_string()),
+        Ok(json!({"first": valid_order_at_o1(), "second": null}).to_string()),
+    ]);
+    let get_call = call("getOrder");
+    let part = |key| JointPart {
+        key,
+        op: get,
+        call: &get_call,
+        ctx: GenerationContext {
+            response_schema: Some(&nullable),
+            ..ctx()
+        },
+    };
+    let out = engine
+        .generate_joint(&bundle, &[part("first"), part("second")])
+        .await;
+    assert_eq!(provider.requests().len(), 2, "one repair call");
+    assert_eq!(out[0].as_ref().unwrap().body, Some(valid_order_at_o1()));
+    assert_eq!(out[1].as_ref().unwrap().body, Some(Value::Null));
+    let system = &provider.requests()[0].messages[0].content;
+    assert!(
+        !system.contains("\"not\""),
+        "the rule is not sent: {system}"
+    );
+}
+
+/// Nullable parts called with the same arguments look up the same thing
+/// under different types (`user(login:)`, `organization(login:)`): of an
+/// answer finding both, only the first is kept, without a repair call.
+/// Parts with different arguments may both be found.
+#[tokio::test]
+async fn joint_lookups_with_the_same_arguments_find_one_thing() {
+    let bundle = orders();
+    let get = bundle.operation("getOrder").unwrap();
+    let nullable = json!({"anyOf": [{"type": "object"}, {"type": "null"}]});
+    let both = json!({"user": valid_order_at_o1(), "org": valid_order_at_o1()});
+    let mut vercel = call("getOrder");
+    vercel.body = Some(json!({"login": "vercel"}));
+    let mut other = call("getOrder");
+    other.body = Some(json!({"login": "octocat"}));
+    let part = |key, call| JointPart {
+        key,
+        op: get,
+        call,
+        ctx: GenerationContext {
+            response_schema: Some(&nullable),
+            ..ctx()
+        },
+    };
+
+    let (provider, engine) = scripted(vec![Ok(both.to_string())]);
+    let out = engine
+        .generate_joint(&bundle, &[part("user", &vercel), part("org", &vercel)])
+        .await;
+    assert_eq!(provider.requests().len(), 1, "no repair call");
+    assert_eq!(out[0].as_ref().unwrap().body, Some(valid_order_at_o1()));
+    assert_eq!(out[1].as_ref().unwrap().body, Some(Value::Null));
+
+    let (_, engine) = scripted(vec![Ok(both.to_string())]);
+    let out = engine
+        .generate_joint(&bundle, &[part("user", &vercel), part("org", &other)])
+        .await;
+    assert!(
+        out.iter()
+            .all(|r| r.as_ref().unwrap().body != Some(Value::Null))
+    );
+}
+
 /// A `null` the schema does not allow is patched locally instead of costing
 /// a repair call: dropped where the property is optional, faked where it is
 /// required. Real APIs return null where their docs never say so (TMDB's

@@ -713,9 +713,10 @@ pub fn build_joint_messages(
     system.push_str(ROLE_STATEMENT);
     system.push_str(
         "\n\nOne query asks for several fields at once. Answer them together as one JSON object \
-keyed by field, consistent with each other: when two fields look up the same thing under \
-different types (the same login, id or name), at most one of them exists and the others are \
-null.\n\n",
+keyed by field, consistent with each other. A field that looks something up by a login, id or \
+name finds it: the query names a thing that exists. When two fields look up the same thing \
+under different types (the same login, id or name), exactly one of them finds it, the type \
+that fits the name best, and the others are null.\n\n",
     );
     api_lines(&mut system, bundle, persona);
     system.push('\n');

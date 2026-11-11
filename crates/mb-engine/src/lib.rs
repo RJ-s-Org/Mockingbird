@@ -137,6 +137,60 @@ pub struct JointPart<'a> {
     pub ctx: GenerationContext<'a>,
 }
 
+/// The joint answer's schema with the rule a lookup answer must keep,
+/// checked (and repaired) but not sent to the provider: some
+/// structured-output modes refuse an `anyOf` at the root. When every part
+/// may be null, `{}` is a valid answer that finds nothing, and models give
+/// it for lookups (`user(login:)` and `organization(login:)` both null).
+/// The query names what it looks up, so at least one part is found.
+fn joint_checks(parts: &[JointPart<'_>], may_be_null: &[bool], combined: &Value) -> Value {
+    let mut checked = combined.clone();
+    if parts.len() > 1 && may_be_null.iter().all(|null| *null) {
+        checked["anyOf"] = parts
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "required": [p.key],
+                    "properties": {p.key: {"not": {"type": "null"}}},
+                })
+            })
+            .collect();
+    }
+    checked
+}
+
+/// Nullable parts called with the same arguments look up the same thing
+/// under different types (`user(login: "vercel")`,
+/// `organization(login: "vercel")`): only the first one found is kept, the
+/// later ones become null. Models (and parts generated on their own) often
+/// find all of them, which clients read as an ambiguous answer.
+fn one_per_lookup(
+    parts: &[JointPart<'_>],
+    may_be_null: &[bool],
+    results: &mut [Result<GeneratedResponse, EngineError>],
+) {
+    let found = |r: &Result<GeneratedResponse, EngineError>| {
+        r.as_ref()
+            .is_ok_and(|g| g.body.as_ref().is_some_and(|b| !b.is_null()))
+    };
+    for i in 0..parts.len() {
+        let Some(args) = parts[i].call.body.as_ref().and_then(Value::as_object) else {
+            continue;
+        };
+        if args.is_empty() || !may_be_null[i] || !found(&results[i]) {
+            continue;
+        }
+        for j in i + 1..parts.len() {
+            if may_be_null[j]
+                && parts[j].call.body.as_ref().and_then(Value::as_object) == Some(args)
+                && let Ok(g) = &mut results[j]
+            {
+                g.body = Some(Value::Null);
+            }
+        }
+    }
+}
+
 /// State the response must stay consistent with.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GenerationContext<'a> {
@@ -1127,16 +1181,20 @@ impl Engine {
     }
 
     /// Answers every part with one LLM call: one object keyed by the parts'
-    /// keys (a nullable part may be left out and reads as null), validated (and repaired) as a whole, then split and finished per
+    /// keys (a nullable part may be left out and reads as null, but not
+    /// every part: [`joint_checks`]), validated (and repaired) as a whole,
+    /// then split and finished per
     /// part. The call's usage is reported on the first part. Without a
     /// provider, for a part with a forced status or no schema, or when the
-    /// joint answer stays invalid, every part is generated on its own.
+    /// joint answer stays invalid, every part is generated on its own. Of
+    /// nullable parts looking up the same thing, only the first found is
+    /// kept ([`one_per_lookup`]).
     pub async fn generate_joint(
         &self,
         bundle: &Bundle,
         parts: &[JointPart<'_>],
     ) -> Vec<Result<GeneratedResponse, EngineError>> {
-        match self.try_joint(bundle, parts).await {
+        let mut results = match self.try_joint(bundle, parts).await {
             Some(responses) => responses.into_iter().map(Ok).collect(),
             None => {
                 futures::future::join_all(
@@ -1146,7 +1204,18 @@ impl Engine {
                 )
                 .await
             }
-        }
+        };
+        let may_be_null: Vec<bool> = parts
+            .iter()
+            .map(|p| {
+                p.ctx
+                    .response_schema
+                    .and_then(|s| self.schema_validator(bundle, s).ok())
+                    .is_some_and(|v| v.is_valid(&Value::Null))
+            })
+            .collect();
+        one_per_lookup(parts, &may_be_null, &mut results);
+        results
     }
 
     async fn try_joint(
@@ -1187,7 +1256,13 @@ impl Engine {
             "properties": properties,
             "required": keys,
         });
-        let validator = self.schema_validator(bundle, &combined).ok()?;
+        let may_be_null: Vec<bool> = shapes
+            .iter()
+            .map(|(_, _, validator)| validator.is_valid(&Value::Null))
+            .collect();
+        let validator = self
+            .schema_validator(bundle, &joint_checks(parts, &may_be_null, &combined))
+            .ok()?;
         let prompt_schema = compact::response_prompt_schema(bundle, &combined, &HashSet::new());
         let messages = tracing::info_span!("mb.prompt").in_scope(|| {
             prompt::build_joint_messages(

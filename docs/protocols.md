@@ -95,6 +95,10 @@ curl -s localhost:8080/graphql \
 
 A batch holds at most 10 operations; a larger or empty one is a `400` problem and nothing runs. The operations run one after another (a query after a mutation sees its write), each as if it had been sent on its own: checked against the root-field, depth and complexity limits, admitted (tenant, quota and, in `api_key` mode, the data-plane key), given its own chaos decision and recorded as its own request-log entry. An operation that is refused answers its own entry, `{"errors": [{"message", "extensions": {"code", "status"}}]}` (with `retryAfter` in seconds for a `429`), and the others still run. The response's `x-mockingbird-source` is the worst source over the batch, and the largest injected latency is waited once. The 1 MiB body limit applies to the whole batch.
 
+### Root fields that look up the same thing
+
+The root fields of one query are generated together, in one call. A query names what it looks up, so when every root field may be null, an answer that finds none of them is repaired. Nullable root fields called with the same arguments look up the same thing under different types (GitHub's `user(login: "vercel")` and `organization(login: "vercel")`): only the first one found in the query is kept, and the others answer `null`.
+
 gRPC (`mockingbird serve --offline helloworld.proto`):
 
 ```sh
