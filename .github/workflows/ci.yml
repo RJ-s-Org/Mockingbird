@@ -1,16 +1,16 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
+  schedule:
+    - cron: "23 6 * * *"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
-# Right-sized: main (and a manual run) runs every job on the whole workspace. A pull
-# request runs only the jobs its files can affect, and `check` covers the crates it
-# changed plus their direct dependents (`scripts/gate.sh --packages`); main catches the
-# rest after merge. A draft pull request runs nothing: review it as a draft, then mark it
+# Right-sized: a pull request runs only the jobs its files can affect, and `check` covers
+# the crates it changed plus their direct dependents (`scripts/gate.sh --packages`). A
+# merge to main runs nothing; the nightly run (and a manual run) runs every job on the
+# whole workspace and catches the rest. A draft pull request runs nothing: review it as a draft, then mark it
 # ready for one CI run. A skipped job counts as passed for the required checks, so
 # `changes` is itself required and fails closed.
 

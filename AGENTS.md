@@ -9,7 +9,7 @@ Read [`plugins/mockingbird/skills/mockingbird/SKILL.md`](plugins/mockingbird/ski
 ## Working on this repository
 
 - Rust workspace (`crates/*`), toolchain pinned in `rust-toolchain.toml`; the console is `crates/mb-console/web` (Node 22).
-- Before opening a pull request, run `scripts/gate.sh`: fmt, plus clippy, nextest and doctests for the crates you changed and their direct dependents, the console checks if you touched it, and the bench tests if you touched `scripts/llm-bench`. Don't run the full workspace locally. A pull request's CI runs the same scope plus the jobs its files affect, and main runs the full list after merge ([CONTRIBUTING.md](CONTRIBUTING.md#local-gates)).
+- Before opening a pull request, run `scripts/gate.sh`: fmt, plus clippy, nextest and doctests for the crates you changed and their direct dependents, the console checks if you touched it, and the bench tests if you touched `scripts/llm-bench`. Don't run the full workspace locally. A pull request's CI runs the same scope plus the jobs its files affect, and a nightly run on main runs the full list ([CONTRIBUTING.md](CONTRIBUTING.md#local-gates)).
 - No `unwrap()`/`expect()` outside tests; Admin API errors are `application/problem+json`; secrets are references only.
 - After changing the Admin API, regenerate the console client: `npm run gen:api` in `crates/mb-console/web`.
 - New config keys go in `docs/configuration.md` and `docs/examples/mockingbird.full.yaml` (a test checks both).
@@ -17,7 +17,7 @@ Read [`plugins/mockingbird/skills/mockingbird/SKILL.md`](plugins/mockingbird/ski
 
 ## Shipping a change (agents)
 
-A change should go from opened pull request to merged in under 30 minutes, with **one CI run**. CI is right-sized: a pull request runs only the jobs its files can affect, and main runs everything after merge. Keep both review and CI bounded:
+A change should go from opened pull request to merged in under 30 minutes, with **one CI run**. CI is right-sized: a pull request runs only the jobs its files can affect; a merge runs nothing, and a nightly run on main runs everything. Keep both review and CI bounded:
 
 1. **One coherent change per pull request.** Small fixes in the same area that one reviewer can read together go in one PR. Unrelated changes don't.
 2. **Gate, then open as a draft.** Run `scripts/gate.sh`, self-review the diff against CONTRIBUTING.md, then `gh pr create --draft`. A draft runs no CI.

@@ -4,27 +4,12 @@ name: IaC
 # resource against a real `mockingbird serve --offline`. Only changes that can
 # affect the provider (it, the Admin API and what it stores) trigger it.
 on:
-  push:
-    branches: [main]
-    paths:
-      - integrations/**
-      - crates/mb-admin/**
-      - crates/mb-auth/**
-      - crates/mb-store/**
-      - crates/mb-import/**
-      - crates/mockingbird/**
-      - Cargo.lock
-      - .github/workflows/iac.yml
+  schedule:
+    - cron: "23 6 * * *"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - integrations/**
-      - crates/mb-admin/**
-      - crates/mb-auth/**
-      - crates/mb-store/**
-      - crates/mb-import/**
-      - crates/mockingbird/**
-      - Cargo.lock
       - .github/workflows/iac.yml
   workflow_dispatch:
 

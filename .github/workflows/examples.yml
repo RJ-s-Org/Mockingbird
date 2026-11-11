@@ -4,14 +4,8 @@ name: Examples
 # they (or the code that embeds them) change; `cargo test` in CI covers the
 # catalog's structure on every pull request.
 on:
-  push:
-    branches: [main]
-    paths:
-      - examples/apis/**
-      - examples/apps/**
-      - crates/mockingbird/src/examples.rs
-      - scripts/smoke-examples.sh
-      - .github/workflows/examples.yml
+  schedule:
+    - cron: "23 6 * * *"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:

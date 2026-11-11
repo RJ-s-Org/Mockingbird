@@ -23,7 +23,7 @@ These are the commands CI runs on main.
 For day-to-day work, `scripts/gate.sh` runs the subset your branch needs (fmt, plus clippy,
 nextest and doctests for the changed crates and their direct dependents, and the console or bench
 tests when those changed). A pull request's CI runs the same Rust scope plus only the jobs its files
-affect (none while it is a draft); main runs the full list below after every merge.
+affect (none while it is a draft); a merge runs nothing, and a nightly run on main runs the full list below.
 
 ```sh
 # Rust

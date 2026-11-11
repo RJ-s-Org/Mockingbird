@@ -8,21 +8,13 @@ name: Integrations
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    # Engine and CLI changes reach it on main; a pull request runs it only when the
-    # integration or this workflow changes.
+    # Engine and CLI changes reach it in the nightly run; a pull request runs it only
+    # when the integration or this workflow changes.
     paths:
       - integrations/**
       - .github/workflows/integrations.yml
-  push:
-    branches: [main]
-    paths:
-      - integrations/**
-      - crates/mb-admin/**
-      - crates/mb-engine/**
-      - crates/mb-protocols/**
-      - crates/mockingbird/**
-      - Cargo.lock
-      - .github/workflows/integrations.yml
+  schedule:
+    - cron: "23 6 * * *"
   workflow_dispatch:
 
 concurrency:

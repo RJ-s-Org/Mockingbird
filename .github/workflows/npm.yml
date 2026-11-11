@@ -6,12 +6,8 @@ name: npm
 # when npm/ (or the example it uses) changes; release.yml builds and
 # publishes the real packages.
 on:
-  push:
-    branches: [main]
-    paths:
-      - npm/**
-      - examples/apis/github-rest/**
-      - .github/workflows/npm.yml
+  schedule:
+    - cron: "23 6 * * *"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
