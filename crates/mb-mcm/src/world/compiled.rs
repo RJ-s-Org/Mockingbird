@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 
-use super::expr::Program;
+use super::expr::{Program, Root, Segment};
 use super::{
     ChangeDesc, DerivedDesc, EffectOp, MAX_EFFECTS, OpDesc, Pointer, TextDesc, TypeDesc, World,
 };
@@ -493,6 +493,21 @@ impl OpExpressions {
         set.chain(refuse).chain(effects).chain(list)
     }
 
+    /// Whether a `set` or `changes` entry reads the request body's top-level member
+    /// `name` (`request.body.<name>` in an expression, `from_request: /<name>`): the
+    /// description says where that member lands, whatever the record calls it.
+    #[must_use]
+    pub fn sets_from_body(&self, name: &str) -> bool {
+        self.set.iter().any(|entry| match &entry.value {
+            SetValue::Literal(_) => false,
+            SetValue::Pointer(p) => p.tokens().first().is_some_and(|t| t == name),
+            SetValue::Expr(p) => p.check().members.iter().any(|m| {
+                matches!(m.root, Root::Body)
+                    && matches!(m.path.first(), Some(Segment::Member(n)) if n == name)
+            }),
+        })
+    }
+
     /// Whether an expression of the operation calls a session function (`held`,
     /// `count`, `exists`, `seq`, `mint`).
     #[must_use]
@@ -531,6 +546,23 @@ fn escape(token: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn sets_from_body_names_the_top_level_members_set_reads() {
+        let world: World = serde_json::from_value(json!({"operations": {"op": {
+            "changes": {"a": {"from_request": "/FromPointer/deep"}},
+            "set": {"b": "request.body.SmsUrl != null ? request.body.SmsUrl : record.b",
+                    "c": "request.query.Q", "d": "record.Inner.x", "e": "'lit'"}
+        }}}))
+        .unwrap();
+        let compiled = Expressions::compile(&world);
+        let op = compiled.op("op").unwrap();
+        assert!(op.sets_from_body("SmsUrl"));
+        assert!(op.sets_from_body("FromPointer"));
+        for name in ["deep", "Q", "Inner", "x", "b", "lit"] {
+            assert!(!op.sets_from_body(name), "{name}");
+        }
+    }
 
     #[test]
     fn changes_are_set_entries_a_set_entry_replaces() {
