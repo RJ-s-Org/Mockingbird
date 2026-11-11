@@ -73,6 +73,11 @@ fn mock_for_path(mocks: &Value, path: &str, host: &str) -> Option<String> {
 const MAX_INLINE_BODY: usize = 64 * 1024;
 /// How many world gaps an import answer carries (`world_gaps_total` counts them all).
 const IMPORT_GAPS: usize = 40;
+/// How many world gaps a `start_server` answer carries over all its mocks.
+const START_GAPS: usize = 80;
+/// A mock's world gaps with the contract version they describe, or why
+/// they could not be read.
+type WorldGaps = Result<(u64, Vec<Value>), String>;
 
 pub(crate) const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock a well-known public API (Stripe, GitHub, TMDB, Twilio, ...), check `list_examples` first: `init_example` writes its contract and a ready config. To mock an API: `import_contract`, then `get_world` (pass the imported `version` unless it was activated) and fix its `gaps` with `patch_world`, then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. To run an app unchanged against mocks, start the server with `proxy: true` and export the variables from `proxy_env` in the app's shell instead of editing its base URLs. Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports; if the key is not in this process's environment, `open_key_setup` lets the user type it into a local page that stores it in a private file. The `mockingbird://skills/…` resources hold the full guides.";
 
@@ -417,7 +422,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "start_server",
             title: "Start Mockingbird in the background",
-            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env.",
+            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env. With a config, also world_review: for each mock whose world description has gaps, the next_steps and world_gaps an import answers (review them as after import_contract, the mockingbird-world skill); and next_steps naming mocks that answer for one host without a common shares group (give mocks of one API the same mocks.<name>.shares).",
             schema: obj(
                 json!({
                     "config": s("Config file (preferred)."),
@@ -1497,6 +1502,9 @@ impl McpServer {
                 if args.proxy {
                     started["proxy_env"] = self.proxy_env(args.config.as_deref(), None)?;
                 }
+                if let Some(config) = &args.config {
+                    self.add_start_review(&mut started, config).await;
+                }
                 if let (Some(config), Ok(mut recorded)) = (&args.config, self.started_config.lock())
                 {
                     *recorded = Some(config.clone());
@@ -2213,23 +2221,89 @@ impl McpServer {
         let Some(version) = imported_version(answer) else {
             return;
         };
-        let v = version.to_string();
         let gaps = self
-            .ws(
-                Method::GET,
-                &["mocks", mock, "contracts", &v, "world"],
-                &[],
-                None,
-            )
+            .world_gaps(&self.admin_url, &self.workspace, mock, &version.to_string())
             .await
-            .map_err(|e| e.0)
-            .and_then(|w| {
-                w.get("gaps")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .ok_or_else(|| "the world answer has no gaps".to_owned())
-            });
-        next_steps(answer, mock, version, gaps);
+            .map(|(_, gaps)| gaps);
+        next_steps(answer, mock, version, gaps, IMPORT_GAPS);
+    }
+
+    /// The world gaps of `mock`'s contract `version` (a number or `active`)
+    /// in `workspace`, read from the Admin API at `admin`, with the number
+    /// of the version they describe.
+    async fn world_gaps(
+        &self,
+        admin: &str,
+        workspace: &str,
+        mock: &str,
+        version: &str,
+    ) -> WorldGaps {
+        let world = client::api(
+            admin,
+            self.token.as_deref(),
+            Some(workspace),
+            Method::GET,
+            &["mocks", mock, "contracts", version, "world"],
+            &[],
+            None,
+        )
+        .await
+        .map_err(|e| ToolError::from(e).0)?
+        .unwrap_or_default();
+        let gaps = world
+            .get("gaps")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| "the world answer has no gaps".to_owned())?;
+        let version = world
+            .get("version")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "the world answer has no version".to_owned())?;
+        Ok((version, gaps))
+    }
+
+    /// After `start_server` started the server from `config`: `world_review`
+    /// lists, for each mock of the config whose active world description
+    /// has gaps, what [`next_steps`] adds to an import (at most
+    /// [`START_GAPS`] gaps in all), and `next_steps` names the mocks that
+    /// answer for one host without a common `shares` group.
+    async fn add_start_review(&self, started: &mut Value, config: &std::path::Path) {
+        let Ok(cfg) = crate::file_config::load(config) else {
+            return;
+        };
+        let steps: Vec<Value> = same_host_without_shares(cfg.mocks.iter().map(|(name, m)| {
+            (
+                name.as_str(),
+                m.workspace.as_str(),
+                m.hosts.as_slice(),
+                m.shares.as_deref(),
+            )
+        }))
+        .into_iter()
+        .map(|(mocks, hosts)| json!(unshared_hosts_step(&mocks, &hosts)))
+        .collect();
+        let admin = started
+            .get("admin")
+            .and_then(Value::as_str)
+            .unwrap_or(&self.admin_url)
+            .to_owned();
+        let mut read = Vec::new();
+        if started.get("ready").and_then(Value::as_bool) == Some(true) {
+            for (name, m) in &cfg.mocks {
+                let gaps = self.world_gaps(&admin, &m.workspace, name, "active").await;
+                read.push((name.clone(), gaps));
+            }
+        }
+        let review = world_review(read);
+        let Some(obj) = started.as_object_mut() else {
+            return;
+        };
+        if !steps.is_empty() {
+            obj.insert("next_steps".into(), Value::Array(steps));
+        }
+        if !review.is_empty() {
+            obj.insert("world_review".into(), Value::Array(review));
+        }
     }
 
     /// The data-plane base URL: the argument, `MB_DATA_URL`, the one the
@@ -2813,9 +2887,15 @@ fn imported_version(answer: &Value) -> Option<u64> {
 
 /// Adds to import `answer` of `mock`'s `version` the steps to take next and the
 /// version's world gaps: `world_gaps_total`, and `world_gaps` with at most
-/// [`IMPORT_GAPS`] of them, the ones to fix before the advisory ones. When the
+/// `cap` of them, the ones to fix before the advisory ones. When the
 /// gaps could not be read, `world_gaps_error` says why instead.
-fn next_steps(answer: &mut Value, mock: &str, version: u64, gaps: Result<Vec<Value>, String>) {
+fn next_steps(
+    answer: &mut Value,
+    mock: &str,
+    version: u64,
+    gaps: Result<Vec<Value>, String>,
+    cap: usize,
+) {
     let Some(obj) = answer.as_object_mut() else {
         return;
     };
@@ -2832,7 +2912,7 @@ fn next_steps(answer: &mut Value, mock: &str, version: u64, gaps: Result<Vec<Val
         Ok(mut gaps) => {
             obj.insert("world_gaps_total".into(), json!(gaps.len()));
             gaps.sort_by_key(|g| g.get("advisory").and_then(Value::as_bool).unwrap_or(false));
-            gaps.truncate(IMPORT_GAPS);
+            gaps.truncate(cap);
             obj.insert("world_gaps".into(), Value::Array(gaps));
         }
         Err(e) => {
@@ -2844,6 +2924,92 @@ fn next_steps(answer: &mut Value, mock: &str, version: u64, gaps: Result<Vec<Val
             );
         }
     }
+}
+
+/// One `world_review` entry per mock whose world gaps were read and are not
+/// empty, or could not be read: the mock, the version, and what
+/// [`next_steps`] adds to an import of it, each capped at [`IMPORT_GAPS`]
+/// gaps and all together at [`START_GAPS`] (`world_gaps_total` still counts
+/// each mock's).
+fn world_review(read: Vec<(String, WorldGaps)>) -> Vec<Value> {
+    let mut left = START_GAPS;
+    let mut review = Vec::new();
+    for (mock, gaps) in read {
+        let mut entry = json!({ "mock": mock });
+        match gaps {
+            Ok((_, gaps)) if gaps.is_empty() => continue,
+            Ok((version, gaps)) => {
+                entry["version"] = json!(version);
+                next_steps(&mut entry, &mock, version, Ok(gaps), left.min(IMPORT_GAPS));
+            }
+            Err(e) => {
+                entry["world_gaps_error"] = json!(format!(
+                    "the world gaps could not be read ({e}); call get_world {{mock: {mock:?}}} for them"
+                ));
+            }
+        }
+        left -= entry
+            .get("world_gaps")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        review.push(entry);
+    }
+    review
+}
+
+/// The mocks (by name) that answer for one host without all naming the same
+/// `shares` group, with the hosts they have in common: each set of mocks
+/// once, with all its hosts. Only mocks of one workspace are compared, as a
+/// `shares` group holds mocks of one workspace. Host names are compared
+/// without case.
+fn same_host_without_shares<'a>(
+    mocks: impl IntoIterator<Item = (&'a str, &'a str, &'a [String], Option<&'a str>)>,
+) -> Vec<(Vec<String>, Vec<String>)> {
+    use std::collections::{BTreeMap, BTreeSet};
+    /// A mock's name and `shares` group.
+    type Member<'a> = (&'a str, Option<&'a str>);
+    let mut by_host: BTreeMap<(&str, String), Vec<Member<'_>>> = BTreeMap::new();
+    for (name, workspace, hosts, shares) in mocks {
+        let hosts: BTreeSet<String> = hosts.iter().map(|h| h.to_ascii_lowercase()).collect();
+        for host in hosts {
+            by_host
+                .entry((workspace, host))
+                .or_default()
+                .push((name, shares));
+        }
+    }
+    let mut groups: BTreeMap<Vec<String>, Vec<String>> = BTreeMap::new();
+    for ((_, host), mocks) in by_host {
+        let Some(&(_, first)) = mocks.first() else {
+            continue;
+        };
+        if mocks.len() < 2 || (first.is_some() && mocks.iter().all(|&(_, s)| s == first)) {
+            continue;
+        }
+        let names: BTreeSet<String> = mocks.iter().map(|&(n, _)| n.to_owned()).collect();
+        groups
+            .entry(names.into_iter().collect())
+            .or_default()
+            .push(host);
+    }
+    groups.into_iter().collect()
+}
+
+/// The next step for `mocks` that answer for `hosts` without a common
+/// `shares` group.
+fn unshared_hosts_step(mocks: &[String], hosts: &[String]) -> String {
+    let quote = |names: &[String]| {
+        names
+            .iter()
+            .map(|n| format!("{n:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "Mocks {} answer for the same host ({}) but have no common shares group. If they serve the same API (REST beside GraphQL, for example), give each the same `shares: <group>` in the config (mocks.<name>.shares) so a record created through one is read through the other, and where a type's name differs between their contracts, describe it with the world's types.<type>.same_as (the mockingbird-world skill).",
+        quote(mocks),
+        quote(hosts)
+    )
 }
 
 #[cfg(test)]
@@ -2867,7 +3033,7 @@ mod tests {
             .collect();
         gaps.push(json!({"code": "no_target", "message": "fix"}));
         let mut answer = json!({"version": 2});
-        next_steps(&mut answer, "shop", 2, Ok(gaps));
+        next_steps(&mut answer, "shop", 2, Ok(gaps), IMPORT_GAPS);
         assert_eq!(answer["world_gaps_total"], 51);
         let listed = answer["world_gaps"].as_array().cloned().unwrap_or_default();
         assert_eq!(listed.len(), IMPORT_GAPS);
@@ -2883,7 +3049,7 @@ mod tests {
     #[test]
     fn a_failed_gap_read_says_so_and_claims_no_gaps() {
         let mut answer = json!({"version": 2});
-        next_steps(&mut answer, "shop", 2, Err("timed out".into()));
+        next_steps(&mut answer, "shop", 2, Err("timed out".into()), IMPORT_GAPS);
         assert!(answer.get("world_gaps").is_none(), "{answer}");
         assert!(answer.get("world_gaps_total").is_none(), "{answer}");
         assert!(
@@ -2892,6 +3058,117 @@ mod tests {
                 .is_some_and(|s| s.contains("timed out"))
         );
         assert!(answer["next_steps"].is_array());
+    }
+
+    #[test]
+    fn same_host_mocks_without_a_common_shares_group_are_named() {
+        let hosts = |h: &[&str]| h.iter().map(|h| (*h).to_owned()).collect::<Vec<_>>();
+        let (api, both, other) = (
+            hosts(&["api.example.com"]),
+            hosts(&["API.example.com", "uploads.example.com"]),
+            hosts(&["other.example.com"]),
+        );
+        let found = same_host_without_shares([
+            ("rest", "default", api.as_slice(), None),
+            ("graph", "default", both.as_slice(), None),
+            ("lone", "default", other.as_slice(), None),
+        ]);
+        assert_eq!(
+            found,
+            vec![(
+                vec!["graph".to_owned(), "rest".to_owned()],
+                vec!["api.example.com".to_owned()]
+            )]
+        );
+        // One group in common: nothing to say.
+        assert!(
+            same_host_without_shares([
+                ("rest", "default", api.as_slice(), Some("api")),
+                ("graph", "default", both.as_slice(), Some("api")),
+            ])
+            .is_empty()
+        );
+        // Different groups, or one without: named.
+        for (a, b) in [(Some("a"), Some("b")), (Some("a"), None), (None, Some("a"))] {
+            assert_eq!(
+                same_host_without_shares([
+                    ("rest", "default", api.as_slice(), a),
+                    ("graph", "default", api.as_slice(), b)
+                ])
+                .len(),
+                1,
+                "{a:?} {b:?}"
+            );
+        }
+        // Mocks of different workspaces cannot share a group: nothing to say.
+        assert!(
+            same_host_without_shares([
+                ("rest", "one", api.as_slice(), None),
+                ("graph", "two", api.as_slice(), None),
+            ])
+            .is_empty()
+        );
+        // Hosts listed by only one mock, or none, say nothing.
+        assert!(
+            same_host_without_shares([
+                ("rest", "default", api.as_slice(), None),
+                ("x", "default", &[][..], None)
+            ])
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_unshared_hosts_step_names_the_mocks_shares_and_same_as() {
+        let step = unshared_hosts_step(
+            &["graph".to_owned(), "rest".to_owned()],
+            &["api.example.com".to_owned()],
+        );
+        for part in [
+            "\"graph\", \"rest\"",
+            "\"api.example.com\"",
+            "mocks.<name>.shares",
+            "same_as",
+            "mockingbird-world",
+        ] {
+            assert!(step.contains(part), "{part}: {step}");
+        }
+    }
+
+    #[test]
+    fn world_review_skips_mocks_without_gaps_and_caps_the_total() {
+        let gaps = |n: usize| {
+            (0..n)
+                .map(|i| json!({"code": "no_target", "message": i}))
+                .collect()
+        };
+        let review = world_review(vec![
+            ("clean".into(), Ok((1, Vec::new()))),
+            ("a".into(), Ok((3, gaps(50)))),
+            ("b".into(), Ok((1, gaps(30)))),
+            ("c".into(), Ok((2, gaps(20)))),
+            ("d".into(), Err("timed out".into())),
+        ]);
+        let mocks: Vec<&str> = review.iter().filter_map(|e| e["mock"].as_str()).collect();
+        assert_eq!(mocks, ["a", "b", "c", "d"]);
+        let listed = |i: usize| review[i]["world_gaps"].as_array().map_or(0, Vec::len);
+        assert_eq!(listed(0), IMPORT_GAPS);
+        assert_eq!(review[0]["world_gaps_total"], 50);
+        assert_eq!(review[0]["version"], 3);
+        assert_eq!(listed(1), 30);
+        assert_eq!(listed(2), START_GAPS - IMPORT_GAPS - 30);
+        assert_eq!(review[2]["world_gaps_total"], 20);
+        assert!(
+            review[0]["next_steps"][0]
+                .as_str()
+                .is_some_and(|s| s.contains("version: 3"))
+        );
+        assert!(
+            review[3]["world_gaps_error"]
+                .as_str()
+                .is_some_and(|s| s.contains("timed out"))
+        );
+        assert!(listed(0) + listed(1) + listed(2) <= START_GAPS);
     }
 
     fn server(read_only: bool) -> McpServer {

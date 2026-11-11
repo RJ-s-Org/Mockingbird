@@ -1600,3 +1600,66 @@ fn mcp_and_cli_write_world_revisions() {
         std::panic::resume_unwind(panic);
     }
 }
+
+/// Started from a config, `start_server` answers each mock's world gaps as an
+/// import does, and names mocks that answer for one host without a common
+/// `shares` group.
+#[test]
+fn start_server_reviews_the_worlds_and_flags_same_host_mocks_without_shares() {
+    let dir = tempdir();
+    std::fs::copy(fixture(), dir.path().join("orders.yaml")).unwrap();
+    std::fs::write(
+        dir.path().join("mockingbird.yaml"),
+        "mocks:\n  rest:\n    contract: orders.yaml\n    hosts: [api.example.com]\n  other:\n    contract: orders.yaml\n    route_prefix: /other\n    hosts: [api.example.com]\n",
+    )
+    .unwrap();
+    let (mut mcp, _, started) = start_server_on_free_ports(
+        dir.path(),
+        &json!({ "config": "mockingbird.yaml", "offline": true }),
+        mcp_env,
+        || {},
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_eq!(started["ready"], true, "{started}");
+        let steps = started["next_steps"].as_array().expect("next_steps");
+        assert_eq!(steps.len(), 1, "{started}");
+        let step = steps[0].as_str().unwrap();
+        for part in [
+            "\"other\", \"rest\"",
+            "\"api.example.com\"",
+            "shares",
+            "same_as",
+        ] {
+            assert!(step.contains(part), "{part}: {step}");
+        }
+        // The orders contract's tier-0 world has gaps, so the review is not empty.
+        let review = started["world_review"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(!review.is_empty(), "{started}");
+        for mock in ["other", "rest"] {
+            let world = mcp.tool("get_world", json!({ "mock": mock }));
+            let gaps = world["gaps"].as_array().unwrap();
+            let entry = review.iter().find(|e| e["mock"] == mock);
+            if gaps.is_empty() {
+                assert!(entry.is_none(), "{mock}: {started}");
+                continue;
+            }
+            let entry = entry.unwrap_or_else(|| panic!("{mock}: {started}"));
+            assert_eq!(entry["version"], world["version"], "{entry}");
+            assert_eq!(entry["world_gaps_total"], gaps.len(), "{entry}");
+            assert!(
+                entry["next_steps"][0]
+                    .as_str()
+                    .is_some_and(|s| s.contains("mockingbird-world")),
+                "{entry}"
+            );
+        }
+    }));
+    let stopped = mcp.tool("stop_server", json!({}));
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
