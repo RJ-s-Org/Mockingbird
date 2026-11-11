@@ -1293,60 +1293,136 @@ fn read_shapes(rt: &crate::MockRuntime, t: &str) -> Vec<(Value, bool)> {
     // type: a repository's pull requests) is read as the scalar members of the
     // definition named for it, none required: what an input sends is kept, and
     // fill writes no nested record a read never asked for.
+    let bundle = rt.bundle();
     if schemas.is_empty()
-        && let Some(schema) = scalar_members(rt.bundle(), t)
+        && let Some(name) = bundle
+            .defs
+            .keys()
+            .find(|d| d.as_str() == t)
+            .or_else(|| bundle.defs.keys().find(|d| d.eq_ignore_ascii_case(t)))
+        && let Some(schema) = scalar_members(bundle, name, false)
     {
         schemas.push((schema, false));
+    }
+    // A GraphQL record holds its own scalars: what a selection asks below it is
+    // another record (its repository, its comments), answered from state or
+    // generated. So a create's fill writes no nested record of another type
+    // (GitHub's `Issue` reaches hundreds), and its check asks for none.
+    if graphql(bundle) {
+        for (schema, _) in &mut schemas {
+            if let Some(name) = own_def(bundle, schema)
+                && let Some(scalars) = scalar_members(bundle, &name, true)
+            {
+                *schema = scalars;
+            }
+        }
     }
     schemas
 }
 
-/// An object schema of the scalar and enum members of the definition named `t`
-/// (case aside, an exact name first), none required; `None` when there is none.
-fn scalar_members(bundle: &mb_mcm::Bundle, t: &str) -> Option<Value> {
-    let name = bundle
-        .defs
-        .keys()
-        .find(|d| d.as_str() == t)
-        .or_else(|| bundle.defs.keys().find(|d| d.eq_ignore_ascii_case(t)))?;
-    let props = bundle.defs.get(name)?.get("properties")?.as_object()?;
-    let scalar = |schema: &Value| {
-        let mut schema = schema;
-        for _ in 0..8 {
-            if schema.get("enum").is_some() || schema.get("const").is_some() {
-                return true;
-            }
-            if let Some(def) = schema
-                .get("$ref")
-                .and_then(Value::as_str)
-                .and_then(|r| r.strip_prefix("#/$defs/"))
-                .and_then(|n| bundle.defs.get(n))
-            {
-                schema = def;
-                continue;
-            }
-            let branch = ["anyOf", "oneOf"]
-                .iter()
-                .filter_map(|k| schema.get(*k).and_then(Value::as_array))
-                .flatten()
-                .find(|b| b.get("type").and_then(Value::as_str) != Some("null"));
-            if let Some(branch) = branch {
-                schema = branch;
-                continue;
-            }
-            return matches!(
-                schema.get("type").and_then(Value::as_str),
-                Some("string" | "integer" | "number" | "boolean")
-            );
+/// Whether `bundle` is a GraphQL schema's.
+fn graphql(bundle: &mb_mcm::Bundle) -> bool {
+    bundle
+        .operations
+        .iter()
+        .any(|op| matches!(op.binding, mb_mcm::Binding::Graphql { .. }))
+}
+
+/// The definition `schema` is, through a `$ref` and a nullable `anyOf`.
+fn own_def(bundle: &mb_mcm::Bundle, schema: &Value) -> Option<String> {
+    let mut schema = schema;
+    for _ in 0..8 {
+        if let Some(name) = schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+        {
+            return bundle
+                .defs
+                .get(name)
+                .filter(|d| d.get("properties").is_some())
+                .map(|_| name.to_owned());
         }
-        false
-    };
+        let branches: Vec<&Value> = schema
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|b| b.get("type").and_then(Value::as_str) != Some("null"))
+            .collect();
+        match branches.as_slice() {
+            [one] => schema = one,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// An object schema of the scalar members of definition `name`: a string,
+/// number, integer or boolean, an `enum` or a `const`, a custom scalar (a
+/// definition with no members, items or alternatives: GraphQL's `URI`), or a
+/// list of them, through `$ref`s and a nullable `anyOf`. Required where the
+/// definition requires them when `required`, else none; `None` when there is
+/// no such member.
+fn scalar_members(bundle: &mb_mcm::Bundle, name: &str, required: bool) -> Option<Value> {
+    fn scalar(bundle: &mb_mcm::Bundle, schema: &Value, depth: usize) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        if schema.get("enum").is_some() || schema.get("const").is_some() {
+            return true;
+        }
+        if let Some(def) = schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+            .and_then(|n| bundle.defs.get(n))
+        {
+            return scalar(bundle, def, depth + 1);
+        }
+        let branches: Vec<&Value> = ["anyOf", "oneOf"]
+            .iter()
+            .filter_map(|k| schema.get(*k).and_then(Value::as_array))
+            .flatten()
+            .filter(|b| b.get("type").and_then(Value::as_str) != Some("null"))
+            .collect();
+        if let [one] = branches.as_slice() {
+            return scalar(bundle, one, depth + 1);
+        }
+        if !branches.is_empty() || schema.get("allOf").is_some() {
+            return false;
+        }
+        match schema.get("type").and_then(Value::as_str) {
+            Some("string" | "integer" | "number" | "boolean") => true,
+            Some("array") => schema
+                .get("items")
+                .is_some_and(|items| scalar(bundle, items, depth + 1)),
+            Some(_) => false,
+            None => schema.get("properties").is_none() && schema.get("items").is_none(),
+        }
+    }
+    let def = bundle.defs.get(name)?;
+    let props = def.get("properties")?.as_object()?;
     let kept: Map<String, Value> = props
         .iter()
-        .filter(|(_, schema)| scalar(schema))
+        .filter(|(_, schema)| scalar(bundle, schema, 0))
         .map(|(m, schema)| (m.clone(), schema.clone()))
         .collect();
-    (!kept.is_empty()).then(|| serde_json::json!({"type": "object", "properties": kept}))
+    if kept.is_empty() {
+        return None;
+    }
+    let mut out = serde_json::json!({"type": "object", "properties": kept});
+    let names: Vec<&Value> = def
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|m| m.as_str().is_some_and(|m| kept.contains_key(m)))
+        .collect();
+    if required && !names.is_empty() {
+        out["required"] = serde_json::json!(names);
+    }
+    Some(out)
 }
 
 /// The members `schemas` declare, each with the first schema declaring it.

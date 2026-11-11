@@ -90,3 +90,95 @@ async fn a_create_of_a_type_read_only_below_another_keeps_its_input() {
     assert_eq!(pr.data["baseRefName"], "main", "{}", pr.data);
     assert_eq!(pr.data["state"], "OPEN", "{}", pr.data);
 }
+
+/// An issue read through `node(id:): Node`, with a custom scalar and required
+/// object and connection members, as GitHub's.
+const NODE_SDL: &str = r#"
+scalar URI
+interface Node { id: ID! }
+enum IssueState { OPEN CLOSED }
+type Actor { login: String! avatarUrl: URI! }
+type Repository implements Node { id: ID! name: String! owner: Actor! }
+type IssueComment implements Node { id: ID! body: String! author: Actor! }
+type IssueCommentConnection { nodes: [IssueComment!]! totalCount: Int! }
+type Issue implements Node {
+  id: ID!
+  number: Int!
+  title: String!
+  state: IssueState!
+  url: URI!
+  labelNames: [String!]!
+  repository: Repository!
+  author: Actor!
+  comments(first: Int): IssueCommentConnection!
+}
+input CreateIssueInput { repositoryId: ID! title: String! }
+type CreateIssuePayload { issue: Issue }
+type Query { node(id: ID!): Node }
+type Mutation { createIssue(input: CreateIssueInput!): CreateIssuePayload }
+"#;
+
+#[tokio::test]
+async fn a_graphql_create_fills_its_own_scalars_and_no_nested_record() {
+    let world: mb_mcm::world::World = serde_json::from_value(json!({
+        "version": 1,
+        "types": {"issue": {"lifecycle": {"member": "state", "states": ["OPEN", "CLOSED"], "initial": "OPEN"}}},
+        "operations": {
+            "Query.node": {"kind": "read", "type": "issue", "target": {"member": "id"}},
+            "Mutation.createIssue": {"kind": "create", "type": "issue", "answer": {"record": "/issue"}}
+        }
+    }))
+    .unwrap();
+    let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let rt = MockRuntime::new(
+        "gh",
+        Arc::new(compile(NODE_SDL.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::clone(&store),
+    )
+    .with_world(&world, &world, 1);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = graphql::try_router(Arc::new(rt)).unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let query = r#"mutation { createIssue(input: {repositoryId: "R_1", title: "Router panics"}) {
+        issue { id url } } }"#;
+    let body: Value = reqwest::Client::new()
+        .post(format!("http://{addr}/graphql"))
+        .header("content-type", "application/json")
+        .header("x-mockingbird-session", "s1")
+        .body(json!({ "query": query }).to_string())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(body.get("errors").is_none(), "{body}");
+    assert_eq!(
+        body["extensions"]["mockingbird"]["sources"]["createIssue"], "state",
+        "{body}"
+    );
+
+    let key = SessionKey {
+        workspace: "default".into(),
+        mock: "gh".into(),
+        session: "s1".into(),
+    };
+    let held = store.export(&key).await.unwrap();
+    let issue = held
+        .iter()
+        .find(|r| r.resource_type == "issue")
+        .unwrap_or_else(|| panic!("{held:?}"));
+    let data = &issue.data;
+    assert_eq!(data["title"], "Router panics", "{data}");
+    assert_eq!(data["state"], "OPEN", "{data}");
+    // Its own scalars: a custom scalar and a list of strings among them.
+    assert!(data["url"].is_string(), "{data}");
+    assert!(data["labelNames"].is_array(), "{data}");
+    // No record of another type written below it.
+    for nested in ["author", "comments"] {
+        assert!(data.get(nested).is_none(), "{nested}: {data}");
+    }
+}
