@@ -54,13 +54,15 @@ impl Engine {
     /// Values for the `missing` members of a record whose `schema` declares them, the
     /// record holding `known` already. A member that may be null and holds a reference
     /// to another record (an id-or-object member) is null, and so is an optional one
-    /// (not in `required`) that holds any other object or list. The rest come from one
+    /// (not in `schema`'s `required`) that holds any other object or list; an optional
+    /// object or list of objects that may not be null gets no value. The rest come from one
     /// structured-output LLM call whose schema is `schema` restricted to them, with
     /// `known` in the prompt so that the values agree with it; none is made when none
     /// is left. A member the answer leaves invalid is the faker's (the answer's local
-    /// patch), and so is every member when the call fails or there is no provider; the
-    /// faker draws by the engine's seed, the operation and the request. A member
-    /// `schema` does not declare gets no value, nor one the faker draws `null` for.
+    /// patch), and so is every member when the call fails or there is no provider,
+    /// but an object or list that may be null is null; the faker draws by the engine's
+    /// seed, the operation and the request. A member `schema` does not declare gets no
+    /// value, nor one the faker draws `null` for.
     pub async fn fill(
         &self,
         bundle: &Bundle,
@@ -86,12 +88,26 @@ impl Engine {
         // them out was most of the model's output. A required one (an issue's `user`)
         // stays the model's, as does every scalar; a faker object would tell a client
         // to act on it.
+        // An optional object, or list of objects, that may not be null is left out:
+        // absent is what the contract allows for it, and its schema was most of the
+        // prompt (a checkout session's branding, its line items). A list of scalars
+        // (a payment's method types) costs little and clients read it; it stays
+        // asked. A world `set` gives a left-out member a client reads.
         let required = consistency::required_members(bundle, schema);
-        let (nulled, asked): (Vec<_>, Vec<_>) = declared
-            .iter()
-            .partition(|(name, member)| nulled_by_fill(bundle, &required, name, member));
-        for (name, _) in &nulled {
-            filled.members.insert((*name).to_string(), Value::Null);
+        let mut asked = Vec::new();
+        let mut left_out = Vec::new();
+        for member in &declared {
+            let (name, schema) = member;
+            if nulled_by_fill(bundle, &required, name, schema) {
+                filled.members.insert((*name).to_string(), Value::Null);
+                continue;
+            }
+            let optional = !required.iter().any(|r| r == name);
+            if optional && structured(bundle, schema) && holds_objects(bundle, schema) {
+                left_out.push(*name);
+                continue;
+            }
+            asked.push(member);
         }
         if !asked.is_empty() {
             self.fill_with_llm(bundle, op, call, known, &asked, &mut filled)
@@ -104,11 +120,18 @@ impl Engine {
             &[&path, &query, &body],
         );
         for (name, member) in &declared {
-            if !filled.members.contains_key(*name) {
-                let value = self.fake_field(bundle, name, member, &mut draws);
-                if !value.is_null() {
-                    filled.members.insert((*name).to_string(), value);
-                }
+            if left_out.contains(name) || filled.members.contains_key(*name) {
+                continue;
+            }
+            // The model wrote no valid value: an object or list that may be null is
+            // null, not a faker object a client would act on (a payment's next step).
+            if admits_null(bundle, member) && structured(bundle, member) {
+                filled.members.insert((*name).to_string(), Value::Null);
+                continue;
+            }
+            let value = self.fake_field(bundle, name, member, &mut draws);
+            if !value.is_null() {
+                filled.members.insert((*name).to_string(), value);
             }
         }
         filled
@@ -229,6 +252,37 @@ fn structured(bundle: &Bundle, schema: &Value) -> bool {
                     .and_then(Value::as_array)
                     .is_some_and(|bs| bs.iter().any(|b| walk(bundle, b, depth + 1)))
             })
+    }
+    walk(bundle, schema, 0)
+}
+
+/// Whether `schema` (a member's) holds an object or a list of objects (through
+/// `$ref`s and unions), not only scalars or lists of them.
+fn holds_objects(bundle: &Bundle, schema: &Value) -> bool {
+    fn walk(bundle: &Bundle, schema: &Value, depth: usize) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        let schema = bundle.resolve(schema);
+        let has_type = |t: &str| match schema.get("type") {
+            Some(Value::String(s)) => s == t,
+            Some(Value::Array(ts)) => ts.iter().any(|x| x == t),
+            _ => false,
+        };
+        if has_type("object") || schema.get("properties").is_some() {
+            return true;
+        }
+        if let Some(items) = schema.get("items")
+            && walk(bundle, items, depth + 1)
+        {
+            return true;
+        }
+        ["anyOf", "oneOf", "allOf"].iter().any(|k| {
+            schema
+                .get(*k)
+                .and_then(Value::as_array)
+                .is_some_and(|bs| bs.iter().any(|b| walk(bundle, b, depth + 1)))
+        })
     }
     walk(bundle, schema, 0)
 }
