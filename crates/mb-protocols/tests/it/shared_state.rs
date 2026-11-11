@@ -127,7 +127,9 @@ async fn rest_and_graphql_read_what_the_other_stored() {
     let gh = runtime(
         "github-graphql",
         SDL,
-        vec![issue(7, "Over GraphQL"), issue(99, "Made up")],
+        // Numbered past what a create draws (0 to 99), so the REST create's
+        // number never names it.
+        vec![issue(7007, "Over GraphQL"), issue(99, "Made up")],
         Arc::clone(&state),
     );
     let gql_router = graphql::try_router(gh).unwrap();
@@ -148,7 +150,7 @@ async fn rest_and_graphql_read_what_the_other_stored() {
         true,
     )
     .await;
-    let read = rest(&rest_router, "GET", "/issues/7", None).await;
+    let read = rest(&rest_router, "GET", "/issues/7007", None).await;
     assert_eq!(read["title"], "Over GraphQL", "{read}");
     assert_eq!(read["state"], "open", "{read}");
 
