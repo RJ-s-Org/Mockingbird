@@ -828,6 +828,46 @@ async fn a_retry_whose_build_fails_is_rescheduled() {
     assert_eq!(env.create_widget_gap().await, None);
 }
 
+/// A first build that fails mounts nothing; the retry mounts the mock
+/// without a config change.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_first_build_is_retried() {
+    let env = Env::stored(NO_ID_CONTRACT, &[]).await;
+    env.store.fail_active.store(1, Ordering::SeqCst);
+    let env = env.start().await;
+    assert_eq!(env.status(), None);
+    assert_eq!(env.registry.failed_mocks().len(), 1);
+    env.wait_status(Some((0, false)), SOON).await;
+    assert_eq!(env.builds(), 2, "one failed build and its retry");
+    assert!(env.registry.failed_mocks().is_empty());
+    assert_eq!(env.create_widget_gap().await, Some(json!(["no_identity"])));
+}
+
+/// A rebuild that fails keeps the previous runtime and is retried until it
+/// succeeds; then the retries stop.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_rebuild_is_retried() {
+    let env = Env::stored(NO_ID_CONTRACT, &[]).await.start().await;
+    assert_eq!(env.builds(), 1);
+    env.store.fail_active.store(2, Ordering::SeqCst);
+    revise(env.store(), &env.mock, 1, widget_identity()).await;
+    let deadline = Instant::now() + SOON;
+    while env.registry.failed_mocks().is_empty() {
+        assert!(Instant::now() < deadline, "the rebuild did not fail");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // The previous runtime still answers.
+    assert_eq!(env.status(), Some((0, false)));
+    // Retried after 1 s (which fails again), then after 2 s more.
+    env.wait_status(Some((1, false)), Duration::from_secs(10))
+        .await;
+    assert!(env.registry.failed_mocks().is_empty());
+    assert_eq!(env.builds(), 4);
+    assert_eq!(env.create_widget_gap().await, None);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(env.builds(), 4, "no retry after a build succeeded");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pending_retry_stops_when_the_mock_is_deleted() {
     let env = Env::stored(NO_ID_CONTRACT, &[]).await;

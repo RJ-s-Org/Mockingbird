@@ -935,6 +935,11 @@ async fn an_oversized_world_file_is_refused_before_it_is_read() {
     assert!(msg.contains("too_large"), "{msg}");
 }
 
+/// How long a test waits for the config watch to apply an edit. A watch
+/// raises no event a test can await, so tests poll; under a loaded test
+/// runner a reload can take well over five seconds.
+const WATCH_DEADLINE: Duration = Duration::from_secs(30);
+
 /// `--watch` watches each mock's `world:` file: editing only that file
 /// reloads it and adds a revision.
 #[tokio::test]
@@ -967,7 +972,7 @@ async fn watch_reloads_an_edited_world_file() {
         "version: 1\noperations:\n  getOrder:\n    not_found: 404\n  deleteOrder:\n    kind: delete\n",
     )
     .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WATCH_DEADLINE;
     loop {
         let n = store.list_world_revisions(mock.id, 1).await.unwrap().len();
         if n == 2 {
@@ -3782,7 +3787,7 @@ async fn watch_applies_an_edit_made_before_it_started() {
     )
     .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WATCH_DEADLINE;
     while store
         .get_mock(DEFAULT_WORKSPACE, "orders")
         .await
@@ -3822,7 +3827,7 @@ async fn watch_applies_a_mocks_block_added_later() {
     ws.write(&format!(
         "{head}proxy:\n  enabled: true\n  port: 1\nmocks:\n  orders:\n    contract: sub/orders.yaml\n    route_prefix: /orders\n    hosts: [api.orders.test]\n"
     ));
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WATCH_DEADLINE;
     loop {
         let r = reqwest::Client::new()
             .get(format!("{}/orders/orders", app.data))
