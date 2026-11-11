@@ -372,3 +372,63 @@ type Mutation { createIssue(input: CreateIssueInput!): CreateIssuePayload }
     .await;
     assert_eq!(read["title"], "Over GraphQL", "{read}");
 }
+
+/// A record whose owner reference holds an id (`repository: {id: 5}`) still
+/// names its owner: a read under a repository it does not hold is not answered
+/// from it. Only a reference naming nothing (`{}`) says nothing of the owner.
+#[tokio::test]
+async fn an_owner_reference_holding_an_id_still_hides_the_record() {
+    const REPOS: &str = r##"
+openapi: 3.0.3
+info: {title: issues, version: "1"}
+paths:
+  /repos/{owner}/{repo}/issues/{issue_number}:
+    get:
+      operationId: getIssue
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+        - {name: issue_number, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200":
+          description: the issue
+          content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}
+        "404": {description: missing}
+components:
+  schemas:
+    Issue:
+      type: object
+      required: [number, title]
+      properties:
+        number: {type: integer}
+        title: {type: string}
+        repository: {type: object, properties: {id: {type: integer}, name: {type: string}}}
+"##;
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let key = mb_state::SessionKey {
+        workspace: "default".into(),
+        mock: "github-rest".into(),
+        session: "s1".into(),
+    };
+    state
+        .upsert(
+            &key,
+            mb_state::StoredResource {
+                resource_type: "issues".into(),
+                id: "7".into(),
+                data: json!({"number": 7, "title": "Another repository's", "repository": {"id": 5}}),
+            },
+        )
+        .await
+        .unwrap();
+    let world = serde_json::from_value::<mb_mcm::world::World>(json!({"version": 1,
+        "types": {"issues": {"identity": {"member": "number"}}}}))
+    .unwrap();
+    let mut rt = Arc::try_unwrap(runtime("github-rest", REPOS, vec![], Arc::clone(&state)))
+        .ok()
+        .unwrap();
+    rt.shares = None;
+    let router = http_rest::router(Arc::new(rt.with_world(&world, &world, 1)));
+    let read = rest(&router, "GET", "/repos/fernwood/trellis/issues/7", None).await;
+    assert_ne!(read["title"], "Another repository's", "{read}");
+}

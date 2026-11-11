@@ -324,9 +324,9 @@ pub(super) fn owner_evidence(rt: &MockRuntime, r: &StoredResource, owner: &Owner
         .filter(|(_, value)| {
             value.is_string() || value.is_object() || (value.is_number() && numeric_owner)
         })
-        // Nor does a reference by id alone (GraphQL's `repository: {id}`) to an
-        // owner the route names by something else: unless it holds the value.
-        .filter(|(_, value)| !(by_id_alone(value) && !holds(value)))
+        // Nor does a reference naming nothing (`{}`: another mock's
+        // `repository: {id}` once its id, of another type here, was left out).
+        .filter(|(_, value)| !names_nothing(value))
         .peekable();
     if tied.peek().is_some() {
         let held = tied.any(|(_, value)| holds(value));
@@ -341,15 +341,12 @@ pub(super) fn owner_evidence(rt: &MockRuntime, r: &StoredResource, owner: &Owner
         .then_some(true)
 }
 
-/// Whether `value` is an object holding nothing but ids and its type's name
-/// (`{__typename, id}`, or nothing at all once another mock's id was left out):
-/// a reference by id alone.
-fn by_id_alone(value: &Value) -> bool {
-    value.as_object().is_some_and(|members| {
-        members
-            .keys()
-            .all(|k| k == "__typename" || mb_mcm::is_generic_id(k))
-    })
+/// Whether `value` is an object naming nothing: no member but its type's
+/// name (`{}`, `{__typename}`). A reference holding an id still names its record.
+fn names_nothing(value: &Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|members| members.keys().all(|k| k == "__typename"))
 }
 
 /// The members the record schema of `resource_type` declares, as [`typed_as_own`]
