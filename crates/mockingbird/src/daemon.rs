@@ -4,7 +4,7 @@
 //! JSON, for agents and scripts.
 
 use std::fs::OpenOptions;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -136,8 +136,9 @@ fn env_port(name: &str) -> Option<u16> {
 }
 
 /// The ports and host `serve` will use: flag, then `MB_*`, then the
-/// config file, then the default.
-fn effective(args: &StartArgs) -> anyhow::Result<(IpAddr, u16, u16, u16)> {
+/// config file, then the default. The last value says whether the gRPC port
+/// was set, so that `serve` fails rather than skips it when it is busy.
+fn effective(args: &StartArgs) -> anyhow::Result<(IpAddr, u16, u16, u16, bool)> {
     let server = match &args.config {
         Some(path) => file_config::load(path)?.server,
         None => file_config::ServerConfig::default(),
@@ -155,7 +156,64 @@ fn effective(args: &StartArgs) -> anyhow::Result<(IpAddr, u16, u16, u16)> {
         .grpc_port
         .or_else(|| env_port("MB_GRPC_PORT"))
         .unwrap_or(server.grpc_port);
-    Ok((host, port, admin, grpc))
+    let grpc_explicit =
+        args.grpc_port.is_some() || env_port("MB_GRPC_PORT").is_some() || server.grpc_port_explicit;
+    Ok((host, port, admin, grpc, grpc_explicit))
+}
+
+/// A listener `server start` cannot bind: another process holds its port,
+/// or the address is not this machine's.
+#[derive(Debug)]
+pub struct BindError {
+    /// `data_plane`, `admin` or `grpc`.
+    pub listener: &'static str,
+    pub address: SocketAddr,
+    pub source: std::io::Error,
+}
+
+impl std::fmt::Display for BindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "cannot bind the {} listener on {}: {}",
+            self.listener, self.address, self.source
+        )
+    }
+}
+
+impl std::error::Error for BindError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Binds and releases each address, so that a busy port fails the start
+/// before a server is spawned whose readiness another process would answer.
+fn check_free(listeners: &[(&'static str, SocketAddr)]) -> Result<(), BindError> {
+    for &(listener, address) in listeners {
+        if address.port() == 0 {
+            continue;
+        }
+        std::net::TcpListener::bind(address).map_err(|source| BindError {
+            listener,
+            address,
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+/// The JSON `server start` prints when it fails: `ready: false` and the
+/// error, with the listener, address and OS error of a [`BindError`].
+#[must_use]
+pub fn start_error(error: &anyhow::Error) -> Value {
+    let mut out = json!({"ready": false, "error": format!("{error:#}")});
+    if let Some(bind) = error.downcast_ref::<BindError>() {
+        out["listener"] = json!(bind.listener);
+        out["address"] = json!(bind.address.to_string());
+        out["os_error"] = json!(bind.source.to_string());
+    }
+    out
 }
 
 /// The address to reach a server bound to `host` from this machine.
@@ -245,8 +303,9 @@ pub fn default_profile_env_names(config: &Path) -> Vec<String> {
 /// # Errors
 ///
 /// Fails when the state directory or the log cannot be written, the ports
-/// or proxy settings do not resolve, the binary cannot be located or
-/// started, or the server does not become ready.
+/// or proxy settings do not resolve, a port is busy (a [`BindError`]), the
+/// binary cannot be located or started, or the server exits before it is
+/// ready.
 pub async fn start(args: &StartArgs) -> anyhow::Result<Value> {
     let (info, child) = start_child(args).await?;
     if let Ok(mut started) = STARTED.lock() {
@@ -290,8 +349,16 @@ pub async fn start_child(args: &StartArgs) -> anyhow::Result<(Value, std::proces
             "a background server already runs (pid {pid}); stop it with `mockingbird server stop`"
         );
     }
+    let (host, port, admin, grpc, grpc_explicit) = effective(args)?;
+    let mut listeners = vec![
+        ("data_plane", SocketAddr::new(host, port)),
+        ("admin", SocketAddr::new(host, admin)),
+    ];
+    if grpc_explicit {
+        listeners.push(("grpc", SocketAddr::new(host, grpc)));
+    }
+    check_free(&listeners)?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let (host, port, admin, grpc) = effective(args)?;
     let exe = std::env::current_exe().context("locating the mockingbird binary")?;
     let mut cmd = Command::new(exe);
     cmd.arg("serve").arg("--admin-port").arg(admin.to_string());

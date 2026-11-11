@@ -1,6 +1,7 @@
 //! The CI commands end to end through the binary: `server start --record`
 //! against a stub LLM, `snapshot export`, `server start --replay` with no
-//! LLM at all, `report` and `verify`, and `server start --wait` failing.
+//! LLM at all, `report` and `verify`, and `server start` failing on a busy
+//! port.
 #![cfg(test)]
 
 use std::path::{Path, PathBuf};
@@ -306,28 +307,44 @@ async fn record_then_replay_answers_without_an_llm() {
     );
 }
 
-/// A stub holds the admin port and answers `/readyz` with 503, so the
-/// server never becomes ready: `server start` must exit 1, whether it sees
-/// the 503s until `--wait` runs out or `serve` exiting on the busy port.
+/// `server start` on a port another process holds fails with the bind
+/// error and spawns no server, whatever answers on that port.
+fn assert_start_refused(ports: &Ports, listener: &str, port: u16) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = tmp.path().join("state");
+    let out = start(&state, ports, &["--offline", "--wait", "5s"], &[]);
+    let _server = Server(state.clone());
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let body = json_out(&out);
+    assert_eq!(body["ready"], false, "{body}");
+    assert_eq!(body["listener"], listener, "{body}");
+    assert_eq!(body["address"], format!("127.0.0.1:{port}"), "{body}");
+    assert!(!body["os_error"].as_str().unwrap().is_empty(), "{body}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(&format!("127.0.0.1:{port}")),
+        "{out:?}"
+    );
+    assert!(!state.join("server.pid").exists(), "no server was spawned");
+}
+
 #[tokio::test]
-async fn server_start_fails_when_not_ready() {
+async fn server_start_fails_on_a_busy_admin_port_that_answers_ready() {
     let stub = MockServer::start().await;
     Mock::given(path("/readyz"))
-        .respond_with(ResponseTemplate::new(503))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "ready"})))
         .mount(&stub)
         .await;
     let mut ports = Ports::new();
     ports.admin = stub.address().port();
-    let tmp = tempfile::tempdir().unwrap();
-    let state = tmp.path().join("state");
-    let out = start(&state, &ports, &["--offline", "--wait", "2s"], &[]);
-    let _server = Server(state);
-    assert_eq!(out.status.code(), Some(1), "{out:?}");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("was not ready within 2s") || stderr.contains("before it was ready"),
-        "{stderr}"
-    );
+    assert_start_refused(&ports, "admin", ports.admin);
+}
+
+#[test]
+fn server_start_fails_on_a_busy_data_port() {
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut ports = Ports::new();
+    ports.data = held.local_addr().unwrap().port();
+    assert_start_refused(&ports, "data_plane", ports.data);
 }
 
 #[test]
