@@ -212,6 +212,217 @@ pub(crate) fn response_prompt_schema(
     ))
 }
 
+/// `doc` (the prompt's schema of a 2xx answer the model writes, with its `$defs`)
+/// with every member asked for, since some models write only what a schema requires
+/// (a search's items with an `id` and nothing else): each member an object does not
+/// require becomes required and may be `null`, so the model writes it or says it
+/// has none, and nothing has to be made up. The local repair drops a `null` the
+/// contract does not allow on a member it does not require. Left as they are: a
+/// member whose absence is the point (one of an exclusive group: named in a
+/// `oneOf`, `anyOf` or `not` part's `required`, in an `x-oneof`, or in an object
+/// with a `maxProperties`), one that is `writeOnly` or a password (through
+/// `$ref`s), and paging state, whose name holds one of [`PAGING_WORDS`] (a `next`
+/// link, a cursor, a has-more flag), so the model is never pushed to invent a next
+/// page. The main generation path only: the output budget has shaped `doc`, and
+/// its estimate counts optional members. For the prompt only: validation keeps the
+/// contract's schema.
+pub(crate) fn with_content_required(status: u16, mut doc: Value) -> Value {
+    if !(200..300).contains(&status) {
+        return doc;
+    }
+    let defs = doc.get("$defs").cloned().unwrap_or(Value::Null);
+    ask_every_member(&mut doc, &defs);
+    doc
+}
+
+/// Words of a member's name that make it paging state, which
+/// [`with_content_required`] leaves as it is. A word too many only leaves a member
+/// optional, as before; one too few could have the model invent a next page.
+const PAGING_WORDS: &[&str] = &[
+    "cursor",
+    "token",
+    "next",
+    "prev",
+    "previous",
+    "page",
+    "pages",
+    "offset",
+    "after",
+    "before",
+    "more",
+    "continuation",
+    "marker",
+    "scroll",
+    "truncated",
+    "last",
+    "done",
+    "links",
+];
+
+/// Whether a member called `name` is paging state: one of its words (split at `_`,
+/// `-`, `.` and case changes) is one of [`PAGING_WORDS`].
+fn paging(name: &str) -> bool {
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    for c in name.chars() {
+        if (c == '_' || c == '-' || c == '.' || c.is_uppercase()) && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        if c.is_alphanumeric() {
+            word.extend(c.to_lowercase());
+        }
+    }
+    words.push(word);
+    words.iter().any(|w| PAGING_WORDS.contains(&w.as_str()))
+}
+
+/// The definition a `$ref` node names.
+fn ref_name(node: &Value) -> Option<String> {
+    node.get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|r| r.strip_prefix("#/$defs/"))
+        .map(|name| name.replace("~1", "/").replace("~0", "~"))
+}
+
+/// `node` with `$ref`s to `defs` followed (a few hops at most).
+fn through_refs<'a>(mut node: &'a Value, defs: &'a Value) -> &'a Value {
+    for _ in 0..8 {
+        match ref_name(node).and_then(|name| defs.get(&name)) {
+            Some(def) => node = def,
+            None => break,
+        }
+    }
+    node
+}
+
+/// Whether a member's schema keeps it out of answers: `writeOnly`, or a password.
+fn kept_out(member: &Value, defs: &Value) -> bool {
+    let node = through_refs(member, defs);
+    [member, node].iter().any(|n| {
+        n.get("writeOnly") == Some(&Value::Bool(true))
+            || n.get("format").and_then(Value::as_str) == Some("password")
+    })
+}
+
+/// Whether a member's schema already takes `null`.
+fn takes_null(member: &Value, defs: &Value) -> bool {
+    let node = through_refs(member, defs);
+    [member, node].iter().any(|n| {
+        n.get("nullable") == Some(&Value::Bool(true))
+            || match n.get("type") {
+                Some(Value::String(t)) => t == "null",
+                Some(Value::Array(ts)) => ts.iter().any(|t| t == "null"),
+                _ => false,
+            }
+            || ["anyOf", "oneOf"].iter().any(|k| {
+                n.get(*k)
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| parts.iter().any(|p| p.get("type") == Some(&json_null())))
+            })
+    })
+}
+
+fn json_null() -> Value {
+    Value::String("null".to_string())
+}
+
+/// The member names an object's own `oneOf`, `anyOf` and `not` parts require:
+/// alternatives, each meant to be there only when the others are not.
+fn exclusive_members(obj: &serde_json::Map<String, Value>) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut parts: Vec<&Value> = Vec::new();
+    for key in ["oneOf", "anyOf"] {
+        if let Some(list) = obj.get(key).and_then(Value::as_array) {
+            parts.extend(list);
+        }
+    }
+    if let Some(not) = obj.get("not") {
+        parts.push(not);
+    }
+    for part in parts {
+        if let Some(required) = part.get("required").and_then(Value::as_array) {
+            out.extend(
+                required
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string),
+            );
+        }
+    }
+    out
+}
+
+/// [`with_content_required`] on `node` and every schema within it.
+fn ask_every_member(node: &mut Value, defs: &Value) {
+    let Some(obj) = node.as_object_mut() else {
+        return;
+    };
+    let exclusive = exclusive_members(obj);
+    let closed = obj.contains_key("maxProperties");
+    if let (Some(Value::Object(props)), false) = (obj.get("properties"), closed) {
+        let required: HashSet<String> = obj
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|r| {
+                r.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let asked: Vec<String> = props
+            .iter()
+            .filter(|(name, member)| {
+                !required.contains(*name)
+                    && !exclusive.contains(*name)
+                    && member.get("x-oneof").is_none()
+                    && !kept_out(member, defs)
+                    && !paging(name)
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        if !asked.is_empty() {
+            if let Some(Value::Object(props)) = obj.get_mut("properties") {
+                for name in &asked {
+                    if let Some(member) = props.get_mut(name)
+                        && !takes_null(member, defs)
+                    {
+                        let schema = member.take();
+                        *member = serde_json::json!({"anyOf": [schema, {"type": "null"}]});
+                    }
+                }
+            }
+            let list = obj
+                .entry("required")
+                .or_insert_with(|| Value::Array(Vec::new()));
+            if let Value::Array(list) = list {
+                list.extend(asked.into_iter().map(Value::String));
+            }
+        }
+    }
+    if let Some(Value::Object(props)) = obj.get_mut("properties") {
+        props.values_mut().for_each(|m| ask_every_member(m, defs));
+    }
+    for key in ["$defs", "patternProperties"] {
+        if let Some(Value::Object(map)) = obj.get_mut(key) {
+            map.values_mut().for_each(|m| ask_every_member(m, defs));
+        }
+    }
+    for key in ["items", "additionalProperties", "not"] {
+        if let Some(sub) = obj.get_mut(key) {
+            match sub {
+                Value::Array(list) => list.iter_mut().for_each(|m| ask_every_member(m, defs)),
+                other => ask_every_member(other, defs),
+            }
+        }
+    }
+    for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+        if let Some(Value::Array(list)) = obj.get_mut(key) {
+            list.iter_mut().for_each(|m| ask_every_member(m, defs));
+        }
+    }
+}
+
 /// Most members [`with_echoes_required`] adds to one answer's `required` lists.
 pub(crate) const MAX_ECHOED_REQUIRED: usize = 12;
 
@@ -759,6 +970,123 @@ fn refs(value: &Value, out: &mut Vec<String>) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn required(node: &Value) -> Vec<&str> {
+        let mut names: Vec<&str> = node["required"]
+            .as_array()
+            .map(|r| r.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        names.sort_unstable();
+        names
+    }
+
+    fn nullable(member: &Value) -> bool {
+        member["anyOf"]
+            .as_array()
+            .is_some_and(|parts| parts.iter().any(|p| p["type"] == "null"))
+    }
+
+    #[test]
+    fn every_member_is_asked_for_and_may_be_null() {
+        let doc = with_content_required(
+            200,
+            json!({
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "example": "Ok"},
+                    "features": {"type": "array", "items": {"$ref": "#/$defs/Feature"}},
+                    "note": {"type": ["string", "null"]}
+                },
+                "$defs": {"Feature": {"type": "object", "required": ["id"], "properties": {
+                    "id": {"type": "string"},
+                    "properties": {"type": "object", "properties": {"name": {"type": "string"}}}
+                }}}
+            }),
+        );
+        assert_eq!(required(&doc), ["code", "features", "note"]);
+        assert!(nullable(&doc["properties"]["code"]), "{doc}");
+        // A member that takes null already is left as it is.
+        assert_eq!(
+            doc["properties"]["note"],
+            json!({"type": ["string", "null"]})
+        );
+        let feature = &doc["$defs"]["Feature"];
+        assert_eq!(required(feature), ["id", "properties"]);
+        assert_eq!(feature["properties"]["id"], json!({"type": "string"}));
+        let inner = &feature["properties"]["properties"]["anyOf"][0];
+        assert_eq!(required(inner), ["name"], "{doc}");
+        // Only a 2xx answer.
+        let error = json!({"type": "object", "properties": {"field": {"type": "string"}}});
+        assert_eq!(with_content_required(404, error.clone()), error);
+    }
+
+    #[test]
+    fn members_whose_absence_means_something_are_left_alone() {
+        let doc = with_content_required(
+            200,
+            json!({
+                "type": "object",
+                "properties": {
+                    "next_cursor": {"type": "string"},
+                    "has_more": {"type": "boolean"},
+                    "_links": {"type": "object", "properties": {"next": {"type": "string"}}},
+                    "password": {"$ref": "#/$defs/Secret"},
+                    "card": {"type": "object"},
+                    "bank_account": {"type": "object"},
+                    "error": {"x-oneof": "result", "type": "object"},
+                    "status": {"type": "string"}
+                },
+                "oneOf": [{"required": ["card"]}, {"required": ["bank_account"]}],
+                "$defs": {"Secret": {"type": "string", "writeOnly": true}}
+            }),
+        );
+        assert_eq!(required(&doc), ["status"], "{doc}");
+        let limited = with_content_required(
+            200,
+            json!({"type": "object", "maxProperties": 1, "properties": {"a": {"type": "string"}}}),
+        );
+        assert!(required(&limited).is_empty(), "{limited}");
+    }
+
+    #[test]
+    fn a_member_that_can_hold_itself_may_end_in_null() {
+        let doc = with_content_required(
+            200,
+            json!({
+                "$ref": "#/$defs/Node",
+                "$defs": {"Node": {"type": "object", "properties": {
+                    "children": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/Node"}}
+                }}}
+            }),
+        );
+        let children = &doc["$defs"]["Node"]["properties"]["children"];
+        assert!(nullable(children), "{doc}");
+    }
+
+    #[test]
+    fn paging_state_goes_by_the_words_of_its_name() {
+        for name in [
+            "next_cursor",
+            "nextPageToken",
+            "has_more",
+            "hasNextPage",
+            "LastEvaluatedKey",
+            "_links",
+            "done",
+        ] {
+            assert!(paging(name), "{name}");
+        }
+        for name in [
+            "code",
+            "status",
+            "total_count",
+            "first_name",
+            "message",
+            "tokenizer",
+        ] {
+            assert!(!paging(name), "{name}");
+        }
+    }
 
     #[test]
     fn a_schema_within_budget_is_unchanged() {

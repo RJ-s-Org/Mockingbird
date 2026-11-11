@@ -320,17 +320,27 @@ async fn the_prompt_schema_requires_what_the_answer_is_sure_to_need() {
     let create = root_record(&h.schema_sent(0));
     let create_required = required(&create);
     assert!(create_required.contains(&"id".to_string()), "{create}");
+    // What the answer is sure to need is required outright, never `null`.
+    assert!(
+        create["properties"]["id"].get("anyOf").is_none(),
+        "{create}"
+    );
+    assert!(
+        create["properties"]["label"].get("anyOf").is_none(),
+        "{create}"
+    );
     assert!(create_required.contains(&"label".to_string()), "{create}");
     assert!(
         !create_required.contains(&"passcode".to_string()),
         "a writeOnly member is never asked for: {create}"
     );
-    assert!(
-        !create_required.contains(&"color".to_string()),
-        "not sent: {create}"
-    );
+    // A top-level member the request did not send is asked for too: the answer's
+    // content, which some models leave out unless required.
+    assert!(create_required.contains(&"color".to_string()), "{create}");
 
     h.send("GET", "/gadgets", None).await;
     let list = root_record(&h.schema_sent(1));
-    assert_eq!(required(&list), ["gadgets"], "{list}");
+    let mut list_required = required(&list);
+    list_required.sort();
+    assert_eq!(list_required, ["count", "gadgets"], "{list}");
 }

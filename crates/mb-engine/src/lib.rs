@@ -1114,17 +1114,22 @@ impl Engine {
                         user.content.push_str(guards::ITEMS_ENVELOPE_NOTE);
                     }
                 }
-                // Some models write only what a schema requires: the members a 2xx
-                // answer is sure to need are required in the prompt's copy.
-                let prompt_schema = compact::with_echoes_required(
-                    bundle,
-                    op,
+                // Some models write only what a schema requires: in the prompt's copy
+                // of a 2xx answer every member is asked for (or `null`), and the ones
+                // it is sure to need are required outright.
+                // Echoes first: what they require stays required and not null.
+                let prompt_schema = compact::with_content_required(
                     status,
-                    call,
-                    compact::response_prompt_schema(
+                    compact::with_echoes_required(
                         bundle,
-                        written,
-                        &compact::expanded_members(call),
+                        op,
+                        status,
+                        call,
+                        compact::response_prompt_schema(
+                            bundle,
+                            written,
+                            &compact::expanded_members(call),
+                        ),
                     ),
                 );
                 let format = ResponseFormat::JsonSchema {

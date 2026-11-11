@@ -1414,6 +1414,44 @@ async fn answer_wrapped_like_a_graphql_response_is_unwrapped() {
     assert_eq!(provider.requests().len(), 1, "no repair call");
 }
 
+/// The prompt lets a model answer `null` for an optional member it has none of.
+/// Such a null is dropped before any guess at an envelope: an answer with one
+/// object member set and the others `null` keeps its shape.
+#[tokio::test]
+async fn an_optional_null_does_not_make_an_answer_an_envelope() {
+    let bundle = inline(
+        r#"
+openapi: 3.0.0
+info: {title: Profiles, version: "1"}
+paths:
+  /profile:
+    get:
+      operationId: getProfile
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: {type: object, properties: {id: {type: string}, name: {type: string}}}
+                  meta: {type: object, properties: {page: {type: integer}}}
+"#,
+    );
+    let op = bundle.operation("getProfile").unwrap();
+    let (provider, engine) = scripted(vec![Ok(json!({
+        "user": {"id": "u1", "name": "Ann"}, "meta": null
+    })
+    .to_string())]);
+    let out = engine
+        .generate(&bundle, op, &call("getProfile"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.body, Some(json!({"user": {"id": "u1", "name": "Ann"}})));
+    assert_eq!(provider.requests().len(), 1, "no repair call");
+}
+
 /// Models answering like a GraphQL server also send `"errors": null`
 /// beside `data` (seen on GitHub's `createIssue`).
 #[tokio::test]
@@ -2504,7 +2542,7 @@ fn schema_descriptions_are_redacted_too() {
         "{system}"
     );
     assert!(
-        system.contains(r#""description":{"description":"Free text.","type":"string"}"#),
+        system.contains(r#"{"description":"Free text.","type":"string"}"#),
         "{system}"
     );
 }
