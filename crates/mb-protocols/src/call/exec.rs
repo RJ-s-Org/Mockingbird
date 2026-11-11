@@ -492,7 +492,12 @@ async fn held_read(
         }
         false => None,
     };
-    match kept.as_ref().and_then(|kept| held(Some(kept))).or(bare) {
+    let served = kept
+        .as_ref()
+        .and_then(|kept| held(Some(kept)))
+        .or(bare)
+        .filter(|served| selected_held(rt, op, response_schema, served));
+    match served {
         Some(mut served) => {
             write_memory::note_not_caught_up(&mut served, plan, Some(stored), &earlier);
             // A described fields parameter narrows the record the answer holds.
@@ -500,6 +505,106 @@ async fn held_read(
             HeldRead::Served(Box::new(served))
         }
         None => HeldRead::Unrendered(Some(earlier), why(kept.as_ref())),
+    }
+}
+
+/// Whether `served`, a held GraphQL record rendered for a selection, holds every member
+/// that selection asks for (`response_schema`, narrowed to it), at every depth. The
+/// narrowed schema leaves a nullable member optional, so a record stored by a smaller
+/// selection (a user's repositories without their `languages`) would otherwise answer
+/// it `null`; such a read generates instead, over the record. Other protocols' schemas
+/// are not narrowed to what the client reads, so they are not checked.
+fn selected_held(
+    rt: &crate::MockRuntime,
+    op: &mb_mcm::Operation,
+    response_schema: Option<&Value>,
+    served: &GeneratedResponse,
+) -> bool {
+    if op.protocol != mb_mcm::Protocol::Graphql {
+        return true;
+    }
+    let (Some(schema), Some(body)) = (response_schema, served.body.as_ref()) else {
+        return true;
+    };
+    holds_selected(rt, schema, schema, body, 0)
+}
+
+/// Bounds [`holds_selected`]'s walk (recursive types).
+const MAX_SELECTED_DEPTH: usize = 16;
+
+fn holds_selected(
+    rt: &crate::MockRuntime,
+    root: &Value,
+    schema: &Value,
+    value: &Value,
+    depth: usize,
+) -> bool {
+    if depth > MAX_SELECTED_DEPTH {
+        return true;
+    }
+    let schema = match schema.get("$ref").and_then(Value::as_str) {
+        Some(r) => {
+            let name = r.rsplit('/').next().unwrap_or_default();
+            match root
+                .get("$defs")
+                .and_then(|d| d.get(name))
+                .or_else(|| rt.bundle.defs.get(name))
+            {
+                Some(found) => found,
+                None => return true,
+            }
+        }
+        None => schema,
+    };
+    match value {
+        Value::Object(obj) => {
+            let branches: Vec<&Value> = std::iter::once(schema)
+                .chain(
+                    ["anyOf", "oneOf", "allOf"]
+                        .iter()
+                        .filter_map(|k| schema.get(*k).and_then(Value::as_array))
+                        .flatten(),
+                )
+                .collect();
+            branches.iter().all(|branch| {
+                let branch = match branch.get("$ref") {
+                    Some(_) if !std::ptr::eq(*branch, schema) => {
+                        return holds_selected(rt, root, branch, value, depth + 1);
+                    }
+                    _ => *branch,
+                };
+                let Some(props) = branch.get("properties").and_then(Value::as_object) else {
+                    return true;
+                };
+                // A branch of another type (`__typename` fixed elsewhere) says nothing.
+                let other_type = props
+                    .get("__typename")
+                    .and_then(|t| t.get("const"))
+                    .is_some_and(|t| obj.get("__typename").is_some_and(|v| v != t));
+                other_type
+                    || props.iter().all(|(name, member)| match obj.get(name) {
+                        Some(v) => holds_selected(rt, root, member, v, depth + 1),
+                        None => false,
+                    })
+            })
+        }
+        Value::Array(items) => {
+            let item = std::iter::once(schema)
+                .chain(
+                    ["anyOf", "oneOf"]
+                        .iter()
+                        .filter_map(|k| schema.get(*k).and_then(Value::as_array))
+                        .flatten(),
+                )
+                .find_map(|s| s.get("items"));
+            match item {
+                Some(item) => items
+                    .iter()
+                    .all(|v| holds_selected(rt, root, item, v, depth + 1)),
+                None => true,
+            }
+        }
+        _ => true,
     }
 }
 

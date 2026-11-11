@@ -3511,7 +3511,12 @@ fn reflect(
             }
             Some(target) if ctx.restates.is_some() => restate(validator, target, body),
             Some(target) if ahead => caught_up(validator, body, target, ctx.earlier_own_body),
-            Some(target) => overlay_target(validator, target, body),
+            Some(target) => overlay_target(
+                validator,
+                target,
+                body,
+                op.protocol == mb_mcm::Protocol::Graphql,
+            ),
             None => body,
         },
         OperationKind::Command(Effect::Create) => {
@@ -5254,13 +5259,28 @@ fn is_text(member: Option<&str>, value: &str) -> bool {
 /// Overlay the stored resource's top-level fields onto a generated object.
 /// If the merge is invalid, prefer the stored data when it validates, else
 /// keep the generated body.
-fn overlay_target(validator: &SchemaValidator, target: &StoredResource, generated: Value) -> Value {
+///
+/// `deep` (a GraphQL read, generated for a selection the stored record may hold only
+/// part of) merges at every depth instead: a stored member's value stands, and what
+/// the generated answer holds that the stored one lacks below it is kept (a user's
+/// stored repositories take the `languages` a wider selection asked for), list items
+/// paired by `id`, else in order ([`merge_deep`]).
+fn overlay_target(
+    validator: &SchemaValidator,
+    target: &StoredResource,
+    generated: Value,
+    deep: bool,
+) -> Value {
     let (Value::Object(mut merged), Value::Object(stored)) = (generated.clone(), &target.data)
     else {
         return generated;
     };
     for (k, v) in stored {
-        merged.insert(k.clone(), v.clone());
+        let value = match (deep, merged.remove(k)) {
+            (true, Some(below)) => merge_deep(v, below, 0),
+            _ => v.clone(),
+        };
+        merged.insert(k.clone(), value);
     }
     let merged = Value::Object(merged);
     if validator.is_valid(&merged) {
@@ -5269,6 +5289,71 @@ fn overlay_target(validator: &SchemaValidator, target: &StoredResource, generate
         target.data.clone()
     } else {
         generated
+    }
+}
+
+/// Bounds [`merge_deep`] (recursive data).
+const MAX_MERGE_DEPTH: usize = 24;
+
+/// `stored` over `generated`: an object keeps `generated`'s members `stored` lacks and
+/// merges those both hold; a list keeps `stored`'s items, each over the generated item
+/// with its `id`, else over the next generated item no stored item's `id` claims;
+/// anything else is `stored`. How a GraphQL read lays the record it holds over what it
+/// generated for a wider selection.
+pub fn merge_stored(stored: &Value, generated: Value) -> Value {
+    merge_deep(stored, generated, 0)
+}
+
+/// [`merge_stored`], `depth` deep.
+fn merge_deep(stored: &Value, generated: Value, depth: usize) -> Value {
+    if depth > MAX_MERGE_DEPTH {
+        return stored.clone();
+    }
+    match (stored, generated) {
+        (Value::Object(held), Value::Object(mut below)) => {
+            for (k, v) in held {
+                let value = match below.remove(k) {
+                    Some(g) => merge_deep(v, g, depth + 1),
+                    None => v.clone(),
+                };
+                below.insert(k.clone(), value);
+            }
+            Value::Object(below)
+        }
+        (Value::Array(held), Value::Array(mut below)) => {
+            let id = |v: &Value| v.get("id").filter(|id| !id.is_null()).cloned();
+            let held_ids: Vec<Value> = held.iter().filter_map(id).collect();
+            let mut claimed = vec![false; below.len()];
+            // By id first, then each unpaired item takes the next generated one that no
+            // stored item's id claims.
+            let mut pairs: Vec<Option<usize>> = held
+                .iter()
+                .map(|item| {
+                    let want = id(item)?;
+                    let at = below.iter().position(|g| id(g).as_ref() == Some(&want))?;
+                    claimed[at] = true;
+                    Some(at)
+                })
+                .collect();
+            for pair in pairs.iter_mut().filter(|p| p.is_none()) {
+                *pair = (0..below.len()).find(|&at| {
+                    !claimed[at] && id(&below[at]).is_none_or(|g| !held_ids.contains(&g))
+                });
+                if let Some(at) = *pair {
+                    claimed[at] = true;
+                }
+            }
+            let out = held
+                .iter()
+                .zip(pairs)
+                .map(|(item, at)| match at {
+                    Some(at) => merge_deep(item, std::mem::take(&mut below[at]), depth + 1),
+                    None => item.clone(),
+                })
+                .collect();
+            Value::Array(out)
+        }
+        (held, _) => held.clone(),
     }
 }
 
@@ -5558,6 +5643,35 @@ mod tests {
     /// The per-member fallback keeps each member that leaves the object
     /// valid, puts back a member it replaced when the new value breaks it,
     /// and leaves the other keys in place (MB-ENGINE-PERF-10).
+    #[test]
+    fn merge_deep_keeps_what_the_stored_record_lacks_below_it() {
+        let stored = json!({"name": "held", "repos": {"nodes": [
+            {"id": "R_1", "name": "hello"},
+            {"id": "R_2", "name": "world"},
+            {"name": "no-id"}
+        ]}});
+        let generated = json!({"name": "new", "extra": 1, "repos": {"total": 3, "nodes": [
+            {"id": "R_2", "name": "w", "langs": ["Go"]},
+            {"id": "R_9", "name": "x", "langs": ["C"]},
+            {"name": "y", "langs": ["Rust"]}
+        ]}});
+        assert_eq!(
+            merge_deep(&stored, generated, 0),
+            json!({"name": "held", "extra": 1, "repos": {"total": 3, "nodes": [
+                // The next generated item no stored id claims.
+                {"id": "R_1", "name": "hello", "langs": ["C"]},
+                // By id.
+                {"id": "R_2", "name": "world", "langs": ["Go"]},
+                {"name": "no-id", "langs": ["Rust"]}
+            ]}})
+        );
+        // A scalar or a list of scalars stands as stored.
+        assert_eq!(
+            merge_deep(&json!([1, 2]), json!([3, 4, 5]), 0),
+            json!([1, 2])
+        );
+    }
+
     #[test]
     fn overlay_falls_back_to_each_member_that_stays_valid() {
         let v = SchemaValidator::new(&json!({

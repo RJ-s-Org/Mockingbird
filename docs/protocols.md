@@ -145,6 +145,12 @@ The root fields of one query are generated together, in one call. Two root field
 
 Fields that share only an argument value (`book(id: 1)` and `author(id: 1)`), aliases of one field, and fields returning an interface or a union are answered on their own.
 
+## GraphQL reads by a lookup argument
+
+A query root field that returns one object and takes one argument, named as a scalar field of that type and of the same scalar type, is looked up by it: `user(login: String!)` by `User.login`, `topic(name:)` by `Topic.name`. A field with another argument (`rate(currency:, date:)`, which may change the answer), and an enum, list, `Boolean` or `Float` argument, look nothing up. This needs no world description; a world's `target: {member: …}` still sets it.
+
+Such a read is generated with the type's key and that member, whether or not the query selects them, and the answer is stored under its key with the argument's value in that member. A later read with the same value is answered from session state with no model call, whatever its variables. A read that selects fields the stored record lacks, at any depth (a user's stored `repositories` read again with their `languages`), is generated, and the record is merged into the answer at every depth: the values it holds stand, the generated answer fills what it lacks, and list items pair by `id`, else in order. A type with no `id` field is stored under the lookup member's value instead (`user(login: "octocat")` as `user` `octocat`), when every such query field of that type looks it up by the same member.
+
 ## Override mapping per protocol
 
 The override headers work on every protocol: gRPC reads them as lowercased metadata (`x-mockingbird-session`, `x-mockingbird-status`, …), and GraphQL reads them from the HTTP request (or from the `connection_init` payload of a subscription). A forced status is reported natively.

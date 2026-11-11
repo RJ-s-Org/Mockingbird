@@ -57,6 +57,12 @@ pub(crate) fn objects(
     };
     let mut walk = Walk {
         bundle,
+        root_key: op
+            .identity
+            .as_ref()
+            .filter(|i| op.kind == OperationKind::Query && i.field != "id")
+            .filter(|i| i.input_field.as_deref() == Some(i.field.as_str()))
+            .map(|i| i.field.as_str()),
         found: Vec::new(),
     };
     walk.value(schema, sel, body, 0, None);
@@ -215,6 +221,9 @@ fn ref_name(schema: &Value) -> Option<&str> {
 
 struct Walk<'a> {
     bundle: &'a Bundle,
+    /// The member a query's own object is keyed by when its type has no `id`: the
+    /// one its lookup argument names (`user(login:)` → `login`).
+    root_key: Option<&'a str>,
     /// With the depth each was found at.
     found: Vec<(StoredResource, usize)>,
 }
@@ -248,8 +257,21 @@ impl Walk<'_> {
                 };
                 let props = def.get("properties").and_then(Value::as_object);
                 let mut own = None;
-                if let Some(Value::String(id)) = obj.get("id")
-                    && let Some(props) = props.filter(|p| p.contains_key("id"))
+                let key = match (obj.get("id"), props) {
+                    (Some(Value::String(id)), Some(p)) if p.contains_key("id") => Some(id.clone()),
+                    // A query's own object of a type with no `id`, by its lookup member.
+                    (_, Some(p)) if depth == 0 && !p.contains_key("id") => self
+                        .root_key
+                        .filter(|k| p.contains_key(*k))
+                        .and_then(|k| match obj.get(k) {
+                            Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+                            Some(Value::Number(n)) => Some(n.to_string()),
+                            _ => None,
+                        }),
+                    _ => None,
+                };
+                if let Some(id) = key
+                    && let Some(props) = props
                 {
                     let mut data = by_field_name(value, sel);
                     if let (Some(parent), Value::Object(fields)) = (parent, &mut data) {
@@ -259,7 +281,7 @@ impl Walk<'_> {
                     self.found.push((
                         StoredResource {
                             resource_type: name.to_lowercase(),
-                            id: id.clone(),
+                            id,
                             data,
                         },
                         depth,
