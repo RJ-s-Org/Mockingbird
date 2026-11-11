@@ -61,6 +61,7 @@ mod relations;
 mod repeats;
 mod replays;
 mod reporting;
+mod reused_ids;
 mod runs;
 mod session_memory;
 mod side_writes;
@@ -1059,6 +1060,22 @@ pub(crate) async fn complete(
     let acted_on = target_id.clone();
     let op = plan.op;
     let session = &plan.session;
+    // A record of the answer reusing another's id gets one of its own, before anything
+    // stores or serves it.
+    if rt.consistency
+        && matches!(generated.source, Source::Llm | Source::Repaired)
+        && (200..300).contains(&generated.status)
+        && let Some(body) = generated.body.as_mut()
+    {
+        let schema = response_schema.or_else(|| {
+            op.output_for_status(generated.status)
+                .and_then(|o| o.schema.as_ref())
+        });
+        let skip = op.resource_type.as_deref().zip(acted_on.as_deref());
+        reused_ids::remint(&mut state, session, rt, body, schema, skip)
+            .instrument(state_span())
+            .await;
+    }
     let resource_type = op.resource_type.as_deref();
     let is_query = matches!(op.kind, OperationKind::Query);
     let collection = collection_of(op, call).filter(|_| rt.consistency);
