@@ -497,6 +497,12 @@ impl Engine {
         value: Value,
         checks: &Checks<'_>,
     ) -> Checked {
+        // The prompt lets the model answer `null` for a member it has none of; those
+        // go before any guess at an envelope sees them.
+        let value = match validator.without_optional_nulls(&value) {
+            Some(without) if validator.validate(&value).is_err() => without,
+            _ => value,
+        };
         match validator.validate(&value) {
             Ok(()) => self.check_formats(validator, value, checks),
             Err(errors) => match unwrap_envelope(validator, &value)

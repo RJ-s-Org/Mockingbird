@@ -1029,13 +1029,14 @@ impl Engine {
                 // Some models write only what a schema requires: in the prompt's copy
                 // of a 2xx answer every member is asked for (or `null`), and the ones
                 // it is sure to need are required outright.
-                let prompt_schema = compact::with_echoes_required(
-                    bundle,
-                    op,
+                // Echoes first: what they require stays required and not null.
+                let prompt_schema = compact::with_content_required(
                     status,
-                    call,
-                    compact::with_content_required(
+                    compact::with_echoes_required(
+                        bundle,
+                        op,
                         status,
+                        call,
                         compact::response_prompt_schema(
                             bundle,
                             written,

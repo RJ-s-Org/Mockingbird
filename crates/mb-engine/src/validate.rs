@@ -667,6 +667,24 @@ impl SchemaValidator {
             .collect()
     }
 
+    /// `instance` without the `null`s [`Self::optional_nulls`] finds (members the
+    /// schema neither takes `null` in nor requires), or `None` when it has none.
+    pub(crate) fn without_optional_nulls(&self, instance: &Value) -> Option<Value> {
+        let nulls = self.optional_nulls(instance);
+        if nulls.is_empty() {
+            return None;
+        }
+        let mut without = instance.clone();
+        for pointer in &nulls {
+            if let Some((parent, name)) = pointer.rsplit_once('/')
+                && let Some(Value::Object(object)) = without.pointer_mut(parent)
+            {
+                object.remove(&unescape(name));
+            }
+        }
+        Some(without)
+    }
+
     /// The location of the schema holding the keyword that failed at
     /// `evaluation_path`: a JSON pointer into the schema that restarts at a
     /// `$ref`'s target.
