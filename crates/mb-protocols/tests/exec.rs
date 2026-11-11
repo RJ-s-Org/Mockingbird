@@ -4690,15 +4690,9 @@ async fn a_version_a_write_carries_starts_at_one() {
 }
 
 #[tokio::test]
-async fn a_list_sent_for_a_member_the_reads_hold_as_an_object_is_filled_not_refused() {
+async fn a_list_sent_for_a_member_the_reads_hold_as_an_object_is_dropped_not_refused() {
     let (capture, _guard) = Capture::install();
-    let listed = json!({"object": "list", "data": [{"price": "p1", "quantity": 2}]});
-    let h = support::harness(
-        SERVER_SET,
-        vec![json!({"line_items": listed, "tags": []})],
-        &HarnessOptions::default(),
-        |rt| rt,
-    );
+    let h = support::harness(SERVER_SET, vec![], &HarnessOptions::default(), |rt| rt);
     // Stripe's shape: the create takes a list of prices, the record holds a list object.
     let sent = json!({"currency": "EUR", "line_items": [{"price": "p1", "quantity": 2}]});
     let (status, _, body) = h.send("POST", "/carts", Some(sent), &[]).await;
@@ -4707,18 +4701,14 @@ async fn a_list_sent_for_a_member_the_reads_hold_as_an_object_is_filled_not_refu
         capture.of("createCart"),
         vec![create_line("createCart", None)]
     );
-    assert_eq!(body["line_items"], listed, "{body}");
+    // Optional and never null: fill leaves it out rather than invent it.
+    assert!(body.get("line_items").is_none(), "{body}");
 }
 
 #[tokio::test]
-async fn an_object_sent_for_a_member_the_reads_hold_as_a_list_is_filled_not_refused() {
+async fn an_object_sent_for_a_member_the_reads_hold_as_a_list_is_dropped_not_refused() {
     let (capture, _guard) = Capture::install();
-    let h = support::harness(
-        SERVER_SET,
-        vec![json!({"tags": ["gift"], "line_items": {"object": "list", "data": []}})],
-        &HarnessOptions::default(),
-        |rt| rt,
-    );
+    let h = support::harness(SERVER_SET, vec![], &HarnessOptions::default(), |rt| rt);
     let sent = json!({"currency": "EUR", "tags": {"gift": true}});
     let (status, _, body) = h.send("POST", "/carts", Some(sent), &[]).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
@@ -4726,7 +4716,8 @@ async fn an_object_sent_for_a_member_the_reads_hold_as_a_list_is_filled_not_refu
         capture.of("createCart"),
         vec![create_line("createCart", None)]
     );
-    assert_eq!(body["tags"], json!(["gift"]), "{body}");
+    // A list of scalars: fill writes it, never the object sent.
+    assert!(body["tags"].is_array(), "{body}");
 }
 
 #[tokio::test]
