@@ -56,7 +56,8 @@ impl Engine {
         let Ok(validator) = self.schema_validator(bundle, &wrapped) else {
             return pooled;
         };
-        let prompt_schema = compact::response_prompt_schema(bundle, &wrapped);
+        let prompt_schema =
+            compact::response_prompt_schema(bundle, &wrapped, &std::collections::HashSet::new());
         let messages = prompt::pool_messages(
             bundle,
             op,

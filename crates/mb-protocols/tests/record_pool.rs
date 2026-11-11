@@ -234,3 +234,91 @@ async fn a_reset_session_takes_the_pool_again_on_its_first_list() {
     assert_eq!(again.as_array().unwrap().len(), 5, "{again}");
     assert_eq!(pool_note(&h), Some(json!(5)));
 }
+
+/// Widgets with a name filter on the list, a create and a delete.
+fn writable() -> (String, Value) {
+    let contract = WIDGETS
+        .replace(
+            "      operationId: listWidgets\n",
+            "      operationId: listWidgets\n      parameters: [{name: name, in: query, schema: {type: string}}]\n",
+        )
+        .replace(
+            "  /widgets/{id}:\n    get:",
+            "  /widgets/{id}:\n    delete:\n      operationId: deleteWidget\n      parameters: [{name: id, in: path, required: true, schema: {type: string}}]\n      responses:\n        \"204\": {description: gone}\n    get:",
+        )
+        .replace(
+            "  /widgets:\n    get:",
+            "  /widgets:\n    post:\n      operationId: createWidget\n      requestBody: {content: {application/json: {schema: {$ref: \"#/components/schemas/Widget\"}}}}\n      responses:\n        \"201\": {description: ok, content: {application/json: {schema: {$ref: \"#/components/schemas/Widget\"}}}}\n    get:",
+        );
+    let mut w = world();
+    w["operations"]["listWidgets"]["filters"] =
+        json!([{"param": "name", "member": "name", "kind": "eq"}]);
+    w["operations"]["createWidget"] =
+        json!({"kind": "create", "type": "widgets", "target": {"member": "id"}});
+    w["operations"]["deleteWidget"] =
+        json!({"kind": "delete", "type": "widgets", "target": {"path_param": "id"}});
+    (contract, w)
+}
+
+#[tokio::test]
+async fn a_declared_filter_runs_over_the_pool_and_may_match_nothing() {
+    let (contract, w) = writable();
+    let batch = json!({"records": (1..=5).map(widget).collect::<Vec<_>>()});
+    let h = support::described(&contract, w, vec![batch]);
+    mb_protocols::fill_record_pool(Arc::downgrade(&h.rt), 60_000).await;
+    let calls = h.provider.requests().len();
+    let (_, headers, one) = h.send("GET", "/widgets?name=Widget%202", None, &[]).await;
+    assert_eq!(headers["x-mockingbird-source"], "state", "{one}");
+    assert_eq!(one, json!([widget(2)]));
+    let (status, headers, none) = h.send("GET", "/widgets?name=Nobody", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["x-mockingbird-source"], "state", "{none}");
+    assert_eq!(none, json!([]));
+    assert_eq!(h.provider.requests().len(), calls);
+}
+
+#[tokio::test]
+async fn a_param_the_world_does_not_describe_falls_back_as_before() {
+    let batch = json!({"records": (1..=5).map(widget).collect::<Vec<_>>()});
+    let h = support::described(WIDGETS, world(), vec![batch, json!([widget(8)])]);
+    mb_protocols::fill_record_pool(Arc::downgrade(&h.rt), 60_000).await;
+    let (_, headers, body) = h.send("GET", "/widgets?color=red", None, &[]).await;
+    assert_ne!(headers["x-mockingbird-source"], "state", "{body}");
+    assert_eq!(pool_note(&h), None);
+}
+
+#[tokio::test]
+async fn the_pool_never_hides_a_created_or_deleted_record() {
+    let (contract, w) = writable();
+    let batch = json!({"records": (1..=5).map(widget).collect::<Vec<_>>()});
+    let h = support::described(&contract, w, vec![batch, widget(9)]);
+    mb_protocols::fill_record_pool(Arc::downgrade(&h.rt), 60_000).await;
+    let (_, _, first) = h.send("GET", "/widgets", None, &[]).await;
+    assert_eq!(first.as_array().unwrap().len(), 5);
+    let (status, _, made) = h.send("POST", "/widgets", Some(widget(9)), &[]).await;
+    assert!(status.is_success(), "{made}");
+    let (status, _, _) = h.send("DELETE", "/widgets/w2", None, &[]).await;
+    assert!(status.is_success());
+    let (_, headers, listed) = h.send("GET", "/widgets", None, &[]).await;
+    assert_eq!(headers["x-mockingbird-source"], "state", "{listed}");
+    let mut ids: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["id"].as_str().unwrap())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["w1", "w3", "w4", "w5", "w9"]);
+}
+
+#[tokio::test]
+async fn a_session_that_wrote_the_type_first_lists_its_own_records() {
+    let (contract, w) = writable();
+    let batch = json!({"records": (1..=5).map(widget).collect::<Vec<_>>()});
+    let h = support::described(&contract, w, vec![batch, widget(9)]);
+    mb_protocols::fill_record_pool(Arc::downgrade(&h.rt), 60_000).await;
+    h.send("POST", "/widgets", Some(widget(9)), &[]).await;
+    let (_, _, listed) = h.send("GET", "/widgets", None, &[]).await;
+    assert_eq!(listed, json!([widget(9)]));
+    assert_eq!(pool_note(&h), None);
+}
