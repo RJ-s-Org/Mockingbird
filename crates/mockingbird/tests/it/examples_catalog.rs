@@ -53,8 +53,23 @@ fn every_example_config_loads_and_its_contracts_compile() {
         for (mock, cfg) in &config.mocks {
             let bytes = mb_import::read_source(&cfg.contract)
                 .unwrap_or_else(|e| panic!("{}/{mock}: {e:#}", example.name));
-            mb_import::compile_with_warnings(&bytes)
+            let (bundle, _) = mb_import::compile_with_warnings(&bytes)
                 .unwrap_or_else(|e| panic!("{}/{mock}: {e:#}", example.name));
+            // A shipped world description applies whole: no entry refused.
+            if let Some(world) = &cfg.world {
+                let text = std::fs::read_to_string(world)
+                    .unwrap_or_else(|e| panic!("{}/{mock}: {e:#}", example.name));
+                let doc: serde_json::Value = serde_saphyr::from_str(&text)
+                    .unwrap_or_else(|e| panic!("{}/{mock}: {e}", example.name));
+                let validation = mb_admin::world::validated_overlay(&doc, &bundle)
+                    .unwrap_or_else(|r| panic!("{}/{mock}: {r:?}", example.name));
+                assert!(
+                    validation.refused.is_empty(),
+                    "{}/{mock}: world entries refused: {:?}",
+                    example.name,
+                    validation.refused
+                );
+            }
             for host in &cfg.hosts {
                 assert!(
                     meta.hosts.contains(host),
@@ -118,6 +133,22 @@ fn examples_list_show_and_init() {
     }
     // The written config loads from its new home.
     mockingbird::file_config::load(&target.join("mockingbird.yaml")).unwrap();
+    // An example's world description is written beside its config.
+    let plaid = dir.path().join("plaid");
+    let out = Command::cargo_bin("mockingbird")
+        .unwrap()
+        .args(["examples", "init", "plaid", "--dir"])
+        .arg(&plaid)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let config = mockingbird::file_config::load(&plaid.join("mockingbird.yaml")).unwrap();
+    let world = config.mocks["plaid"].world.as_ref().unwrap();
+    assert!(world.is_file(), "{}", world.display());
     // A second init refuses to overwrite.
     let out = init();
     assert!(!out.status.success());

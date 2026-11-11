@@ -69,6 +69,10 @@ Ed25519 and ECDSA signatures, ...), so those examples use `hmac-sha256`
 (`X-Mockingbird-Signature: sha256=<hex>`) and each README says what the real header
 looks like. See [improvements](improvements.md#from-the-examples-catalog-2026-10-28).
 
+*World*: the Plaid example also ships a [world description](world.md),
+`plaid.world.yaml`, wired as `world:` in its config: after a token exchange, its account
+lists answer from state. The other examples ship none.
+
 *SDK*: every snippet except the Kafka consumer was run against its example through the
 proxy. Some SDKs bypass the proxy variables or ship their own CA bundle (stripe-python,
 plaid-python, hubspot-api-client); their snippets pass the CA or proxy explicitly.

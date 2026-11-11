@@ -1,0 +1,64 @@
+# World description for plaid.openapi.yaml (see docs/world.md). Every entry is
+# what Plaid's API reference states; it holds no records and no values from traffic.
+version: 1
+types:
+  item:
+    # /item/public_token/exchange issues an access_token for the Item; every
+    # Item-scoped endpoint names the Item by it.
+    identity: { member: item_id, alternates: [access_token] }
+  account:
+    # Accounts belong to an Item.
+    identity: { member: account_id }
+    parent: { type: item }
+  transaction:
+    # Transactions belong to an Item's accounts.
+    identity: { member: transaction_id }
+    parent: { type: item }
+operations:
+  itemPublicTokenExchange:
+    kind: create
+    type: item
+    answer: { record: "" }          # {access_token, item_id, request_id}
+  itemGet:
+    kind: read
+    type: item
+    target: { member: access_token }
+    answer: { record: /item }
+    not_found: 400                  # INVALID_ACCESS_TOKEN
+  accountsGet:
+    kind: list
+    type: account
+    answer: { records: /accounts }
+    scope: { param: access_token }
+    ignores: [client_id, secret]
+    not_found: 400
+  accountsBalanceGet:
+    kind: list
+    type: account
+    answer: { records: /accounts }
+    scope: { param: access_token }
+    ignores: [client_id, secret]
+    not_found: 400
+  authGet:
+    kind: list
+    type: account
+    answer: { records: /accounts }
+    scope: { param: access_token }
+    ignores: [client_id, secret]
+    not_found: 400
+  identityGet:
+    kind: list
+    type: account
+    answer: { records: /accounts }
+    scope: { param: access_token }
+    ignores: [client_id, secret]
+    not_found: 400
+  transactionsSync:
+    kind: list
+    type: transaction
+    answer: { records: /added }
+    scope: { param: access_token }
+    ignores: [client_id, secret]
+    # cursor in, next_cursor out, count the page size (1-500, default 100).
+    paging: { style: cursor, request: cursor, response: next_cursor, size: count }
+    not_found: 400
