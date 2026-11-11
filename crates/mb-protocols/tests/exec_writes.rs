@@ -215,7 +215,7 @@ components:
       properties: {name: {type: string}, size: {type: integer}, note: {type: string, nullable: true}, status: {type: string}}
     ItemPatch:
       type: object
-      properties: {name: {type: string, nullable: true}, size: {type: integer}, note: {type: string, nullable: true}, version: {type: integer}}
+      properties: {name: {type: string, nullable: true}, size: {type: integer}, note: {type: string, nullable: true}, Note: {type: string}, version: {type: integer}}
     Note:
       type: object
       required: [id, text, rev]
@@ -453,6 +453,52 @@ async fn an_update_sending_a_member_the_record_does_not_declare_falls_back() {
         ..line("updateItem", "update", Some("undeclared_member"))
     };
     assert_eq!(capture.of("updateItem"), vec![undeclared]);
+}
+
+/// A form API names its parameters otherwise than its records (`SmsUrl` for
+/// `sms_url`): the described `set` says where the member lands, so the update stays the
+/// executor's, and the undeclared member is not merged.
+#[tokio::test]
+async fn an_undeclared_member_a_described_set_reads_is_set_not_a_fallback() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"updateItem": {"kind": "update", "set": {
+        "note": "request.body.Note != null ? request.body.Note : record.note"
+    }}}});
+    let h = with_item(world, vec![item(), decoy()]).await;
+    let (status, headers, body) = h
+        .send(
+            "PATCH",
+            "/items/i1",
+            Some(json!({"Note": "renamed", "size": 2})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(
+        (&body["note"], &body["size"]),
+        (&json!("renamed"), &json!(2))
+    );
+    assert!(body.get("Note").is_none(), "{body}");
+    assert_eq!(
+        h.provider.requests().len(),
+        1,
+        "only the seeded create asks the model"
+    );
+    assert_eq!(
+        capture.of("updateItem"),
+        vec![line("updateItem", "update", None)]
+    );
+    // One no `set` reads still falls back.
+    let (status, _, body) = h
+        .send("PATCH", "/items/i1", Some(json!({"Other": 1})), &[])
+        .await;
+    assert!(status.is_success(), "{body}");
+    let undeclared = ExecLine {
+        exec_fallback_on: Some("Other".to_owned()),
+        ..line("updateItem", "update", Some("undeclared_member"))
+    };
+    assert_eq!(capture.of("updateItem")[1], undeclared);
 }
 
 #[tokio::test]
