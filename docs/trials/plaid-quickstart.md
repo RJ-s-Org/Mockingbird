@@ -135,3 +135,52 @@ The flows were run twice: once before the `ignores` and paging entries (7a), onc
 | Calls | Sources | Fallbacks | Model-served latency | Tokens (prompt / completion) | OpenRouter spend |
 | --- | --- | --- | --- | --- | --- |
 | 27 (2 flow runs plus probes) | 25 `llm`, 2 `cache` | 0 | p50 2.3 s, p95 8.0 s, max 9.2 s | 44.3k / 9.9k | about $0.005 at $0.006/M prompt and $0.50/M completion (the shared key's daily usage was $0.066 in total) |
+
+## Run 9 (2026-11-11): after the fixes for findings #1–#3, #7 and #8
+
+Built from `main` plus the token-alias PR (#415). Same app, contract and model (`deepseek/deepseek-v4.1-flash-1017`). The world the agent wrote now says what Plaid's documentation says:
+
+```json
+{"types": {
+   "item": {"identity": {"member": "item_id", "alternates": ["access_token"]}},
+   "account": {"identity": {"member": "account_id"}, "parent": {"type": "item"}},
+   "transaction": {"identity": {"member": "transaction_id"}, "parent": {"type": "item"}}},
+ "operations": {
+   "itemPublicTokenExchange": {"kind": "create", "type": "item", "answer": {"record": ""}},
+   "itemGet": {"kind": "read", "type": "item", "target": {"member": "access_token"}, "answer": {"record": "/item"}, "not_found": 400},
+   "accountsGet": {"kind": "list", "type": "account", "answer": {"records": "/accounts"}, "scope": {"param": "access_token"}, "ignores": ["client_id", "secret"], "not_found": 400}}}
+```
+
+`authGet`, `identityGet` and `accountsBalanceGet` are written like `accountsGet`. `transactionsSync` is too, plus cursor paging.
+
+All of it applies in one `patch_world` (no refusals; #397). `call_mock {mock: "plaid", …}` reaches the host-bound mock from any directory with no hand-set `Host` (#404).
+
+### What changed
+
+- **Exchange (#408 and #415):** `/item/public_token/exchange` is answered from state. The Item is stored, with its members filled once. The `access_token` is minted in the contract's shape, and `/item/get` by that token reads the Item back from state.
+- **Unknown token:** `{"access_token": "access-sandbox-nope"}` on `/item/get` or `/accounts/get` answers the declared 400 (`ITEM_NOT_FOUND`-style body), not invented data.
+- **Account lists:** `/accounts/get` generates once, and that marks the Item's accounts. `/auth/get`, `/accounts/balance/get` and the repeated `/accounts/get` are then answered from state in 3–24 ms, with the same `account_id`s and balances.
+
+| Call (app session) | Run 7 | Run 9 |
+| --- | --- | --- |
+| `/link/token/create` | llm | llm (`no_identity`: nothing to store) |
+| `/item/public_token/exchange` | llm | **state** (fill: 1 model call) |
+| `/accounts/get` | llm | llm (`never_listed`: first list of the Item) |
+| `/auth/get` | llm | **state**, 3 ms |
+| `/identity/get` | llm | patched (`render_failed`: stored accounts have no `owners`) |
+| `/transactions/sync` (2 pages) | llm, llm | llm, llm (`never_listed`; page 2 `unknown_token`) |
+| `/accounts/balance/get` | llm | **state**, 5 ms |
+| `/item/get` | llm | **state**, 0 ms |
+| `/institutions/get_by_id` | llm | llm (`not_held`: a catalog record) |
+| `/accounts/get` again | cache | **state**, 15 ms |
+
+**5 of 11 app calls from state (run 7: 0, plus 1 cache hit).**
+
+| Model-served latency (app session) | Tokens (prompt / completion, whole run with probes) | OpenRouter spend |
+| --- | --- | --- |
+| p50 3.3 s, max 6.6 s (6 calls) | 18.6k / 3.5k | about $0.002 |
+
+### Still open (not blocking the flows)
+
+- **`/identity/get` (`render_failed`):** its items require `owners`, which the accounts stored by `/accounts/get` do not hold, so the model answers it, with the same accounts.
+- **`/transactions/sync` page 2 (`unknown_token`):** the first page is generated, so its `next_cursor` is the model's, and the executor cannot continue it. The model answers page 2.
