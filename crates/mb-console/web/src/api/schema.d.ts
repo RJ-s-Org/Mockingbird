@@ -2499,8 +2499,9 @@ export interface components {
             /** @description What the description leaves open, including each refused entry. */
             gaps: components["schemas"]["WorldGap"][];
             /**
-             * @description The newest revision's entries that did not validate; they fall back
-             *     to tier 0.
+             * @description The newest revision's entries that did not validate, and the
+             *     entries of a config-file mock's `world:` file refused when the config
+             *     was last loaded; they fall back to tier 0.
              */
             refused: components["schemas"]["WorldRefusal"][];
             /**

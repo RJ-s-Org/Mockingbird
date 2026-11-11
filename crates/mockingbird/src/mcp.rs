@@ -1341,7 +1341,7 @@ impl McpServer {
                     state: self.state_for(config.as_deref()),
                     config,
                 };
-                Ok(daemon::doctor(&args, &self.admin_url).await)
+                Ok(daemon::doctor(&args, &self.admin_url, self.token.as_deref()).await)
             }
             "list_llm_providers" => Ok(onboard::providers_json()),
             "init_config" => {
