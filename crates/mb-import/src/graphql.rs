@@ -700,14 +700,43 @@ fn record_type(schema: &Schema, noun: &str) -> Option<String> {
 }
 
 /// The argument of `f` that names the record it is about: `id`, else
-/// `<resource type>Id` (`orderId`), case aside.
-fn id_argument(f: &Field, resource_type: Option<&str>) -> Option<String> {
+/// `<resource type>Id` (`orderId`), case aside. A mutation (`nested`) whose one argument
+/// is an input object (the Relay convention: `closeIssue(input: CloseIssueInput!)`)
+/// names it by a member of that object found by the same rules, as a dotted path
+/// (`input.issueId`), which the runtime reads into the request ([`mb_mcm::member_at`]).
+fn id_argument(
+    schema: &Schema,
+    f: &Field,
+    resource_type: Option<&str>,
+    nested: bool,
+) -> Option<String> {
+    id_member(&f.args, resource_type).or_else(|| {
+        let [one] = f.args.as_slice() else {
+            return None;
+        };
+        if !nested {
+            return None;
+        }
+        if !matches!(one.ty.base, BaseType::Named(_)) {
+            return None;
+        }
+        let Some(Kind::Input { fields }) = schema.types.get(named_type(&one.ty)).map(|t| &t.kind)
+        else {
+            return None;
+        };
+        id_member(fields, resource_type).map(|member| format!("{}.{member}", one.name))
+    })
+}
+
+/// The one of `values` that names a record of `resource_type`: `id`, else
+/// `<resource type>Id`, case aside.
+fn id_member(values: &[InputValue], resource_type: Option<&str>) -> Option<String> {
     let resource_id = resource_type.map(|r| format!("{r}id"));
-    f.args
+    values
         .iter()
         .find(|a| a.name == "id")
         .or_else(|| {
-            f.args.iter().find(|a| {
+            values.iter().find(|a| {
                 resource_id
                     .as_deref()
                     .is_some_and(|r| a.name.eq_ignore_ascii_case(r))
@@ -751,7 +780,7 @@ fn write_identity(
         _ => return None,
     };
     let input_field = match effect {
-        Effect::Delete => Some(id_argument(f, Some(record))?),
+        Effect::Delete => Some(id_argument(schema, f, Some(record), true)?),
         _ => None,
     };
     Some(Identity {
@@ -790,8 +819,9 @@ fn held_record(schema: &Schema, f: &Field, payload: &str) -> Option<(String, Str
     };
     let held = named_type(&one.ty).to_lowercase();
     // A bare `id` may name the part the name names (`productVariantDelete(id:)`
-    // answering the product that stays); `cartId` names the cart.
-    let argument = id_argument(f, Some(&held)).filter(|a| a != "id")?;
+    // answering the product that stays), as may `input.id`; `cartId` names the cart.
+    let argument =
+        id_argument(schema, f, Some(&held), true).filter(|a| a.rsplit('.').next() != Some("id"))?;
     Some((one.name.clone(), held, argument))
 }
 
@@ -858,7 +888,12 @@ fn operation(
         .map(|_| Identity {
             path_param: None,
             field: "id".into(),
-            input_field: id_argument(f, resource_type.as_deref()),
+            input_field: id_argument(
+                schema,
+                f,
+                resource_type.as_deref(),
+                operation_type == GraphqlOperationType::Mutation,
+            ),
             path_field: None,
             record: None,
         })

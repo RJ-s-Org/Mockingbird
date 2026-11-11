@@ -368,6 +368,102 @@ fn a_graphql_mutation_acts_on_the_record_its_payload_holds() {
     );
 }
 
+/// Relay-style mutations: one `input` argument whose members hold the ids.
+const RELAY: &str = r#"
+type Ticket { id: ID! title: String! state: String! }
+type Note { id: ID! body: String! }
+input CreateTicketInput { title: String! clientMutationId: String }
+type CreateTicketPayload { clientMutationId: String ticket: Ticket }
+input CloseTicketInput { ticketId: ID! clientMutationId: String }
+type CloseTicketPayload { clientMutationId: String ticket: Ticket }
+input DeleteTicketInput { id: ID! clientMutationId: String }
+type DeleteTicketPayload { clientMutationId: String deletedTicketId: ID ticket: Ticket }
+input PinTicketInput { id: ID! }
+type PinTicketPayload { ticket: Ticket }
+input AddNoteInput { subjectId: ID! body: String! }
+type AddNotePayload { note: Note }
+input RenameTicketInput { ticketId: ID! title: String! }
+input TicketWhere { id: ID! }
+type Query { ticket(id: ID!): Ticket ticketWhere(where: TicketWhere!): Ticket }
+type Mutation {
+  createTicket(input: CreateTicketInput!): CreateTicketPayload
+  closeTicket(input: CloseTicketInput!): CloseTicketPayload
+  deleteTicket(input: DeleteTicketInput!): DeleteTicketPayload
+  pinTicket(input: PinTicketInput!): PinTicketPayload
+  addNote(input: AddNoteInput!): AddNotePayload
+  renameTicket(input: RenameTicketInput!): Ticket
+  closeTickets(input: [CloseTicketInput!]!): CloseTicketPayload
+}
+"#;
+
+/// A mutation whose one argument is an input object (not a query's) names its record by that object's
+/// `id` or `<type>Id` member, as a dotted path into the request (`input.ticketId`), as
+/// a top-level argument would.
+#[test]
+fn a_relay_mutation_names_its_record_inside_its_input() {
+    let b = compile(RELAY.as_bytes()).unwrap();
+    // An action on the record its payload holds, named by `ticketId` inside `input`.
+    let close = op(&b, "Mutation.closeTicket");
+    assert_eq!(close.kind, OperationKind::Command(Effect::Other));
+    assert_eq!(close.resource_type.as_deref(), Some("ticket"));
+    assert_eq!(
+        close.identity,
+        identity(
+            "id",
+            Some("input.ticketId"),
+            Some(RecordAt::Member("ticket".into()))
+        )
+    );
+    // A delete by the `id` inside `input`.
+    let delete = op(&b, "Mutation.deleteTicket");
+    assert_eq!(delete.kind, OperationKind::Command(Effect::Delete));
+    assert_eq!(
+        delete
+            .identity
+            .as_ref()
+            .and_then(|i| i.input_field.as_deref()),
+        Some("input.id")
+    );
+    // A mutation answering the record itself.
+    assert_eq!(
+        op(&b, "Mutation.renameTicket")
+            .identity
+            .as_ref()
+            .and_then(|i| i.input_field.as_deref()),
+        Some("input.ticketId")
+    );
+    // A query's input object is not looked into: only a mutation's.
+    assert_eq!(
+        op(&b, "Query.ticketWhere")
+            .identity
+            .as_ref()
+            .and_then(|i| i.input_field.as_deref()),
+        None
+    );
+    // A bare `id` inside `input` may name another part than the record held, as a
+    // top-level one may; `subjectId` names no type; a list of inputs names no one record.
+    for name in [
+        "Mutation.pinTicket",
+        "Mutation.addNote",
+        "Mutation.closeTickets",
+    ] {
+        assert_eq!(op(&b, name).identity, None, "{name}");
+    }
+
+    let world = tier0(&b);
+    let close = &world.operations["Mutation.closeTicket"];
+    assert_eq!(close.kind, Some(OpKind::Action));
+    assert_eq!(close.r#type.as_deref(), Some("ticket"));
+    assert_eq!(
+        close.target.as_ref().and_then(|t| t.member.as_deref()),
+        Some("input.ticketId")
+    );
+    assert_eq!(
+        close.answer.as_ref().and_then(|a| a.record.clone()),
+        Some(Pointer::parse("/ticket").unwrap())
+    );
+}
+
 /// An eBay Trading-style WSDL: the record is a member named for the type, keyed by
 /// `<Type>ID`; the create sends the record whole and answers its id.
 const TRADING: &str = r#"<?xml version="1.0"?>
