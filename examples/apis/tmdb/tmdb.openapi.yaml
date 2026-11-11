@@ -1,9 +1,11 @@
-# A hand-written subset of The Movie Database (TMDB) API v3 (movie details,
-# popular, search, discover, TV series, people, genres, configuration), written
-# for Mockingbird's examples and covered by its license. Paths, operation ids
-# (the reference page slugs) and field names follow TMDB's public reference,
-# https://developer.themoviedb.org/reference; TMDB's own OpenAPI file is offered
-# under its API Terms of Use, not an open licence, so none of it is vendored or pinned.
+# A hand-written subset of The Movie Database (TMDB) API v3 (movie details and
+# lists, recommendations, search, discover, trending, TV series, seasons and lists,
+# people and their credits, genres, configuration; `append_to_response` members on
+# the details answers), written for Mockingbird's examples and covered by its
+# license. Paths, operation ids (the reference page slugs) and field names follow
+# TMDB's public reference, https://developer.themoviedb.org/reference; TMDB's own
+# OpenAPI file is offered under its API Terms of Use, not an open licence, so none
+# of it is vendored or pinned.
 openapi: 3.1.0
 info:
   title: TMDB API v3 (Mockingbird example subset)
@@ -48,13 +50,14 @@ paths:
       summary: The primary information about a movie.
       parameters:
         - { $ref: "#/components/parameters/language" }
-        - { name: append_to_response, in: query, schema: { type: string }, description: "Comma-separated, e.g. credits,videos" }
+        - { name: append_to_response, in: query, schema: { type: string }, description: "Comma-separated: credits, videos, images, external_ids, release_dates" }
+        - { name: include_image_language, in: query, schema: { type: string } }
       responses:
         "200":
           description: The movie.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/movie-details" }
+              schema: { allOf: [{ $ref: "#/components/schemas/movie-details" }, { $ref: "#/components/schemas/movie-appended" }] }
         "401": { $ref: "#/components/responses/unauthorized" }
         "404": { $ref: "#/components/responses/not_found" }
         "429": { $ref: "#/components/responses/rate_limited" }
@@ -145,12 +148,14 @@ paths:
       summary: The details of a TV show.
       parameters:
         - { $ref: "#/components/parameters/language" }
+        - { name: append_to_response, in: query, schema: { type: string }, description: "Comma-separated: credits, videos, images, external_ids, content_ratings" }
+        - { name: include_image_language, in: query, schema: { type: string } }
       responses:
         "200":
           description: The series.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/tv-series-details" }
+              schema: { allOf: [{ $ref: "#/components/schemas/tv-series-details" }, { $ref: "#/components/schemas/tv-appended" }] }
         "401": { $ref: "#/components/responses/unauthorized" }
         "404": { $ref: "#/components/responses/not_found" }
         "429": { $ref: "#/components/responses/rate_limited" }
@@ -163,14 +168,270 @@ paths:
       summary: Query the top level details of a person.
       parameters:
         - { $ref: "#/components/parameters/language" }
+        - { name: append_to_response, in: query, schema: { type: string }, description: "Comma-separated: combined_credits, images, external_ids" }
+        - { name: include_image_language, in: query, schema: { type: string } }
       responses:
         "200":
           description: The person.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/person-details" }
+              schema: { allOf: [{ $ref: "#/components/schemas/person-details" }, { $ref: "#/components/schemas/person-appended" }] }
         "401": { $ref: "#/components/responses/unauthorized" }
         "404": { $ref: "#/components/responses/not_found" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/movie/top_rated:
+    get:
+      operationId: movie-top-rated-list
+      summary: A list of top rated movies.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200": { $ref: "#/components/responses/movie_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/movie/upcoming:
+    get:
+      operationId: movie-upcoming-list
+      summary: A list of upcoming movies.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200": { $ref: "#/components/responses/movie_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/movie/now_playing:
+    get:
+      operationId: movie-now-playing-list
+      summary: A list of now playing movies.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200": { $ref: "#/components/responses/movie_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/tv/popular:
+    get:
+      operationId: tv-series-popular-list
+      summary: A list of popular TV shows.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200": { $ref: "#/components/responses/tv_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/tv/top_rated:
+    get:
+      operationId: tv-series-top-rated-list
+      summary: A list of top rated TV shows.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200": { $ref: "#/components/responses/tv_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/tv/airing_today:
+    get:
+      operationId: tv-series-airing-today-list
+      summary: A list of airing today TV shows.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200": { $ref: "#/components/responses/tv_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/tv/on_the_air:
+    get:
+      operationId: tv-series-on-the-air-list
+      summary: A list of on the air TV shows.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200": { $ref: "#/components/responses/tv_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/movie/{movie_id}/recommendations:
+    parameters:
+      - { name: movie_id, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: movie-recommendations
+      summary: Movies recommended for a movie.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200": { $ref: "#/components/responses/movie_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/tv/{series_id}/recommendations:
+    parameters:
+      - { name: series_id, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: tv-series-recommendations
+      summary: TV shows recommended for a TV show.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200": { $ref: "#/components/responses/tv_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/tv/{series_id}/season/{season_number}:
+    parameters:
+      - { name: series_id, in: path, required: true, schema: { type: integer } }
+      - { name: season_number, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: tv-season-details
+      summary: The details of a TV season, with its episodes.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+      responses:
+        "200":
+          description: The season.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/tv-season" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/trending/all/{time_window}:
+    parameters:
+      - { name: time_window, in: path, required: true, schema: { type: string, enum: [day, week] } }
+    get:
+      operationId: trending-all
+      summary: The trending movies, TV shows and people of the day or week.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200": { $ref: "#/components/responses/multi_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/trending/movie/{time_window}:
+    parameters:
+      - { name: time_window, in: path, required: true, schema: { type: string, enum: [day, week] } }
+    get:
+      operationId: trending-movies
+      summary: The trending movies of the day or week.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200": { $ref: "#/components/responses/movie_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/trending/tv/{time_window}:
+    parameters:
+      - { name: time_window, in: path, required: true, schema: { type: string, enum: [day, week] } }
+    get:
+      operationId: trending-tv
+      summary: The trending TV shows of the day or week.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200": { $ref: "#/components/responses/tv_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/trending/person/{time_window}:
+    parameters:
+      - { name: time_window, in: path, required: true, schema: { type: string, enum: [day, week] } }
+    get:
+      operationId: trending-people
+      summary: The trending people of the day or week.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200": { $ref: "#/components/responses/multi_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/discover/tv:
+    get:
+      operationId: discover-tv
+      summary: Find TV shows using filters and sort options.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+        - { name: with_genres, in: query, schema: { type: string }, description: "Comma (AND) or pipe (OR) separated genre ids" }
+        - { name: sort_by, in: query, schema: { type: string, default: popularity.desc } }
+      responses:
+        "200": { $ref: "#/components/responses/tv_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/genre/tv/list:
+    get:
+      operationId: genre-tv-list
+      summary: The list of official genres for TV shows.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+      responses:
+        "200":
+          description: The genres.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [genres]
+                properties:
+                  genres: { type: array, minItems: 5, maxItems: 16, items: { type: object, required: [id, name], properties: { id: { type: integer, enum: [10759, 16, 35, 80, 99, 18, 10751, 10762, 9648, 10763, 10764, 10765, 10766, 10767, 10768, 37] }, name: { type: string } } } }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/person/{person_id}/combined_credits:
+    parameters:
+      - { name: person_id, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: person-combined-credits
+      summary: The movie and TV credits of a person.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+      responses:
+        "200":
+          description: The credits.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/combined-credits" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/search/multi:
+    get:
+      operationId: search-multi
+      summary: Search movies, TV shows and people in one request.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+        - { name: query, in: query, required: true, schema: { type: string } }
+        - { name: include_adult, in: query, schema: { type: boolean, default: false } }
+      responses:
+        "200": { $ref: "#/components/responses/multi_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
         "429": { $ref: "#/components/responses/rate_limited" }
         "503": { $ref: "#/components/responses/service_offline" }
 components:
@@ -178,7 +439,7 @@ components:
     apiKey: { type: apiKey, in: query, name: api_key }
     bearerAuth: { type: http, scheme: bearer, description: An API Read Access Token. }
   parameters:
-    language: { name: language, in: query, schema: { type: string, default: en-US, pattern: "^[a-z]{2}-[A-Z]{2}$" } }
+    language: { name: language, in: query, schema: { type: string, default: en-US, pattern: "^[a-z]{2}(-[A-Z]{2})?$" } }
     page: { name: page, in: query, schema: { type: integer, default: 1, minimum: 1, maximum: 500 } }
   responses:
     movie_page:
@@ -191,6 +452,30 @@ components:
             properties:
               page: { type: integer, minimum: 1 }
               results: { type: array, maxItems: 20, items: { $ref: "#/components/schemas/movie-list-item" } }
+              total_pages: { type: integer, minimum: 1, maximum: 500 }
+              total_results: { type: integer, minimum: 0, maximum: 10000 }
+    tv_page:
+      description: A page of TV shows.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [page, results, total_pages, total_results]
+            properties:
+              page: { type: integer, minimum: 1 }
+              results: { type: array, maxItems: 20, items: { $ref: "#/components/schemas/tv-list-item" } }
+              total_pages: { type: integer, minimum: 1, maximum: 500 }
+              total_results: { type: integer, minimum: 0, maximum: 10000 }
+    multi_page:
+      description: A page of movies, TV shows and people.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [page, results, total_pages, total_results]
+            properties:
+              page: { type: integer, minimum: 1 }
+              results: { type: array, maxItems: 20, items: { $ref: "#/components/schemas/multi-item" } }
               total_pages: { type: integer, minimum: 1, maximum: 500 }
               total_results: { type: integer, minimum: 0, maximum: 10000 }
     unauthorized:
@@ -224,6 +509,155 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/status" }
   schemas:
+    tv-list-item:
+      type: object
+      required: [adult, backdrop_path, first_air_date, genre_ids, id, name, origin_country, original_language, original_name, overview, popularity, poster_path, vote_average, vote_count]
+      properties:
+        adult: { type: boolean, const: false }
+        backdrop_path: { $ref: "#/components/schemas/image-path" }
+        first_air_date: { type: string, format: date }
+        genre_ids: { type: array, maxItems: 3, items: { type: integer, enum: [10759, 16, 35, 80, 99, 18, 10751, 9648, 10765, 10768] } }
+        id: { type: integer, minimum: 1, maximum: 300000 }
+        name: { type: string }
+        origin_country: { type: array, maxItems: 2, items: { type: string, pattern: "^[A-Z]{2}$" } }
+        original_language: { type: string }
+        original_name: { type: string }
+        overview: { type: string }
+        popularity: { type: number, minimum: 0, maximum: 5000 }
+        poster_path: { $ref: "#/components/schemas/image-path" }
+        vote_average: { type: number, minimum: 0, maximum: 10 }
+        vote_count: { type: integer, minimum: 0 }
+    multi-item:
+      type: object
+      required: [id, media_type, adult, popularity]
+      description: A movie (title, release_date), a TV show (name, first_air_date) or a person (name, profile_path).
+      properties:
+        id: { type: integer, minimum: 1 }
+        media_type: { type: string, enum: [movie, tv, person] }
+        adult: { type: boolean, const: false }
+        title: { type: string }
+        original_title: { type: string }
+        name: { type: string }
+        original_name: { type: string }
+        overview: { type: string }
+        release_date: { type: string, format: date }
+        first_air_date: { type: string, format: date }
+        poster_path: { $ref: "#/components/schemas/image-path" }
+        backdrop_path: { $ref: "#/components/schemas/image-path" }
+        profile_path: { $ref: "#/components/schemas/image-path" }
+        genre_ids: { type: array, maxItems: 3, items: { type: integer } }
+        popularity: { type: number, minimum: 0, maximum: 5000 }
+        vote_average: { type: number, minimum: 0, maximum: 10 }
+        vote_count: { type: integer, minimum: 0 }
+        character: { type: string }
+        job: { type: string }
+    tv-season:
+      type: object
+      required: [_id, air_date, episodes, id, name, overview, poster_path, season_number]
+      properties:
+        _id: { type: string }
+        air_date: { type: string, format: date }
+        id: { type: integer }
+        name: { type: string }
+        overview: { type: string }
+        poster_path: { $ref: "#/components/schemas/image-path" }
+        season_number: { type: integer, minimum: 0 }
+        episodes:
+          type: array
+          maxItems: 12
+          items:
+            type: object
+            required: [air_date, episode_number, id, name, overview, runtime, season_number, still_path, vote_average]
+            properties:
+              air_date: { type: string, format: date }
+              episode_number: { type: integer, minimum: 1 }
+              id: { type: integer }
+              name: { type: string }
+              overview: { type: string }
+              runtime: { type: [integer, "null"] }
+              season_number: { type: integer }
+              still_path: { $ref: "#/components/schemas/image-path" }
+              vote_average: { type: number, minimum: 0, maximum: 10 }
+    combined-credits:
+      type: object
+      required: [id, cast, crew]
+      properties:
+        id: { type: integer }
+        cast: { type: array, maxItems: 12, items: { $ref: "#/components/schemas/multi-item" } }
+        crew: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/multi-item" } }
+    appended-credits:
+      type: object
+      properties:
+        cast: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/cast-member" } }
+        crew: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/crew-member" } }
+    appended-videos:
+      type: object
+      properties:
+        results:
+          type: array
+          maxItems: 4
+          items:
+            type: object
+            required: [id, key, name, site, type]
+            properties: { id: { type: string }, key: { type: string }, name: { type: string }, site: { type: string, enum: [YouTube] }, type: { type: string, enum: [Trailer, Teaser, Clip, Featurette] }, official: { type: boolean } }
+    appended-external-ids:
+      type: object
+      properties:
+        imdb_id: { type: [string, "null"] }
+        facebook_id: { type: [string, "null"] }
+        instagram_id: { type: [string, "null"] }
+        twitter_id: { type: [string, "null"] }
+    movie-appended:
+      type: object
+      description: What append_to_response adds to a movie's details.
+      properties:
+        credits: { $ref: "#/components/schemas/appended-credits" }
+        videos: { $ref: "#/components/schemas/appended-videos" }
+        images:
+          type: object
+          properties:
+            backdrops: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/image" } }
+            posters: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/image" } }
+        external_ids: { $ref: "#/components/schemas/appended-external-ids" }
+        release_dates:
+          type: object
+          properties:
+            results: { type: array, maxItems: 3, items: { type: object, properties: { iso_3166_1: { type: string }, release_dates: { type: array, items: { type: object, properties: { certification: { type: string }, release_date: { type: string } } } } } } }
+    tv-appended:
+      type: object
+      description: What append_to_response adds to a TV show's details.
+      properties:
+        credits: { $ref: "#/components/schemas/appended-credits" }
+        videos: { $ref: "#/components/schemas/appended-videos" }
+        images:
+          type: object
+          properties:
+            backdrops: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/image" } }
+            posters: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/image" } }
+        external_ids: { $ref: "#/components/schemas/appended-external-ids" }
+        content_ratings:
+          type: object
+          properties:
+            results: { type: array, maxItems: 3, items: { type: object, properties: { iso_3166_1: { type: string }, rating: { type: string } } } }
+    person-appended:
+      type: object
+      description: What append_to_response adds to a person's details.
+      properties:
+        combined_credits: { $ref: "#/components/schemas/combined-credits" }
+        images:
+          type: object
+          properties:
+            profiles: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/image" } }
+        external_ids: { $ref: "#/components/schemas/appended-external-ids" }
+    image:
+      type: object
+      required: [aspect_ratio, file_path, height, width]
+      properties:
+        aspect_ratio: { type: number }
+        file_path: { $ref: "#/components/schemas/image-path" }
+        height: { type: integer }
+        width: { type: integer }
+        vote_average: { type: number }
     status:
       type: object
       required: [success, status_code, status_message]
