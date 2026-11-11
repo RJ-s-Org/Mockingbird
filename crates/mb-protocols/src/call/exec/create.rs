@@ -240,7 +240,7 @@ pub(super) async fn run(
     // Its tokens' first values; a token none can be minted for is filled as any member.
     let seed = crate::call::header_ids::MintSeed::new(rt, &plan.session, call);
     initial_token(rt, (seed, t), &mut data);
-    issue_aliases(rt, (seed, t, op), response_schema, &mut data);
+    let issued = issue_aliases(rt, (seed, t, op), response_schema, &mut data);
     let tokens = token_members(rt, t);
     owned.retain(|m| !tokens.contains(m) || mb_mcm::member_at(&data, m).is_some());
     // A request member that does not fit the record's is never stored as sent: the
@@ -362,7 +362,9 @@ pub(super) async fn run(
         fill_into(known, filled.members);
         settle_filled(rt, (field, &shape.schemas), (&missing, &required), known);
     }
-    unique_keys(state, (seed, t), &filled_keys, &mut data)
+    // Issued values name their record as alternate keys do: unique among the type's.
+    let drawn: Vec<(String, Value)> = filled_keys.into_iter().chain(issued).collect();
+    unique_keys(state, (seed, t), &drawn, &mut data)
         .instrument(state_span())
         .await;
 
@@ -784,16 +786,18 @@ pub(in crate::call) fn issued_aliases(rt: &crate::MockRuntime, t: &str) -> Vec<S
 }
 
 /// Mints on `record` each of [`issued_aliases`] the create `op` answers beside the
-/// record and the request did not send, drawn as its answer declares it.
+/// record and the request did not send, drawn as its answer declares it; answers each
+/// minted member with its declared schema, for [`unique_keys`] to keep it unique.
 fn issue_aliases(
     rt: &crate::MockRuntime,
     (seed, t, op): (crate::call::header_ids::MintSeed<'_>, &str, &Operation),
     response_schema: Option<&Value>,
     record: &mut Value,
-) {
+) -> Vec<(String, Value)> {
+    let mut minted = Vec::new();
     let bundle = rt.bundle();
     let Some(answer) = response_schema.or_else(|| op.success_output()?.schema.as_ref()) else {
-        return;
+        return minted;
     };
     let held = op
         .identity
@@ -811,8 +815,10 @@ fn issue_aliases(
             .filter(|v| fits(rt, &declared, v))
         {
             mb_mcm::set_member_at(record, &member, value);
+            minted.push((member, declared));
         }
     }
+    minted
 }
 
 /// Settles what fill wrote of `missing` on `record`: a required member (in `required`)
