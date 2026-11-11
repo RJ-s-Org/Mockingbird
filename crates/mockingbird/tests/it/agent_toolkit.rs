@@ -797,6 +797,7 @@ fn skills_recommend_proxy_mode() {
         "get_draft",
         "edit_draft",
         "approve_draft",
+        "edit_contract",
         "get_request",
         "proxy_env",
     ] {
@@ -1117,6 +1118,101 @@ fn cli_world_schema_prints_valid_json() {
     assert_eq!(printed, json_file("crates/mb-mcm/schemas/world.v1.json"));
     assert!(printed["$schema"].is_string(), "{printed}");
     assert_eq!(printed["type"], "object", "{printed}");
+}
+
+/// A contract stricter than the real API (here `text` required) is loosened with
+/// `edit_contract`, which activates the edit as a new version: the request it
+/// refused is then served.
+#[test]
+fn mcp_edit_contract_loosens_the_active_contract() {
+    let dir = tempdir();
+    run_json(dir.path(), &["init", "--offline"]);
+    let (mut mcp, _admin_url, started) = start_server_on_free_ports(
+        dir.path(),
+        &json!({ "config": "mockingbird.yaml" }),
+        mcp_env,
+        || {},
+    );
+    assert_eq!(started["ready"], true, "{started}");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let contract = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "Hooks", "version": "1"},
+            "paths": {"/hooks/{id}": {"post": {
+                "operationId": "postHook",
+                "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                    "type": "object", "required": ["text"],
+                    "properties": {"text": {"type": "string"}}
+                }}}},
+                "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {
+                    "type": "object", "properties": {"ok": {"type": "boolean"}}
+                }}}}}
+            }}}
+        });
+        let imported = mcp.tool(
+            "import_contract",
+            json!({"mock": "hooks", "content": contract.to_string(), "filename": "hooks.json"}),
+        );
+        assert_eq!(imported["version"], 1, "{imported}");
+        let call = json!({"mock": "hooks", "method": "POST", "path": "/hooks/hooks/1",
+                          "body": {"attachments": []}});
+        // The data plane mounts a version when its registry watcher rebuilt the mock:
+        // call until the answer has the status wanted, or 10 s passed.
+        let call_until = |mcp: &mut McpClient, status: u64| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let answer = mcp.tool("call_mock", call.clone());
+                if answer["status"] == status || std::time::Instant::now() >= deadline {
+                    break answer;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        let refused = call_until(&mut mcp, 400);
+        assert_eq!(refused["status"], 400, "{refused}");
+
+        let patch =
+            json!({"requestBody": {"content": {"application/json": {"schema": {"required": []}}}}});
+        let edited = mcp.tool(
+            "edit_contract",
+            json!({"mock": "hooks", "operation": "postHook", "patch": patch}),
+        );
+        assert_eq!(edited["version"], 2, "{edited}");
+        assert_eq!(edited["status"], "active", "{edited}");
+        let served = call_until(&mut mcp, 200);
+        assert_eq!(served["status"], 200, "{served}");
+
+        let error = mcp.tool_error(
+            "edit_contract",
+            json!({"mock": "hooks", "operation": "nope", "patch": {}}),
+        );
+        assert!(error.contains("nope"), "{error}");
+
+        // A YAML source is edited as well; a source that is no OpenAPI is refused
+        // with what to do instead.
+        let yaml = "openapi: 3.1.0\ninfo: {title: Ys, version: '1'}\npaths:\n  /y:\n    get:\n      operationId: getY\n      responses: {'200': {description: ok}}\n";
+        mcp.tool(
+            "import_contract",
+            json!({"mock": "y", "content": yaml, "filename": "y.yaml"}),
+        );
+        let edited = mcp.tool(
+            "edit_contract",
+            json!({"mock": "y", "operation": "getY", "patch": {"summary": "Get y"}}),
+        );
+        assert_eq!(edited["version"], 2, "{edited}");
+        mcp.tool(
+            "import_contract",
+            json!({"mock": "gql", "content": "type Query { hello: String }\n", "filename": "schema.graphql"}),
+        );
+        let error = mcp.tool_error("edit_contract", json!({"mock": "gql", "patch": {}}));
+        assert!(error.contains("not an OpenAPI document"), "{error}");
+    }));
+    let stopped = mcp.tool("stop_server", json!({}));
+    assert_eq!(stopped["stopped"], true);
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[test]

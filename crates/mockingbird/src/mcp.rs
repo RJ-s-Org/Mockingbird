@@ -709,6 +709,22 @@ fn tools() -> Vec<Tool> {
             destructive: false,
         },
         Tool {
+            name: "edit_contract",
+            title: "Edit an active contract",
+            description: "Fix a mock's active OpenAPI contract, typically one imported from documentation that is stricter than the real API (a member required that the API does not require, null or a number refused where the API takes it): apply a JSON merge patch (RFC 7396: null removes a key) to one operation (its OpenAPI operation object) or to the whole document, and activate the result as a new contract version. Returns the import answer, with the new version's world gaps.",
+            schema: obj(
+                json!({
+                    "mock": mock(),
+                    "version": n("Contract version to start from; default the active one."),
+                    "operation": s("Operation id to patch; default the whole document."),
+                    "patch": o("JSON merge patch."),
+                }),
+                &["mock", "patch"],
+            ),
+            read_only: false,
+            destructive: false,
+        },
+        Tool {
             name: "approve_draft",
             title: "Approve a draft contract",
             description: "Approve a reviewed draft; it is activated (served) unless activate is false.",
@@ -1498,6 +1514,7 @@ impl McpServer {
                 draft_summary(&view, opt_str(a, "operation").as_deref())
             }
             "edit_draft" => self.edit_draft(a).await,
+            "edit_contract" => self.edit_contract(a).await,
             "approve_draft" => {
                 let mock = str_arg(a, "mock")?;
                 let version = self
@@ -1889,6 +1906,89 @@ impl McpServer {
             &[],
             None,
         )
+        .await
+    }
+
+    /// `edit_contract`: the active (or given) version's OpenAPI source, merge-patched
+    /// at one operation or whole, imported and activated as a new version.
+    async fn edit_contract(&self, a: &Value) -> ToolResult {
+        let mock = str_arg(a, "mock")?;
+        let patch = a
+            .get("patch")
+            .filter(|p| p.is_object())
+            .ok_or_else(|| ToolError("patch must be a JSON object".into()))?;
+        let version = match opt_u64(a, "version") {
+            Some(v) => v,
+            None => {
+                let versions = self
+                    .ws(Method::GET, &["mocks", mock, "contracts"], &[], None)
+                    .await?;
+                versions
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|v| v["status"] == "active")
+                    .and_then(|v| v["version"].as_u64())
+                    .ok_or_else(|| ToolError(format!("mock {mock:?} has no active contract")))?
+            }
+        };
+        let v = version.to_string();
+        // The source is served as bytes (`application/octet-stream`): read raw, as
+        // `{content_type, text}`, then parsed as JSON or YAML here.
+        let source = client::api_path(
+            &self.admin_url,
+            self.token.as_deref(),
+            Method::GET,
+            &format!(
+                "/workspaces/{}/mocks/{mock}/contracts/{v}/source",
+                self.workspace
+            ),
+            None,
+        )
+        .await?
+        .unwrap_or_default();
+        // A JSON answer (a source served as JSON) comes back parsed.
+        let openapi = |d: &Value| d.get("openapi").is_some() || d.get("swagger").is_some();
+        let mut document: Value = Some(source.clone())
+            .filter(openapi)
+            .or_else(|| {
+                let text = source["text"].as_str()?;
+                serde_json::from_str(text)
+                    .ok()
+                    .or_else(|| serde_saphyr::from_str(text).ok())
+            })
+            .filter(openapi)
+            .ok_or_else(|| {
+                ToolError(format!(
+                    "version {version} of {mock:?} is not an OpenAPI document; import an edited contract with import_contract"
+                ))
+            })?;
+        match opt_str(a, "operation") {
+            None => json_patch::merge(&mut document, patch),
+            Some(id) => {
+                let target = document
+                    .get_mut("paths")
+                    .and_then(Value::as_object_mut)
+                    .into_iter()
+                    .flat_map(|paths| paths.values_mut())
+                    .filter_map(Value::as_object_mut)
+                    .flat_map(|item| item.values_mut())
+                    .find(|op| op["operationId"] == id.as_str())
+                    .ok_or_else(|| {
+                        ToolError(format!(
+                            "version {version} of {mock:?} has no operation {id:?}"
+                        ))
+                    })?;
+                json_patch::merge(target, patch);
+            }
+        }
+        let content = serde_json::to_string_pretty(&document).map_err(anyhow::Error::from)?;
+        self.import(&json!({
+            "mock": mock,
+            "content": content,
+            "filename": "contract.json",
+            "activate": true,
+        }))
         .await
     }
 
