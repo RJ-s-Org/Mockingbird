@@ -447,12 +447,16 @@ async fn serve(
             v.query.as_ref(),
             Some(&Value::Object(query.clone())),
         );
-        check(
-            &mut errors,
-            ("body", lenient),
-            body_validator,
-            body.as_ref(),
-        );
+        // A body may send `null` for a member it need not send at all.
+        if let (Some(v), Some(body)) = (body_validator, body.as_ref())
+            && let Err(found) = v.validate_request_located(body, lenient)
+        {
+            errors.extend(found.into_iter().map(|(pointer, e)| Violation {
+                location: "body".to_string(),
+                pointer,
+                reason: format!("body{e}"),
+            }));
+        }
     }
     if !errors.is_empty() {
         // The entered span is not held across the await.

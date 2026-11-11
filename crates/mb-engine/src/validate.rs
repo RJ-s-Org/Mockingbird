@@ -629,6 +629,44 @@ impl SchemaValidator {
         }
     }
 
+    /// The pointers of the `null`s in `instance` that break the schema as members of
+    /// an object that does not require them: removed, they leave no member missing.
+    /// The schema decides through `$ref`s, `allOf` and the rest, as validation does.
+    fn optional_nulls(&self, instance: &Value) -> HashSet<String> {
+        let nulls: HashSet<String> = self
+            .inner
+            .iter_errors(instance)
+            .map(|e| e.instance_path().as_str().to_owned())
+            .filter(|p| !p.is_empty() && instance.pointer(p) == Some(&Value::Null))
+            .filter(|p| {
+                p.rsplit_once('/')
+                    .and_then(|(parent, _)| instance.pointer(parent))
+                    .is_some_and(Value::is_object)
+            })
+            .collect();
+        if nulls.is_empty() {
+            return nulls;
+        }
+        let mut without = instance.clone();
+        for pointer in &nulls {
+            if let Some((parent, name)) = pointer.rsplit_once('/')
+                && let Some(Value::Object(object)) = without.pointer_mut(parent)
+            {
+                object.remove(&unescape(name));
+            }
+        }
+        let required: HashSet<String> = self
+            .inner
+            .iter_errors(&without)
+            .filter(|e| matches!(e.kind(), ValidationErrorKind::Required { .. }))
+            .map(|e| violated_pointer(&e))
+            .collect();
+        nulls
+            .into_iter()
+            .filter(|p| !required.contains(p))
+            .collect()
+    }
+
     /// The location of the schema holding the keyword that failed at
     /// `evaluation_path`: a JSON pointer into the schema that restarts at a
     /// `$ref`'s target.
@@ -933,7 +971,7 @@ impl SchemaValidator {
     /// member or a lone unexpected one, that member under it (`/name` for a body
     /// without its required `name`). `""` names the instance itself.
     pub fn validate_located(&self, instance: &Value) -> Result<(), Vec<(String, String)>> {
-        self.located(instance, false)
+        self.located(instance, false, false)
     }
 
     /// [`Self::validate_located`] for a request to a contract whose request schemas
@@ -941,13 +979,36 @@ impl SchemaValidator {
     /// member, and a scalar where the schema wants a scalar of another type, are not
     /// violations. A wrong shape (an object for a string), an enum or a bound still is.
     pub fn validate_lenient_located(&self, instance: &Value) -> Result<(), Vec<(String, String)>> {
-        self.located(instance, true)
+        self.located(instance, true, false)
     }
 
-    fn located(&self, instance: &Value, lenient: bool) -> Result<(), Vec<(String, String)>> {
+    /// [`Self::validate_located`] for a request body (leniently, as
+    /// [`Self::validate_lenient_located`], when `lenient`): `null` in a member its object
+    /// does not require is accepted even where the schema does not allow it, as real
+    /// APIs commonly treat it as absent (Telegram's `"message_thread_id": null`).
+    pub fn validate_request_located(
+        &self,
+        instance: &Value,
+        lenient: bool,
+    ) -> Result<(), Vec<(String, String)>> {
+        self.located(instance, lenient, true)
+    }
+
+    fn located(
+        &self,
+        instance: &Value,
+        lenient: bool,
+        optional_null: bool,
+    ) -> Result<(), Vec<(String, String)>> {
+        let tolerated = if optional_null {
+            self.optional_nulls(instance)
+        } else {
+            HashSet::new()
+        };
         let mut found: Vec<_> = self
             .inner
             .iter_errors(instance)
+            .filter(|e| !tolerated.contains(e.instance_path().as_str()))
             .filter(|e| !(lenient && self.is_guesswork(e, instance)))
             .take(MAX_SCANNED)
             .collect();

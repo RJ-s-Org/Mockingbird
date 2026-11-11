@@ -166,6 +166,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Fixed
 
+- A REST request may send `null` for a body member its object does not require, even where the schema does not allow `null`: real APIs commonly treat it as absent. Telegram's `sendMessage {"message_thread_id": null}` was refused with 400. `null` in a required member (also through `allOf`) is still refused.
 - A contract the smart import inferred from documentation (or text, or recorded traffic) validates requests leniently: its request schemas are guesses, so a request is no longer refused for a missing or undeclared member or a scalar of another type (Slack's `attachments`, Opsgenie's numeric `details`). Wrong shapes, enums and bounds are still refused, and `mocks.<name>.strict_requests: true` validates strictly. Drafts are marked with `info.x-mockingbird-inferred: true`.
 - A generated or repaired answer to a read carries the id its path named even when that id breaks the schema's numeric bound or length: `GET /person/99999999` under `maximum: 5000000` answered a record with `"id": 5000000`. A value of another type is still not forced.
 - A response in a non-JSON media type answered from the contract's declared example (Slack's literal `ok`) has source `example`, no longer `fallback`, so `verify --no-fallbacks` and `report` no longer count a correct answer as a fallback.
