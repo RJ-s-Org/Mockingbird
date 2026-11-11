@@ -18,6 +18,12 @@ use tokio::sync::mpsc;
 use crate::file_config::{self, FileConfig};
 use crate::reconcile::reconcile;
 
+/// The first delay before a config reload that failed applying is tried again.
+const RETRY_FIRST: Duration = Duration::from_secs(1);
+
+/// The longest delay between two tries of a failed config reload.
+const RETRY_MAX: Duration = Duration::from_secs(60);
+
 /// How long the file system must be quiet before a reload.
 pub const DEBOUNCE: Duration = Duration::from_millis(500);
 
@@ -287,14 +293,33 @@ pub fn spawn_with_status(
         // The file is watched from here on, but an edit made before then
         // (after the caller last read it, e.g. during a new leader's
         // reconcile) raised no event: re-read it once.
-        reloader.reload(true).await;
-        while let Some(batch) = rx.recv().await {
+        // A reload that failed applying the config (not reading it) is tried again,
+        // after a delay that doubles up to [`RETRY_MAX`], until one succeeds or the
+        // next edit reloads anyway.
+        // When, and the delay it waited: events that do not reload do not put it off.
+        let after = |delay: Duration| (tokio::time::Instant::now() + delay, delay);
+        let mut retry = reloader.reload(true).await.then(|| after(RETRY_FIRST));
+        loop {
+            let batch = match retry {
+                Some((at, delay)) => tokio::select! {
+                    batch = rx.recv() => batch,
+                    () = tokio::time::sleep_until(at) => {
+                        let next = delay.saturating_mul(2).min(RETRY_MAX);
+                        retry = reloader.reload(false).await.then(|| after(next));
+                        continue;
+                    }
+                },
+                None => rx.recv().await,
+            };
+            let Some(batch) = batch else {
+                break;
+            };
             let relevant = match reloader.watcher.lock() {
                 Ok(w) => w.concerns_batch(&batch),
                 Err(_) => return,
             };
             if relevant {
-                reloader.reload(false).await;
+                retry = reloader.reload(false).await.then(|| after(RETRY_FIRST));
             }
         }
     });
@@ -321,7 +346,9 @@ impl Reloader {
     /// Re-reads the config and reconciles it, keeping the previous state
     /// when that fails. `initial` is the check made as the watch starts,
     /// which usually finds nothing changed and then logs at debug level.
-    async fn reload(&self, initial: bool) {
+    /// Whether to try again: the store failed applying the config (that may
+    /// pass); a config that cannot be read, or that is refused, waits for an edit.
+    async fn reload(&self, initial: bool) -> bool {
         let path = self.config_path.display();
         match load_and_reconcile(
             &self.config_path,
@@ -363,27 +390,42 @@ impl Reloader {
                     );
                 }
             }
-            Err(error) => {
+            Err((error, retry)) => {
                 self.status.failed(format!("{error:#}"));
                 tracing::error!(
                     config = %path,
                     error = %format!("{error:#}"),
+                    retry,
                     "config reload failed; keeping the previous state"
                 );
+                return retry;
             }
         }
+        false
     }
 }
 
+/// The config read and reconciled; on failure the error, and whether the store
+/// failed applying it (worth trying again): a config that cannot be read, or that the
+/// reconcile refuses, waits for the next edit.
 async fn load_and_reconcile(
     config_path: &Path,
     store: &dyn ControlStore,
     state: &dyn StateStore,
     prepare: &Prepare,
-) -> anyhow::Result<(FileConfig, crate::reconcile::ReconcileReport)> {
-    let mut cfg = file_config::load(config_path)?;
-    prepare(&mut cfg)?;
-    let report = reconcile(store, state, &cfg).await?;
+) -> Result<(FileConfig, crate::reconcile::ReconcileReport), (anyhow::Error, bool)> {
+    let read = || -> anyhow::Result<FileConfig> {
+        let mut cfg = file_config::load(config_path)?;
+        prepare(&mut cfg)?;
+        Ok(cfg)
+    };
+    let cfg = read().map_err(|error| (error, false))?;
+    let report = reconcile(store, state, &cfg).await.map_err(|error| {
+        let transient = error
+            .chain()
+            .any(|cause| cause.downcast_ref::<mb_store::StoreError>().is_some());
+        (error, transient)
+    })?;
     Ok((cfg, report))
 }
 
