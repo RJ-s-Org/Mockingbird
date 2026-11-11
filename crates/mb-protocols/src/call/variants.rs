@@ -55,6 +55,16 @@ fn selector(op: &Operation, call: &OperationCall) -> Option<(String, Option<Stri
     Some((param.clone(), value))
 }
 
+/// The representation a read of `op` asks for, as the prompt names it
+/// (`language=fr-FR`; the API's default when the read sends none).
+pub(super) fn representation(op: &Operation, call: &OperationCall) -> Option<String> {
+    let (param, value) = selector(op, call)?;
+    Some(match value {
+        Some(value) => format!("{param}={value}"),
+        None => format!("no {param}: the API's default"),
+    })
+}
+
 /// What a read in another language than its record's makes of the held record.
 pub(crate) enum Variant {
     /// The record as this language's earlier read answered it.
