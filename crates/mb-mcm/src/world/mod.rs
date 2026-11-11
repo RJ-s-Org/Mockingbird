@@ -27,12 +27,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod apply;
+mod compiled;
 mod effective;
 pub mod expr;
 mod tier0;
 mod validate;
 
 pub use apply::{apply, record_at};
+pub use compiled::{
+    Expressions, OpExpressions, RefuseEntry, SetEntry, SetValue, TextValue, changes_as_set,
+};
 pub use effective::{effective, effective_validated};
 pub use tier0::{record_pointer, tier0};
 pub use validate::{Refusal, RefusalCode, Validation, check_size, validate};
@@ -291,9 +295,19 @@ pub struct OpDesc {
     /// Members an action sets, e.g. `{state: DELETE_REQUESTED}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<BTreeMap<String, Value>>,
-    /// Members of the target the operation changes, keyed by member.
+    /// Members of the target the operation changes, keyed by member. Read as
+    /// [`OpDesc::set`] entries (see [`Expressions`]): `from_request` is the request
+    /// body's member, `value` a literal.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub changes: BTreeMap<String, ChangeDesc>,
+    /// Members of the record a create, update, replace or action stores, keyed by
+    /// member path, each the [expression](expr) its value is.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub set: BTreeMap<String, String>,
+    /// Refusals checked in order before anything is stored or generated: the first
+    /// whose `when` holds answers its status.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refuse: Vec<RefuseDesc>,
     /// The parameter that limits a list to one scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<ScopeDesc>,
@@ -619,6 +633,37 @@ pub enum ChangeDesc {
     FromRequest(Pointer),
     /// This fixed value.
     Value(Value),
+}
+
+/// A refusal an operation answers when its condition holds.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RefuseDesc {
+    /// The [expression](expr) that refuses the call when it is `true`.
+    pub when: String,
+    /// The declared status it answers.
+    pub status: u16,
+    /// The error code its body says, where the error schema has a member for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<TextDesc>,
+    /// The message its body says, where the error schema has a member for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<TextDesc>,
+    /// Unknown keys.
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// A text a refusal says: as written, or an [expression](expr)'s value.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum TextDesc {
+    /// This text.
+    Text(String),
+    /// The value of this expression.
+    Expr {
+        /// The expression.
+        expr: String,
+    },
 }
 
 /// The parameter that limits a list to the records of one scope.
@@ -1002,6 +1047,8 @@ fn overlay_op(mut b: OpDesc, t: &OpDesc) -> OpDesc {
     merge_sub(&mut b.answer, &t.answer, overlay_answer);
     set(&mut b.transition, &t.transition);
     set_map(&mut b.changes, &t.changes);
+    set_map(&mut b.set, &t.set);
+    set_vec(&mut b.refuse, &t.refuse);
     set(&mut b.scope, &t.scope);
     set_vec(&mut b.filters, &t.filters);
     set(&mut b.order, &t.order);

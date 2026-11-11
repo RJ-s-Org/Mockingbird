@@ -44,6 +44,8 @@ pub(crate) struct Described {
     /// The `identity.alternates` of each type whose effective list differs from tier
     /// 0's.
     alternates: HashMap<String, Vec<String>>,
+    /// The world's `set`, `changes` and `refuse` expressions, compiled once.
+    expressions: mb_mcm::world::Expressions,
 }
 
 impl Described {
@@ -111,7 +113,14 @@ impl Described {
             lifecycle_members,
             changed_headers,
             alternates,
+            expressions: mb_mcm::world::Expressions::compile(world),
         }
+    }
+
+    /// The compiled expressions of operation `id` (its `set`, with its `changes`
+    /// rewritten as `set`, and its `refuse`), when it has any.
+    pub(crate) fn expressions(&self, id: &str) -> Option<&mb_mcm::world::OpExpressions> {
+        self.expressions.op(id)
     }
 
     /// The effective world, when one is attached.
@@ -392,6 +401,7 @@ components:
             patched: None,
             headers: Vec::new(),
             world_gaps: gaps.iter().map(|g| (*g).to_owned()).collect(),
+            exec_notes: serde_json::Map::new(),
         }
     }
 

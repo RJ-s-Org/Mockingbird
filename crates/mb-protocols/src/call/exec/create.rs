@@ -75,7 +75,7 @@ use crate::call::writes::type_members;
 use crate::call::{
     CallPlan, MAX_SCAN, OperationCall, StateAccess, derived, header_ids, id_string,
     in_create_collection, lifecycle, path_set, records, repeats, replays, request_values,
-    serve_held, state_lists, state_span, target_id, value_index,
+    serve_held, state_lists, state_span, target_id, transitions, value_index,
 };
 
 /// Whether the executor takes these calls.
@@ -157,24 +157,8 @@ pub(super) async fn run(
         .instrument(state_span())
         .await;
     if let Some(held) = taken.clone()
-        && let Some(code) = [409, 422]
-            .into_iter()
-            .find(|code| mb_engine::guards::declares_code(op, *code))
-        && let Some(refusal) = plan
-            .engine
-            .refuse_held(
-                rt.bundle(),
-                op,
-                call,
-                code,
-                ErrorCause::Taken,
-                &RefusalFacts::taken(&[held]),
-            )
-            .await
+        && let Some(refusal) = refuse_taken(state, plan, call, held).await
     {
-        replays::keep(state, plan, call, &refusal)
-            .instrument(state_span())
-            .await;
         answered(rt, plan, kind);
         return Ran::Answered(Box::new(refusal));
     }
@@ -231,7 +215,7 @@ pub(super) async fn run(
             }
         }
     };
-    let Some(key) = id_string(&id) else {
+    let Some(mut key) = id_string(&id) else {
         return fall("no_id");
     };
     let mut data = Value::Object(record);
@@ -260,6 +244,44 @@ pub(super) async fn run(
     // anything fill would write.
     if let Value::Object(known) = &mut data {
         shape.path_scoped(rt, &from_path, known);
+    }
+    // What the description sets (`set`, `changes` read as `set`) wins over what the
+    // request sent and the path says, and is never filled. One that sets the identity
+    // member names the record by it.
+    let set = transitions::apply_on_create(state, (plan, call), &mut data).await;
+    for member in &set {
+        if !member.contains('.') && !owned.contains(member) {
+            owned.push(member.clone());
+        }
+    }
+    // An alternate key the description sets is checked as one the request sent is.
+    if set.iter().any(|m| keys.iter().any(|(k, _)| k == m))
+        && let Value::Object(now) = &data
+        && let Some(held) = repeated_key(state, plan, call, t, (&keys, now))
+            .instrument(state_span())
+            .await
+    {
+        return match refuse_taken(state, plan, call, held).await {
+            Some(refusal) => {
+                answered(rt, plan, kind);
+                Ran::Answered(Box::new(refusal))
+            }
+            None => fall("repeated_key"),
+        };
+    }
+    if set.iter().any(|m| m == field) {
+        let Some(named) = mb_mcm::member_at(&data, field).and_then(id_string) else {
+            return fall("no_id");
+        };
+        if named != key
+            && records::held_by_key(state, &plan.session, t, &named)
+                .instrument(state_span())
+                .await
+                .is_some()
+        {
+            return fall("held");
+        }
+        key = named;
     }
     // A member the request did not send whose schema decides its value (a `const`, a
     // one-value `enum`: GraphQL's `__typename`; a `default`) takes it, at any depth.
@@ -383,6 +405,36 @@ pub(super) async fn run(
     let answer = commit(state, plan, call, (t, None), write, answer).await;
     answered(rt, plan, kind);
     Ran::Answered(Box::new(answer))
+}
+
+/// The conflict `plan`'s create declares (`409`, else `422`) for `held`, a value of an
+/// alternate key another record holds, kept for a replay of the call. `None` when it
+/// declares neither.
+async fn refuse_taken(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    held: (String, Value),
+) -> Option<GeneratedResponse> {
+    let op = plan.op;
+    let code = [409, 422]
+        .into_iter()
+        .find(|code| mb_engine::guards::declares_code(op, *code))?;
+    let refusal = plan
+        .engine
+        .refuse_held(
+            state.rt.bundle(),
+            op,
+            call,
+            code,
+            ErrorCause::Taken,
+            &RefusalFacts::taken(&[held]),
+        )
+        .await?;
+    replays::keep(state, plan, call, &refusal)
+        .instrument(state_span())
+        .await;
+    Some(refusal)
 }
 
 /// The first of `keys` (a type's alternate keys, [`Shape::key_members`]) whose value
@@ -1413,6 +1465,7 @@ fn unreadable(
 
 /// Logs that a create's record is not stored ([`Fallback::RecordInvalid`]), and why.
 fn invalid(rt: &crate::MockRuntime, plan: &CallPlan<'_>, why: &str) {
+    plan.exprs.fell_back(Fallback::RecordInvalid.as_str(), None);
     tracing::info!(
         mock = %rt.name,
         operation = %plan.op.id,
@@ -2047,6 +2100,7 @@ fn probe(status: u16) -> GeneratedResponse {
         patched: None,
         headers: Vec::new(),
         world_gaps: Vec::new(),
+        exec_notes: serde_json::Map::new(),
     }
 }
 

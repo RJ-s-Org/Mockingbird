@@ -43,6 +43,7 @@ mod effects;
 mod entities;
 mod envelopes;
 mod exec;
+mod exprs;
 mod header_ids;
 mod lifecycle;
 mod list_query;
@@ -80,6 +81,9 @@ use creates::*;
 pub(crate) use described::Described;
 pub(crate) use effects::*;
 use entities::*;
+#[cfg(feature = "graphql")]
+pub(crate) use exprs::seed_notes;
+pub(crate) use exprs::{CallExprs, SeqCounters};
 pub(crate) use list_query::undescribed_params;
 use lookup::*;
 use owners::*;
@@ -303,15 +307,17 @@ pub(crate) async fn generate_narrowed(
     call: &OperationCall,
     response_schema: Option<&Value>,
 ) -> Result<GeneratedResponse, EngineError> {
-    match prepare(rt, plan, call, response_schema).await {
+    let mut answer = match prepare(rt, plan, call, response_schema).await {
         Prepared::Answered(mut answer) => {
             seed_world_gaps(rt, plan.op, &mut answer);
-            Ok(*answer)
+            *answer
         }
         Prepared::Pending(pending) => {
-            generate_pending(rt, plan, call, *pending, response_schema).await
+            generate_pending(rt, plan, call, *pending, response_schema).await?
         }
-    }
+    };
+    exprs::seed_notes(plan, &mut answer);
+    Ok(answer)
 }
 
 /// Generates the answer of a [`prepare`]d call, then [`complete`]s it.
@@ -740,6 +746,7 @@ pub(crate) async fn prepare<'a>(
             patched: None,
             headers: Vec::new(),
             world_gaps: Vec::new(),
+            exec_notes: serde_json::Map::new(),
         };
         // The answer's items were seeded when it was generated; writes and
         // resets that could remove them also clear the cache.
@@ -1004,6 +1011,7 @@ pub(crate) async fn complete(
     // A new record whose id no draw could free: the answer is served, and
     // nothing else comes of it.
     let mut unstored = false;
+    let mut set_moved_identity = false;
     let mut header_id: Option<Value> = None;
     // A bulk create's request records, with the ids minted for them.
     let mut request_records: Vec<Value> = Vec::new();
@@ -1281,17 +1289,68 @@ pub(crate) async fn complete(
                     .as_ref()
                     .map(|b| records::request_record(rt, op, b));
                 lifecycle::initial(rt, t, body, request);
+                // What the description sets on a created record holds on one the
+                // executor left to generation too: in the answer, and so in what is
+                // stored from it.
+                let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+                let before = mb_mcm::member_at(body, field).cloned();
+                transitions::apply_on_create(&mut state, (plan, call), body)
+                    .instrument(state_span())
+                    .await;
+                set_moved_identity = mb_mcm::member_at(body, field) != before.as_ref();
+            }
+            // A `set` that gave the record another identity is checked again: a record
+            // held under it is not stored over. The answer is the refusal of a repeat
+            // the contract declares, else the held record, as an idempotent create.
+            if set_moved_identity {
+                let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+                let set_id = generated
+                    .body
+                    .as_ref()
+                    .and_then(|b| mb_mcm::member_at(b, field))
+                    .and_then(id_string);
+                let held = match set_id {
+                    Some(id) => state.get(session, t, &id).await,
+                    None => None,
+                };
+                let repeated = held.map(|held| {
+                    if owners::in_create_collection(rt, session, op, state_call, &held) {
+                        Repeated::Here(held)
+                    } else {
+                        Repeated::Elsewhere(held.id)
+                    }
+                });
+                match repeated {
+                    Some(Repeated::Here(held)) => {
+                        unstored = true;
+                        drop_all_effects(rt, op, &held.id, &mut generated);
+                        match plan.engine.refuse_repeat(rt.bundle(), op, call, &generated) {
+                            Some(mut refusal) => {
+                                refusal.effect_outcomes =
+                                    std::mem::take(&mut generated.effect_outcomes);
+                                refusal.dropped_effects = generated.dropped_effects;
+                                answered = None;
+                                generated = refusal;
+                            }
+                            None => generated.body = Some(held.data),
+                        }
+                    }
+                    Some(Repeated::Elsewhere(_)) => unstored = true,
+                    None => {}
+                }
             }
             // What the description says an update or action sets on its target shows
             // in the answer's record too.
             if !generated.new_record {
+                let before = target.as_ref().map(|t| &t.data);
                 transitions::onto_answer(
-                    rt,
-                    op,
-                    call.body.as_ref(),
-                    target_id.as_deref(),
+                    &mut state,
+                    (plan, call),
+                    (before, target_id.as_deref()),
                     &mut generated,
-                );
+                )
+                .instrument(state_span())
+                .await;
             }
             // A faker list standing in for a failed LLM call seeds nothing,
             // or its items would join the session's later LLM lists.
@@ -1348,6 +1407,7 @@ pub(crate) async fn complete(
                         generated: &generated,
                         request_body: state_call.body.as_ref(),
                         call_body: call.body.as_ref(),
+                        called: Some((plan, call)),
                         query: Some(&call.query),
                         collection: collection.clone(),
                         origin,

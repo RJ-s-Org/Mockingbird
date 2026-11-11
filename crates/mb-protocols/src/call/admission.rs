@@ -137,6 +137,9 @@ pub(crate) struct CallPlan<'a> {
     /// reached it at ([`crate::base_url::of`]) and the request's path as sent. What a
     /// next page's URL is written with ([`pages`]); `None` off HTTP routes.
     pub page_url: Option<String>,
+    /// What the call's world expressions decided and what the executor noted of it
+    /// (see [`super::CallExprs`]).
+    pub exprs: super::CallExprs,
 }
 
 impl CallPlan<'_> {
@@ -432,6 +435,7 @@ pub(crate) async fn plan<'a>(
         chaos,
         bearer: minted::bearer_hash(headers),
         page_url: None,
+        exprs: super::CallExprs::default(),
     })
 }
 

@@ -17,9 +17,11 @@ pub(super) struct WriteRequest<'a> {
     pub(super) target_id: Option<String>,
     pub(super) generated: &'a GeneratedResponse,
     pub(super) request_body: Option<&'a Value>,
-    /// The call's whole request body, which a described change's `from_request`
-    /// pointer reads (`request_body` may be the record it holds).
+    /// The call's whole request body (`request_body` may be the record it holds).
     pub(super) call_body: Option<&'a Value>,
+    /// The call and its plan, which a described `set` (or `changes`) reads; `None`
+    /// for list seeding, which sets nothing.
+    pub(super) called: Option<(&'a CallPlan<'a>, &'a OperationCall)>,
     /// The call's query, which a create's record is noted as made under (see
     /// [`Collections::note_scope`]).
     pub(super) query: Option<&'a Map<String, Value>>,
@@ -70,6 +72,7 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
         generated,
         request_body,
         call_body,
+        called,
         query,
         collection,
         origin,
@@ -253,8 +256,16 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
                 _ => data,
             };
             // What the description says the update sets, whatever was answered.
-            if !generated.new_record {
-                transitions::apply(rt, op, call_body, &mut data);
+            if !generated.new_record
+                && let Some(called) = called
+            {
+                // `set` reads the target as stored before the call.
+                let held = match transitions::sets_members(rt, op) {
+                    true => state.get(session, resource_type, &id).await,
+                    false => None,
+                };
+                let before = held.as_ref().map(|h| &h.data);
+                transitions::apply(state, called, before, &mut data).await;
             }
             (id, Some(data))
         }
@@ -284,9 +295,16 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
                     let answered = (answer.clone(), generated.status);
                     write_memory::onto_record(rt, op, on, answered, call_body)
                 }
-                _ => held.data,
+                _ => held.data.clone(),
             };
-            if transitions::apply(rt, op, call_body, &mut data).is_empty() {
+            let Some(called) = called else {
+                return WriteOutcome::default();
+            };
+            let before = held.data;
+            if transitions::apply(state, called, Some(&before), &mut data)
+                .await
+                .is_empty()
+            {
                 return WriteOutcome::default();
             }
             (id, Some(data))

@@ -2241,7 +2241,7 @@ async fn update_without_answer(
     let Some(raw) = raw else {
         // Nothing sent: only what the description says the update sets.
         let mut data = held.data.clone();
-        transitions::apply(rt, op, w.call.body.as_ref(), &mut data);
+        transitions::apply(state, (plan, w.call), Some(&held.data), &mut data).await;
         let changed = data != held.data;
         if changed {
             store_merged(state, rt, session, held, data).await;
@@ -2267,7 +2267,7 @@ async fn update_without_answer(
     let raw = &without_contradictions(rt, plan, w.call, held, raw);
     let request = request.map(|r| without_contradictions(rt, plan, w.call, held, r));
     let (mut merged, rest) = apply_update(rt, held, raw);
-    transitions::apply(rt, op, w.call.body.as_ref(), &mut merged);
+    transitions::apply(state, (plan, w.call), Some(&held.data), &mut merged).await;
     let changed = merged != held.data;
     if changed {
         store_merged(state, rt, session, held, merged.clone()).await;

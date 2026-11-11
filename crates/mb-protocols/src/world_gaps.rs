@@ -284,6 +284,7 @@ fn behaviour_gaps(bundle: &Bundle, world: &World, out: &mut Vec<Gap>) {
         let td = world.types.get(&t);
         if k == OpKind::Action
             && d.changes.is_empty()
+            && d.set.is_empty()
             && d.transition.is_none()
             && d.queue.is_none()
         {
@@ -292,7 +293,7 @@ fn behaviour_gaps(bundle: &Bundle, world: &World, out: &mut Vec<Gap>) {
                 operation: Some(op.id.clone()),
                 r#type: Some(t.clone()),
                 message: format!(
-                    "action `{}` on `{t}` is given nothing to change: if the docs say what it does to the record, write its `changes` (members it sets, from the request or a value) or a `transition` of `{t}`'s lifecycle; an action the docs say changes nothing (a send, a test) needs neither",
+                    "action `{}` on `{t}` is given nothing to change: if the docs say what it does to the record, write its `set` (members it sets, each an expression over the request, the record and the session) or a `transition` of `{t}`'s lifecycle; an action the docs say changes nothing (a send, a test) needs neither",
                     op.id
                 ),
                 advisory: true,

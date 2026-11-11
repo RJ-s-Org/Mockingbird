@@ -14,12 +14,13 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::expr::{MemberRef, Program, Root, Segment};
 use super::{
     AnswerDesc, ChangeDesc, ConcurrencyDesc, DerivedDesc, Extra, FieldsDesc, FilterDesc,
     FilterGrammar, HeaderRef, IdentityDesc, IdentityHeader, InstructionDesc, InstructionsDesc,
     LifecycleDesc, LongRunning, MAX_BYTES, MAX_DEPTH, OpDesc, OpKind, OrderDesc, PagingDesc,
-    ParamValue, ParentDesc, Pointer, QueueDesc, QueueEffect, RecordsAt, RequeueDesc, ScopeDesc,
-    ScopeKind, SoftDelete, TargetDesc, TypeDesc, UniqueDesc, VERSION, World,
+    ParamValue, ParentDesc, Pointer, QueueDesc, QueueEffect, RecordsAt, RefuseDesc, RequeueDesc,
+    ScopeDesc, ScopeKind, SoftDelete, TargetDesc, TextDesc, TypeDesc, UniqueDesc, VERSION, World,
 };
 use crate::{Binding, Bundle, Operation, RecordAt, StatusSelector};
 
@@ -1476,6 +1477,37 @@ impl<'a> Ctx<'a> {
             out.changes.insert(member.clone(), change.clone());
         }
 
+        let kind = d.kind.or_else(|| OpKind::of(op));
+        let p = path.join("set");
+        if !d.set.is_empty()
+            && !matches!(
+                kind,
+                Some(OpKind::Create | OpKind::Update | OpKind::Replace | OpKind::Action)
+            )
+        {
+            self.refuse(
+                &p,
+                RefusalCode::Invalid,
+                "`set` applies to a create, update, replace or action".to_string(),
+            );
+        } else {
+            for (member, source) in &d.set {
+                let mp = p.join(member);
+                if !self.check_member(record, ty, member, &mp) {
+                    continue;
+                }
+                if self.check_expression(op, (record, ty), source, &mp) {
+                    out.set.insert(member.clone(), source.clone());
+                }
+            }
+        }
+        for (i, r) in d.refuse.iter().enumerate() {
+            let rp = path.join("refuse").join(i);
+            if let Some(kept) = self.refusal(op, (record, ty), r, &rp) {
+                out.refuse.push(kept);
+            }
+        }
+
         if let Some(s) = &d.scope {
             let p = path.join("scope");
             self.unknown(&p, &s.extra);
@@ -1688,6 +1720,159 @@ impl<'a> Ctx<'a> {
         out
     }
 
+    /// A `refuse` entry: its `when` (and a `code` or `message` expression) compiles and
+    /// reads what the operation declares ([`Self::check_expression`]), and its status
+    /// is one the operation declares ([`Self::check_status`]).
+    fn refusal(
+        &mut self,
+        op: &'a Operation,
+        (record, ty): (Option<&'a Value>, Option<&str>),
+        r: &RefuseDesc,
+        path: &Path,
+    ) -> Option<RefuseDesc> {
+        self.unknown(path, &r.extra);
+        let mut ok = self.check_expression(op, (record, ty), &r.when, &path.join("when"));
+        ok &= self.check_status(op, r.status, &path.join("status"));
+        for (key, text) in [("code", &r.code), ("message", &r.message)] {
+            if let Some(TextDesc::Expr { expr }) = text {
+                ok &= self.check_expression(op, (record, ty), expr, &path.join(key));
+            }
+        }
+        ok.then(|| RefuseDesc {
+            when: r.when.clone(),
+            status: r.status,
+            code: r.code.clone(),
+            message: r.message.clone(),
+            extra: Extra::new(),
+        })
+    }
+
+    /// An expression of operation `op`: it compiles (refused with the line and column
+    /// of its first error), and what it reads is declared: a `request.body` member is
+    /// one of the request body's (a dotted name too), the first member under
+    /// `request.query`, `request.path` and `request.headers` a declared parameter of
+    /// that place (a header ignoring case), a member of `record` one of the type's
+    /// records, and a member of `it` in `count`, `exists` or `held` one of that type's
+    /// records; the types it names are resource types. Each failure is refused at
+    /// `path`, naming the expression's line and column.
+    fn check_expression(
+        &mut self,
+        op: &'a Operation,
+        (record, ty): (Option<&'a Value>, Option<&str>),
+        source: &str,
+        path: &Path,
+    ) -> bool {
+        let program = match Program::compile(source) {
+            Ok(p) => p,
+            Err(e) => {
+                self.refuse(
+                    path,
+                    RefusalCode::Invalid,
+                    format!("`{source}` does not compile: {e}"),
+                );
+                return false;
+            }
+        };
+        let refs = program.check();
+        let mut ok = true;
+        for t in &refs.types {
+            if !self.types.contains(t.name.as_str()) {
+                self.refuse(
+                    path,
+                    RefusalCode::Unresolved,
+                    format!(
+                        "{}: `{}` in {}() is not a resource type of the contract",
+                        t.pos, t.name, t.function
+                    ),
+                );
+                ok = false;
+            }
+        }
+        for m in &refs.members {
+            if let Some(problem) = self.member_problem(op, (record, ty), m) {
+                self.refuse(
+                    path,
+                    RefusalCode::Unresolved,
+                    format!("{}: {problem}", m.pos),
+                );
+                ok = false;
+            }
+        }
+        ok
+    }
+
+    /// Why member path `m` an expression of `op` reads is not declared, if it is not.
+    fn member_problem(
+        &self,
+        op: &'a Operation,
+        (record, ty): (Option<&'a Value>, Option<&str>),
+        m: &MemberRef,
+    ) -> Option<String> {
+        let b = self.bundle;
+        let first = match m.path.first() {
+            Some(Segment::Member(name)) => Some(name.as_str()),
+            _ => None,
+        };
+        match &m.root {
+            Root::Body => {
+                let body = op.input.body.as_ref();
+                match body {
+                    Some(schema) if declares_path(b, schema, &m.path) => None,
+                    Some(_) => Some(format!(
+                        "`{m}` is not a member of operation `{}`'s request body",
+                        op.id
+                    )),
+                    None if m.path.is_empty() => None,
+                    None => Some(format!(
+                        "operation `{}` declares no request body for `{m}`",
+                        op.id
+                    )),
+                }
+            }
+            Root::Query | Root::Path | Root::Headers => {
+                let name = first?;
+                let (declared, place) = match m.root {
+                    Root::Query => (
+                        has_property(b, op.input.query.as_ref(), |k| k == name),
+                        "query parameter",
+                    ),
+                    Root::Path => (declares_path_param(b, op, name), "path parameter"),
+                    _ => (
+                        has_property(b, op.input.headers.as_ref(), |k| {
+                            k.eq_ignore_ascii_case(name)
+                        }),
+                        "header",
+                    ),
+                };
+                (!declared).then(|| format!("operation `{}` declares no {place} `{name}`", op.id))
+            }
+            Root::Record => match (record, ty) {
+                (_, None) => Some(format!(
+                    "`{m}` reads the target, but operation `{}` has no resource type",
+                    op.id
+                )),
+                (None, Some(t)) => Some(format!("type `{t}` has no record schema for `{m}`")),
+                (Some(schema), Some(t)) => (!declares_path(b, schema, &m.path))
+                    .then(|| format!("`{m}` is not a member of a `{t}` record")),
+            },
+            Root::Type(t) => {
+                if !self.types.contains(t.as_str()) {
+                    // Refused as a type already.
+                    return None;
+                }
+                match self.record_schema(t) {
+                    Some(schema) => (!declares_path(b, schema, &m.path))
+                        .then(|| format!("`{m}` is not a member of a `{t}` record")),
+                    None => Some(format!("type `{t}` has no record schema for `{m}`")),
+                }
+            }
+            Root::It => Some(
+                "`it` is bound only inside count(), exists(), sum() and the list macros"
+                    .to_string(),
+            ),
+        }
+    }
+
     /// A read's or list's `fields`: its parameter declared, a separator that is not
     /// empty, and the members it always or by default answers members of the record
     /// (each refused alone). An operation of another kind is refused it whole.
@@ -1774,11 +1959,11 @@ impl<'a> Ctx<'a> {
             );
             return None;
         }
-        if d.transition.is_some() || !d.changes.is_empty() {
+        if d.transition.is_some() || !d.changes.is_empty() || !d.set.is_empty() {
             self.refuse(
                 path,
                 RefusalCode::Invalid,
-                "a `queue` sets no members of its target: it is not with `transition` or `changes`"
+                "a `queue` sets no members of its target: it is not with `transition`, `changes` or `set`"
                     .to_string(),
             );
             return None;
@@ -1994,6 +2179,58 @@ fn at_pointer<'a>(b: &'a Bundle, schema: &'a Value, tokens: &[String]) -> Option
     })
 }
 
+/// Whether `schema` declares member path `path`: each named step a property (a
+/// name holding dots is a property of that name, else its steps in turn), each item
+/// step an array's items or a map's values. A step into a schema that declares no
+/// properties, items or values (free-form) is declared.
+fn declares_path(b: &Bundle, schema: &Value, path: &[Segment]) -> bool {
+    let mut at = schema;
+    for segment in path {
+        let next = match segment {
+            Segment::Member(name) => dotted_member(b, at, name),
+            Segment::Item => items(b, at),
+        };
+        let next = next.or_else(|| map_values(b, at));
+        match next {
+            Some(s) => at = s,
+            None => return free_form(b, at),
+        }
+    }
+    true
+}
+
+/// The schema of a map's values: its `additionalProperties` when that is a schema.
+fn map_values<'a>(b: &'a Bundle, schema: &'a Value) -> Option<&'a Value> {
+    fn walk<'a>(
+        b: &'a Bundle,
+        schema: &'a Value,
+        seen: &mut Seen,
+        depth: usize,
+    ) -> Option<&'a Value> {
+        let schema = visit(b, schema, seen, depth)?;
+        if let Some(v) = schema.get("additionalProperties").filter(|v| v.is_object()) {
+            return Some(v);
+        }
+        branches(schema).find_map(|s| walk(b, s, seen, depth + 1))
+    }
+    walk(b, schema, &mut Seen::new(), 0)
+}
+
+/// Whether `schema` says nothing of what it holds: no properties, items or
+/// `additionalProperties: false` anywhere through its `$ref`s and branches.
+fn free_form(b: &Bundle, schema: &Value) -> bool {
+    fn walk(b: &Bundle, schema: &Value, seen: &mut Seen, depth: usize) -> bool {
+        let Some(schema) = visit(b, schema, seen, depth) else {
+            return true;
+        };
+        schema.get("properties").is_none()
+            && schema.get("items").is_none()
+            && schema.get("additionalProperties") != Some(&Value::Bool(false))
+            && branches(schema).all(|s| walk(b, s, seen, depth + 1))
+    }
+    walk(b, schema, &mut Seen::new(), 0)
+}
+
 /// Whether `schema` (through `$ref`s and branches) has a property whose
 /// name `matches`.
 fn has_property(b: &Bundle, schema: Option<&Value>, matches: impl Fn(&str) -> bool) -> bool {
@@ -2172,6 +2409,182 @@ mod tests {
 
     fn world(v: Value) -> World {
         serde_json::from_value(v).unwrap()
+    }
+
+    /// Members created by `POST /members` (`{email, name, list_id}`, header
+    /// `X-Actor`, query `notify`), read by `GET /members/{id}` and refused with a
+    /// declared `409`; lists read by `GET /lists/{id}`.
+    fn members() -> Bundle {
+        let member = json!({"type": "object", "properties": {
+            "id": {"type": "string"}, "email": {"type": "string"}, "name": {"type": "string"},
+            "list_id": {"type": "string"}, "currency": {"type": "string"},
+            "meta": {"type": "object", "properties": {"source": {"type": "string"}}}
+        }});
+        let list = json!({"type": "object", "properties": {"id": {"type": "string"}, "currency": {"type": "string"}}});
+        let mut b = bundle(&[
+            ("addMember", "POST", "/members", member.clone()),
+            ("getMember", "GET", "/members/{id}", member),
+            ("getList", "GET", "/lists/{id}", list),
+        ]);
+        typed(&mut b, "addMember", "members", None, "id");
+        typed(&mut b, "getMember", "members", Some("id"), "id");
+        typed(&mut b, "getList", "lists", Some("id"), "id");
+        declare(&mut b, "addMember", 409);
+        let add = op(&mut b, "addMember");
+        add.input.body = Some(json!({"type": "object", "properties": {
+            "email": {"type": "string"}, "name": {"type": "string"}, "list_id": {"type": "string"},
+            "a.b": {"type": "string"}
+        }}));
+        add.input.headers =
+            Some(json!({"type": "object", "properties": {"X-Actor": {"type": "string"}}}));
+        add.input.query =
+            Some(json!({"type": "object", "properties": {"notify": {"type": "boolean"}}}));
+        b
+    }
+
+    #[test]
+    fn set_and_refuse_keep_expressions_that_read_what_the_contract_declares() {
+        let b = members();
+        let w = world(json!({"operations": {"addMember": {
+            "set": {
+                "id": "md5(lower(request.body.email))",
+                "currency": "held('lists', request.body.list_id).currency",
+                "name": "request.headers['x-actor'] + ':' + request.body['a.b'] + string(request.query.notify)",
+                "meta.source": "has(request.body.name) ? 'named' : 'anonymous'"
+            },
+            "refuse": [{
+                "when": "exists('members', it.email == request.body.email && it.meta.source != 'x')",
+                "status": 409,
+                "code": "member_exists",
+                "message": {"expr": "'taken: ' + request.body.email"}
+            }]
+        }}}));
+        let v = validate(&w, &b);
+        assert!(v.refused.is_empty(), "{:?}", v.refused);
+        assert_eq!(v.applied, w);
+    }
+
+    #[test]
+    fn an_expression_that_does_not_compile_is_refused_at_its_line_and_column() {
+        let b = members();
+        let w = world(json!({"operations": {"addMember": {
+            "set": {"name": "request.body.name +\n  * 2"},
+            "refuse": [{"when": "request.body.email ==", "status": 409}]
+        }}}));
+        let v = validate(&w, &b);
+        assert_eq!(
+            paths(&v),
+            vec![
+                ("/operations/addMember/set/name", RefusalCode::Invalid),
+                ("/operations/addMember/refuse/0/when", RefusalCode::Invalid),
+            ]
+        );
+        assert!(
+            v.refused[0].message.contains("line 2, column 3"),
+            "{}",
+            v.refused[0]
+        );
+        assert!(
+            v.refused[1].message.contains("line 1, column"),
+            "{}",
+            v.refused[1]
+        );
+        assert!(v.applied.operations["addMember"].set.is_empty());
+        assert!(v.applied.operations["addMember"].refuse.is_empty());
+    }
+
+    #[test]
+    fn an_expression_reading_an_undeclared_member_or_type_is_refused() {
+        let b = members();
+        let w = world(json!({"operations": {"addMember": {
+            "set": {
+                "name": "request.body.nickname",
+                "email": "request.query.page + request.path.id",
+                "currency": "held('accounts', request.body.list_id).currency",
+                "list_id": "held('lists', request.body.list_id).owner",
+                "id": "record.missing",
+                "nickname": "request.body.name"
+            },
+            "refuse": [{"when": "count('members', it.age > 1) > 0", "status": 409}]
+        }}}));
+        let v = validate(&w, &b);
+        let refused: Vec<(&str, &str)> = v
+            .refused
+            .iter()
+            .map(|r| (r.path.as_str(), r.message.as_str()))
+            .collect();
+        let at = |path: &str, needle: &str| {
+            assert!(
+                refused
+                    .iter()
+                    .any(|(p, m)| *p == path && m.contains(needle)),
+                "{path} {needle}: {refused:?}"
+            );
+        };
+        at(
+            "/operations/addMember/set/name",
+            "`request.body.nickname` is not a member",
+        );
+        at(
+            "/operations/addMember/set/email",
+            "declares no query parameter `page`",
+        );
+        at(
+            "/operations/addMember/set/email",
+            "declares no path parameter `id`",
+        );
+        at(
+            "/operations/addMember/set/currency",
+            "`accounts` in held() is not a resource type",
+        );
+        at(
+            "/operations/addMember/set/list_id",
+            "`lists.owner` is not a member of a `lists` record",
+        );
+        at(
+            "/operations/addMember/set/id",
+            "`record.missing` is not a member of a `members` record",
+        );
+        at(
+            "/operations/addMember/set/nickname",
+            "`nickname` is not a member of a `members` record",
+        );
+        at(
+            "/operations/addMember/refuse/0/when",
+            "`members.age` is not a member",
+        );
+        assert!(refused.iter().all(|(_, m)| !m.is_empty()));
+        assert!(v.applied.operations["addMember"].set.is_empty());
+        assert!(v.applied.operations["addMember"].refuse.is_empty());
+    }
+
+    #[test]
+    fn a_refusal_status_the_operation_does_not_declare_is_refused() {
+        let b = members();
+        let w = world(json!({"operations": {
+            "addMember": {"refuse": [
+                {"when": "true", "status": 422},
+                {"when": "false", "status": 409, "flavor": 1}
+            ]},
+            "getMember": {"set": {"name": "'x'"}}
+        }}));
+        let v = validate(&w, &b);
+        assert_eq!(
+            paths(&v),
+            vec![
+                (
+                    "/operations/addMember/refuse/0/status",
+                    RefusalCode::Unresolved
+                ),
+                (
+                    "/operations/addMember/refuse/1/flavor",
+                    RefusalCode::UnknownKey
+                ),
+                ("/operations/getMember/set", RefusalCode::Invalid),
+            ]
+        );
+        assert_eq!(v.applied.operations["addMember"].refuse.len(), 1);
+        assert_eq!(v.applied.operations["addMember"].refuse[0].status, 409);
     }
 
     fn paths(v: &Validation) -> Vec<(&str, RefusalCode)> {

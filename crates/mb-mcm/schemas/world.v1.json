@@ -488,6 +488,78 @@
                 ]
               }
             ]
+          },
+          "description": "Read as `set` entries: `from_request` is the expression reading the request body there, `value` a literal."
+        },
+        "set": {
+          "type": "object",
+          "description": "Members of the record a create, update, replace or action stores, keyed by member path: each value an expression (a CEL subset, see docs/world.md) over `request`, `record` and `now`.",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "refuse": {
+          "type": "array",
+          "description": "Refusals checked in order before anything is stored or generated: the first whose `when` is true answers its declared `status`, with `code` and `message` placed in the members its error schema has for them (text as written, or `{expr}`).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "when": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 599
+              },
+              "code": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "expr": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "expr"
+                    ]
+                  }
+                ]
+              },
+              "message": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "expr": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "expr"
+                    ]
+                  }
+                ]
+              }
+            },
+            "required": [
+              "when",
+              "status"
+            ]
           }
         },
         "scope": {
