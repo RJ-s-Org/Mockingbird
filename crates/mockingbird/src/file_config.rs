@@ -1665,13 +1665,14 @@ impl FileConfig {
                 .validate()
                 .map_err(|e| format!("{prefix}{e}"))?;
             if let Some(group) = &mock.shares
-                && !self
-                    .mocks
-                    .iter()
-                    .any(|(other, m)| other != name && m.shares.as_ref() == Some(group))
+                && !self.mocks.iter().any(|(other, m)| {
+                    other != name
+                        && m.workspace == mock.workspace
+                        && m.shares.as_ref() == Some(group)
+                })
             {
                 return Err(format!(
-                    "{prefix}shares: no other mock shares {group:?}; give the mocks of one API the same name"
+                    "{prefix}shares: no other mock of its workspace shares {group:?}; give the mocks of one API the same name"
                 ));
             }
             if let Some(default) = &mock.default_scenario

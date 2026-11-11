@@ -92,7 +92,11 @@ pub(super) async fn read_context(
                                 {
                                     Some(hit) => Some(hit),
                                     // What the mock this one shares stored.
-                                    None => shared::by_shared(state, session, (op, t), id).await,
+                                    None => shared::by_shared(state, session, (op, t), id)
+                                        .await
+                                        .filter(|hit| {
+                                            owner.is_none_or(|o| key_fits(rt, session, hit, o))
+                                        }),
                                 }
                             }
                         }

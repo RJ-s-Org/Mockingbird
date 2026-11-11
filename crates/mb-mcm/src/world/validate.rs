@@ -3703,6 +3703,20 @@ mod tests {
     }
 
     #[test]
+    fn validate_refuses_an_empty_same_as_name() {
+        let w = world(json!({"types": {"folder": {"same_as": ["folders-v2", " "]}}}));
+        let v = validate(&w, &folders());
+        assert_eq!(
+            paths(&v),
+            vec![("/types/folder/same_as/1", RefusalCode::Invalid)]
+        );
+        assert_eq!(
+            v.applied.types["folder"].same_as,
+            vec!["folders-v2".to_string()]
+        );
+    }
+
+    #[test]
     fn validate_refuses_records_pointer_to_non_array() {
         let w = world(json!({"operations": {
             "ListFolders": {"answer": {"records": "/nextPageToken"}},

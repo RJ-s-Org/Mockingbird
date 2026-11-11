@@ -708,6 +708,13 @@ impl MockRuntime {
         &self.own_reads
     }
 
+    /// The name this mock's sessions are kept under: its `shares` group, or
+    /// its own name.
+    #[must_use]
+    pub fn store_name(&self) -> &str {
+        self.shares.as_deref().unwrap_or(&self.name)
+    }
+
     /// Narrowed schemas of GraphQL root fields, by selection.
     #[cfg(feature = "graphql")]
     pub(crate) fn narrowed(&self) -> &graphql::NarrowCache {
