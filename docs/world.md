@@ -24,12 +24,15 @@ mockingbird world show orders              # the active version: gaps first, the
 mockingbird world show orders --version 2 --json
 mockingbird world show orders --operation getOrder --operation listOrders   # only these, with their gaps
 mockingbird world show orders --type order # the type, its operations, and their gaps
+mockingbird world show orders --called     # only what the request log names, with its gaps
 mockingbird world schema                   # the format, as JSON Schema
 ```
 
 On a large contract, narrow the answer to the operations an app uses: `--operation <id>` and `--type <resource type>` (each repeatable; `operations` and `types` arrays on `get_world`; `?operation=` and `?type=` on the Admin API) keep only the operations named, the types named and the operations of those types, and the gaps, refused entries and authors about them. Gaps and refusals about the description as a whole are kept. A name the version does not have gives an empty answer with `warnings` listing it, not an error.
 
-The MCP tool is `get_world {mock, version?, operations?, types?}`, and `get_world_schema` answers the format's JSON Schema as `mockingbird world schema` prints it; the Admin API is `GET /api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world`, with `version` a number or `active`. The answer:
+Once the app has run against the mock, `--called` (`called: true` on `get_world`, `?called=true` on the Admin API) narrows the answer to what it used: the operations the mock's request log names (any session; a GraphQL request names each root field it answered), the types those operations touch, the gaps naming one of those operations, naming no operation and one of those types, or skipping a route of one of those types (a skipped route is never served, so the log cannot name it), and the refused entries and authors about them. Gaps and refusals about the description as a whole are kept. The other gaps are left out and counted in `gaps_left_out`. A log that names no operation of the version gives an empty answer with a warning. It combines with `--operation` and `--type`. On a contract with hundreds of gaps, run the app's flows first, then review this list; the `next_steps` of an import or `start_server` answer says so when a version has more than 40 gaps. The request log keeps the newest `observability.request_log_retention` calls per mock, so an operation called only before them no longer counts.
+
+The MCP tool is `get_world {mock, version?, operations?, types?, called?}`, and `get_world_schema` answers the format's JSON Schema as `mockingbird world schema` prints it; the Admin API is `GET /api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world`, with `version` a number or `active`. The answer:
 
 | Field | What it holds |
 | --- | --- |
@@ -39,7 +42,8 @@ The MCP tool is `get_world {mock, version?, operations?, types?}`, and `get_worl
 | `revision` | The newest revision's number; `0` when only the heuristics wrote it (every version stored before world descriptions starts there). |
 | `refused` | Entries of the newest revision that did not validate; each falls back to tier 0. |
 | `gaps` | What the description leaves open. |
-| `warnings` | The `operation` and `type` filters naming nothing in the version; absent when there is none. |
+| `warnings` | The `operation` and `type` filters naming nothing in the version, and with `called` a request log naming no operation of it; absent when there is none. |
+| `gaps_left_out` | With `called`, how many gaps it left out; absent without it. |
 
 Gaps. The first three codes also mark the recorded calls of each operation they concern (see [Gaps in the request log](#gaps-in-the-request-log)). The last four point at behaviour the contract signals and the description does not state yet. `undescribed_param` is something the executor cannot answer from the records; the three marked `advisory: true` are checks: read the docs for each, and write an entry only when they state the behaviour, otherwise leave the gap.
 

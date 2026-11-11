@@ -1521,6 +1521,20 @@ impl ControlStore for PgStore {
             .collect()
     }
 
+    async fn request_log_operations(
+        &self,
+        mock_id: Uuid,
+    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT operation_id FROM request_log \
+             WHERE mock_id = $1 AND operation_id IS NOT NULL",
+        )
+        .bind(mock_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(ids.into_iter().collect())
+    }
+
     async fn get_request_log(&self, id: i64) -> Result<Option<RequestLogEntry>, StoreError> {
         let sql = format!("SELECT {LOG_SELECT} FROM request_log WHERE id = $1");
         sqlx::query(sqlx::AssertSqlSafe(sql))

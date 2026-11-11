@@ -2338,3 +2338,204 @@ async fn a_world_write_without_running_mocks_is_unknown() {
     let result = put_world(&app, &uri, &json!({"version": 1})).await;
     assert_eq!(result["runtime"], "unknown", "{result}");
 }
+
+/// Widgets and gadgets with no identity member, each with an action that
+/// changes nothing: gaps on both types and on an operation of each, and a
+/// widget route that is skipped (it matches what `polishWidget` matches).
+const CALLED_SRC: &str = r##"
+openapi: 3.0.0
+info: {title: Shop, version: "1"}
+paths:
+  /widgets:
+    post:
+      operationId: createWidget
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}
+      responses:
+        "201":
+          description: created
+          content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}
+  /widgets/{widgetId}/polish:
+    post:
+      operationId: polishWidget
+      parameters: [{name: widgetId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}
+  /widgets/{zother}/polish:
+    post:
+      operationId: polishWidgetAgain
+      parameters: [{name: zother, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}
+  /gadgets:
+    post:
+      operationId: createGadget
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Gadget"}}}}
+      responses:
+        "201":
+          description: created
+          content: {application/json: {schema: {$ref: "#/components/schemas/Gadget"}}}
+  /gadgets/{gadgetId}/activate:
+    post:
+      operationId: activateGadget
+      parameters: [{name: gadgetId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {$ref: "#/components/schemas/Gadget"}}}
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        color: {type: string}
+    Gadget:
+      type: object
+      properties:
+        size: {type: string}
+"##;
+
+/// Logs a call of `operation` (in session `session`) on mock `mock`.
+async fn log_call(st: &AdminState, mock: Uuid, operation: &str, session: &str) {
+    st.store
+        .append_request_log(
+            mb_store::NewRequestLogEntry {
+                mock_id: mock,
+                operation_id: Some(operation.into()),
+                session: session.into(),
+                method: "POST".into(),
+                path: "/".into(),
+                status: 200,
+                source: Some("llm".into()),
+                fallback_reason: None,
+                latency_ms: 1,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                request: json!({}),
+                response: None,
+                at: chrono::Utc::now(),
+                kind: mb_store::RequestKind::Http,
+            },
+            1000,
+        )
+        .await
+        .unwrap();
+}
+
+/// Each gap of a world view as `code operation-or-type`, sorted.
+fn gap_names(view: &Value) -> Vec<String> {
+    let mut names: Vec<String> = view["gaps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|g| {
+            let about = g["operation"].as_str().or(g["type"].as_str());
+            format!(
+                "{} {}",
+                g["code"].as_str().unwrap_or("?"),
+                about.unwrap_or("-")
+            )
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn get_world_called_lists_only_the_gaps_of_what_the_request_log_names() {
+    let (st, app) = admin().await;
+    let uploaded = send(
+        &app,
+        Method::POST,
+        &format!("{BASE}/widgets/contracts"),
+        "application/yaml",
+        CALLED_SRC.as_bytes().to_vec(),
+    )
+    .await;
+    let version = uploaded["version"].as_i64().unwrap();
+    let mock = st
+        .store
+        .get_mock(DEFAULT_WORKSPACE, "widgets")
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let world = format!("{BASE}/widgets/contracts/{version}/world");
+    let get = |query: &str| {
+        let app = app.clone();
+        let uri = format!("{world}{query}");
+        async move { send(&app, Method::GET, &uri, "application/json", Vec::new()).await }
+    };
+    let full = get("").await;
+    assert_eq!(
+        gap_names(&full),
+        [
+            "no_effect activateGadget",
+            "no_effect polishWidget",
+            "no_effect polishWidgetAgain",
+            "no_identity gadgets",
+            "no_identity widgets",
+            "skipped_route polishWidgetAgain",
+        ],
+        "{full}"
+    );
+    assert!(full.get("gaps_left_out").is_none(), "{full}");
+
+    // Nothing called yet: no gaps, all of them left out, and a warning.
+    let none = get("?called=true").await;
+    assert_eq!(none["gaps"], json!([]), "{none}");
+    assert_eq!(none["gaps_left_out"], 6, "{none}");
+    assert!(
+        none["warnings"].to_string().contains("run the app's flows"),
+        "{none}"
+    );
+
+    // One operation called: its gaps, its type's and the skipped route of its
+    // type (never served, so never logged); not the other operations' nor the
+    // other type's.
+    log_call(&st, mock, "polishWidget", "s1").await;
+    let one = get("?called=true").await;
+    assert_eq!(
+        gap_names(&one),
+        [
+            "no_effect polishWidget",
+            "no_identity widgets",
+            "skipped_route polishWidgetAgain",
+        ],
+        "{one}"
+    );
+    assert_eq!(one["gaps_left_out"], 3, "{one}");
+    assert!(one.get("warnings").is_none(), "{one}");
+    let ops: Vec<&String> = one["world"]["operations"]
+        .as_object()
+        .map(|o| o.keys().collect())
+        .unwrap_or_default();
+    assert_eq!(ops, ["polishWidget"], "{one}");
+    let types: Vec<&String> = one["world"]["types"]
+        .as_object()
+        .map(|o| o.keys().collect())
+        .unwrap_or_default();
+    assert!(types.iter().all(|t| *t == "widgets"), "{one}");
+
+    // A GraphQL entry names its root fields joined with `,`, in any session;
+    // an id the version lacks names nothing.
+    log_call(&st, mock, "createGadget,activateGadget", "s2").await;
+    log_call(&st, mock, "gone", "s3").await;
+    let all = get("?called=true").await;
+    let mut expected = gap_names(&full);
+    expected.retain(|g| g != "no_effect polishWidgetAgain");
+    assert_eq!(gap_names(&all), expected, "{all}");
+    assert_eq!(all["gaps_left_out"], 1, "{all}");
+
+    // With an operation filter too: both apply.
+    let both = get("?called=true&operation=polishWidget").await;
+    assert_eq!(gap_names(&both), ["no_effect polishWidget"], "{both}");
+
+    // `called` that is not a boolean is a 400 problem.
+    let (status, ctype, body) = get_any(&app, &format!("{world}?called=yes")).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(ctype, "application/problem+json");
+}

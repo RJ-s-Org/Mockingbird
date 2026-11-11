@@ -2505,6 +2505,13 @@ export interface components {
             /** @description What the description leaves open, including each refused entry. */
             gaps: components["schemas"]["WorldGap"][];
             /**
+             * @description With `called`: how many gaps were left out because they name neither
+             *     an operation of the request log nor a type those operations touch
+             *     (nor skip a route of one).
+             *     Absent without `called`.
+             */
+            gaps_left_out?: number | null;
+            /**
              * @description The newest revision's entries that did not validate, and the
              *     entries of a config-file mock's `world:` file refused when the config
              *     was last loaded; they fall back to tier 0.
@@ -3880,6 +3887,8 @@ export interface operations {
                 operation?: string[];
                 /** @description Answer only this resource type (repeatable): its `types` entry, the operations of that type, and their gaps, refused entries and authors */
                 type?: string[];
+                /** @description Answer only what the mock's request log (any session) names: the operations called, the types they touch, the gaps naming one of those operations, or naming no operation and one of those types, or skipping a route of one of those types, and their refused entries and authors; gaps about the description as a whole are kept. `gaps_left_out` counts the gaps left out. Combines with `operation` and `type` */
+                called?: boolean;
             };
             header?: never;
             path: {
@@ -3892,7 +3901,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. */
+            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -3901,7 +3910,7 @@ export interface operations {
                     "application/json": components["schemas"]["WorldView"];
                 };
             };
-            /** @description The version is neither a number nor `active` */
+            /** @description The version is neither a number nor `active`, or `called` is not a boolean */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -6657,6 +6666,8 @@ export interface operations {
                 operation?: string[];
                 /** @description Answer only this resource type (repeatable): its `types` entry, the operations of that type, and their gaps, refused entries and authors */
                 type?: string[];
+                /** @description Answer only what the mock's request log (any session) names: the operations called, the types they touch, the gaps naming one of those operations, or naming no operation and one of those types, or skipping a route of one of those types, and their refused entries and authors; gaps about the description as a whole are kept. `gaps_left_out` counts the gaps left out. Combines with `operation` and `type` */
+                called?: boolean;
             };
             header?: never;
             path: {
@@ -6671,7 +6682,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. */
+            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6680,7 +6691,7 @@ export interface operations {
                     "application/json": components["schemas"]["WorldView"];
                 };
             };
-            /** @description The version is neither a number nor `active` */
+            /** @description The version is neither a number nor `active`, or `called` is not a boolean */
             400: {
                 headers: {
                     [name: string]: unknown;
