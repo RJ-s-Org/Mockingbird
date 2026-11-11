@@ -64,6 +64,31 @@ use crate::guards::{Checks, Echoes};
 use crate::validate::SchemaValidator;
 use crate::{Engine, GeneratedResponse, GenerationContext, OperationCall, Source, Usage};
 
+/// The dotted paths of the members of `op`'s error `schema` for `status` (its
+/// `variant`) the contract names a value for (`contract_values::named_paths`), which
+/// the faker's words never stand in: `repeated` names the request members whose
+/// repeated value the refusal is for, if any.
+fn contract_named(
+    bundle: &Bundle,
+    op: &Operation,
+    (variant, schema, status): (&mb_mcm::OutputVariant, &Value, u16),
+    repeated: &[String],
+) -> HashSet<String> {
+    let request = crate::guards::request_members(bundle, op);
+    crate::contract_values::named_paths(
+        bundle,
+        (schema, status),
+        crate::contract_values::Prose {
+            description: variant.description.as_deref(),
+            info: bundle.description.as_deref(),
+            repeated,
+            resource: op.resource_type.as_deref(),
+            request: &request,
+            only_empty: true,
+        },
+    )
+}
+
 /// Properties of a declared error shape that carry the reasons, most preferred first.
 pub const MESSAGE_FIELDS: [&str; 7] = [
     "message",
@@ -219,12 +244,14 @@ impl RefusalFacts {
     }
 
     /// A refusal the world description states: its `code` and `message`, each
-    /// placed where the error schema has a member for it, when given (an empty
-    /// message says nothing).
+    /// placed where the error schema has a member for it, when given (an empty or
+    /// blank message says nothing).
     #[must_use]
     pub fn stated(code: Option<String>, message: Option<String>) -> Self {
         Self {
-            message: message.unwrap_or_default(),
+            message: message
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or_default(),
             members: Vec::new(),
             code,
         }
@@ -811,6 +838,73 @@ pub fn place_code(
         candidate
     } else {
         body
+    }
+}
+
+/// The dotted path (`errors.code`, array steps left out, as [`writes_text`] names
+/// members) of the member of the error `schema` holding its code (`code_path`), when
+/// `body` holds `code` there as that member declares it (`typed_code`), as
+/// [`place_code`] puts it; `None` when it does not.
+#[must_use]
+pub(crate) fn code_held(
+    body: &Value,
+    schema: &Value,
+    defs: &Map<String, Value>,
+    code: &Value,
+) -> Option<String> {
+    let (path, prop) = code_path(schema, defs, 0)?;
+    let want = typed_code(code, prop, defs)?;
+    let mut at = body;
+    for step in &path {
+        at = match step {
+            Step::Key(key) => at.get(key)?,
+            Step::First => at.as_array()?.first()?,
+        };
+    }
+    (*at == want).then(|| {
+        path.iter()
+            .filter_map(|step| match step {
+                Step::Key(key) => Some(key.as_str()),
+                Step::First => None,
+            })
+            .collect::<Vec<_>>()
+            .join(".")
+    })
+}
+
+/// Whether `body`, an error body declared by `schema`, says `message`: in its
+/// message-like member as [`set_message`] puts it (cut to that member's
+/// `maxLength`), or, when the schema has none [`set_message`] reaches, whole in any
+/// string member ([`with_reasons`] places it in the items of an array of error
+/// objects).
+#[must_use]
+pub(crate) fn message_held(
+    body: &Value,
+    schema: &Value,
+    defs: &Map<String, Value>,
+    message: &str,
+) -> bool {
+    fn anywhere(value: &Value, message: &str, depth: usize) -> bool {
+        if depth > MAX_DEPTH {
+            return false;
+        }
+        match value {
+            Value::String(text) => text == message,
+            Value::Array(items) => items.iter().any(|v| anywhere(v, message, depth + 1)),
+            Value::Object(members) => members.values().any(|v| anywhere(v, message, depth + 1)),
+            _ => false,
+        }
+    }
+    match message_path(schema, defs, 0) {
+        Some(path) => {
+            let mut at = Some(body);
+            for (key, _) in &path {
+                at = at.and_then(|v| v.get(key));
+            }
+            let max_len = path.last().and_then(|(_, max_len)| *max_len);
+            at.and_then(Value::as_str) == Some(capped(message, max_len).as_str())
+        }
+        None => anywhere(body, message, 0),
     }
 }
 
@@ -2009,19 +2103,7 @@ impl Engine {
             if !from_state {
                 return None;
             }
-            let request = crate::guards::request_members(bundle, op);
-            let named = crate::contract_values::named_paths(
-                bundle,
-                (schema, status),
-                crate::contract_values::Prose {
-                    description: variant.description.as_deref(),
-                    info: bundle.description.as_deref(),
-                    repeated,
-                    resource: op.resource_type.as_deref(),
-                    request: &request,
-                    only_empty: true,
-                },
-            );
+            let named = contract_named(bundle, op, (variant, schema, status), repeated);
             if !writes_text(schema, &bundle.defs, status, &named) {
                 return None;
             }
@@ -2036,6 +2118,47 @@ impl Engine {
             schema,
             validator,
         })
+    }
+
+    /// Whether `response`, the faker's error body for a refusal that states its code
+    /// and message (`facts`) with them laid over it, leaves the model nothing to
+    /// write: it holds the code ([`code_held`]) and the message ([`message_held`])
+    /// where they go, and its schema has no other free text member the faker alone
+    /// fills ([`writes_text`], the code member and those the contract names a value
+    /// for set aside). When it does not, the refusal's body is written as the mock's
+    /// other refusals' are.
+    #[must_use]
+    pub(crate) fn stated_refusal_stands(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        response: &GeneratedResponse,
+        facts: &RefusalFacts,
+    ) -> bool {
+        let status = response.status;
+        let (Some(code), Some(body), Some(variant)) = (
+            facts.code(),
+            response.body.as_ref(),
+            op.output_for_status(status),
+        ) else {
+            return false;
+        };
+        if crate::media::is_non_json(op, variant) {
+            return false;
+        }
+        let Some(schema) = variant.schema.as_ref() else {
+            return false;
+        };
+        let defs = &bundle.defs;
+        let Some(code_at) = code_held(body, schema, defs, &Value::String(code.to_string())) else {
+            return false;
+        };
+        if !message_held(body, schema, defs, facts.text()) {
+            return false;
+        }
+        let mut named = contract_named(bundle, op, (variant, schema, status), facts.members());
+        named.insert(code_at);
+        !writes_text(schema, defs, status, &named)
     }
 
     /// The validator of `op`'s response for `status`, when it has a JSON schema.
