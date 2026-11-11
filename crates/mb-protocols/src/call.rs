@@ -217,20 +217,6 @@ fn last_path_param(template: &str) -> Option<String> {
     (alone && !argument).then(|| template[start + 1..end].to_string())
 }
 
-/// The record a create's `answer` is: the answer itself, else the one its
-/// operation's identity says it holds (`/commentEdge/node`).
-fn record_of_answer<'a>(op: &Operation, answer: &'a mut Value) -> Option<&'a mut Value> {
-    let holds = op
-        .identity
-        .as_ref()
-        .filter(|i| i.record.is_some())
-        .is_some_and(|i| i.record_in(answer).is_some());
-    match op.identity.as_ref() {
-        Some(identity) if holds => identity.record_in_mut(answer),
-        _ => Some(answer),
-    }
-}
-
 fn id_string(v: &Value) -> Option<String> {
     match v {
         Value::String(s) => Some(s.clone()),
@@ -1379,8 +1365,9 @@ pub(crate) async fn complete(
                 }
             }
             // A created record shows the described initial state it is stored in.
-            // The record is the answer, else where the answer holds it. A GraphQL
-            // record holds only what its selection asked for, and names its type.
+            // The answer is the record here (unwrapped from where the identity
+            // says the answer holds it). A GraphQL record holds only what its
+            // selection asked for, and names its type.
             let names_type = |record: &Value| {
                 record
                     .get("__typename")
@@ -1390,8 +1377,7 @@ pub(crate) async fn complete(
             if op.kind == OperationKind::Command(Effect::Create)
                 && !unstored
                 && (200..300).contains(&generated.status)
-                && let Some(body) = generated.body.as_mut()
-                && let Some(record) = record_of_answer(op, body)
+                && let Some(record) = generated.body.as_mut()
                 && (entities::entity_fits(rt, t, record) || names_type(record))
             {
                 let request = call
@@ -1416,9 +1402,8 @@ pub(crate) async fn complete(
                 let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
                 let set_id = generated
                     .body
-                    .as_mut()
-                    .and_then(|b| record_of_answer(op, b))
-                    .and_then(|r| mb_mcm::member_at(r, field))
+                    .as_ref()
+                    .and_then(|b| mb_mcm::member_at(b, field))
                     .and_then(id_string);
                 let held = match set_id {
                     Some(id) => state.get(session, t, &id).await,
