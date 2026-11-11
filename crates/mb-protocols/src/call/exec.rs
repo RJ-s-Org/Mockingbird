@@ -9,7 +9,8 @@
 //! kind) when the executor answers it, and with `exec_fallback` (a [`Fallback`]) when it
 //! goes on to generation, with `exec_fallback_on` naming the query parameter or body
 //! member that caused it where one did (`undescribed_param`, `undeclared_member`,
-//! `read_only_member`), a read's `render_failed` with `render_error` saying why; executor
+//! `read_only_member`), a read's or a create's `render_failed` (and a create's
+//! `record_invalid`) with `render_error` saying why, on the request record too; executor
 //! answers are tagged `state`, as stored answers are.
 //!
 //! An executor answer is final: a write is stored through [`commit`], which keeps only
@@ -368,15 +369,7 @@ async fn read(
             Ran::Generate(Some(earlier))
         }
         HeldRead::Unrendered(earlier, why) => {
-            plan.exprs.fell_back(Fallback::RenderFailed.as_str(), None);
-            tracing::info!(
-                mock = %rt.name,
-                operation = %plan.op.id,
-                exec = kind_name(kind),
-                exec_fallback = Fallback::RenderFailed.as_str(),
-                render_error = %why,
-                "not answered by the executor"
-            );
+            fell_back_unrendered(rt, plan, kind, Fallback::RenderFailed, &why);
             Ran::Generate(earlier)
         }
     }
@@ -552,6 +545,26 @@ fn answered(rt: &crate::MockRuntime, plan: &CallPlan<'_>, kind: OpKind) {
 /// of one kind's executor (`undescribed_param`).
 fn fell_back(rt: &crate::MockRuntime, plan: &CallPlan<'_>, kind: OpKind, reason: &str) {
     fell_back_on(rt, plan, kind, &Stop::from(reason));
+}
+
+/// [`fell_back`] for `reason` because the record did not render, saying `why`
+/// (`render_error`), on the log line and the request record.
+fn fell_back_unrendered(
+    rt: &crate::MockRuntime,
+    plan: &CallPlan<'_>,
+    kind: OpKind,
+    reason: Fallback,
+    why: &str,
+) {
+    plan.exprs.unrendered(reason.as_str(), why);
+    tracing::info!(
+        mock = %rt.name,
+        operation = %plan.op.id,
+        exec = kind_name(kind),
+        exec_fallback = reason.as_str(),
+        render_error = %super::log_capped(why),
+        "not answered by the executor"
+    );
 }
 
 /// Why one kind's executor did not answer a call: its reason (`exec_fallback`), and the

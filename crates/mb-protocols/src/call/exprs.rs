@@ -74,6 +74,8 @@ pub(crate) struct CallExprs {
 struct Notes {
     /// Why the executor went on to generation, and what caused it.
     fallback: Option<(String, Option<String>)>,
+    /// Why the record did not render, when that is why (`render_error`).
+    render_error: Option<String>,
     /// Each expression that failed: `{pointer, error}`.
     failed: Vec<Value>,
     /// How many records the call took from the mock's record pool.
@@ -94,7 +96,19 @@ impl CallExprs {
 
     /// Notes that the executor went on to generation for `reason`, caused by `on`.
     pub(super) fn fell_back(&self, reason: &str, on: Option<&str>) {
-        self.with_notes(|n| n.fallback = Some((reason.to_string(), on.map(str::to_string))));
+        self.with_notes(|n| {
+            n.fallback = Some((reason.to_string(), on.map(str::to_string)));
+            n.render_error = None;
+        });
+    }
+
+    /// Notes that the executor went on to generation for `reason` because the record
+    /// did not render, for `why` (`render_error`).
+    pub(super) fn unrendered(&self, reason: &str, why: &str) {
+        self.with_notes(|n| {
+            n.fallback = Some((reason.to_string(), None));
+            n.render_error = Some(why.to_string());
+        });
     }
 
     /// Notes that the call took `count` records from the mock's record pool.
@@ -119,7 +133,8 @@ impl CallExprs {
     }
 
     /// The notes, as a request record's `request` keeps them: `exec_fallback`,
-    /// `exec_fallback_on` and `expr_failed`, each only when there is one.
+    /// `exec_fallback_on`, `render_error` and `expr_failed`, each only when there is
+    /// one.
     pub(crate) fn notes(&self) -> Map<String, Value> {
         let notes = self
             .notes
@@ -134,6 +149,9 @@ impl CallExprs {
                     Value::from(super::log_capped(on)),
                 );
             }
+        }
+        if let Some(why) = &notes.render_error {
+            out.insert("render_error".into(), Value::from(super::log_capped(why)));
         }
         if !notes.failed.is_empty() {
             out.insert("expr_failed".into(), Value::Array(notes.failed.clone()));

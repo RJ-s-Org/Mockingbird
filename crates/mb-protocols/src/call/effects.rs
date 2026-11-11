@@ -257,10 +257,11 @@ pub(crate) fn record_effects(request: &mut Value, generated: &GeneratedResponse)
 /// What a request record's `request` notes of the call beside its body: the world's
 /// gaps (`world_gap`) and what the executor noted ([`GeneratedResponse::exec_notes`]).
 #[cfg(any(feature = "http-rest", feature = "soap"))]
-pub(crate) const RECORD_NOTES: [&str; 5] = [
+pub(crate) const RECORD_NOTES: [&str; 6] = [
     "world_gap",
     "exec_fallback",
     "exec_fallback_on",
+    "render_error",
     "expr_failed",
     "pool",
 ];
