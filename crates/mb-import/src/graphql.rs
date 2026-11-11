@@ -745,6 +745,43 @@ fn id_member(values: &[InputValue], resource_type: Option<&str>) -> Option<Strin
         .map(|a| a.name.clone())
 }
 
+/// The argument a query field with no id argument looks its one record up by: the
+/// one argument named as a scalar field of the record's type and of that field's
+/// scalar type (`user(login: String!)` → `User.login`, `topic(name:)`), when every
+/// other argument is optional. A `Boolean` or `Float` looks nothing up. A required
+/// argument naming no such field (`repository(owner:, name:)`, where `name` alone
+/// names no repository) leaves none, as do two such arguments, an enum and a list.
+fn lookup_argument(schema: &Schema, f: &Field, fields: &[Field]) -> Option<String> {
+    let scalar = |ty: &Type| match &ty.base {
+        BaseType::Named(n) if matches!(n.as_str(), "Boolean" | "Float") => false,
+        BaseType::Named(n) => {
+            is_builtin(n.as_str())
+                || matches!(schema.types.get(n.as_str()).map(|t| &t.kind), Some(Kind::Scalar))
+        }
+        BaseType::List(_) => false,
+    };
+    let names_field = |arg: &InputValue| {
+        scalar(&arg.ty)
+            && fields.iter().any(|field| {
+                field.name == arg.name
+                    && field.args.is_empty()
+                    && scalar(&field.ty)
+                    && named_type(&field.ty) == named_type(&arg.ty)
+            })
+    };
+    let mut lookups = f.args.iter().filter(|a| names_field(a));
+    let one = lookups.next()?;
+    if lookups.next().is_some() {
+        return None;
+    }
+    let others_optional = f
+        .args
+        .iter()
+        .filter(|a| a.name != one.name)
+        .all(|a| a.ty.nullable || a.has_default);
+    others_optional.then(|| one.name.clone())
+}
+
 /// The identity of a create or a delete of `record`, as its name says
 /// ([`write_verb`]: `issueCreate`, `commentDelete`), that answers `payload`, a type
 /// other than the record: the record's `id`; for a delete, the argument that names the
@@ -885,7 +922,7 @@ fn operation(
     let returns_one = matches!(f.ty.base, BaseType::Named(_));
     let identity = object_fields
         .filter(|fields| returns_one && fields.iter().any(|x| x.name == "id"))
-        .map(|_| Identity {
+        .map(|fields| Identity {
             path_param: None,
             field: "id".into(),
             input_field: id_argument(
@@ -893,9 +930,28 @@ fn operation(
                 f,
                 resource_type.as_deref(),
                 operation_type == GraphqlOperationType::Mutation,
-            ),
+            )
+            .or_else(|| {
+                (operation_type == GraphqlOperationType::Query)
+                    .then(|| lookup_argument(schema, f, fields))
+                    .flatten()
+            }),
             path_field: None,
             record: None,
+        })
+        // A type with no `id` is keyed by what a query looks it up by (`login`).
+        .or_else(|| {
+            let fields = object_fields.filter(|_| {
+                returns_one && operation_type == GraphqlOperationType::Query
+            })?;
+            let member = lookup_argument(schema, f, fields)?;
+            Some(Identity {
+                path_param: None,
+                field: member.clone(),
+                input_field: Some(member),
+                path_field: None,
+                record: None,
+            })
         })
         .or_else(|| {
             let effect = write_effect.filter(|e| kind == OperationKind::Command(*e))?;

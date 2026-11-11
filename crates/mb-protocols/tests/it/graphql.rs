@@ -2965,6 +2965,100 @@ async fn a_read_by_another_member_than_the_key_keeps_the_id_and_finds_the_record
     assert_eq!(provider.requests().len(), 1);
 }
 
+const USERS: &str = r#"
+type Count { totalCount: Int! }
+type User { id: ID! login: String! name: String followers: Count! }
+type Query { user(login: String!): User }
+"#;
+
+/// A root read with no id argument looks its record up by the argument naming a
+/// member (`user(login:)`), with no world: a repeat is answered from state, and a read
+/// selecting more keeps what the session holds.
+#[tokio::test]
+async fn a_read_by_a_lookup_argument_is_answered_from_state() {
+    let provider = scripted(vec![
+        json!({"__typename": "User", "id": "U_1", "login": "octocat", "name": "The Octocat"}),
+        // Generated again for the wider selection, under what the session holds.
+        json!({"__typename": "User", "id": "U_9", "name": "Someone Else", "followers": {"__typename": "Count", "totalCount": 12}}),
+    ]);
+    let base = serve(MockRuntime::new(
+        "gh",
+        Arc::new(compile(USERS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    ))
+    .await;
+    let session = [("x-mockingbird-session", "s1")];
+    let first = post(
+        &base,
+        json!({"query": r#"{ user(login: "octocat") { id login name } }"#}),
+        &session,
+    )
+    .await;
+    assert_eq!(first.body["data"]["user"]["name"], "The Octocat", "{}", first.body);
+    // Other variables, the same record: no cache hit, no model call.
+    let again = post(
+        &base,
+        json!({"query": r#"query($l: String!) { user(login: $l) { name login } }"#, "variables": {"l": "octocat"}}),
+        &session,
+    )
+    .await;
+    assert_eq!(again.headers["x-mockingbird-source"], "state", "{}", again.body);
+    assert_eq!(again.body["data"]["user"]["name"], "The Octocat", "{}", again.body);
+    assert_eq!(provider.requests().len(), 1);
+    // More fields: what is held stays.
+    let more = post(
+        &base,
+        json!({"query": r#"{ user(login: "octocat") { id name followers { totalCount } } }"#}),
+        &session,
+    )
+    .await;
+    let user = &more.body["data"]["user"];
+    assert_eq!(user["id"], "U_1", "{}", more.body);
+    assert_eq!(user["name"], "The Octocat", "{}", more.body);
+    assert_eq!(user["followers"]["totalCount"], 12, "{}", more.body);
+    assert_eq!(provider.requests().len(), 2);
+}
+
+/// A type with no `id` read by a lookup argument is stored under that member's value,
+/// so a later read by it is answered from state.
+#[tokio::test]
+async fn a_type_with_no_id_is_kept_by_its_lookup_member() {
+    let sdl = "type User { login: String! name: String } type Query { user(login: String!): User }";
+    let provider = scripted(vec![
+        json!({"__typename": "User", "login": "octocat", "name": "The Octocat"}),
+        json!({"__typename": "User", "login": "hubot", "name": "Hubot"}),
+    ]);
+    let base = serve(MockRuntime::new(
+        "gh",
+        Arc::new(compile(sdl.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    ))
+    .await;
+    let session = [("x-mockingbird-session", "s1")];
+    let read = |login: &str| json!({"query": format!(r#"{{ user(login: "{login}") {{ name login }} }}"#)});
+    let first = post(&base, read("octocat"), &session).await;
+    assert_eq!(first.body["data"]["user"]["name"], "The Octocat", "{}", first.body);
+    let other = post(&base, read("hubot"), &session).await;
+    assert_eq!(other.body["data"]["user"]["name"], "Hubot", "{}", other.body);
+    let again = post(
+        &base,
+        json!({"query": r#"{ user(login: "octocat") { login name } }"#}),
+        &session,
+    )
+    .await;
+    assert_eq!(again.headers["x-mockingbird-source"], "state", "{}", again.body);
+    assert_eq!(again.body["data"]["user"]["name"], "The Octocat", "{}", again.body);
+    assert_eq!(provider.requests().len(), 2);
+}
+
 const VARIANTS: &str = r#"
 type ProductVariant { id: ID! title: String! product: Product }
 type Product { id: ID! handle: String! title: String! variants: [ProductVariant!]! }
