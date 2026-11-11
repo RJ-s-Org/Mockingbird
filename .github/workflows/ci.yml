@@ -14,12 +14,11 @@ on:
 # ready for one CI run. A skipped job counts as passed for the required checks, so
 # `changes` is itself required and fails closed.
 
-# A newer push to the same PR cancels the run it supersedes. Runs on main
-# are never cancelled, so every main commit reports a result and saves its
-# cache.
+# A newer push cancels the run it supersedes, on a PR and on main: back-to-back
+# merges test only the latest main, which still saves the cache.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always

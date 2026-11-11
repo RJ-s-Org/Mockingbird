@@ -654,10 +654,12 @@ paths:
 #[tokio::test]
 async fn a_refusal_reads_a_credential_header_that_neither_the_record_nor_the_model_sees() {
     // The first entry fails on every call: its failure is noted without the value.
+    // The second states no message, so the model writes its body: the prompt of a
+    // call carrying the token.
     let world = json!({"operations": {"sendMessage": {"kind": "create", "refuse": [
         {"when": "int(request.headers['x-server-token']) > 0", "status": 401, "code": "0"},
         {"when": "request.headers['x-server-token'] != 'good-secret'", "status": 401,
-         "code": "10", "message": "Request does not contain a valid Server token."}
+         "code": "10"}
     ]}}});
     let h = support::described(TOKENED, world, vec![json!({"id": "s1", "to": "a@x.io"})]);
     let (status, _, body) = h
@@ -688,7 +690,58 @@ async fn a_refusal_reads_a_credential_header_that_neither_the_record_nor_the_mod
     assert!(!records.contains("good-secret"), "{records}");
     assert!(!records.contains("wrong"), "{records}");
     let requests = h.provider.requests();
-    assert!(!requests.is_empty(), "the accepted call asks the model");
+    assert!(!requests.is_empty(), "the refusal's body is the model's");
     let prompts = format!("{requests:?}");
     assert!(!prompts.contains("good-secret"), "{prompts}");
+    assert!(!prompts.contains("wrong"), "{prompts}");
+}
+
+#[tokio::test]
+async fn a_refusal_stating_its_code_and_message_asks_no_model() {
+    let world = json!({"operations": {"addMember": {"kind": "create", "refuse": [
+        {"when": "request.body.amount > 1000", "status": 422,
+         "code": "amount_too_large", "message": "amount is over 1000"},
+        {"when": "request.body.amount < 0", "status": 422, "code": "amount_negative"}
+    ]}}});
+    let h = members(world, vec![]);
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "a@x.io", "name": "A", "amount": 5000})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"]["code"], "amount_too_large", "{body}");
+    assert_eq!(body["error"]["message"], "amount is over 1000", "{body}");
+    assert!(
+        h.provider.requests().is_empty(),
+        "{:?}",
+        h.provider.requests()
+    );
+    assert_eq!(
+        h.records()[0].source.as_deref(),
+        Some("state"),
+        "{:?}",
+        h.records()
+    );
+
+    // With no message the model still writes the body's text.
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "a@x.io", "name": "A", "amount": -5})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"]["code"], "amount_negative", "{body}");
+    assert_eq!(
+        h.provider.requests().len(),
+        1,
+        "{:?}",
+        h.provider.requests()
+    );
 }

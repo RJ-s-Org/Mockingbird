@@ -19,7 +19,8 @@
 //!
 //! Either generates instead, as today, when it cannot tell what the write does: on an
 //! action's route (`action_route`); for a request holding no object (`unmerged_body`),
-//! a member the record does not declare (`undeclared_member`) or a new value of a
+//! a member the record does not declare that no described `set` reads
+//! (`undeclared_member`) or a new value of a
 //! read-only one (`read_only_member`); for a patch or instruction that does not apply
 //! (`unapplied_patch`, `patch_filter`, `undescribed_instruction`,
 //! `unapplied_instruction`); for a result with a schema violation the held
@@ -266,10 +267,14 @@ fn changed(
     // What a client does not set: the identity, and the members the contract keeps.
     let kept = |name: &str| identity.iter().any(|field| field == name) || read_only(name);
     let declared = schema.and_then(|s| declared_members(bundle, s));
+    // A member the record does not declare is the description's when its `set` reads
+    // it (Twilio's form `SmsUrl` for the record's `sms_url`): not merged, not a fallback.
+    let described = rt.described().expressions(&op.id);
+    let set_reads = |name: &str| described.is_some_and(|e| e.sets_from_body(name));
     if let Some(declared) = &declared
         && let Some(name) = sent
             .keys()
-            .find(|name| !kept(name) && !declared.contains(*name))
+            .find(|name| !kept(name) && !declared.contains(*name) && !set_reads(name))
     {
         return Err(Stop::on("undeclared_member", name));
     }
@@ -292,7 +297,7 @@ fn changed(
     }) {
         return Err(Stop::on("read_only_member", name));
     }
-    sent.retain(|name, _| !kept(name));
+    sent.retain(|name, _| !kept(name) && declared.as_ref().is_none_or(|d| d.contains(name)));
     let mut out = match replace {
         true => Map::new(),
         false => held.clone(),

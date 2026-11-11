@@ -2,7 +2,7 @@
 
 use mb_engine::{FillContext, OperationCall};
 use mb_import::compile;
-use mb_llm::ResponseFormat;
+use mb_llm::{LlmError, ResponseFormat};
 use serde_json::{Map, Value, json};
 
 use crate::support::scripted;
@@ -43,6 +43,10 @@ components:
         discounts: {type: array, nullable: true, items: {type: string}}
         metadata: {type: object, nullable: true}
         receipt_email: {type: string, nullable: true}
+        branding:
+          allOf: [{$ref: "#/components/schemas/Action"}]
+        excluded: {type: array, items: {$ref: "#/components/schemas/Action"}}
+        method_types: {type: array, items: {type: string}}
     Action:
       type: object
       required: [type]
@@ -149,4 +153,85 @@ async fn only_nullable_references_and_optional_objects_ask_no_model() {
         assert_eq!(filled.members[member], Value::Null, "{member}");
     }
     assert!(provider.requests().is_empty());
+}
+
+/// An optional object or list of objects that may not be null is left out: not
+/// asked, and no faker value either. A list of scalars is still asked.
+#[tokio::test]
+async fn an_optional_object_that_may_not_be_null_is_left_out() {
+    let bundle = compile(CONTRACT.as_bytes()).unwrap();
+    let op = bundle.operation("createIntent").unwrap();
+    let schema = op.success_output().unwrap().schema.clone().unwrap();
+    let (provider, engine) = scripted(vec![Ok(
+        json!({"status": "open", "method_types": ["card"]}).to_string(),
+    )]);
+    let call = OperationCall {
+        credentials: Default::default(),
+        operation_id: op.id.clone(),
+        path_params: Map::new(),
+        query: Map::new(),
+        headers: Map::new(),
+        body: None,
+    };
+    let missing: Vec<String> = ["status", "branding", "excluded", "method_types"]
+        .map(String::from)
+        .to_vec();
+    let filled = engine
+        .fill(
+            &bundle,
+            &schema,
+            &Map::new(),
+            &missing,
+            FillContext { op, call: &call },
+        )
+        .await;
+    assert_eq!(filled.members["status"], "open");
+    assert!(
+        !filled.members.contains_key("branding"),
+        "{:?}",
+        filled.members
+    );
+    assert!(
+        !filled.members.contains_key("excluded"),
+        "{:?}",
+        filled.members
+    );
+    let sent = provider.requests();
+    let ResponseFormat::JsonSchema { schema, .. } = &sent[0].response_format else {
+        panic!("no schema sent");
+    };
+    assert_eq!(filled.members["method_types"], json!(["card"]));
+    let mut asked: Vec<&String> = schema["properties"].as_object().unwrap().keys().collect();
+    asked.sort();
+    assert_eq!(asked, vec!["method_types", "status"]);
+}
+
+/// When the model call fails, a required object that may be null is null, not a
+/// faker object a client would act on; a scalar is still the faker's.
+#[tokio::test]
+async fn a_failed_call_leaves_a_nullable_object_null() {
+    let bundle = compile(CONTRACT.as_bytes()).unwrap();
+    let op = bundle.operation("createIntent").unwrap();
+    let schema = op.success_output().unwrap().schema.clone().unwrap();
+    let (_provider, engine) = scripted(vec![Err(LlmError::Transport("down".into()))]);
+    let call = OperationCall {
+        credentials: Default::default(),
+        operation_id: op.id.clone(),
+        path_params: Map::new(),
+        query: Map::new(),
+        headers: Map::new(),
+        body: None,
+    };
+    let missing: Vec<String> = ["status", "next_action"].map(String::from).to_vec();
+    let filled = engine
+        .fill(
+            &bundle,
+            &schema,
+            &Map::new(),
+            &missing,
+            FillContext { op, call: &call },
+        )
+        .await;
+    assert_eq!(filled.members["next_action"], Value::Null);
+    assert!(filled.members["status"].is_string(), "{:?}", filled.members);
 }

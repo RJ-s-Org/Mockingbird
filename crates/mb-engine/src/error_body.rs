@@ -1872,20 +1872,21 @@ impl Engine {
         status: u16,
         cause: ErrorCause,
     ) -> Option<GeneratedResponse> {
-        self.error_answer_repeating(bundle, op, call, (status, cause), &[])
+        self.error_answer_repeating(bundle, op, call, (status, cause), (&[], true))
             .await
     }
 
     /// [`Self::error_answer`], its body refusing the repeated value of the request
     /// members `repeated` (what the contract names for such a repeat, see
-    /// [`crate::contract_values`]).
+    /// [`crate::contract_values`]). With `write` false the faker's body stands and no
+    /// model is asked.
     pub(crate) async fn error_answer_repeating(
         &self,
         bundle: &Bundle,
         op: &Operation,
         call: &OperationCall,
         (status, cause): (u16, ErrorCause),
-        repeated: &[String],
+        (repeated, write): (&[String], bool),
     ) -> Option<GeneratedResponse> {
         let variant = op.output_for_status(status)?;
         let ctx = GenerationContext {
@@ -1893,9 +1894,12 @@ impl Engine {
             ..GenerationContext::default()
         };
         let mut usage = Usage::default();
-        let written = self
-            .written_error(bundle, op, (status, cause, repeated), call, &mut usage)
-            .await;
+        let written = if write {
+            self.written_error(bundle, op, (status, cause, repeated), call, &mut usage)
+                .await
+        } else {
+            None
+        };
         let only_empty = written.is_some();
         let mut response =
             written.unwrap_or_else(|| self.fallback(bundle, op, variant, status, call, &ctx));
