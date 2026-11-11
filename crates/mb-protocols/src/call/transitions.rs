@@ -11,7 +11,8 @@
 //!   its `changes` too (`from_request` as the request member's expression, `value` as a
 //!   literal). Each `set` value is written as its member's schema declares it
 //!   ([`super::exprs::written_back`]); every value is checked against that schema and
-//!   dropped, with an info log, when it does not fit.
+//!   dropped when it does not fit, noted under `expr_failed` on the request record
+//!   (as is a whole set dropped for the violation it adds to the record).
 //! - [`replaces`]: an update the description calls a `replace`, which stores what its
 //!   request sends instead of merging it (see `write_memory::onto_record`).
 //!
@@ -55,23 +56,30 @@ pub(super) async fn apply(
     before: Option<&Value>,
     record: &mut Value,
 ) -> Vec<String> {
-    applied(state, (plan, call), (before, false), record).await
+    applied(state, (plan, call), (before, false, true), record).await
 }
 
 /// [`apply`] on the record a create stores: its `set` alone, since `changes` (which
-/// `set` replaces) never applied to a create, nor does a `transition`.
+/// `set` replaces) never applied to a create, nor does a `transition`. A `null` value
+/// is set where its member's schema is known and admits it (there is nothing to leave
+/// as it was).
+/// A record still being built (`building`: the executor's, which fill completes and
+/// checks against the type's reads before it is stored) is not checked for the
+/// violations the set adds: a nested member set (`user.type`) leaves its object without
+/// the members fill writes next.
 pub(super) async fn apply_on_create(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
     record: &mut Value,
+    building: bool,
 ) -> Vec<String> {
-    applied(state, (plan, call), (None, true), record).await
+    applied(state, (plan, call), (None, true, !building), record).await
 }
 
 async fn applied(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
-    (before, creating): (Option<&Value>, bool),
+    (before, creating, checked): (Option<&Value>, bool, bool),
     record: &mut Value,
 ) -> Vec<String> {
     let rt = state.rt;
@@ -82,14 +90,20 @@ async fn applied(
     if !record.is_object() {
         return Vec::new();
     }
-    let mut wanted: Vec<(String, Option<Value>)> = Vec::new();
+    // Each member, its value, and where its entry is in the description.
+    let mut wanted: Vec<(String, Option<Value>, String)> = Vec::new();
     if let Some(d) = rt.described().op(&op.id).filter(|_| !creating) {
         for (member, value) in d.transition.iter().flatten() {
             let typed = match value {
                 Value::String(state) => rt.described().state_value(t, state),
                 other => Some(other.clone()),
             };
-            wanted.push((member.clone(), typed));
+            let at = format!(
+                "/operations/{}/transition/{}",
+                escaped(&op.id),
+                escaped(member)
+            );
+            wanted.push((member.clone(), typed, at));
         }
     }
     // A create's `set` reads the record as built (its minted id among it).
@@ -106,46 +120,85 @@ async fn applied(
             true => value,
             false => value.map(|v| exprs::written_back(rt, t, &member, v)),
         };
-        wanted.push((member, value));
+        let at = rt
+            .described()
+            .expressions(&op.id)
+            .and_then(|o| {
+                o.set
+                    .iter()
+                    .find(|e| e.member == member && e.from_changes == from_changes)
+            })
+            .map_or_else(
+                || format!("/operations/{}/set/{}", escaped(&op.id), escaped(&member)),
+                |e| e.pointer.clone(),
+            );
+        wanted.push((member, value, at));
     }
     if wanted.is_empty() {
         return Vec::new();
     }
     let before = record.clone();
     let mut set = Vec::new();
-    for (member, value) in wanted {
-        match value.filter(|v| fits_member(rt, t, &member, v)) {
-            Some(value) => {
+    for (member, value, at) in wanted {
+        match value {
+            // A `null` (a create's) is set only where the member's schema is known
+            // and admits it.
+            Some(value)
+                if match value.is_null() {
+                    true => admits_null(rt, t, &member),
+                    false => fits_member(rt, t, &member, &value),
+                } =>
+            {
                 if mb_mcm::set_member_at(record, &member, value) {
                     set.retain(|m| *m != member);
                     set.push(member);
                 }
             }
+            // A failed expression is noted already; a `null` the member does not admit
+            // sets nothing.
+            Some(Value::Null) => {}
             None => tracing::info!(
                 mock = %rt.name,
                 operation = %op.id,
                 member = %member,
-                "a described transition or set has no value its member's schema takes: dropped"
+                "a described transition or set has no value: the member is left as it is"
+            ),
+            Some(_) => exprs::failed(
+                plan,
+                rt,
+                &at,
+                "its value does not fit its member's schema: not set",
             ),
         }
     }
     // A fitting record refuses a change that breaks it; one that did not fit before
     // (stored in an earlier, incomplete shape) takes a change that adds no violation.
-    if set.is_empty() {
+    if set.is_empty() || !checked {
         return set;
     }
     if let Some((path, keyword)) = added_violation(rt, t, &before, record) {
-        tracing::info!(
-            mock = %rt.name,
-            operation = %op.id,
-            path = %path,
-            keyword = %keyword,
-            "the record a described transition or set leaves has a violation it did not: none is set"
+        let path = match path.as_str() {
+            "" => "<root>",
+            at => at,
+        };
+        exprs::failed(
+            plan,
+            rt,
+            &format!("/operations/{}", escaped(&op.id)),
+            &format!(
+                "the record its transition or set leaves breaks its type's schema at {path} \
+                 ({keyword}): none of it is set"
+            ),
         );
         *record = before;
         return Vec::new();
     }
     set
+}
+
+/// `token` as one step of a JSON pointer.
+fn escaped(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
 }
 
 /// Sets on the record `generated` answers (an update's or action's, the record an
@@ -195,14 +248,25 @@ pub(super) fn replaces(rt: &MockRuntime, op: &Operation) -> bool {
 /// Whether `value` fits the schema the record schema of type `t` gives `member`; a
 /// member with no schema to go by takes anything.
 fn fits_member(rt: &MockRuntime, t: &str, member: &str, value: &Value) -> bool {
+    member_takes(rt, t, member, value).unwrap_or(true)
+}
+
+/// Whether the record schema of type `t` gives `member` a schema that admits `null`;
+/// a member with no schema to go by does not (its answer may refuse it).
+fn admits_null(rt: &MockRuntime, t: &str, member: &str) -> bool {
+    member_takes(rt, t, member, &Value::Null).unwrap_or(false)
+}
+
+/// Whether `value` fits the schema the record schema of type `t` gives `member`;
+/// `None` when there is no such schema.
+fn member_takes(rt: &MockRuntime, t: &str, member: &str, value: &Value) -> Option<bool> {
     let bundle = rt.bundle();
-    let Some(schema) =
-        read_schema(rt, t).and_then(|r| mb_engine::consistency::property_schema(bundle, r, member))
-    else {
-        return true;
-    };
-    mb_engine::SchemaValidator::new(&bundle.with_reachable_defs(&schema))
-        .is_ok_and(|v| v.is_valid(value))
+    let schema = read_schema(rt, t)
+        .and_then(|r| mb_engine::consistency::property_schema(bundle, r, member))?;
+    Some(
+        mb_engine::SchemaValidator::new(&bundle.with_reachable_defs(&schema))
+            .is_ok_and(|v| v.is_valid(value)),
+    )
 }
 
 #[cfg(test)]

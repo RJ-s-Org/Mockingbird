@@ -273,7 +273,7 @@ pub(super) async fn run(
     // What the description sets (`set`, `changes` read as `set`) wins over what the
     // request sent and the path says, and is never filled. One that sets the identity
     // member names the record by it.
-    let set = transitions::apply_on_create(state, (plan, call), &mut data).await;
+    let set = transitions::apply_on_create(state, (plan, call), &mut data, true).await;
     for member in &set {
         if !member.contains('.') && !owned.contains(member) {
             owned.push(member.clone());
