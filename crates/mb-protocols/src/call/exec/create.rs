@@ -146,6 +146,13 @@ pub(super) async fn run(
     };
     // A record member the query names is set as the body sets it, as an update's is.
     shape.query_members(rt, op, call, &mut record);
+    // A member sent in another shape than the record holds it (input lines naming
+    // variants, where the record holds a connection of lines) is the API's to turn into
+    // the record: generated knowing the request, never filled blind.
+    if let Some(member) = request.and_then(|r| unkept(rt, t, r)) {
+        tracing::debug!(member = %member, "a create sends a member in another shape");
+        return fall("reshaped_member");
+    }
     // What the request sent of the record, as the record holds it.
     let sent = Value::Object(record.clone());
     let from_path = path_set(rt, (op, t), call);
@@ -1206,6 +1213,52 @@ pub(super) fn read_schemas(rt: &crate::MockRuntime, t: &str) -> Vec<Value> {
 
 /// [`read_schemas`], each with whether it is a list's item, which a list renders a
 /// record into as it projects it ([`crate::call::lists::projected`]).
+/// The first member a create's `request` sends of its record (at its top, or one level
+/// into an object member the type's reads do not declare: GraphQL's `input`) with a
+/// non-empty array or object value (child records), of another JSON type than the type's reads hold it and
+/// with no conversion that loses nothing ([`converted`]); a reference to a held record
+/// ([`references_object`]) is the record it names, so it is kept.
+fn unkept(rt: &crate::MockRuntime, t: &str, request: &Value) -> Option<String> {
+    let bundle = rt.bundle();
+    let reads = read_shapes(rt, t);
+    let schemas_of = |name: &str| -> Vec<(Value, bool)> {
+        reads
+            .iter()
+            .filter_map(|(s, item)| Some((property_schema(bundle, s, name)?, *item)))
+            .collect()
+    };
+    let check = |name: &String, sent: &Value| -> Option<String> {
+        // Child records: a scalar of another type is the gate's (`record_invalid`).
+        let structured = match sent {
+            Value::Array(items) => !items.is_empty(),
+            Value::Object(members) => !members.is_empty(),
+            _ => false,
+        };
+        if !structured {
+            return None;
+        }
+        let schemas = schemas_of(name);
+        let (member, _) = schemas.first()?;
+        let fits = |value: &Value| {
+            schemas
+                .iter()
+                .all(|(s, item)| shaped(rt, (s, *item), value))
+        };
+        let kept = fits(sent)
+            || references_object(bundle, member, sent)
+            || !of_another_type(bundle, member, sent)
+            || converted(bundle, member, sent).is_some_and(|c| fits(&c));
+        (!kept).then(|| name.clone())
+    };
+    let top = request.as_object()?;
+    top.iter().find_map(|(name, sent)| match sent {
+        Value::Object(inner) if schemas_of(name).is_empty() => {
+            inner.iter().find_map(|(name, sent)| check(name, sent))
+        }
+        _ => check(name, sent),
+    })
+}
+
 fn read_shapes(rt: &crate::MockRuntime, t: &str) -> Vec<(Value, bool)> {
     let mut schemas: Vec<(Value, bool)> = type_check(rt, t)
         .and_then(|(read, shape)| shape.or_else(|| read.success_output()?.schema.as_ref()))
