@@ -124,36 +124,34 @@ pub(super) fn record_schema_of(
 /// alternative's (`Node`'s first `state` is a deployment's). `None` when `schema`
 /// names no such alternative.
 fn own_alternative(bundle: &mb_mcm::Bundle, schema: &Value, t: &str) -> Option<Value> {
-    fn find(bundle: &mb_mcm::Bundle, schema: &Value, t: &str, depth: usize) -> Option<String> {
-        if depth > 3 {
+    /// The definition named `t` among the alternatives of a union or interface
+    /// definition `schema` reaches; `in_union` once below one. A nullable place
+    /// of one type (`anyOf: [Issue, null]`) names no alternative.
+    fn find(
+        bundle: &mb_mcm::Bundle,
+        schema: &Value,
+        t: &str,
+        in_union: bool,
+        depth: usize,
+    ) -> Option<String> {
+        if depth > 8 {
             return None;
         }
-        if let Some(name) = schema
-            .get("$ref")
-            .and_then(Value::as_str)
-            .and_then(|r| r.strip_prefix("#/$defs/"))
-        {
-            if name.eq_ignore_ascii_case(t) {
+        if let Some(name) = def_name(schema) {
+            if in_union && name.eq_ignore_ascii_case(t) {
                 return Some(name.to_owned());
             }
-            return find(bundle, bundle.defs.get(name)?, t, depth + 1);
+            let def = bundle.defs.get(name)?;
+            let union = def.get("anyOf").is_some() || def.get("oneOf").is_some();
+            return find(bundle, def, t, in_union || union, depth + 1);
         }
         ["anyOf", "oneOf"]
             .iter()
             .filter_map(|k| schema.get(*k).and_then(Value::as_array))
             .flatten()
-            .find_map(|alternative| find(bundle, alternative, t, depth + 1))
+            .find_map(|alternative| find(bundle, alternative, t, in_union, depth + 1))
     }
-    let alternatives = |s: &Value| s.get("anyOf").is_some() || s.get("oneOf").is_some();
-    let named = schema
-        .get("$ref")
-        .and_then(Value::as_str)
-        .and_then(|r| r.strip_prefix("#/$defs/"))
-        .and_then(|name| bundle.defs.get(name));
-    if !alternatives(schema) && !named.is_some_and(alternatives) {
-        return None;
-    }
-    let name = find(bundle, schema, t, 0)?;
+    let name = find(bundle, schema, t, false, 0)?;
     Some(serde_json::json!({"$ref": format!("#/$defs/{name}")}))
 }
 
@@ -1050,8 +1048,10 @@ type Query { node(id: ID!): Node search: [Searchable] }
             own_alternative(&bundle, &union, "issue"),
             Some(issue.clone())
         );
-        // A place of one type is left as it is.
+        // A place of one type, nullable or not, is left as it is.
         assert_eq!(own_alternative(&bundle, &issue, "issue"), None);
+        let nullable_issue = json!({"anyOf": [issue.clone(), {"type": "null"}]});
+        assert_eq!(own_alternative(&bundle, &nullable_issue, "issue"), None);
         let nullable_union = json!({"anyOf": [union, {"type": "null"}]});
         assert_eq!(
             own_alternative(&bundle, &nullable_union, "issue"),
