@@ -59,3 +59,4 @@
   - [Next.js Commerce](trials/nextjs-commerce.md)
   - [Stripe accept-a-payment (Java)](trials/stripe-java.md)
   - [github-readme-stats (holdout)](trials/github-readme-stats.md)
+  - [Twilio CLI (holdout, messaging)](trials/twilio-cli.md)
