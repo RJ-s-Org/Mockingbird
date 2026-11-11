@@ -1235,6 +1235,11 @@ impl GatheredReply {
                 return Err(self.repeated(false));
             }
             if let Some(max) = self.max_answer.filter(|max| self.content.len() > *max) {
+                // An answer looping when it passes its cap is a loop: stopped as
+                // one and retried, only sooner than the guard's span.
+                if self.content_guard.low_variety() {
+                    return Err(self.repeated(false));
+                }
                 count_cut(CutReason::AnswerCap);
                 let usage = self.usage.as_ref().map(usage_of).unwrap_or_else(|| Usage {
                     prompt_tokens: estimated_tokens(self.prompt_bytes),
