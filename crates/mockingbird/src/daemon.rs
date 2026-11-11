@@ -822,6 +822,7 @@ pub async fn doctor(args: &DoctorArgs, admin_url: &str, token: Option<&str>) -> 
     };
     json!({
         "version": env!("CARGO_PKG_VERSION"),
+        "skills_level": crate::agents::SKILLS_LEVEL,
         "binary": std::env::current_exe().ok(),
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,

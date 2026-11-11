@@ -58,6 +58,7 @@ Without MCP, the same operations are CLI subcommands (`mockingbird --help`); eac
 ## Rules
 
 - Start with `doctor` (or `mockingbird doctor`) when the state is unknown: it reports the binary, config, provider keys and whether a server is running.
+- These skills are written for `skills_level` 1. If `doctor` reports a lower `skills_level`, or none, the binary is older than the skills (a release binary beside skills from `main`), and tools or commands named here may be missing. Get a binary built from `main`: `curl -fsSL https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.sh | MOCKINGBIRD_VERSION=main sh` (builds with cargo, a few minutes), then restart the MCP server or the agent.
 - After every import or `approve_draft`, review the world description with the `mockingbird-world` skill before you call the mock done.
 - Never write an API key into a file, a command line or a tool argument. Profiles hold references (`env:OPENROUTER_API_KEY`); ask the user to export the variable, then restart or re-test.
 - Without an LLM key, use `--offline` (faker only): mocks still answer schema-valid data.

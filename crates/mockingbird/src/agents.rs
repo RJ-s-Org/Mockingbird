@@ -28,6 +28,53 @@ macro_rules! skill {
     };
 }
 
+/// What the skills need of the binary: `doctor` reports it as `skills_level`,
+/// and the entry skill names the level it was written for, so an agent whose
+/// skills are newer than its binary (skills from `main`, a binary from an older
+/// release) sees it and is told how to get a matching binary. Raised whenever
+/// the agent surface ([`agent_surface`]) changes; a test holds the surface's
+/// fingerprint ([`SURFACE_FINGERPRINT`]) to this level.
+pub const SKILLS_LEVEL: u32 = 1;
+
+/// The FNV-1a fingerprint of [`agent_surface`] at [`SKILLS_LEVEL`].
+#[cfg(test)]
+const SURFACE_FINGERPRINT: u64 = 570_844_583_176_563_329;
+
+/// What skills can name: every MCP tool and every CLI subcommand path
+/// (`world show`), sorted.
+#[cfg(test)]
+fn agent_surface() -> Vec<String> {
+    fn walk(cmd: &clap::Command, path: &str, out: &mut Vec<String>) {
+        for sub in cmd.get_subcommands().filter(|c| c.get_name() != "help") {
+            let name = format!("{path}{}", sub.get_name());
+            out.push(format!("cli {name}"));
+            walk(sub, &format!("{name} "), out);
+        }
+    }
+    let mut out: Vec<String> = crate::mcp::tool_names()
+        .into_iter()
+        .map(|t| format!("mcp {t}"))
+        .collect();
+    walk(
+        &<crate::config::Cli as clap::CommandFactory>::command(),
+        "",
+        &mut out,
+    );
+    out.sort();
+    out
+}
+
+/// The FNV-1a hash of `items`, one per line: stable across builds and platforms.
+#[cfg(test)]
+fn fingerprint(items: &[String]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in items.iter().flat_map(|i| i.bytes().chain([b'\n'])) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// Every skill, the entry point first.
 pub const SKILLS: &[Skill] = &[
     skill!("mockingbird"),
@@ -518,6 +565,25 @@ pub fn skills(dir: &Path) -> anyhow::Result<Value> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A change to the agent surface raises [`SKILLS_LEVEL`]: otherwise skills that
+    /// name a new tool would not tell a binary without it apart from one with it.
+    #[test]
+    fn the_skills_level_moves_with_the_agent_surface() {
+        let now = fingerprint(&agent_surface());
+        assert_eq!(
+            now,
+            SURFACE_FINGERPRINT,
+            "the MCP tools or CLI subcommands changed: raise SKILLS_LEVEL to {}, set SURFACE_FINGERPRINT to {now}, and the level in plugins/mockingbird/skills/mockingbird/SKILL.md",
+            SKILLS_LEVEL + 1
+        );
+        let entry = SKILLS[0].text;
+        assert!(
+            entry.contains(&format!("`skills_level` {SKILLS_LEVEL}")),
+            "the mockingbird skill should name `skills_level` {SKILLS_LEVEL}"
+        );
+    }
+
     use super::*;
 
     #[test]

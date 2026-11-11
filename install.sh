@@ -4,7 +4,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.sh | sh
 #
 # Environment:
-#   MOCKINGBIRD_VERSION      release tag to install (default: the latest release)
+#   MOCKINGBIRD_VERSION      release tag to install (default: the latest release),
+#                            or `main` to build the main branch with cargo
 #   MOCKINGBIRD_INSTALL_DIR  where the binary goes (default: ~/.mockingbird/bin)
 #
 # It downloads the release archive for this platform, checks its SHA-256 and
@@ -77,6 +78,8 @@ latest_tag() {
 }
 
 install_release() {
+    # `main` has no release binary: it is built from source.
+    [ "${MOCKINGBIRD_VERSION:-}" = main ] && return 1
     tgt=$(target) || { say "no release binary for $(uname -s) $(uname -m)"; return 1; }
     tag="${MOCKINGBIRD_VERSION:-}"
     [ -n "$tag" ] || tag=$(latest_tag) || true
@@ -107,7 +110,9 @@ install_source() {
     have cargo || return 1
     say "building from source with cargo (a few minutes)"
     tmp=$(mktemp -d)
-    if [ -n "${MOCKINGBIRD_VERSION:-}" ]; then
+    if [ "${MOCKINGBIRD_VERSION:-}" = main ]; then
+        set -- --branch main
+    elif [ -n "${MOCKINGBIRD_VERSION:-}" ]; then
         set -- --tag "$MOCKINGBIRD_VERSION"
     else
         set --

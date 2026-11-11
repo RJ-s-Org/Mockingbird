@@ -28,7 +28,9 @@ curl -fsSL https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.s
 irm https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.ps1 | iex           # Windows
 ```
 
-The scripts install the release binary for the platform into `~/.mockingbird/bin` after checking its SHA-256 (`MOCKINGBIRD_VERSION` pins a release, `MOCKINGBIRD_INSTALL_DIR` changes the directory), and build from source with `cargo install` when no release binary fits.
+The scripts install the release binary for the platform into `~/.mockingbird/bin` after checking its SHA-256 (`MOCKINGBIRD_VERSION` pins a release, `MOCKINGBIRD_VERSION=main` builds the main branch with cargo, `MOCKINGBIRD_INSTALL_DIR` changes the directory), and build from source with `cargo install` when no release binary fits.
+
+The skills come from `main` and may be newer than a release binary. `doctor` reports the binary's `skills_level`, and the `mockingbird` skill names the level it was written for; when the binary's is lower or missing, the skill tells the agent to install a binary built from `main`.
 
 `mockingbird agent install <agent>` merges a `mockingbird` server entry into the agent's MCP config, leaving other entries alone, and writes the skills where that agent reads them (`.claude/skills`, `.agents/skills`, `.cursor/skills`, `.gemini/skills`, `.github/skills`, or Kiro steering files). The entry runs this binary by its absolute path. Options: `--scope user` (home directory instead of the project), `--no-skills`, `--no-mcp`, `--dry-run`, `--command <path>`, `--config <file>` and `--pass-env <NAME>`. `mockingbird agent skills <dir>` writes just the skills.
 
