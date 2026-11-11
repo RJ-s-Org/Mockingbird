@@ -1698,15 +1698,37 @@ impl Engine {
         if !guards::declares_code(op, code) {
             return None;
         }
-        // A refusal that states its code and message leaves the model nothing to say:
-        // the faker's body carries them, with no wait on a model.
-        let write = !(matches!(cause, error_body::ErrorCause::Refused)
+        // A refusal that states its code and message leaves the model nothing to say
+        // when the faker's body carries both and has no other free text: it stands,
+        // with no wait on a model. Otherwise the body is written as other refusals' are.
+        let stated = matches!(cause, error_body::ErrorCause::Refused)
             && facts.code().is_some()
-            && !facts.text().is_empty());
-        let response = self
-            .error_answer_repeating(bundle, op, call, (code, cause), (facts.members(), write))
-            .await?;
-        let response = self.with_facts(bundle, op, response, (facts, cause));
+            && !facts.text().is_empty();
+        let mut faked = None;
+        if stated {
+            let response = self
+                .error_answer_repeating(bundle, op, call, (code, cause), (facts.members(), false))
+                .await?;
+            let response = self.with_facts(bundle, op, response, (facts, cause));
+            if self.stated_refusal_stands(bundle, op, &response, facts) {
+                faked = Some(response);
+            }
+        }
+        let response = match faked {
+            Some(response) => response,
+            None => {
+                let response = self
+                    .error_answer_repeating(
+                        bundle,
+                        op,
+                        call,
+                        (code, cause),
+                        (facts.members(), true),
+                    )
+                    .await?;
+                self.with_facts(bundle, op, response, (facts, cause))
+            }
+        };
         let mut response = self.with_own_status(bundle, op, response);
         tracing::info!(operation = %op.id, status = code, cause = ?cause, "the call was refused from state with a declared error");
         response.source = if response.fallback_reason.is_some() {

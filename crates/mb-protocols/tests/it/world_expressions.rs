@@ -667,3 +667,162 @@ async fn a_refusal_stating_its_code_and_message_asks_no_model() {
         h.provider.requests()
     );
 }
+
+/// [`MEMBERS`] with its `Error` schema replaced by `error` (YAML at that indent).
+fn members_erring(error: &str, world: Value) -> DescribedHarness {
+    let (head, _) = MEMBERS
+        .split_once("    Error:\n")
+        .expect("MEMBERS declares Error last");
+    support::described(&format!("{head}    Error:\n{error}"), world, vec![])
+}
+
+fn refuse_large(code: &str) -> Value {
+    json!({"operations": {"addMember": {"kind": "create", "refuse": [
+        {"when": "request.body.amount > 1000", "status": 422,
+         "code": code, "message": "amount is over 1000"}
+    ]}}})
+}
+
+async fn send_large(h: &DescribedHarness) -> Value {
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "a@x.io", "name": "A", "amount": 5000})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    body
+}
+
+#[tokio::test]
+async fn a_stated_refusal_whose_code_its_schema_cannot_hold_still_asks_the_model() {
+    // An integer code member: the stated `amount_too_large` is not placed.
+    let h = members_erring(
+        "      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties: {code: {type: integer}, message: {type: string}}
+",
+        refuse_large("amount_too_large"),
+    );
+    let body = send_large(&h).await;
+    assert_eq!(body["error"]["message"], "amount is over 1000", "{body}");
+    assert_eq!(
+        h.provider.requests().len(),
+        1,
+        "{:?}",
+        h.provider.requests()
+    );
+
+    // With no code member at all, the same (`hint` is free text the model would
+    // write: with none, no model is ever asked for this schema).
+    let h = members_erring(
+        "      type: object
+      required: [message, hint]
+      properties: {message: {type: string}, hint: {type: string}}
+",
+        refuse_large("amount_too_large"),
+    );
+    let body = send_large(&h).await;
+    assert_eq!(body["message"], "amount is over 1000", "{body}");
+    assert_eq!(
+        h.provider.requests().len(),
+        1,
+        "{:?}",
+        h.provider.requests()
+    );
+}
+
+#[tokio::test]
+async fn a_stated_refusal_leaving_other_free_text_still_asks_the_model() {
+    // JSON:API's `title` beside `code` and `detail` is the faker's word unless the
+    // model writes it.
+    let errors = |item: &str| {
+        format!(
+            "      type: object
+      required: [errors]
+      properties:
+        errors:
+          type: array
+          items: {{type: object, properties: {item}}}
+"
+        )
+    };
+    let h = members_erring(
+        &errors("{code: {type: string}, title: {type: string}, detail: {type: string}}"),
+        refuse_large("amount_too_large"),
+    );
+    let body = send_large(&h).await;
+    assert_eq!(body["errors"][0]["code"], "amount_too_large", "{body}");
+    assert_eq!(
+        h.provider.requests().len(),
+        1,
+        "{:?}",
+        h.provider.requests()
+    );
+
+    // With nothing but the code and the message, the faker's body stands.
+    let h = members_erring(
+        &errors("{code: {type: string}, detail: {type: string}}"),
+        refuse_large("amount_too_large"),
+    );
+    let body = send_large(&h).await;
+    assert_eq!(body["errors"][0]["code"], "amount_too_large", "{body}");
+    assert_eq!(body["errors"][0]["detail"], "amount is over 1000", "{body}");
+    assert!(
+        h.provider.requests().is_empty(),
+        "{:?}",
+        h.provider.requests()
+    );
+}
+
+#[tokio::test]
+async fn a_refusal_whose_message_is_blank_still_asks_the_model() {
+    let world = json!({"operations": {"addMember": {"kind": "create", "refuse": [
+        {"when": "request.body.amount > 1000", "status": 422,
+         "code": "amount_too_large", "message": "   "}
+    ]}}});
+    let h = members(world, vec![]);
+    let body = send_large(&h).await;
+    assert_eq!(body["error"]["code"], "amount_too_large", "{body}");
+    assert_ne!(
+        body["error"]["message"], "   ",
+        "a blank message is never laid: {body}"
+    );
+    assert_eq!(
+        h.provider.requests().len(),
+        1,
+        "{:?}",
+        h.provider.requests()
+    );
+}
+
+#[tokio::test]
+async fn a_stated_refusal_whose_message_its_schema_refuses_still_asks_the_model() {
+    // The message member's pattern refuses the stated message: only the code lands.
+    let h = members_erring(
+        "      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties: {code: {type: string}, message: {type: string, pattern: '^x+$'}}
+",
+        refuse_large("amount_too_large"),
+    );
+    let body = send_large(&h).await;
+    assert_eq!(body["error"]["code"], "amount_too_large", "{body}");
+    assert_ne!(body["error"]["message"], "amount is over 1000", "{body}");
+    assert_eq!(
+        h.provider.requests().len(),
+        1,
+        "{:?}",
+        h.provider.requests()
+    );
+}
