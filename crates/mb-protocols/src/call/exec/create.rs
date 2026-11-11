@@ -2,7 +2,9 @@
 //! and the members [`mb_engine::Engine::fill`] writes, stored and answered.
 //!
 //! - The record is what the request holds at the described `request.record`, else the
-//!   body: the members the type's records declare (all of them when it declares none),
+//!   body: the members the type's records declare (all of them when it declares none;
+//!   a top-level member sent by another name, a form API's `FriendlyName`, under the
+//!   one of the same [`mb_mcm::member_key`] when exactly one has it, as an update),
 //!   with those of an object member the type does not declare itself (an input wrapper,
 //!   GraphQL's `input: {...}`) one level down, the members a declared query parameter
 //!   names (`POST /boards?name=…`), and the path values naming its parent or a member
@@ -147,7 +149,9 @@ pub(super) async fn run(
         .body
         .as_ref()
         .map(|b| records::request_record(rt, op, b));
-    let Some(mut record) = shape.request_record(rt, request) else {
+    let expressions = rt.described().expressions(&op.id);
+    let set_reads = |name: &str| expressions.is_some_and(|e| e.sets_from_body(name));
+    let Some(mut record) = shape.request_record(rt, request, &set_reads) else {
         return fall("no_record");
     };
     // A record member the query names is set as the body sets it, as an update's is.
@@ -1059,13 +1063,17 @@ impl Shape {
     }
 
     /// The record `request` (the request's record) holds: the members the type
-    /// declares (all of them when it declares none), and those of an object member the
-    /// type does not declare, one level down, that the record holds no value for.
-    /// Empty with no request; `None` for a request that is not an object.
+    /// declares (all of them when it declares none), a member sent by another name
+    /// (`FriendlyName`) under the declared one of its key (`friendly_name`, as an
+    /// update takes it: [`super::writes::by_record_names`]) unless a described `set`
+    /// reads it (`set_reads`), and those of an object member the type does not declare,
+    /// one level down, that the record holds no value for. Empty with no request;
+    /// `None` for a request that is not an object.
     fn request_record(
         &self,
         rt: &crate::MockRuntime,
         request: Option<&Value>,
+        set_reads: &dyn Fn(&str) -> bool,
     ) -> Option<Map<String, Value>> {
         let sent = match request {
             None => return Some(Map::new()),
@@ -1075,6 +1083,8 @@ impl Shape {
         if self.members.is_empty() {
             return Some(sent.clone());
         }
+        let names: Vec<&str> = self.members.iter().map(|(m, _)| m.as_str()).collect();
+        let sent = &super::writes::by_record_names(sent, &names, set_reads);
         let declares = |name: &str| self.members.iter().any(|(m, _)| m == name);
         let mut record: Map<String, Value> = sent
             .iter()
