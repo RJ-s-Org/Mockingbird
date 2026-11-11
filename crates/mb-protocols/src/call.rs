@@ -543,7 +543,7 @@ pub(crate) async fn prepare<'a>(
     if rt.unknown_ids == UnknownIds::NotFound
         && matches!(op.kind, OperationKind::Query)
         && plan.forced_status.is_none()
-        && op.identity.as_ref().is_some_and(path_names_identity)
+        && targets_by_path(rt, op)
         && target.is_none()
         && state.available()
         && let (Some(t), Some(id)) = (resource_type, target_id.as_deref())
@@ -1889,6 +1889,26 @@ fn path_names_identity(identity: &mb_mcm::Identity) -> bool {
         return false;
     };
     param == mb_mcm::leaf_member(&identity.field) || identity.path_field.is_some() || id_like(param)
+}
+
+/// Whether `op`'s path parameter holds the id its record is stored by, for
+/// `unknown_ids: 404`: where the world description writes the target's path parameter,
+/// whether that is the one the operation's identity reads; otherwise (tier 0's target
+/// only restates the identity's parameter) [`path_names_identity`] judges by its name.
+fn targets_by_path(rt: &MockRuntime, op: &Operation) -> bool {
+    let Some(identity) = op.identity.as_ref() else {
+        return false;
+    };
+    let written = rt
+        .writes_path_target(&op.id)
+        .then(|| rt.described().op(&op.id))
+        .flatten()
+        .and_then(|d| d.target.as_ref())
+        .and_then(|t| t.path_param.as_deref());
+    match written {
+        Some(param) => identity.path_param.as_deref() == Some(param),
+        None => path_names_identity(identity),
+    }
 }
 
 /// Whether a path parameter's name says it holds an id.

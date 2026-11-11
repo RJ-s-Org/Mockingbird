@@ -713,17 +713,18 @@ fn stale_described(
 }
 
 /// The refusal of a write `plan` of `call` for a stale token, with the first of `codes`
-/// the operation declares a response for, its body the one written for
+/// the operation declares a response for (see [`mb_engine::guards::first_declared`]), its body the one written for
 /// [`mb_engine::error_body::ErrorCause::Stale`] (see [`mb_engine::Engine::refuse_held`]); `None` when it
 /// declares none of them.
 async fn refuse_stale(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,
-    mut codes: impl Iterator<Item = u16>,
+    codes: impl Iterator<Item = u16>,
 ) -> Option<GeneratedResponse> {
     let op = plan.op;
-    let code = codes.find(|code| mb_engine::guards::declares_code(op, *code))?;
+    let codes: Vec<u16> = codes.collect();
+    let code = mb_engine::guards::first_declared(op, &codes)?;
     plan.engine
         .refuse_held(
             rt.bundle(),

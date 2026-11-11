@@ -1635,10 +1635,10 @@ impl Engine {
 
     /// The refusal `code` of a create that repeats the value of request member `member`
     /// a stored record holds, decided by the caller from what the contract says of it:
-    /// `op`'s response declared for `code` by that very status, rendered as an LLM's
-    /// refusal is, its body taking what the contract says of that repeat (see
+    /// `op`'s response declared for `code`, by that status or `default`, rendered as an
+    /// LLM's refusal is, its body taking what the contract says of that repeat (see
     /// [`contract_values`]), with `answered`'s source and usage. `None` when `op`
-    /// declares no response for `code` itself.
+    /// declares no response for `code`.
     #[must_use]
     pub fn refuse_repeated_value(
         &self,
@@ -1649,30 +1649,27 @@ impl Engine {
         answered: &GeneratedResponse,
     ) -> Option<GeneratedResponse> {
         let repeated = [member.to_string()];
-        op.outputs
-            .iter()
-            .any(|o| o.status == StatusSelector::Code(code))
-            .then(|| {
-                let refusal = Refusal {
-                    code,
-                    repeated: &repeated,
-                    written: None,
-                };
-                self.refused(bundle, op, call, refusal, (answered.source, answered.usage))
-            })
+        guards::declares_code(op, code).then(|| {
+            let refusal = Refusal {
+                code,
+                repeated: &repeated,
+                written: None,
+            };
+            self.refused(bundle, op, call, refusal, (answered.source, answered.usage))
+        })
     }
 
     /// A refusal decided from state alone, before generating (a unique value
     /// another record holds, a stale concurrency token, a record the description says
-    /// is gone): `op`'s response declared for `code` by that very status, its body
-    /// [`Engine::error_answer`]'s for `cause` (written once per operation, status and
+    /// is gone): `op`'s response declared for `code`, by that status or `default`, its
+    /// body [`Engine::error_answer`]'s for `cause` (written once per operation, status and
     /// cause by the model, else the faker's), refusing the repeated value of `facts`'
     /// members, with `facts` laid over it while it still validates: their message in
     /// its message-like member, and their members in its path-like ones (see
     /// [`error_body::with_reasons`]). Tagged `State` (`Fallback` when the faker could
     /// not make its body valid), with the usage of a body written now. `None` when `op`
-    /// declares no response for `code` itself (a `default` one is not a refusal the
-    /// contract names).
+    /// declares no response for `code`, by that status or, for a 4xx or 5xx, by a
+    /// `default` one (whose schema the body then follows).
     pub async fn refuse_held(
         &self,
         bundle: &Bundle,

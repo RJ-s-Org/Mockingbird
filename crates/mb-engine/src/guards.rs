@@ -1008,13 +1008,28 @@ pub(crate) fn refusals(
     offered_codes(op)
 }
 
-/// Whether `op` declares a response for `code` by that very status (a `default` or a
-/// range is no refusal the contract names).
+/// Whether `op` declares a response for the refusal status `code`: by that very
+/// status, else, for a 4xx or 5xx, by a `default` response (see
+/// [`mb_mcm::Operation::declares_status`]).
 #[must_use]
 pub fn declares_code(op: &mb_mcm::Operation, code: u16) -> bool {
-    op.outputs
+    op.declares_status(code)
+}
+
+/// The first of `codes` `op` declares by that very status, else, where a `default`
+/// response covers it, the first of `codes`: a contract listing its errors keeps the
+/// one it lists. `None` when it declares none of them.
+#[must_use]
+pub fn first_declared(op: &mb_mcm::Operation, codes: &[u16]) -> Option<u16> {
+    codes
         .iter()
-        .any(|o| o.status == mb_mcm::StatusSelector::Code(code))
+        .copied()
+        .find(|code| {
+            op.outputs
+                .iter()
+                .any(|o| o.status == mb_mcm::StatusSelector::Code(*code))
+        })
+        .or_else(|| codes.iter().copied().find(|code| op.declares_status(*code)))
 }
 
 /// The statuses a refusal of `op` may name, whatever a prompt was shown: the codes

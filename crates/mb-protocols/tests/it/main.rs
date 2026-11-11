@@ -30,6 +30,7 @@ mod create_repeats;
 mod create_target_overlay;
 mod data_plane_auth;
 mod data_plane_auth_protocols;
+mod default_errors;
 mod described_actions_partial;
 mod described_conflicts;
 mod described_derived;

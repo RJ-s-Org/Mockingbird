@@ -2617,9 +2617,7 @@ fn declares_success_header(op: &Operation, name: &str) -> bool {
 }
 
 fn declares_status(op: &Operation, code: u16) -> bool {
-    op.outputs
-        .iter()
-        .any(|o| o.status == StatusSelector::Code(code))
+    op.declares_status(code)
 }
 
 #[cfg(test)]

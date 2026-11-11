@@ -422,6 +422,9 @@ pub struct MockRuntime {
     /// The effective world description, indexed (see [`MockRuntime::with_world`]);
     /// describes nothing until a world is attached.
     described: call::Described,
+    /// The operations whose target path parameter the world description writes (see
+    /// [`MockRuntime::with_path_targets`]).
+    path_targets: std::collections::BTreeSet<String>,
     /// GraphQL root fields' narrowed schemas, by selection.
     #[cfg(feature = "graphql")]
     narrowed: graphql::NarrowCache,
@@ -547,6 +550,7 @@ impl MockRuntime {
             own_reads: call::OwnReads::default(),
             collections: call::Collections::default(),
             described: call::Described::default(),
+            path_targets: std::collections::BTreeSet::new(),
             #[cfg(feature = "graphql")]
             narrowed: graphql::NarrowCache::default(),
         }
@@ -579,6 +583,23 @@ impl MockRuntime {
         }
         self.bundle = bundle;
         self
+    }
+
+    /// This runtime with `ops` the operations whose target path parameter the world
+    /// description writes, rather than tier 0 guessing it from the identity
+    /// ([`mb_mcm::world::written_path_targets`]). Under `unknown_ids: 404`, a read of
+    /// one of them whose target is its identity's path parameter answers an id the
+    /// session does not hold with 404 whatever the parameter's name; other reads go by
+    /// the name.
+    #[must_use]
+    pub fn with_path_targets(mut self, ops: &std::collections::BTreeSet<String>) -> Self {
+        self.path_targets = ops.clone();
+        self
+    }
+
+    /// Whether the world description writes operation `op_id`'s target path parameter.
+    pub(crate) fn writes_path_target(&self, op_id: &str) -> bool {
+        self.path_targets.contains(op_id)
     }
 
     /// The revision of the world description this runtime serves; `0` with none.

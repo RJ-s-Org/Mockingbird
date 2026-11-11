@@ -435,9 +435,7 @@ async fn refuse_taken(
     held: (String, Value),
 ) -> Option<GeneratedResponse> {
     let op = plan.op;
-    let code = [409, 422]
-        .into_iter()
-        .find(|code| mb_engine::guards::declares_code(op, *code))?;
+    let code = mb_engine::guards::first_declared(op, &[409, 422])?;
     let refusal = plan
         .engine
         .refuse_held(

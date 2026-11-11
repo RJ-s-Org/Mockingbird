@@ -38,7 +38,7 @@ use mb_auth::Permission;
 use mb_mcm::Bundle;
 use mb_mcm::world::{
     Author, ChangeDesc, OpDesc, Pointer, Refusal, RefusalCode, TypeDesc, Validation, World,
-    check_size, effective, effective_validated, tier0, validate,
+    check_size, effective_validated, tier0, validate, written_path_targets,
 };
 use mb_protocols::world_gaps::{Gap, GapCode, gaps};
 use mb_store::{
@@ -193,7 +193,8 @@ fn with_file_refusals(mut refused: Vec<Refusal>, mock_id: Uuid, version: i64) ->
 
 /// The world description a runtime of `mock_id`'s contract `version` serves,
 /// with its revision: what [`effective_world`] answers as `(world, revision)`,
-/// over `base` (`tier0(bundle)`, computed once by the caller).
+/// over `base` (`tier0(bundle)`, computed once by the caller), and the operations
+/// whose target path parameter the revision writes ([`written_path_targets`]).
 ///
 /// It reads only the newest revision, once, and none of the earlier ones:
 /// the runtime needs neither the authors nor the gaps. A newest revision
@@ -210,12 +211,16 @@ pub async fn runtime_world(
     version: i64,
     bundle: &Bundle,
     base: &World,
-) -> Result<(World, i64), StoreError> {
+) -> Result<(World, i64, BTreeSet<String>), StoreError> {
     let Some(latest) = store.latest_world_revision(mock_id, version).await? else {
-        return Ok((base.clone(), 0));
+        return Ok((base.clone(), 0, BTreeSet::new()));
     };
     match serde_json::from_value::<World>(latest.document) {
-        Ok(doc) => Ok((effective(bundle, base, &doc).0, latest.revision)),
+        Ok(doc) => {
+            let (world, v) = effective_validated(bundle, base, &doc);
+            let written = written_path_targets(&v.applied, &world);
+            Ok((world, latest.revision, written))
+        }
         Err(error) => {
             tracing::warn!(
                 mock = %mock_id,
@@ -223,7 +228,7 @@ pub async fn runtime_world(
                 %error,
                 "the newest world revision is not a world description; serving tier 0"
             );
-            Ok((base.clone(), latest.revision))
+            Ok((base.clone(), latest.revision, BTreeSet::new()))
         }
     }
 }

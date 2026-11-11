@@ -503,6 +503,8 @@ pub(crate) struct LoadedWorld {
     pub(crate) world: Arc<World>,
     /// Its revision; `0` with none.
     pub(crate) revision: i64,
+    /// The operations whose target path parameter the revision writes.
+    pub(crate) path_targets: Arc<BTreeSet<String>>,
     /// The description could not be loaded: the runtime serves a fallback
     /// (the previous runtime's world, or tier 0), and a retry is due.
     pub(crate) pending: bool,
@@ -562,10 +564,11 @@ pub(crate) async fn build_runtime_tracked(
     )
     .await
     {
-        Ok((world, revision)) => LoadedWorld {
+        Ok((world, revision, path_targets)) => LoadedWorld {
             version: contract.version,
             world: Arc::new(world),
             revision,
+            path_targets: Arc::new(path_targets),
             pending: false,
         },
         Err(error) => {
@@ -579,6 +582,7 @@ pub(crate) async fn build_runtime_tracked(
                     version: contract.version,
                     world: Arc::new(base.clone()),
                     revision: 0,
+                    path_targets: Arc::default(),
                     pending: true,
                 },
             }
@@ -591,7 +595,8 @@ pub(crate) async fn build_runtime_tracked(
         Arc::new(engine),
         deps.state.clone(),
     )
-    .with_world(&base, &loaded.world, loaded.revision);
+    .with_world(&base, &loaded.world, loaded.revision)
+    .with_path_targets(&loaded.path_targets);
     rt.workspace = mock.workspace.clone();
     rt.configured_profile = configured_profile(deps, mock);
     if !deps.offline {
