@@ -28,6 +28,7 @@ use tokio::sync::mpsc;
 use crate::agents::SKILLS;
 use crate::client::{self, ClientError};
 use crate::daemon;
+use crate::examples;
 use crate::onboard;
 use crate::providers::{self, ProviderArgs};
 
@@ -73,7 +74,7 @@ const MAX_INLINE_BODY: usize = 64 * 1024;
 /// How many world gaps an import answer carries (`world_gaps_total` counts them all).
 const IMPORT_GAPS: usize = 40;
 
-pub(crate) const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock an API: `import_contract`, then `get_world` (pass the imported `version` unless it was activated) and fix its `gaps` with `patch_world`, then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. To run an app unchanged against mocks, start the server with `proxy: true` and export the variables from `proxy_env` in the app's shell instead of editing its base URLs. Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports; if the key is not in this process's environment, `open_key_setup` lets the user type it into a local page that stores it in a private file. The `mockingbird://skills/…` resources hold the full guides.";
+pub(crate) const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock a well-known public API (Stripe, GitHub, TMDB, Twilio, ...), check `list_examples` first: `init_example` writes its contract and a ready config. To mock an API: `import_contract`, then `get_world` (pass the imported `version` unless it was activated) and fix its `gaps` with `patch_world`, then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. To run an app unchanged against mocks, start the server with `proxy: true` and export the variables from `proxy_env` in the app's shell instead of editing its base URLs. Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports; if the key is not in this process's environment, `open_key_setup` lets the user type it into a local page that stores it in a private file. The `mockingbird://skills/…` resources hold the full guides.";
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Transport {
@@ -147,6 +148,7 @@ const LOCAL_TOOLS: &[&str] = &[
     "configure_llm",
     "test_llm",
     "validate_contract",
+    "init_example",
     "start_server",
     "server_status",
     "server_logs",
@@ -380,6 +382,36 @@ fn tools() -> Vec<Tool> {
             description: "Compile a contract (OpenAPI, Swagger, GraphQL, protobuf, WSDL, AsyncAPI, archive) locally: counts by protocol and the first 20 operations and channels (operations_truncated says how many more). Needs no server.",
             schema: obj(json!({ "path": s("Contract file path.") }), &["path"]),
             read_only: true,
+            destructive: false,
+        },
+        Tool {
+            name: "list_examples",
+            title: "List the ready-made API examples",
+            description: "The catalog of ready-made mocks of well-known APIs (Stripe, GitHub, TMDB, Twilio, Shopify, ...): name, title, protocol, summary and the hosts each answers for. Check it before writing a contract for a public API: init_example writes one's contract and config.",
+            schema: obj(
+                json!({
+                    "protocol": s("Only this protocol: openapi, graphql, grpc, asyncapi, soap."),
+                    "category": s("Only this category: payments, messaging, ..."),
+                }),
+                &[],
+            ),
+            read_only: true,
+            destructive: false,
+        },
+        Tool {
+            name: "init_example",
+            title: "Write a ready-made example",
+            description: "Write an example's mockingbird.yaml, contracts and README into a directory (list_examples names them). Edit its config for the app (ports, LLM profile, hosts, route_prefix, path_rewrite), then start_server. full also downloads the API's complete upstream contract where the example pins one.",
+            schema: obj(
+                json!({
+                    "name": s("The example's name, from list_examples."),
+                    "dir": s("Target directory, created if missing; default the current directory."),
+                    "force": b("Overwrite files that already exist."),
+                    "full": b("Also download the complete upstream contract (where list_examples says full_spec)."),
+                }),
+                &["name"],
+            ),
+            read_only: false,
             destructive: false,
         },
         Tool {
@@ -1412,6 +1444,22 @@ impl McpServer {
             "validate_contract" => Ok(onboard::contract_summary(&PathBuf::from(str_arg(
                 a, "path",
             )?))?),
+            "list_examples" => Ok(examples::run(examples::ExamplesCommand::List {
+                protocol: opt_str(a, "protocol"),
+                category: opt_str(a, "category"),
+            })
+            .await?),
+            "init_example" => Ok(examples::run(examples::ExamplesCommand::Init(
+                examples::InitArgs {
+                    name: str_arg(a, "name")?.to_owned(),
+                    dir: opt_str(a, "dir")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| ".".into()),
+                    force: opt_bool(a, "force"),
+                    full: opt_bool(a, "full"),
+                },
+            ))
+            .await?),
             "start_server" => {
                 let config = opt_str(a, "config")
                     .map(|c| std::env::current_dir().unwrap_or_default().join(c));
@@ -2892,6 +2940,59 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .to_string()
+    }
+
+    /// An agent asked to mock a public API finds the catalog's example by the host
+    /// the app calls, and writes its contract and config in one call.
+    #[tokio::test]
+    async fn the_catalog_is_listed_and_an_example_written() {
+        let s = server(false);
+        let listed = call_tool(&s, "list_examples", json!({})).await;
+        let tmdb = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "tmdb")
+            .cloned()
+            .unwrap();
+        assert!(
+            tmdb["hosts"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("api.themoviedb.org")),
+            "{tmdb}"
+        );
+        let graphql = call_tool(&s, "list_examples", json!({"protocol": "graphql"})).await;
+        assert!(
+            graphql
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|e| e["protocol"] == "graphql"),
+            "{graphql}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let mocks = dir.path().join("mocks");
+        let made = call_tool(
+            &s,
+            "init_example",
+            json!({"name": "tmdb", "dir": mocks.display().to_string()}),
+        )
+        .await;
+        assert_eq!(made["contract"], "tmdb.openapi.yaml", "{made}");
+        assert!(mocks.join("mockingbird.yaml").is_file());
+        assert!(mocks.join("tmdb.openapi.yaml").is_file());
+        // A second call does not overwrite what the agent may have edited.
+        let again = call_tool_error(
+            &s,
+            "init_example",
+            json!({"name": "tmdb", "dir": mocks.display().to_string()}),
+        )
+        .await;
+        assert!(again.contains("--force"), "{again}");
+        let unknown = call_tool_error(&s, "init_example", json!({"name": "nope"})).await;
+        assert!(unknown.contains("the catalog has"), "{unknown}");
     }
 
     /// A server whose Admin API is `admin`.
