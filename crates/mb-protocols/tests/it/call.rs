@@ -3546,10 +3546,11 @@ async fn a_read_by_name_with_a_null_full_name_does_not_answer_for_another_owner(
     assert_eq!(other["stargazers_count"], 9, "{other}");
 }
 
-/// An effect on a stored resource of a type with no read says why it was
-/// rejected.
+/// An effect on a stored resource of a type with no read is checked against the type's
+/// own definition: `refunds`, only created by `POST /refunds`, against its `Refund`. One
+/// on a type with no definition either says why it was rejected.
 #[tokio::test]
-async fn an_effect_on_a_type_with_no_read_says_it_has_no_schema() {
+async fn an_effect_on_a_type_with_no_read_is_checked_against_its_definition() {
     let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     store(
         &state,
@@ -3559,8 +3560,11 @@ async fn an_effect_on_a_type_with_no_read_says_it_has_no_schema() {
     )
     .await;
     store(&state, "refunds", "r1", json!({"id": "r1", "amount": 5})).await;
+    store(&state, "receipts", "x1", json!({"id": "x1", "total": 5})).await;
     let answer = json!({"response": {"reason": "asked"}, "effects": [
         {"type": "refunds", "id": "r1", "set": {"amount": 7}},
+        {"type": "refunds", "id": "r1", "set": {"amount": "seven"}},
+        {"type": "receipts", "id": "x1", "set": {"total": 7}},
     ]});
     let records = Arc::new(crate::support::Records::default());
     let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer.to_string())]));
@@ -3571,7 +3575,7 @@ async fn an_effect_on_a_type_with_no_read_says_it_has_no_schema() {
             Some(provider as Arc<dyn Provider>),
             EngineConfig::default(),
         )),
-        state as Arc<dyn StateStore>,
+        Arc::clone(&state) as Arc<dyn StateStore>,
     );
     rt.recorder = Some(Arc::clone(&records) as Arc<dyn mb_protocols::RequestRecorder>);
     let req = Request::post("/bookings/b1/cancel")
@@ -3580,8 +3584,16 @@ async fn an_effect_on_a_type_with_no_read_says_it_has_no_schema() {
     http_rest::router(Arc::new(rt)).oneshot(req).await.unwrap();
     let record = records.wait(1).await.remove(0);
     let effects = record.request["effects"].as_array().unwrap();
-    assert_eq!(effects[0]["outcome"], "rejected");
-    assert_eq!(effects[0]["reason"], "no schema to check against");
+    assert_eq!(effects[0]["outcome"], "applied", "{effects:?}");
+    assert_eq!(effects[1]["outcome"], "rejected", "{effects:?}");
+    assert_eq!(
+        effects[1]["reason"],
+        "the merged resource breaks its schema"
+    );
+    assert_eq!(effects[2]["outcome"], "rejected", "{effects:?}");
+    assert_eq!(effects[2]["reason"], "no schema to check against");
+    assert_eq!(stored_data(&state, "refunds", "r1").await["amount"], 7);
+    assert_eq!(stored_data(&state, "receipts", "x1").await["total"], 5);
 }
 
 /// Actions that answer their parent's own schema, with no request that tells
