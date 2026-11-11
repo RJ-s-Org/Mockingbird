@@ -653,7 +653,9 @@ paths:
 
 #[tokio::test]
 async fn a_refusal_reads_a_credential_header_that_neither_the_record_nor_the_model_sees() {
+    // The first entry fails on every call: its failure is noted without the value.
     let world = json!({"operations": {"sendMessage": {"kind": "create", "refuse": [
+        {"when": "int(request.headers['x-server-token']) > 0", "status": 401, "code": "0"},
         {"when": "request.headers['x-server-token'] != 'good-secret'", "status": 401,
          "code": "10", "message": "Request does not contain a valid Server token."}
     ]}}});
@@ -679,8 +681,14 @@ async fn a_refusal_reads_a_credential_header_that_neither_the_record_nor_the_mod
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 
-    let records = format!("{:?}", h.records());
+    let records = h.records();
+    assert_eq!(records.len(), 2, "{records:?}");
+    let records = format!("{records:?}");
+    assert!(records.contains("expr_failed"), "{records}");
     assert!(!records.contains("good-secret"), "{records}");
-    let prompts = format!("{:?}", h.provider.requests());
+    assert!(!records.contains("wrong"), "{records}");
+    let requests = h.provider.requests();
+    assert!(!requests.is_empty(), "the accepted call asks the model");
+    let prompts = format!("{requests:?}");
     assert!(!prompts.contains("good-secret"), "{prompts}");
 }
