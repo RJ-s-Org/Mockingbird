@@ -605,7 +605,7 @@ pub async fn create(
     Json(body): Json<CreateMock>,
 ) -> ApiResult<impl IntoResponse> {
     access.require(Permission::Edit)?;
-    // The name first: a duplicate's default prefix `/<name>` is taken too,
+    // The name first: a duplicate's default prefix (`/<name>`, `/` with hosts) is taken too,
     // and the name is the conflict the caller needs to hear about.
     if st.store.get_mock(&access.ws, &body.name).await?.is_some() {
         return Err(mock_exists(&access.ws, &body.name));
