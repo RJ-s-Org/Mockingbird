@@ -1,4 +1,4 @@
-# Trial: github-readme-stats (Node, GitHub GraphQL), holdout run (2026-11-11)
+# Trial: github-readme-stats (Node, GitHub GraphQL), holdout runs (2026-11-11)
 
 [anuraghazra/github-readme-stats](https://github.com/anuraghazra/github-readme-stats) at `54a7985` is an Express app that renders SVG cards (stats, top languages, repository pins, gists) from GitHub's GraphQL API, plus REST `search/commits` for `include_all_commits`. This is a **holdout** run on `main` at `d6e7a49f`, after record pools (#416). The mock was built by the user's agent from one prompt.
 
@@ -60,3 +60,72 @@ The app's unit tests (241/242) stub axios, so they never reach the mock. The one
 | 7 | Errors: unknown ids, invalid input | declared status and body | Not exercised: the app's flows send neither. |
 
 **Do the fixes generalize?** The build itself does: one prompt, two minutes, the proxy and host routing with no source edits, and no fallbacks. Record pools don't help this app, because its reads are GraphQL with no world and its one REST list is scoped. What's left is the null-root answer (F1) and the missing world (F2).
+
+## Rerun on `main` at `0d591b1b` (2026-11-11, second holdout run)
+
+The same app at `54a7985`, on `main` after the pool, GraphQL-reference, null-optional and lenient-import fixes. The mock was built by a fresh agent taking the README's path.
+
+### How the mock was built
+
+- **Install:** the README's Claude Code path, in a fresh clone of the app:
+  - `claude plugin marketplace add rj-s-org/mockingbird --scope local`
+  - `claude plugin install mockingbird@mockingbird --scope local`
+  - Both commands took about a second. The plugin's MCP wrapper ran the `mockingbird` first on `PATH`, here a dev build of `0d591b1b`.
+  - Local scope keeps the plugin out of other Claude Code sessions on the machine. A fresh `CLAUDE_CONFIG_DIR` would have isolated it too, but it is not logged in, and a headless agent can't log in.
+- **Build agent:** headless Claude Code (`claude -p`, Sonnet 5.5) got one prompt and no hints:
+  > I want to run this app (github-readme-stats) locally and render its cards without a GitHub token. Mock the GitHub API it calls (GraphQL and REST) with Mockingbird. Don't edit the app's source. Use OpenRouter with the model deepseek/deepseek-v4.1-flash-1017; my key is in OPENROUTER_API_KEY. When it works, tell me the exact command to run the app against the mock.
+- **Ports:** another session's server held 9090, 50051 and 8888, so the agent's environment set `MB_PORT`, `MB_ADMIN_PORT`, `MB_GRPC_PORT` and `MB_ADMIN_URL` to free ports. The prompt didn't mention them. The proxy has no environment variable: the agent found 8888 taken and set `proxy.port: 28888` in the config itself.
+- **Time:** **5.0 min** (302 s), 31 turns, $0.62 of Claude Code spend. It used skills, MCP and CLI only, with no edits to Mockingbird or the app.
+- **What it built:**
+  - Two hand-written contracts covering the fields the app reads, both with `hosts: [api.github.com]`: GraphQL with `route_prefix: /graphql`, REST with `/search`.
+  - It made `languages` non-null in its SDL after top-langs crashed on a `null`.
+  - It set `total_count` to at least 100 after a generated `0` made the app treat the count as a failed fetch.
+  - It wrote no world description, and said so.
+  - It moved its config from its session scratchpad to `~/.mockingbird/github-readme-stats/` and gave a `mockingbird server start … --proxy` command plus the app's proxy environment.
+
+### Results
+
+`flows.sh` drove 14 card requests through the unmodified app: stats, top-langs, five pins, a gist, repeats, an unknown user and an unknown repository.
+
+| Run | Cards render | Pins | Calls | Sources | State/cache p50 | Model p50 / p95 | Tokens (prompt / completion) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `main` `0d591b1b` | 10/14 | 2/5 named pins; the unknown repository errors | 15 | 12 `llm`, 3 `cache`, 0 fallbacks | 2 ms | 1.52 s / 3.68 s | 19.4k / 1.9k |
+| With #473 and #471 | 14/14 | 5/5, and the unknown repository renders | 15 | 13 `llm`, 2 `cache`, 0 fallbacks | 6 ms | 1.76 s / 3.34 s | 14.9k / 2.6k |
+
+**Pins on `main`:**
+- `octocat/hello-world` answered both `user` and `organization`, which the app reads as ambiguous.
+- `rust-lang/rust` answered both null (6 completion tokens).
+- `denoland/deno` answered `user.repository: null`.
+
+The app's pin query sent straight to the data plane, 7 repositories, a new session for each sample:
+
+| Build | Pins that render | Failures |
+| --- | --- | --- |
+| `main` | 11/21 | 6 both roots null, 1 both found, 4 `user.repository` null |
+| Nested lookup fix only | 12/21 | 9 both roots null |
+| Both fixes | **28/28** | none; p50 1.37 s, p95 4.6 s |
+
+Unit tests: 241/242, the same `calculateRank` rounding failure as with no mock. They stub axios themselves.
+
+### Failures and fixes
+
+| # | Class | Failure | Fix |
+| --- | --- | --- | --- |
+| G1 | Engine, general | When every root field of a joint GraphQL answer may be null, `{}` validated, and the model gave it for `user(login:)` + `organization(login:)`. | #471: the validator requires one root found (repair); the provider's schema is unchanged. |
+| G2 | Engine, general | Root fields with the same arguments under different types were both answered, by the model or by per-field generation after a failed joint answer. | #471: only the first one found is kept. |
+| G3 | Engine, general | A nested lookup by a value of its record (`repository(name:)`) came back `null`. | #473: generated as found, like a REST read of a named id. |
+| G4 | Skills gap | The agent wrote no world description, again, and nothing in the tool results pointed it to one. So stats, top-langs and pins for one user are generated separately (`no_identity`). | Not fixed. Candidate: `start_server`/`import_contract` results for a GraphQL mock without a world could say what a world description would make stateful. |
+| G5 | Install and config | No environment variable or `start_server` field for the proxy port, while the data, admin and gRPC ports have `MB_*` variables. | Not fixed. The agent coped by editing the config. |
+| G6 | Measure 7 | An unknown login gets an invented user (zero counts), not GitHub's `NOT_FOUND` error. After G3, an unknown repository is found too. | None needed for the flows. A GraphQL contract declares no error, and without a world nothing says a login is unknown. |
+
+### Scorecard (measures 1–7)
+
+| # | Measure | Target | `main` `0d591b1b` | With both fixes |
+| --- | --- | --- | --- | --- |
+| 1 | App's tests and main flows pass | 100% | ✗ 10/14 card requests (pins) | ✓ 14/14; pin query 28/28 |
+| 2 | Consistency the flows rely on | 100% | Partly: repeats are identical (`cache`); different queries for one user are generated separately (G4); no writes | Same |
+| 3 | Agent build ≤ 15 min, skills/MCP/CLI only | ≤ 15 min | ✓ 5.0 min, 31 turns | n/a (same build) |
+| 4 | State/pool latency | p50 < 50 ms | ✓ 2 ms (n = 3) | ✓ 6 ms (n = 2) |
+| 5 | Model latency | p50 < 2 s, p95 < 5 s, rare | p50 1.52 s and p95 3.68 s ✓; not rare (12 of 15) | p50 1.76 s and p95 3.34 s ✓; not rare (13 of 15) |
+| 6 | Model spend per session | < $0.05 | ✓ about $0.002 | ✓ about $0.002 |
+| 7 | Errors: unknown ids, invalid input | declared status and body | n/a: no declared GraphQL errors (G6) | Same |
