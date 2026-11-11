@@ -289,8 +289,13 @@ pub(super) async fn mint_one(
     given: &mut Vec<String>,
 ) -> Option<Value> {
     let seed = header_ids::MintSeed::new(state.rt, session, call);
+    let shape = match header_ids::record_id_shape(state.rt, t, field) {
+        Some(shape) => Some(shape),
+        None => header_ids::session_id_shape(state, session, t, field).await,
+    };
     for _ in 0..MINT_ATTEMPTS {
-        let Some(id) = header_ids::draw_record_id(state.rt, seed, t, field) else {
+        let Some(id) = header_ids::draw_record_id(state.rt, seed, (t, field), shape.as_ref())
+        else {
             continue;
         };
         let Some(text) = id_string(&id) else {
