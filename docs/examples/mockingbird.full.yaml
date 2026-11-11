@@ -178,6 +178,7 @@ mocks:
     unknown_ids: generate
     default_scenario: friendly
     shares: shop          # mocks of one API keep their sessions together
+    strict_requests: false  # true: validate requests strictly even for a contract inferred from documentation
     faker_seed: 42
     data_plane_auth:
       mode: api_key
