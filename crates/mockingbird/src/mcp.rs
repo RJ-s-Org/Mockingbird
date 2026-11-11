@@ -1933,15 +1933,21 @@ impl McpServer {
             }
         };
         let v = version.to_string();
-        let source = self
-            .ws(
-                Method::GET,
-                &["mocks", mock, "contracts", &v, "source"],
-                &[],
-                None,
-            )
-            .await?;
-        // A JSON source comes back parsed; any other, as `{content_type, text}`.
+        // The source is served as bytes (`application/octet-stream`): read raw, as
+        // `{content_type, text}`, then parsed as JSON or YAML here.
+        let source = client::api_path(
+            &self.admin_url,
+            self.token.as_deref(),
+            Method::GET,
+            &format!(
+                "/workspaces/{}/mocks/{mock}/contracts/{v}/source",
+                self.workspace
+            ),
+            None,
+        )
+        .await?
+        .unwrap_or_default();
+        // A JSON answer (a source served as JSON) comes back parsed.
         let openapi = |d: &Value| d.get("openapi").is_some() || d.get("swagger").is_some();
         let mut document: Value = Some(source.clone())
             .filter(openapi)

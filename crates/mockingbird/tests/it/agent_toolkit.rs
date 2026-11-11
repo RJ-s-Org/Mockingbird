@@ -1188,6 +1188,25 @@ fn mcp_edit_contract_loosens_the_active_contract() {
             json!({"mock": "hooks", "operation": "nope", "patch": {}}),
         );
         assert!(error.contains("nope"), "{error}");
+
+        // A YAML source is edited as well; a source that is no OpenAPI is refused
+        // with what to do instead.
+        let yaml = "openapi: 3.1.0\ninfo: {title: Ys, version: '1'}\npaths:\n  /y:\n    get:\n      operationId: getY\n      responses: {'200': {description: ok}}\n";
+        mcp.tool(
+            "import_contract",
+            json!({"mock": "y", "content": yaml, "filename": "y.yaml"}),
+        );
+        let edited = mcp.tool(
+            "edit_contract",
+            json!({"mock": "y", "operation": "getY", "patch": {"summary": "Get y"}}),
+        );
+        assert_eq!(edited["version"], 2, "{edited}");
+        mcp.tool(
+            "import_contract",
+            json!({"mock": "gql", "content": "type Query { hello: String }\n", "filename": "schema.graphql"}),
+        );
+        let error = mcp.tool_error("edit_contract", json!({"mock": "gql", "patch": {}}));
+        assert!(error.contains("not an OpenAPI document"), "{error}");
     }));
     let stopped = mcp.tool("stop_server", json!({}));
     assert_eq!(stopped["stopped"], true);
