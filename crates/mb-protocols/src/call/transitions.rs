@@ -92,7 +92,12 @@ async fn applied(
             wanted.push((member.clone(), typed));
         }
     }
-    for (member, value, from_changes) in exprs::set_values(state, (plan, call), before).await {
+    // A create's `set` reads the record as built (its minted id among it).
+    let building = creating.then(|| record.clone());
+    let before = building.as_ref().or(before);
+    for (member, value, from_changes) in
+        exprs::set_values(state, (plan, call), (before, creating)).await
+    {
         if creating && from_changes {
             continue;
         }

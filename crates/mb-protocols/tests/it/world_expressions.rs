@@ -19,7 +19,7 @@ paths:
     post:
       operationId: addMember
       parameters: [{name: X-Actor, in: header, schema: {type: string}}]
-      requestBody: {content: {application/json: {schema: {type: object, properties: {email: {type: string}, name: {type: string}, list_id: {type: string}, amount: {type: integer}}}}}}
+      requestBody: {content: {application/json: {schema: {type: object, properties: {email: {type: string}, name: {type: string}, list_id: {type: string}, amount: {type: integer}, number: {type: string}}}}}}
       responses:
         "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Member"}}}}
         "409": {description: taken, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
@@ -166,6 +166,80 @@ async fn set_writes_members_from_the_request_a_held_record_a_template_a_hash_and
     assert_eq!(stored["currency"], "EUR");
     assert_eq!(stored["number"], 300);
     assert!(record_of(&h, "addMember").get("expr_failed").is_none());
+}
+
+#[tokio::test]
+async fn a_create_s_set_reads_the_record_as_built_its_set_id_first() {
+    // `label` comes before `id` in the description; the id is still evaluated first.
+    let h = members(
+        add_member(json!({
+            "label": "'https://x/' + record.id",
+            "id": "'m_' + lower(request.body.name)",
+            "code": "record.email"
+        })),
+        vec![fill_decoys()],
+    );
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "a@x.io", "name": "Ada"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["id"], "m_ada", "{body}");
+    assert_eq!(body["label"], "https://x/m_ada", "{body}");
+    assert_eq!(body["code"], "a@x.io", "{body}");
+    let stored = h.stored("members", "m_ada").await.expect("stored");
+    assert_eq!(stored["label"], "https://x/m_ada");
+    assert!(record_of(&h, "addMember").get("expr_failed").is_none());
+}
+
+#[tokio::test]
+async fn a_create_s_set_reads_the_id_the_executor_minted() {
+    let h = members(
+        add_member(json!({"label": "'https://x/' + record.id"})),
+        vec![fill_decoys()],
+    );
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "a@x.io", "name": "Ada"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().expect("an id").to_owned();
+    assert_eq!(body["label"], format!("https://x/{id}"), "{body}");
+    let stored = h.stored("members", &id).await.expect("stored");
+    assert_eq!(stored["label"], format!("https://x/{id}"));
+    assert!(record_of(&h, "addMember").get("expr_failed").is_none());
+}
+
+#[tokio::test]
+async fn a_create_the_executor_gives_up_on_reads_the_generated_record_s_id() {
+    // `number` sent as text that is no integer: the executor's record is refused and
+    // the create is generated, under the generated id.
+    let generated = json!({"id": "m-gen", "email": "a@x.io", "name": "Ada", "number": 1});
+    let h = members(
+        add_member(json!({"label": "'https://x/' + record.id"})),
+        vec![fill_decoys(), generated],
+    );
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "a@x.io", "name": "Ada", "number": "abc"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let request = record_of(&h, "addMember");
+    assert_eq!(request["exec_fallback"], "record_invalid", "{request}");
+    let id = body["id"].as_str().expect("an id").to_owned();
+    assert_eq!(body["label"], format!("https://x/{id}"), "{body}");
 }
 
 #[tokio::test]

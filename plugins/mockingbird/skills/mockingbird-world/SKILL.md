@@ -90,7 +90,7 @@ What an expression can read:
 | Name | Value |
 | --- | --- |
 | `request` | `{body, path, query, headers}`: `request.body.email`, `request.path.id`, `request.query.status`, `request.headers['x-actor']` (header names in lower case) |
-| `record` | The target as stored before the call (`null` on a create); in `computed`, the record answered; in `effects`, the target as the call left it; not bound in `list` |
+| `record` | The target as stored before the call (on a create: `null` in `refuse`, the record as built with its id in `set`); in `computed`, the record answered; in `effects`, the target as the call left it; not bound in `list` |
 | `now` | The request time, RFC 3339 text |
 | `it` | Each record inside `count`, `exists` and `sum`, and in `list.where`; in an effect's `when` and `set`, the record it found. The macros name their own item: `record.items.map(x, x.price)` |
 | `value` | In `list.sort.by`, the sort parameter's value as sent |
