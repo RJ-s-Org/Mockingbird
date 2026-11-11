@@ -24,7 +24,7 @@ components:
   schemas:
     Intent:
       type: object
-      required: [id, status, description, next_action]
+      required: [id, status, description, next_action, latest_charge]
       properties:
         id: {type: string}
         status: {type: string}
@@ -32,14 +32,25 @@ components:
         next_action:
           nullable: true
           allOf: [{$ref: "#/components/schemas/Action"}]
+        latest_charge:
+          nullable: true
+          anyOf:
+            - {type: string}
+            - {$ref: "#/components/schemas/Charge"}
     Action:
       type: object
+      required: [type]
       properties:
         type: {type: string}
+    Charge:
+      type: object
+      properties:
+        id: {type: string}
 "##;
 
-/// An object member that may be null and that nothing set is stored as null and
-/// not asked of the model; a nullable scalar and the others are asked.
+/// A nullable reference to another record that nothing set is null, a nullable
+/// object is the faker's, and neither is asked of the model; a nullable scalar and
+/// the other members are.
 #[tokio::test]
 async fn a_nullable_member_nothing_set_is_null_and_not_asked() {
     let bundle = compile(CONTRACT.as_bytes()).unwrap();
@@ -56,7 +67,7 @@ async fn a_nullable_member_nothing_set_is_null_and_not_asked() {
         body: Some(json!({})),
     };
     let known: Map<String, Value> = json!({"id": "pi_1"}).as_object().cloned().unwrap();
-    let missing: Vec<String> = ["status", "description", "next_action"]
+    let missing: Vec<String> = ["status", "description", "next_action", "latest_charge"]
         .map(String::from)
         .to_vec();
     let filled = engine
@@ -70,7 +81,12 @@ async fn a_nullable_member_nothing_set_is_null_and_not_asked() {
         .await;
     assert_eq!(filled.members["status"], "requires_payment_method");
     assert_eq!(filled.members["description"], "Order 42");
-    assert_eq!(filled.members["next_action"], Value::Null);
+    assert_eq!(filled.members["latest_charge"], Value::Null);
+    assert!(
+        filled.members["next_action"]["type"].is_string(),
+        "{:?}",
+        filled.members
+    );
     let sent = provider.requests();
     let ResponseFormat::JsonSchema { schema, .. } = &sent[0].response_format else {
         panic!("no schema sent");
@@ -80,7 +96,7 @@ async fn a_nullable_member_nothing_set_is_null_and_not_asked() {
     assert_eq!(asked, vec!["description", "status"]);
 }
 
-/// With every missing member a nullable object, no model call is made.
+/// With only nullable objects and references missing, no model call is made.
 #[tokio::test]
 async fn only_nullable_members_ask_no_model() {
     let bundle = compile(CONTRACT.as_bytes()).unwrap();
@@ -94,7 +110,7 @@ async fn only_nullable_members_ask_no_model() {
         headers: Map::new(),
         body: None,
     };
-    let missing: Vec<String> = ["next_action"].map(String::from).to_vec();
+    let missing: Vec<String> = ["next_action", "latest_charge"].map(String::from).to_vec();
     let filled = engine
         .fill(
             &bundle,
@@ -104,6 +120,7 @@ async fn only_nullable_members_ask_no_model() {
             FillContext { op, call: &call },
         )
         .await;
-    assert_eq!(filled.members["next_action"], Value::Null);
+    assert_eq!(filled.members["latest_charge"], Value::Null);
+    assert!(filled.members.contains_key("next_action"));
     assert!(provider.requests().is_empty());
 }

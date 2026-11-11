@@ -28,13 +28,16 @@ pub struct Filled {
 
 impl Engine {
     /// Values for the `missing` members of a record whose `schema` declares them, the
-    /// record holding `known` already: one structured-output LLM call whose schema is
-    /// `schema` restricted to those members, with `known` in the prompt so that the
-    /// values agree with it. A member the answer leaves invalid is the faker's (the
-    /// answer's local patch), and so is every member when the call fails or there is
-    /// no provider; the faker draws by the engine's seed, the operation and the request.
-    /// A member `schema` does not declare gets no value, nor one the faker draws `null`
-    /// for.
+    /// record holding `known` already. A member that may be null and holds a reference
+    /// to another record (an id-or-object member) is null; one that may be null and
+    /// holds any other object or list is the faker's. The rest come from one
+    /// structured-output LLM call whose schema is `schema` restricted to them, with
+    /// `known` in the prompt so that the values agree with it; none is made when none
+    /// is left. A member the answer leaves invalid is the faker's (the answer's local
+    /// patch), and so is every member when the call fails or there is no provider; the
+    /// faker draws by the engine's seed, the operation and the request. A member
+    /// `schema` does not declare gets no value, nor one the faker draws `null` for
+    /// unless it may be null.
     pub async fn fill(
         &self,
         bundle: &Bundle,
@@ -52,21 +55,61 @@ impl Engine {
         if declared.is_empty() {
             return filled;
         }
-        // An object, list or reference to another record that may be null and that
-        // nothing set (not the request, the world description or the executor) is
-        // stored as null, as an API leaves the parts a create does not ask for: a
-        // reference nothing named points at no record the session holds. Writing
-        // them out was most of the model's output, and their schemas most of its
-        // prompt. Scalars (a client secret, a description) are still the model's.
-        let (nullable, asked): (Vec<_>, Vec<_>) = declared
+        // What a nullable member that nothing set (not the request, the world
+        // description or the executor) holds is not the model's to write: a
+        // reference to another record (an id-or-object member) is null, as nothing
+        // named a record it could point at, and any other object or list is the
+        // faker's (valid, and at once). Writing them out was most of the model's
+        // output, and their schemas most of its prompt. Scalars (a client secret, a
+        // description) are still the model's.
+        let (local, asked): (Vec<_>, Vec<_>) = declared
             .iter()
             .partition(|(_, schema)| admits_null(bundle, schema) && structured(bundle, schema));
-        for (name, _) in &nullable {
-            filled.members.insert((*name).to_string(), Value::Null);
+        for (name, schema) in &local {
+            if reference(bundle, schema) {
+                filled.members.insert((*name).to_string(), Value::Null);
+            }
         }
-        if asked.is_empty() {
-            return filled;
+        if !asked.is_empty() {
+            self.fill_with_llm(bundle, op, call, known, &asked, &mut filled)
+                .await;
         }
+        let [path, query, body] = seed::call_parts(call);
+        let mut draws = seed::Draws::new(
+            seed::request_seed(call).or(self.faker_seed),
+            &[&bundle.source_digest, &op.id, "fill"],
+            &[&path, &query, &body],
+        );
+        for (name, member) in &declared {
+            if !filled.members.contains_key(*name) {
+                // A nullable object or list left to the faker is drawn without its
+                // null: present, as an author or a status object a client reads.
+                let local = local.iter().any(|(n, _)| n == name);
+                let member = if local {
+                    without_null(bundle.resolve(member))
+                } else {
+                    member.clone()
+                };
+                let value = self.fake_field(bundle, name, &member, &mut draws);
+                if !value.is_null() {
+                    filled.members.insert((*name).to_string(), value);
+                }
+            }
+        }
+        filled
+    }
+
+    /// The model's values for the `asked` members, into `filled`; nothing when the
+    /// call fails or there is no provider (the faker fills them after).
+    async fn fill_with_llm(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        call: &OperationCall,
+        known: &Map<String, Value>,
+        asked: &[&(&str, Value)],
+        filled: &mut Filled,
+    ) {
         let properties: Map<String, Value> = asked
             .iter()
             .map(|(name, schema)| ((*name).to_string(), schema.clone()))
@@ -123,21 +166,6 @@ impl Engine {
                 }
             }
         }
-        let [path, query, body] = seed::call_parts(call);
-        let mut draws = seed::Draws::new(
-            seed::request_seed(call).or(self.faker_seed),
-            &[&bundle.source_digest, &op.id, "fill"],
-            &[&path, &query, &body],
-        );
-        for (name, member) in &declared {
-            if !filled.members.contains_key(*name) {
-                let value = self.fake_field(bundle, name, member, &mut draws);
-                if !value.is_null() {
-                    filled.members.insert((*name).to_string(), value);
-                }
-            }
-        }
-        filled
     }
 }
 
@@ -188,4 +216,60 @@ fn structured(bundle: &Bundle, schema: &Value) -> bool {
             })
     }
     walk(bundle, schema, 0)
+}
+
+/// Whether `schema` (a member's) names another record by id or holds it whole:
+/// a union of a plain string and an object branch, `null` branches aside.
+fn reference(bundle: &Bundle, schema: &Value) -> bool {
+    fn walk(bundle: &Bundle, schema: &Value, depth: usize) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        let schema = bundle.resolve(schema);
+        ["anyOf", "oneOf"].iter().any(|k| {
+            let Some(branches) = schema.get(*k).and_then(Value::as_array) else {
+                return false;
+            };
+            let string = |b: &Value| {
+                let b = bundle.resolve(b);
+                b.get("type").and_then(Value::as_str) == Some("string")
+                    && b.get("enum").is_none()
+                    && b.get("const").is_none()
+            };
+            (branches.iter().any(string) && branches.iter().any(|b| structured(bundle, b)))
+                || branches.iter().any(|b| walk(bundle, b, depth + 1))
+        })
+    }
+    walk(bundle, schema, 0)
+}
+
+/// `schema` with its `null` left out: the `null` type, `nullable`, and the `null`
+/// branches of an `anyOf`/`oneOf` (a union left with one branch becomes it).
+fn without_null(schema: &Value) -> Value {
+    let mut schema = schema.clone();
+    let Value::Object(obj) = &mut schema else {
+        return schema;
+    };
+    obj.remove("nullable");
+    if let Some(Value::Array(types)) = obj.get_mut("type") {
+        types.retain(|t| t != "null");
+        if let [only] = types.as_slice() {
+            let only = only.clone();
+            obj.insert("type".into(), only);
+        }
+    }
+    for key in ["anyOf", "oneOf"] {
+        if let Some(Value::Array(branches)) = obj.get_mut(key) {
+            branches.retain(|b| b.get("type").and_then(Value::as_str) != Some("null"));
+            if let [only] = branches.as_slice() {
+                let only = only.clone();
+                obj.remove(key);
+                if obj.is_empty() {
+                    return only;
+                }
+                return json!({"allOf": [Value::Object(obj.clone()), only]});
+            }
+        }
+    }
+    schema
 }
