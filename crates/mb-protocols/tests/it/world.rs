@@ -359,6 +359,11 @@ impl StateStore for Counting {
     async fn upsert(&self, s: &SessionKey, r: StoredResource) -> Result<(), StateError> {
         self.inner.upsert(s, r).await
     }
+    // As the store does it: the trait's default upserts, publishing a change a seed
+    // does not make.
+    async fn insert_seeded(&self, s: &SessionKey, r: StoredResource) -> Result<bool, StateError> {
+        self.inner.insert_seeded(s, r).await
+    }
     async fn delete(&self, s: &SessionKey, t: &str, id: &str) -> Result<bool, StateError> {
         self.inner.delete(s, t, id).await
     }

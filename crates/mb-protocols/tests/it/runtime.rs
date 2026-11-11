@@ -962,6 +962,77 @@ impl Provider for Gated {
     }
 }
 
+/// A read whose client gives up while its LLM call runs still finishes: the
+/// answer is stored and the call logged, so the identical repeat is served
+/// without a second LLM call.
+#[tokio::test]
+async fn a_read_the_client_gave_up_on_still_finishes() {
+    let real = order("o1");
+    let inner = Arc::new(ScriptedProvider::new(vec![Ok(real.to_string())]));
+    let held = Arc::new(HeldFirst {
+        inner: inner.clone(),
+        entered: AtomicUsize::new(0),
+        open: tokio::sync::Notify::new(),
+    });
+    let collect = Arc::new(Collect::default());
+    let mut rt = runtime(Some(held.clone()), memory());
+    rt.recorder = Some(collect.clone());
+    let router = http_rest::router(Arc::new(rt));
+    let first = tokio::spawn({
+        let router = router.clone();
+        async move { send(&router, get_with("/orders/o1", &[])).await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while held.entered.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the read reaches the LLM");
+    // The client goes away: hyper drops the request's future.
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    held.open.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while collect.records.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the abandoned read is logged");
+    let logged = collect.records.lock().unwrap().clone();
+    assert_eq!(logged.len(), 1);
+    assert_eq!(logged[0].source.as_deref(), Some("llm"));
+    let again = send(&router, get_with("/orders/o1", &[])).await;
+    assert_ne!(again.headers()["x-mockingbird-source"], "llm");
+    assert_eq!(body_json(again).await, real);
+    assert_eq!(inner.requests().len(), 1, "the repeat made no LLM call");
+}
+
+/// Answers as its inner provider does, holding the first call until `open`
+/// is notified.
+struct HeldFirst {
+    inner: Arc<ScriptedProvider>,
+    entered: AtomicUsize,
+    open: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl Provider for HeldFirst {
+    fn capabilities(&self) -> mb_llm::Capabilities {
+        self.inner.capabilities()
+    }
+    async fn complete(
+        &self,
+        req: mb_llm::ChatRequest,
+    ) -> Result<mb_llm::ChatResponse, mb_llm::LlmError> {
+        if self.entered.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.open.notified().await;
+        }
+        self.inner.complete(req).await
+    }
+}
+
 /// A faker list standing in for a failed LLM call seeds nothing: its items
 /// would otherwise be mixed into the session's later LLM lists.
 #[tokio::test]

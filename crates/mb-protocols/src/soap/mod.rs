@@ -147,7 +147,9 @@ pub fn try_router(rt: Arc<MockRuntime>) -> Result<Router, SoapError> {
         endpoints,
         services: services.into_iter().collect(),
     });
-    Ok(Router::new().fallback(handle).with_state(state))
+    Ok(crate::detach::detached(
+        Router::new().fallback(handle).with_state(state),
+    ))
 }
 
 /// A schema's `x-xml-root` as `(namespace, name)`.
