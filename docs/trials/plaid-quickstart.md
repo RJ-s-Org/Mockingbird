@@ -86,3 +86,52 @@ Balances agree too (available 1420.75, current 1583.42 on every route). The repe
 | 10 | 4 `llm`, 5 `repaired`, 1 `cache` | 0 | 0.8–5.2 s, median 2.2 s | 14.6k / 4.3k |
 
 The catalog's `transactionsSync` webhook still fires: a target that names a read's operation gets its event.
+
+## Run 7 (2026-11-10): built through the skills and MCP, `deepseek-v4.1-flash-1017`
+
+Release binary from `main` at `0c843950`, built into the shared lane. Plaid quickstart `cd23ead`, Python backend, no source edits. The coding agent used only the installed skills, the MCP tools (`call_mock`, `get_world`, `patch_world`, `list_requests`, `reset_session`) and the CLI:
+
+```bash
+mockingbird examples init plaid --dir mb-run7
+mockingbird llm configure --provider openrouter --model deepseek/deepseek-v4.1-flash-1017 --default -c mockingbird.yaml   # api_key: env:OPENROUTER_API_KEY
+mockingbird server start --proxy -c mockingbird.yaml      # ports 43080/43090/43888
+eval "$(mockingbird proxy env -c mockingbird.yaml)"; PLAID_CLIENT_ID=test_client_id PLAID_SECRET=test_secret PORT=8017 python server.py
+```
+
+World entries written, following the `mockingbird-world` skill:
+- `item` has identity `item_id`.
+- `itemPublicTokenExchange` is a create of `item` (answer record at the root).
+- `itemGet` reads `item` with target `access_token` and `not_found: 400`.
+- The four account reads and `transactionsSync` are lists with `answer.records`.
+- `access_token`, `client_id` and `secret` are listed as `ignores`.
+- `transactionsSync` has cursor paging.
+
+The flows were run twice: once before the `ignores` and paging entries (7a), once after (7b). The front end's order is `info`, `create_link_token`, `set_access_token`, then `accounts`, `auth`, `identity`, `transactions`, `balance` and `item`, and finally `accounts` again.
+
+### What works
+
+- **All 9 routes answer 200 in both runs, with 0 fallbacks.** `plaid-python` reaches the mock through the proxy preload.
+- **The exchange's `item_id` holds through the session.** It comes back from `/item/get` and in the `item` of `/accounts/get`, `/auth/get` and `/accounts/balance/get`.
+- **Account data agrees across calls.** `account_id`s, masks and balances match on accounts, auth, identity, balance and the transactions' `account_id`.
+- **A repeated `/accounts/get` is a cache hit** (3–5 ms).
+- **Dates are now recent:** the link token expires `11 Nov 2026`, and transactions are dated 6–10 Nov 2026. The persona held: First Platypus Bank, masks 0000/1111/3333, Alberta Charleson, ACH routing 011401533.
+- **Self-test with `call_mock` worked:** an exchange followed by `/item/get` gave back the same `item_id`.
+
+### Failures
+
+| # | Repro (request → expected / got) | Class |
+| --- | --- | --- |
+| 1 | `POST /accounts/get {"access_token":"access-sandbox-00000000-0000-4000-8000-000000000000"}` (never issued) → expected 400 `INVALID_ACCESS_TOKEN` / got 200 with invented accounts. In the app's session, it returns that session's accounts under a new `item_id` (`b2Nc4d…`, not the exchanged `k7Qm2x…`). | inexpressible: `access_token` names the Item but is not an Item member. `types.item.identity.alternates: [access_token]` is refused with `access_token is not a member of a item record`, and the format cannot say that a create's answer member is an alias for the record. |
+| 2 | With `itemPublicTokenExchange: {kind: create, type: item, answer: {record: ""}}`, `POST /item/public_token/exchange` → expected the item stored / got `exec_fallback: record_invalid` (the answer `{access_token,item_id,request_id}` lacks the Item's required members). `/item/get` is then `not_held`, so the model answers it and `not_found: 400` never applies. | engine bug: a create whose answer carries the identity and only some members should store a partial record. Arguably inexpressible. |
+| 3 | `POST /accounts/get` (and `/auth/get`, `/identity/get`, `/accounts/balance/get`, `/transactions/sync`) → expected an answer from state / got model-served every time. The fallback is `undescribed_param access_token`; once `access_token` is in `ignores`, it is `unscoped_list`. 25 of 27 calls were `llm`, and `/accounts/get` took 3–9 s. | inexpressible: the list's scope is the Item named by `access_token`, and account records have no item member for `scope.member`. |
+| 4 | `POST /transactions/sync {"cursor":""}` → expected a page of about 10–30 recent transactions / got 1 transaction with `has_more: true`. The second page, `{"cursor":"<next_cursor>"}`, gives `exec_fallback: unknown_token` (the executor did not mint the model's cursor) and 1 more transaction. That is 2 transactions in total in 7b, and 1 in 7a. | model answer (thin data). Follows from #3. |
+| 5 | `POST /identity/get` → expected all 3 accounts / got 2: the credit card is missing in both runs, although the contract allows 3. | model answer |
+| 6 | 7b: `/accounts/get` → expected distinct ids / got the first `account_id` equal to the exchange's `item_id` (`k7Qm2xR9tLpV4nB8…`). | model answer |
+| 7 | `call_mock {path:"/item/public_token/exchange"}` on the catalog mock (`route_prefix: /`, `hosts: [sandbox.plaid.com]`) → expected 200 / got 404 `no mock is mounted … for host 127.0.0.1`. It works only with `headers: {Host: sandbox.plaid.com}`, which no skill mentions. Also, when the MCP server runs outside the server's directory, `call_mock` goes to `:8080`, because it reads `.mockingbird/server.json` from its own working directory. | skills/MCP gap |
+| 8 | `patch_world` with `types.account.identity` plus `operations.accountsGet.type: account` in one patch → expected a new type / got both refused (`no operation has resource type account`). The four account reads stay as four heuristic types (`accounts`, `auth`, `identity`, `balance`). | engine bug (world validation checks types before the same patch's operation types) |
+
+### Numbers
+
+| Calls | Sources | Fallbacks | Model-served latency | Tokens (prompt / completion) | OpenRouter spend |
+| --- | --- | --- | --- | --- | --- |
+| 27 (2 flow runs plus probes) | 25 `llm`, 2 `cache` | 0 | p50 2.3 s, p95 8.0 s, max 9.2 s | 44.3k / 9.9k | about $0.005 at $0.006/M prompt and $0.50/M completion (the shared key's daily usage was $0.066 in total) |
