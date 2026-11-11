@@ -102,3 +102,57 @@ mockingbird run -c mockingbird/mockingbird.yaml -- .venv/bin/python manage.py se
 - The GitHub integration authenticates as a GitHub App: it signs a JWT with `GITHUB_PRIVATE_KEY` and calls `POST /app/installations/{id}/access_tokens` before creating the issue. The catalog's GitHub REST subset has no Apps operations; the trial added that one.
 - A single-value answer (Slack's literal `"ok"`) is labelled `llm` with 0 tokens and 0 ms. It should carry its own source.
 - Created issues got realistic numbers (`#417`) and the title and body healthchecks sent.
+
+## Holdout run (2026-11-11): built by the agent through the skills and MCP
+
+`main` at `6c131052`, model `deepseek/deepseek-v4.1-flash-1017`. No source edits; same seed data (`mb-holdout/` in the trial checkout). The flows are the ones healthchecks runs:
+- **Down:** the check goes overdue, and `sendalerts` notifies 6 channels.
+- **Up:** a ping through the app's own `/ping/<code>` flips the check up, and `sendalerts` notifies the 4 channels that send "up" messages. Opsgenie's is a close by alias.
+
+**How the agent built the mock:**
+- **Twilio and GitHub REST** came from the catalog (`examples init`), with their hosts set in `mockingbird.yaml`. The catalog's GitHub subset now has the installation-token operation.
+- **Slack incoming webhooks, Opsgenie and Telegram** are not in the catalog. They were imported with MCP `import_contract` from their documentation pages (`api.slack.com/messaging/webhooks`, `docs.opsgenie.com/docs/alert-api`, `core.telegram.org/bots/api`), reviewed with `get_draft`, approved, and given hosts with `update_mock`.
+  - The imports took 6 s, 33 s and 3.5 min. They produced 1, 18 and 173 operations.
+
+### Results
+
+| Run | Down flow | Up flow | Notes |
+| --- | --- | --- | --- |
+| 1, contracts as imported | 3 of 6 (SMS, call, GitHub) | not run (a script bug in the trial) | Slack, Telegram and Opsgenie answered 400 with the declared error bodies |
+| 2, after the agent loosened 3 contracts | **6 of 6** | **4 of 4** | `Notification.error` empty everywhere |
+
+The app's own integration tests (`manage.py test hc.integrations.{sms,call,slack,telegram,opsgenie,github}`) pass: 164 tests. They patch `curl.request`, though, so none reaches the mock. healthchecks has no test that exercises the integrations over HTTP.
+
+### Scorecard (run 2)
+
+| # | Measure | Result |
+| --- | --- | --- |
+| 1 | Flows pass | 10 of 10 notifications, after the contract edits in failures 1–3 |
+| 2 | Consistency the flows check | nothing to check: healthchecks never reads back what it sent. The Opsgenie close by alias answers 202 |
+| 3 | Agent build | 16.8 min from an empty directory to the passing run 2, including 3.5 min waiting on the Telegram import and about 4 min fixing failures 1–3 |
+| 4 | State-served latency | **p50 3.3 s** (4 creates). A create answered from state still makes its fill call |
+| 5 | Model-served latency | p50 0.9 s, p95 2.4 s (5 calls) |
+| 6 | Spend per session | $0.0009 for the run (13.5k prompt / 1.6k completion tokens). Doc-import spend is not recorded (failure 6) |
+| 7 | Errors | invalid input gets the declared body: Twilio `{"code": 21211, …}` with 400, Slack `invalid_payload`. An unknown Twilio message SID gets 200 with an invented message (failure 7) |
+
+**Sources:** 11 calls. 4 from `state`, 36% (the Twilio message, call and second message, and the GitHub issue). 5 from `llm` (Telegram ×2, Opsgenie create and close, GitHub installation token). 2 `fallback` (Slack's literal `ok`).
+
+### Failures
+
+| # | Repro (request → expected / got) | Class |
+| --- | --- | --- |
+| 1 | Slack `POST hooks.slack.com/services/T…/B…/…` with healthchecks' `{"attachments": [...]}` → expected 200 `ok` / got 400 `invalid_payload`. The doc import made `text` required (the page's examples all send it), and it did not declare `attachments`. | doc import (built-in model) too strict |
+| 2 | Telegram `POST /bot<token>/sendMessage {"message_thread_id": null, …}` → expected 200 / got 400 `message_thread_id: null is not of type "integer"`. The docs say "Optional Integer"; the real API accepts `null`. | engine: validation treats `null` in an optional, non-nullable member as an error, though real APIs commonly accept it. Could be fixed generally for optional members |
+| 3 | Opsgenie `POST /v2/alerts {"details": {"Total pings": 0}}` → expected 202 / got 400 `details/Total pings: 0 is not of type "string"`. The docs type details values as strings; the real API accepts numbers. | doc import (built-in model): the contract is stricter than the API |
+| 4 | Fixing an active contract that came from a doc import: no MCP tool and no skill says how. `edit_draft` only works on drafts. The path that worked was `admin_api GET /mocks/<m>/contracts/1/source`, edit, then `import_contract {source, activate: true}`. | skills/MCP gap |
+| 5 | The Telegram import holds 173 operations and gives 179 world gaps. Only 5 paths carry the `/bot{token}` prefix; the rest are `/<method>`. The skill says to work through every gap, which is impossible here; it should say to cover the operations the app calls. | doc import (path prefix), skills gap (gap triage) |
+| 6 | Import jobs (`GET /mocks/<m>/imports`) and the request log carry no token usage for doc imports, so the spend of an agent build is invisible. | engine (reporting) |
+| 7 | `GET api.twilio.com/2010-04-01/Accounts/AC…/Messages/SM000….json` (never created) → expected 404 / got 200 with an invented message. The default `unknown_ids: generate` applies. healthchecks never does this. | engine default (measure 7). Not blocking |
+| 8 | Creates answered from `state` (Twilio messages and calls, GitHub issue) take 1.0–3.4 s, because the create's fill is a model call. Measure 4 (p50 < 50 ms) fails for write-heavy apps. | engine (latency) |
+| 9 | Slack's literal `ok` answer is source `fallback` ("the response media type is not JSON: answered from the declared example"). `report` counts it as a fallback, so `verify --no-fallbacks` would fail on a correct answer. | engine (reporting) |
+
+**Generalized from the dev-app fixes:**
+- **Host-bound mocks:** worked through `update_mock` and the proxy with no `Host` work (#404).
+- **Rejected requests:** now logged as `rejected` with their validation reason, no longer as `fallback`.
+- **Creates read back from state:** worked for Twilio and GitHub (the record stored, filled once).
+- **Token aliases and scoped lists (#415):** not exercised, because no read-backs.

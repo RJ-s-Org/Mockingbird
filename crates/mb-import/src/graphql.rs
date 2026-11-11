@@ -567,6 +567,73 @@ fn implementors(schema: &Schema) -> BTreeMap<&str, Vec<&str>> {
     out
 }
 
+/// The string format a custom scalar's values take when its name or its
+/// description says it holds a date or a time: `DateTime`, `Timestamp`,
+/// `ISO8601DateTime` → `date-time`; `Date`, `ISO8601Date` → `date`;
+/// otherwise a description naming ISO 8601 or RFC 3339. A description of
+/// seconds or milliseconds since the epoch (and naming neither) keeps the
+/// scalar untyped: those values are numbers.
+fn date_format(name: &str, description: Option<&str>) -> Option<&'static str> {
+    let description = description.unwrap_or_default().to_lowercase();
+    let standard = ["iso-8601", "iso 8601", "iso8601", "rfc 3339", "rfc3339"]
+        .iter()
+        .any(|w| description.contains(w));
+    if !standard
+        && ["unix", "epoch", "seconds since", "milliseconds"]
+            .iter()
+            .any(|w| description.contains(w))
+    {
+        return None;
+    }
+    // By whole words of the name: `DateTime`, `ISO8601Date`, `Timestamp`, not
+    // `Update` or `Runtime`.
+    let words = name_words(name);
+    let last = words.last().map(String::as_str);
+    if words.windows(2).any(|w| w[0] == "date" && w[1] == "time") || last == Some("timestamp") {
+        return Some("date-time");
+    }
+    if last == Some("date") {
+        return Some("date");
+    }
+    // A bare `Time` is left a plain string: a JSON Schema `time` needs an
+    // offset most APIs' times do not carry.
+    if last == Some("time") {
+        return None;
+    }
+    if !standard {
+        None
+    } else if description.contains("time") {
+        Some("date-time")
+    } else if description.contains("date") {
+        Some("date")
+    } else {
+        None
+    }
+}
+
+/// `ISO8601DateTime` → `iso8601`, `date`, `time`: lowercased words split at
+/// capitals (after a lowercase letter or a digit) and at `_`.
+fn name_words(name: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    let mut prev: Option<char> = None;
+    for c in name.chars() {
+        let boundary = c == '_'
+            || (c.is_ascii_uppercase()
+                && prev.is_some_and(|p| p.is_ascii_lowercase() || p.is_ascii_digit()));
+        if boundary || words.is_empty() {
+            words.push(String::new());
+        }
+        if c != '_'
+            && let Some(word) = words.last_mut()
+        {
+            word.push(c.to_ascii_lowercase());
+        }
+        prev = Some(c);
+    }
+    words.retain(|w| !w.is_empty());
+    words
+}
+
 fn def_schema(
     schema: &Schema,
     implementors: &BTreeMap<&str, Vec<&str>>,
@@ -575,7 +642,12 @@ fn def_schema(
 ) -> Value {
     let mut obj = match &def.kind {
         Kind::Scalar => {
-            return json!({ "description": format!("GraphQL scalar {name}") });
+            let mut out = json!({ "description": format!("GraphQL scalar {name}") });
+            if let Some(format) = date_format(name, def.description.as_deref()) {
+                out["type"] = json!("string");
+                out["format"] = json!(format);
+            }
+            return out;
         }
         Kind::Object { fields, .. } => fields_schema(schema, fields, Some(name)),
         Kind::Interface { fields, .. } => match implementors.get(name) {
