@@ -503,7 +503,27 @@ async fn only_sysadmin_binds_a_secret_to_a_base_url() {
             StatusCode::FORBIDDEN,
             &format!("{who}: new profile with a secret"),
         );
+        // The same through the config file's name for the key.
+        h.call(
+            w,
+            Method::PUT,
+            &uri("evil"),
+            Some(json!({ "base_url": "https://attacker.example", "model": "m", "api_key": key })),
+        )
+        .await
+        .expect(
+            StatusCode::FORBIDDEN,
+            &format!("{who}: new profile with an api_key reference"),
+        );
     }
+    h.call(
+        Some("sysadmin"),
+        Method::PUT,
+        &uri("alias"),
+        Some(json!({ "base_url": "https://llm", "model": "m", "api_key": key })),
+    )
+    .await
+    .expect(StatusCode::OK, "sysadmin sets the secret as api_key");
     h.call(
         Some("sysadmin"),
         Method::PUT,

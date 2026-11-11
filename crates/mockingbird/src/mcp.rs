@@ -176,6 +176,7 @@ const LOCAL_TOOLS: &[&str] = &[
 ];
 
 /// Why a tool call failed: shown to the model as an error result.
+#[derive(Debug)]
 struct ToolError(String);
 
 impl From<anyhow::Error> for ToolError {
@@ -241,6 +242,34 @@ fn n(desc: &str) -> Value {
 
 fn o(desc: &str) -> Value {
     json!({ "type": "object", "description": desc })
+}
+
+/// The `profile` argument of `put_llm_profile`.
+fn profile_schema() -> Value {
+    let ids: Vec<&str> = providers::PRESETS.iter().map(|p| p.id).collect();
+    json!({
+        "type": "object",
+        "description": "The profile. base_url and model are required unless provider gives them.",
+        "properties": {
+            "provider": { "type": "string", "enum": ids, "description": "Provider preset (list_llm_providers); fills base_url, model, output_mode, headers and the key reference where not given." },
+            "base_url": s("OpenAI-compatible base URL; default: the preset's."),
+            "model": s("Model; default: the preset's."),
+            "secret_ref": s("Secret reference holding the provider key: env:NAME (e.g. env:OPENROUTER_API_KEY), file:/path or vault:<mount>/<path>#<field>; never the key itself. Default with provider: the preset's variable."),
+            "api_key": s("Alias of secret_ref, as the config file names it; also a reference, never the key."),
+            "output_mode": { "type": "string", "enum": ["none", "json_object", "json_schema"], "description": "How the provider is asked for JSON; default: the preset's, else json_schema." },
+            "temperature": n("0-2; default 0.7."),
+            "timeout_ms": n("Default 60000."),
+            "max_tokens": n("Default 16384."),
+            "fallback_profile": s("Profile tried when this one fails."),
+            "headers": o("Extra provider headers; values may embed ${env:NAME}."),
+            "extra_body": o("JSON merged into every provider request body."),
+            "repetition_guard": b("Stop and retry looping replies; default true."),
+            "account_id": s("Cloudflare presets: account ID (default: CLOUDFLARE_ACCOUNT_ID)."),
+            "gateway_id": s("cloudflare-ai-gateway: gateway ID (default: default)."),
+            "resource": s("azure-openai: resource name."),
+            "no_gateway_token": b("cloudflare-ai-gateway with authentication off: send no cf-aig-authorization header."),
+        },
+    })
 }
 
 fn provider_props() -> Map<String, Value> {
@@ -960,9 +989,12 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "put_llm_profile",
             title: "Create or replace an LLM profile",
-            description: "Write an LLM profile through the Admin API: base_url, model, secret_ref (env:NAME), output_mode, temperature, timeout_ms, max_tokens, fallback_profile, headers. configure_llm builds one from a preset.",
+            description: "Write an LLM profile through the Admin API in one call, e.g. {name: \"openrouter\", profile: {provider: \"openrouter\", model: \"deepseek/deepseek-v4.1-flash-1017\", api_key: \"env:OPENROUTER_API_KEY\"}}. Fields: provider (a preset from list_llm_providers: fills base_url, the default model, output_mode, headers and the key reference when not given), base_url and model (required without provider), secret_ref or its alias api_key (a secret reference such as env:OPENROUTER_API_KEY, never the key itself), output_mode, temperature, timeout_ms, max_tokens, fallback_profile, headers, extra_body, repetition_guard. Replaces the whole profile.",
             schema: obj(
-                json!({ "name": s("Profile name."), "profile": o("The profile.") }),
+                json!({
+                    "name": s("Profile name."),
+                    "profile": profile_schema(),
+                }),
                 &["name", "profile"],
             ),
             read_only: false,
@@ -1113,6 +1145,95 @@ fn provider_args(args: &Value) -> Result<ProviderArgs, ToolError> {
             .filter(|v| !v.is_null())
             .map(Value::to_string),
     })
+}
+
+/// Keys of a `put_llm_profile` profile that only feed its `provider`
+/// preset and are not sent to the Admin API.
+const PRESET_KEYS: [&str; 5] = [
+    "provider",
+    "account_id",
+    "gateway_id",
+    "resource",
+    "no_gateway_token",
+];
+
+/// A `put_llm_profile` profile with its `provider` preset (if any) expanded
+/// into the fields the Admin API takes: `base_url`, `model`, `output_mode`,
+/// the key's reference (`secret_ref`) and headers, each only where the
+/// profile does not set it (its headers win name by name). `account_id`,
+/// `gateway_id` and `resource` fill the preset's base URL, and
+/// `no_gateway_token` drops Cloudflare AI Gateway's token header. The key alias
+/// `api_key` is left to the Admin API, which refuses a raw key.
+fn expand_preset(mut profile: Value) -> Result<Value, ToolError> {
+    let Some(obj) = profile.as_object_mut() else {
+        return Ok(profile);
+    };
+    let Some(provider) = obj.get("provider").filter(|p| !p.is_null()) else {
+        for key in PRESET_KEYS {
+            obj.remove(key);
+        }
+        return Ok(profile);
+    };
+    let Some(provider) = provider.as_str().map(String::from) else {
+        return Err(ToolError(
+            "profile.provider must be a preset id (list_llm_providers)".into(),
+        ));
+    };
+    let has = |obj: &Map<String, Value>, k: &str| obj.get(k).is_some_and(|v| !v.is_null());
+    let text = |k: &str| obj.get(k).and_then(Value::as_str).map(String::from);
+    let has_key = ["secret_ref", "api_key", "apiKey"]
+        .iter()
+        .any(|k| obj.contains_key(*k));
+    let args = ProviderArgs {
+        provider: Some(provider.clone()),
+        model: text("model"),
+        base_url: text("base_url"),
+        no_api_key: has_key,
+        account_id: text("account_id"),
+        gateway_id: text("gateway_id"),
+        resource: text("resource"),
+        no_gateway_token: obj
+            .get("no_gateway_token")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        ..ProviderArgs::default()
+    };
+    let preset = args.profile().map_err(|e| {
+        let mut detail = format!("{e:#}");
+        for (flag, field) in [
+            ("--base-url", "base_url"),
+            ("--model", "model"),
+            ("--account-id", "account_id"),
+            ("--gateway-id", "gateway_id"),
+            ("--resource", "resource"),
+        ] {
+            detail = detail.replace(flag, field);
+        }
+        ToolError(format!("profile.provider {provider:?}: {detail}"))
+    })?;
+    let filled = providers::api_body(&preset, None);
+    for key in ["base_url", "model"] {
+        if !has(obj, key) {
+            obj.insert(key.into(), filled[key].clone());
+        }
+    }
+    if !has(obj, "output_mode") && !has(obj, "json_schema") {
+        obj.insert("output_mode".into(), filled["output_mode"].clone());
+    }
+    if !has_key && !filled["secret_ref"].is_null() {
+        obj.insert("secret_ref".into(), filled["secret_ref"].clone());
+    }
+    if let Some(preset_headers) = filled["headers"].as_object().filter(|h| !h.is_empty()) {
+        let mut headers = preset_headers.clone();
+        if let Some(own) = obj.get("headers").and_then(Value::as_object) {
+            headers.extend(own.clone());
+        }
+        obj.insert("headers".into(), Value::Object(headers));
+    }
+    for key in PRESET_KEYS {
+        obj.remove(key);
+    }
+    Ok(profile)
 }
 
 fn paths(args: &Value, key: &str) -> Vec<PathBuf> {
@@ -1982,11 +2103,12 @@ impl McpServer {
             }
             "list_llm_profiles" => self.ws(Method::GET, &["llm-profiles"], &[], None).await,
             "put_llm_profile" => {
+                let profile = a.get("profile").cloned().map(expand_preset).transpose()?;
                 self.ws(
                     Method::PUT,
                     &["llm-profiles", str_arg(a, "name")?],
                     &[],
-                    a.get("profile").cloned(),
+                    profile,
                 )
                 .await
             }
@@ -3243,6 +3365,95 @@ fn unshared_hosts_step(mocks: &[String], hosts: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_provider_preset_fills_what_the_profile_leaves_out() {
+        // The field-trial calls: provider with the config file's api_key,
+        // and provider with secret_ref.
+        for key in ["api_key", "secret_ref"] {
+            let mut profile = json!({
+                "provider": "openrouter",
+                "model": "deepseek/deepseek-v4.1-flash-1017",
+            });
+            profile[key] = json!("env:OPENROUTER_API_KEY");
+            let body = expand_preset(profile).unwrap();
+            assert_eq!(body["base_url"], "https://openrouter.ai/api/v1", "{body}");
+            assert_eq!(body["model"], "deepseek/deepseek-v4.1-flash-1017");
+            assert_eq!(body["output_mode"], "json_schema");
+            assert_eq!(body[key], "env:OPENROUTER_API_KEY");
+            assert_eq!(body["headers"]["x-title"], "Mockingbird", "{body}");
+            assert!(body.get("provider").is_none(), "{body}");
+            if key == "api_key" {
+                // The alias is left to the Admin API, which checks it.
+                assert!(body.get("secret_ref").is_none(), "{body}");
+            }
+        }
+
+        // No key given: the preset's variable; own fields and headers win.
+        let body = expand_preset(json!({
+            "provider": "openrouter",
+            "base_url": "https://proxy.example/v1",
+            "output_mode": "none",
+            "headers": { "x-title": "Mine" },
+        }))
+        .unwrap();
+        assert_eq!(body["secret_ref"], "env:OPENROUTER_API_KEY");
+        assert_eq!(body["base_url"], "https://proxy.example/v1");
+        assert_eq!(body["model"], "deepseek/deepseek-v4.1-flash-1017");
+        assert_eq!(body["output_mode"], "none");
+        assert_eq!(body["headers"]["x-title"], "Mine");
+        assert_eq!(
+            body["headers"]["http-referer"],
+            "https://github.com/rj-s-org/mockingbird"
+        );
+
+        // An explicit null secret_ref means no key.
+        let body = expand_preset(json!({ "provider": "openrouter", "secret_ref": null })).unwrap();
+        assert_eq!(body["secret_ref"], Value::Null, "{body}");
+
+        // Preset parameters fill the base URL and are not sent on.
+        let body = expand_preset(json!({
+            "provider": "cloudflare-ai-gateway",
+            "account_id": "acct",
+            "gateway_id": "gw",
+        }))
+        .unwrap();
+        assert_eq!(
+            body["base_url"],
+            "https://gateway.ai.cloudflare.com/v1/acct/gw/compat"
+        );
+        assert!(body.get("account_id").is_none(), "{body}");
+        assert!(
+            body["headers"].get("cf-aig-authorization").is_some(),
+            "{body}"
+        );
+        let body = expand_preset(json!({
+            "provider": "cloudflare-ai-gateway",
+            "account_id": "acct",
+            "no_gateway_token": true,
+        }))
+        .unwrap();
+        assert!(
+            body["headers"].get("cf-aig-authorization").is_none(),
+            "{body}"
+        );
+        assert!(body.get("no_gateway_token").is_none(), "{body}");
+
+        // Without a provider the profile passes through as written.
+        let plain = json!({ "base_url": "https://x", "model": "m", "api_key": "env:K_API_KEY" });
+        assert_eq!(expand_preset(plain.clone()).unwrap(), plain);
+    }
+
+    #[test]
+    fn a_provider_preset_names_what_is_missing() {
+        let e = expand_preset(json!({ "provider": "custom", "model": "m" })).unwrap_err();
+        assert!(e.0.contains("base_url"), "{}", e.0);
+        assert!(!e.0.contains("--"), "{}", e.0);
+        let e = expand_preset(json!({ "provider": "nope" })).unwrap_err();
+        assert!(e.0.contains("openrouter"), "{}", e.0);
+        let e = expand_preset(json!({ "provider": 3 })).unwrap_err();
+        assert!(e.0.contains("list_llm_providers"), "{}", e.0);
+    }
 
     #[test]
     fn a_draft_import_gets_no_next_steps() {
