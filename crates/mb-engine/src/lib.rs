@@ -2877,7 +2877,7 @@ impl Engine {
         match (one, two) {
             (Some(Ok(answer)), _) | (_, Some(Ok(answer))) => Ok(answer),
             (Some(Err(e)), _) | (None, Some(Err(e))) => Err(e),
-            (None, None) => Err("LLM request timed out".into()),
+            (None, None) => Err(TIMED_OUT.into()),
         }
     }
 
@@ -2968,10 +2968,15 @@ impl Engine {
                 charge(e.spent());
                 Err(e.to_string())
             }
-            Err(_) => Err("LLM request timed out".into()),
+            Err(_) => Err(TIMED_OUT.into()),
         }
     }
 }
+
+/// The fallback reason of an answer the model did not give in time. It names the
+/// setting to raise, which a developer would otherwise have to look for.
+const TIMED_OUT: &str = "LLM request timed out: a served answer waits at most \
+limits.generation_timeout (20s by default) or the profile's timeout";
 
 /// Times the estimated size of an answer its text may reach before the reply is
 /// stopped (see [`answer_cap`]).
