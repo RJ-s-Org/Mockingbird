@@ -2771,7 +2771,7 @@ components:
 }
 
 #[test]
-fn a_list_is_typed_by_its_items_when_they_are_exactly_a_types_record() {
+fn a_list_is_typed_by_its_items_when_they_are_a_form_of_a_types_record() {
     let bundle = lists();
     let type_of = |id: &str| op(&bundle, id).resource_type.clone();
     assert_eq!(type_of("query").as_deref(), Some("pages"));
@@ -2779,8 +2779,9 @@ fn a_list_is_typed_by_its_items_when_they_are_exactly_a_types_record() {
     assert_eq!(op(&bundle, "searchGet").kind, OperationKind::Query);
     // A write is not a list, whatever it answers.
     assert_eq!(type_of("searchPost").as_deref(), Some("jql"));
-    // A longer form is not exactly the record, and two types are not one.
-    assert_eq!(type_of("summaries").as_deref(), Some("summaries"));
+    // A longer form is a form of the record, so its list lists that type; two types
+    // are not one.
+    assert_eq!(type_of("summaries").as_deref(), Some("pages"));
     assert_eq!(type_of("mixed").as_deref(), Some("mixed"));
     assert_eq!(type_of("getSource").as_deref(), Some("sources"));
 }
@@ -3056,9 +3057,10 @@ fn a_created_record_takes_the_type_that_reads_its_schema() {
     for id in ["addComment", "getActions"] {
         assert_eq!(type_of(id).as_deref(), Some("actions"), "{id}");
     }
-    // The read by path serves exactly what the create answers.
+    // The read by path serves exactly what the create answers, and the list its
+    // compact form.
     assert_eq!(type_of("createSubtask").as_deref(), Some("tasks"));
-    assert_eq!(type_of("getSubtasks").as_deref(), Some("subtasks"));
+    assert_eq!(type_of("getSubtasks").as_deref(), Some("tasks"));
     // Lists of two other types are not one type.
     assert_eq!(type_of("like").as_deref(), Some("likes"));
     let note = op(&bundle, "addNote");
@@ -3589,4 +3591,77 @@ components:
         bundle.defs["PaymentIntent"]["properties"]["id"],
         json!({"type": "string", "examples": ["pi_3MtwBwLkdIwHu7ix28a3tqPa"]})
     );
+}
+
+/// TMDB's shape: lists named for what they rank (`/movie/popular`,
+/// `/tv/{series_id}/recommendations`) of summaries of the records the reads by path
+/// serve, each with a member the record lacks (`genre_ids` beside `genres`).
+const SUMMARY_LISTS: &str = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /movie/popular:
+    get:
+      operationId: popularMovies
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/MoviePage"}}}}}
+  /movie/{movie_id}:
+    parameters: [{name: movie_id, in: path, required: true, schema: {type: integer}}]
+    get:
+      operationId: movie
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Movie"}}}}}
+  /tv/popular:
+    get:
+      operationId: popularShows
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {page: {type: integer}, results: {type: array, items: {$ref: "#/components/schemas/ShowItem"}}}}}}}}
+  /tv/{series_id}:
+    parameters: [{name: series_id, in: path, required: true, schema: {type: integer}}]
+    get:
+      operationId: show
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Show"}}}}}
+  /tv/{series_id}/recommendations:
+    parameters: [{name: series_id, in: path, required: true, schema: {type: integer}}]
+    get:
+      operationId: showRecommendations
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {page: {type: integer}, results: {type: array, items: {$ref: "#/components/schemas/ShowItem"}}}}}}}}
+  /trending:
+    get:
+      operationId: trending
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {results: {type: array, items: {$ref: "#/components/schemas/Hit"}}}}}}}}
+components:
+  schemas:
+    Movie: {type: object, properties: {id: {type: integer}, title: {type: string}, overview: {type: string}, genres: {type: array, items: {type: object}}, runtime: {type: integer}}}
+    MovieItem: {type: object, properties: {id: {type: integer}, title: {type: string}, overview: {type: string}, genre_ids: {type: array, items: {type: integer}}}}
+    MoviePage: {type: object, properties: {page: {type: integer}, results: {type: array, items: {$ref: "#/components/schemas/MovieItem"}}}}
+    Show: {type: object, properties: {id: {type: integer}, name: {type: string}, overview: {type: string}, genres: {type: array, items: {type: object}}}}
+    ShowItem: {type: object, properties: {id: {type: integer}, name: {type: string}, overview: {type: string}, genre_ids: {type: array, items: {type: integer}}}}
+    Hit: {type: object, properties: {id: {type: integer}, overview: {type: string}, genres: {type: array, items: {type: object}}}}
+"##;
+
+#[test]
+fn a_list_of_summaries_takes_the_type_whose_record_they_summarize() {
+    let bundle = compile(SUMMARY_LISTS.as_bytes()).unwrap();
+    let type_of = |id: &str| op(&bundle, id).resource_type.clone();
+    assert_eq!(type_of("popularMovies").as_deref(), Some("movie"));
+    assert_eq!(type_of("popularShows").as_deref(), Some("tv"));
+    assert_eq!(type_of("showRecommendations").as_deref(), Some("tv"));
+    // Items as close to a movie as to a show are neither.
+    assert_eq!(type_of("trending").as_deref(), Some("trending"));
+}
+
+/// A lone list of summaries, the only route of its type (a lookup), lists the type it
+/// summarizes too; items as close to two records leave it as it was.
+#[test]
+fn a_lone_list_of_summaries_takes_the_type_whose_record_they_summarize() {
+    let lone = |items: &str| {
+        let contract = SUMMARY_LISTS
+            .replace("  /tv/popular:", "  /tv/popular_unused:")
+            .replace(
+                "items: {$ref: \"#/components/schemas/MovieItem\"}",
+                &format!("items: {{$ref: \"#/components/schemas/{items}\"}}"),
+            );
+        let bundle = compile(contract.as_bytes()).unwrap();
+        op(&bundle, "popularMovies").resource_type.clone()
+    };
+    assert_eq!(lone("MovieItem").as_deref(), Some("movie"));
+    assert_eq!(lone("Hit").as_deref(), Some("popular"));
 }
