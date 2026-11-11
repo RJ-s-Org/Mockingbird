@@ -119,7 +119,7 @@ impl Selection {
     }
 
     /// The field names this response key reads, first one first.
-    fn names(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.name.as_str()).chain(self.also.iter().map(String::as_str))
     }
 
@@ -210,7 +210,11 @@ const MAX_NARROWED: usize = 256;
 /// dozen fields takes longer than finding it again. Held by a runtime,
 /// whose bundle is fixed, so the operation id is key enough.
 #[derive(Debug, Default)]
-pub(crate) struct NarrowCache(Mutex<Narrowed>);
+pub(crate) struct NarrowCache(Mutex<Narrowed>, std::sync::OnceLock<LookupKeys>);
+
+/// Per object type, the scalar fields some field of the schema looks it up
+/// by: `Repository.issue(number:)` → `Issue: {number}`.
+pub(crate) type LookupKeys = HashMap<String, std::collections::BTreeSet<String>>;
 
 #[derive(Debug, Default)]
 struct Narrowed {
@@ -252,10 +256,72 @@ impl NarrowCache {
         narrowed
     }
 
+    /// Sets the schema's lookup keys (once, when the schema is built).
+    pub(crate) fn set_lookup_keys(&self, keys: LookupKeys) {
+        let _ = self.1.set(keys);
+    }
+
+    /// The lookup keys of object type `ty`.
+    pub(crate) fn lookup_keys(&self, ty: &str) -> Option<&std::collections::BTreeSet<String>> {
+        self.1.get()?.get(ty)
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.0.lock().map(|c| c.len).unwrap_or_default()
     }
+}
+
+/// `sel` with the lookup keys (see [`LookupKeys`]) of the record a create
+/// answers added: the answer's own object when its type has an `id`, else
+/// each selected member of the payload that has one
+/// (`createIssue { issue { id url } }` → also `number`). The client reads
+/// only what it selected; the stored record holds what a later query finds
+/// it by.
+pub(crate) fn with_lookup_keys(
+    sel: &Selection,
+    schema: &Value,
+    defs: &Map<String, Value>,
+    keys: impl Fn(&str) -> Option<Vec<String>>,
+) -> Selection {
+    fn def_name<'a>(schema: &'a Value, defs: &Map<String, Value>) -> Option<&'a str> {
+        let name = super::nested::def_ref(schema)?;
+        let props = defs.get(name)?.get("properties")?.as_object()?;
+        props.contains_key("id").then_some(name)
+    }
+    let add = |sel: &mut Selection, ty: &str| {
+        for name in keys(ty).into_iter().flatten() {
+            let selected = sel.fields.values().any(|c| c.names().any(|n| n == name));
+            if !selected && !sel.fields.contains_key(&name) {
+                sel.fields.insert(
+                    name.clone(),
+                    Selection {
+                        name,
+                        ..Selection::default()
+                    },
+                );
+            }
+        }
+    };
+    let mut out = sel.clone();
+    if let Some(ty) = def_name(schema, defs) {
+        add(&mut out, ty);
+        return out;
+    }
+    let Some(props) =
+        super::nested::def_ref(schema).and_then(|n| defs.get(n)?.get("properties")?.as_object())
+    else {
+        return out;
+    };
+    for child in out.fields.values_mut() {
+        if child.fields.is_empty() {
+            continue;
+        }
+        if let Some(ty) = props.get(&child.name).and_then(|s| def_name(s, defs)) {
+            add(child, ty);
+        }
+    }
+    out
 }
 
 /// `__typename` if listed, then every generated response key whose field

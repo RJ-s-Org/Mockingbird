@@ -322,6 +322,18 @@ async fn generate_in(
     let Some(op) = rt.operation(op_id) else {
         return Err(Failure::new(500, format!("unknown operation {op_id}")).error);
     };
+    // A create generates its record's lookup keys too, so that what a
+    // later query finds it by (an issue's `number`) is stored.
+    let widened;
+    let selection = match (op.kind, op.success_output().and_then(|o| o.schema.as_ref())) {
+        (OperationKind::Command(mb_mcm::Effect::Create), Some(schema)) => {
+            widened = super::select::with_lookup_keys(selection, schema, &rt.bundle.defs, |ty| {
+                Some(rt.narrowed().lookup_keys(ty)?.iter().cloned().collect())
+            });
+            &widened
+        }
+        _ => selection,
+    };
     let mut report = Report {
         operation_id: Some(op_id.to_string()),
         session: DEFAULT_SESSION.into(),
@@ -488,6 +500,27 @@ async fn generate_in(
                             Err(Failure::new(404, detail))
                         }
                         Ok(mut generated) => {
+                            if was_narrowed
+                                && rt.consistency
+                                && op.kind == OperationKind::Query
+                                && (200..300).contains(&generated.status)
+                                && generated.source != Source::State
+                                && let Some(body) = generated.body.as_mut()
+                            {
+                                let args = match &call.body {
+                                    Some(Value::Object(args)) => args.clone(),
+                                    _ => Map::new(),
+                                };
+                                super::nested::from_state(
+                                    rt,
+                                    &plan.session,
+                                    op,
+                                    selection,
+                                    args,
+                                    body,
+                                )
+                                .await;
+                            }
                             reconcile_money(rt, &plan, &call, &mut generated).await;
                             store_answer(rt, &plan, op, selection, &call, &generated).await;
                             write_by_id(rt, &plan, op, &call, &generated).await;
@@ -603,9 +636,27 @@ async fn store_answer(
     let (Some(body), Some(Value::Object(args))) = (&generated.body, &call.body) else {
         return;
     };
-    let objects = super::state::objects(&rt.bundle, op, selection, body, args);
+    let mut objects = super::state::objects(&rt.bundle, op, selection, body, args);
+    if !seeding {
+        super::nested::link_args(rt, &plan.session, &mut objects, args).await;
+    }
+    // A query's own object (the first found) keeps what it was read by.
+    let read_by = match objects.first() {
+        Some(root) if seeding && super::nested::answers_type(op, &root.resource_type) => {
+            let members = super::state::read_args(&rt.bundle, op, args);
+            (!members.is_empty()).then(|| mb_state::StoredResource {
+                resource_type: root.resource_type.clone(),
+                id: root.id.clone(),
+                data: Value::Object(members),
+            })
+        }
+        _ => None,
+    };
     if !objects.is_empty() {
         call::store_resources(rt, &plan.session, objects, !seeding).await;
+    }
+    if let Some(read_by) = read_by {
+        call::store_resources(rt, &plan.session, vec![read_by], true).await;
     }
 }
 
