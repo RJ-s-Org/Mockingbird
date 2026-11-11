@@ -66,10 +66,12 @@ impl GenerationLimiter {
     /// off the request path never takes the last slot, nor waits for one); `None`
     /// otherwise.
     fn try_acquire_spare(&self) -> Option<GenerationPermit> {
-        if self.semaphore.available_permits() < 2 {
+        // Taken first, then given back if it was the last: checking before taking would
+        // let two callers each see two free and leave none.
+        let permit = Arc::clone(&self.semaphore).try_acquire_owned().ok()?;
+        if self.semaphore.available_permits() == 0 {
             return None;
         }
-        let permit = Arc::clone(&self.semaphore).try_acquire_owned().ok()?;
         metrics::gauge!(IN_FLIGHT_METRIC).increment(1.0);
         Some(GenerationPermit { _permit: permit })
     }
