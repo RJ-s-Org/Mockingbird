@@ -620,7 +620,8 @@
               "$ref": "#/$defs/param"
             },
             "member": {
-              "$ref": "#/$defs/member"
+              "$ref": "#/$defs/member",
+              "description": "The record member the parameter's value matches. Absent when the parameter is a value a create of the records' `parent` type issues (an issued alternate): the list holds that parent's records."
             },
             "kind": {
               "enum": [
@@ -635,8 +636,7 @@
             }
           },
           "required": [
-            "param",
-            "member"
+            "param"
           ]
         },
         "filters": {

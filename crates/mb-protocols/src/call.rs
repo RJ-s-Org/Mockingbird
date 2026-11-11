@@ -563,6 +563,25 @@ pub(crate) async fn prepare<'a>(
             nothing_held(rt, plan, call, response_schema, &detail).await,
         ));
     }
+    // The same for a list scoped by a value the server issued its items' parent: no
+    // parent holds it, so no collection answers to it.
+    if plan.forced_status.is_none()
+        && state.available()
+        && let Some((parent, param, value)) = state_lists::issued_scope(rt, op, call)
+        && records::by_extra_fields(&mut state, session, &parent, (&[], &value), None)
+            .instrument(state_span())
+            .await
+            .is_none()
+    {
+        let detail = format!(
+            "no {parent} has {param} {value} in session {}",
+            session.session
+        );
+        state.touch(session).instrument(state_span()).await;
+        return Prepared::Answered(Box::new(
+            nothing_held(rt, plan, call, response_schema, &detail).await,
+        ));
+    }
     // A value the server issues for a record ([`exec::issued_aliases`], Plaid's
     // `access_token`) that names no held record was never issued: whatever
     // `unknown_ids` says, no record answers to it.

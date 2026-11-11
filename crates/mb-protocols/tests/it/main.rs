@@ -65,6 +65,7 @@ mod identity_by_contract;
 mod if_none_match_range;
 mod in_segment_keys;
 mod issued_aliases;
+mod issued_scopes;
 mod nested_identity_patches;
 mod partial_creates;
 mod provider_policy;

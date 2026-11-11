@@ -466,7 +466,9 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
             (true, Value::String(path)) => path.clone(),
             _ => texts(&value).into_iter().next()?,
         };
-        Some((s.member.clone(), text))
+        // An issued scope has no member: it names the collection
+        // ([`super::state_lists::issued_scope`]), and filters nothing.
+        Some((s.member.clone()?, text))
     });
     let scope_prefix = prefix.then(|| {
         d.scope

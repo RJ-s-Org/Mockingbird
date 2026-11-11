@@ -723,8 +723,12 @@ pub enum TextDesc {
 pub struct ScopeDesc {
     /// The request parameter.
     pub param: String,
-    /// The record member it matches.
-    pub member: String,
+    /// The record member it matches. Absent when the parameter is a value a
+    /// create of the records' described `parent` type issues (an issued
+    /// alternate, Plaid's `access_token`): the list then holds that parent's
+    /// records, which every list of the type with the same scope shares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
     /// How the member matches the parameter; `eq` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<ScopeKind>,

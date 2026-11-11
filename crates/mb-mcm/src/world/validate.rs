@@ -527,6 +527,38 @@ impl<'a> Ctx<'a> {
         false
     }
 
+    /// Whether `param`, a scope with no member, names a value a create of type `t`'s
+    /// described parent issues ([`Self::issued_member`]) and the parent's
+    /// `identity.alternates` name; refuses it otherwise.
+    fn check_issued_scope(&mut self, t: Option<&str>, param: &str, path: &Path) -> bool {
+        let name = param.strip_prefix('/').unwrap_or(param);
+        let parent = t
+            .and_then(|t| self.world.types.get(t))
+            .and_then(|d| d.parent.as_ref())
+            .map(|p| p.r#type.as_str());
+        let issued = parent.is_some_and(|p| {
+            self.issued_member(p, name)
+                && self
+                    .world
+                    .types
+                    .get(p)
+                    .and_then(|d| d.identity.as_ref())
+                    .and_then(|i| i.alternates.as_ref())
+                    .is_some_and(|alts| alts.iter().any(|a| a == name))
+        });
+        if !issued {
+            self.refuse(
+                path,
+                RefusalCode::Unresolved,
+                format!(
+                    "a scope with no `member` takes a value a create of the type's `parent` \
+                     issues and names in its `identity.alternates`; `{name}` is not one"
+                ),
+            );
+        }
+        issued
+    }
+
     /// Whether a create of type `t` answers `member` beside its record, where the
     /// record itself does not declare it: a value the server issues for the record
     /// (Plaid's `access_token` for an Item), which `identity.alternates` may name.
@@ -1610,7 +1642,10 @@ impl<'a> Ctx<'a> {
             let p = path.join("scope");
             self.unknown(&p, &s.extra);
             let param = self.check_param(op, &s.param, &p.join("param"));
-            let member = self.check_member(record, ty, &s.member, &p.join("member"));
+            let member = match &s.member {
+                Some(m) => self.check_member(record, ty, m, &p.join("member")),
+                None => self.check_issued_scope(ty, &s.param, &p.join("param")),
+            };
             let recursive = match &s.recursive {
                 Some(_) if s.kind != Some(ScopeKind::Prefix) => {
                     self.refuse(
