@@ -1365,26 +1365,35 @@ pub(crate) async fn complete(
                 }
             }
             // A created record shows the described initial state it is stored in.
+            // The answer is the record here (unwrapped from where the identity
+            // says the answer holds it). A GraphQL record holds only what its
+            // selection asked for, and names its type.
+            let names_type = |record: &Value| {
+                record
+                    .get("__typename")
+                    .and_then(Value::as_str)
+                    .is_some_and(|n| n.eq_ignore_ascii_case(t))
+            };
             if op.kind == OperationKind::Command(Effect::Create)
                 && !unstored
                 && (200..300).contains(&generated.status)
-                && let Some(body) = generated.body.as_mut()
-                && entities::entity_fits(rt, t, body)
+                && let Some(record) = generated.body.as_mut()
+                && (entities::entity_fits(rt, t, record) || names_type(record))
             {
                 let request = call
                     .body
                     .as_ref()
                     .map(|b| records::request_record(rt, op, b));
-                lifecycle::initial(rt, t, body, request);
+                lifecycle::initial(rt, t, record, request);
                 // What the description sets on a created record holds on one the
                 // executor left to generation too: in the answer, and so in what is
                 // stored from it.
                 let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
-                let before = mb_mcm::member_at(body, field).cloned();
-                transitions::apply_on_create(&mut state, (plan, call), body)
+                let before = mb_mcm::member_at(record, field).cloned();
+                transitions::apply_on_create(&mut state, (plan, call), record)
                     .instrument(state_span())
                     .await;
-                set_moved_identity = mb_mcm::member_at(body, field) != before.as_ref();
+                set_moved_identity = mb_mcm::member_at(record, field) != before.as_ref();
             }
             // A `set` that gave the record another identity is checked again: a record
             // held under it is not stored over. The answer is the refusal of a repeat
