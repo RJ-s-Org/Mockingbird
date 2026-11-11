@@ -56,6 +56,7 @@ mod events_triggers;
 mod events_ws;
 mod graphql;
 mod graphql_creates;
+mod graphql_links;
 mod graphql_nested;
 mod graphql_ws;
 mod grpc;
