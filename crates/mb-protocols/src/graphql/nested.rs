@@ -866,6 +866,7 @@ impl Walk<'_> {
         }
         out.insert("__typename".into(), json!(ty));
         overlay(&mut out, &record.data, sel);
+        self.expand_references(ty, sel, &record.data, &mut out);
         for (key, _) in sel.fields.iter().filter(|(_, c)| c.name == "id") {
             out.insert(key.clone(), json!(record.id));
         }
@@ -875,6 +876,88 @@ impl Walk<'_> {
             out.insert("id".into(), json!(record.id));
         }
         Value::Object(out)
+    }
+
+    /// Each member of `out` (an object of type `ty` rendered for `sel` from
+    /// `data`) that `data` holds as a reference by id alone (`headRepository:
+    /// {__typename, id}`, a stored link where an answer said `null`) while `sel`
+    /// asks for more of it: the record the session holds under that id,
+    /// rendered for its selection, else what the answer gave there with the
+    /// rest faked, under that id. A reference to an interface or union with no
+    /// `__typename` is matched among the concrete types the session holds, and
+    /// left as it is when none holds it. Each level goes one step down a finite
+    /// selection, so references that loop end with the query.
+    fn expand_references(
+        &self,
+        ty: &str,
+        sel: &Selection,
+        data: &Value,
+        out: &mut Map<String, Value>,
+    ) {
+        let id_or_type = |name: &str| name == "id" || name == "__typename";
+        for (key, child) in &sel.fields {
+            if child.fields.values().all(|c| id_or_type(&c.name)) {
+                continue;
+            }
+            let Some(Value::Object(reference)) = child.names().find_map(|n| data.get(n)) else {
+                continue;
+            };
+            if !reference.keys().all(|k| id_or_type(k)) {
+                continue;
+            }
+            let Some(id) = reference.get("id").and_then(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            }) else {
+                continue;
+            };
+            // The concrete types it may be: its own, else the declared type's.
+            let candidates: Vec<String> = match reference.get("__typename").and_then(Value::as_str)
+            {
+                Some(named) => vec![named.to_owned()],
+                None => self
+                    .bundle
+                    .defs
+                    .get(ty)
+                    .and_then(|d| {
+                        let props = d.get("properties")?;
+                        child.names().find_map(|n| props.get(n))
+                    })
+                    .map(|schema| keyed_types(self.bundle, schema))
+                    .unwrap_or_default(),
+            };
+            let held = candidates.iter().find_map(|t| {
+                self.held
+                    .get(t)?
+                    .iter()
+                    .find(|r| r.id == id)
+                    .map(|r| (t, r))
+            });
+            let expanded = match (held, candidates.as_slice()) {
+                (Some((t, record)), _) => self.render(t, record, child, None),
+                (None, [only]) => {
+                    let mut faked = self.fake(only, child);
+                    // What the answer gave stands over the faker's.
+                    if let Some(Value::Object(answered)) = out.get(key) {
+                        for (k, v) in answered.iter().filter(|(_, v)| !v.is_null()) {
+                            faked.insert(k.clone(), v.clone());
+                        }
+                    }
+                    faked.insert("__typename".into(), json!(only));
+                    for (k, _) in child.fields.iter().filter(|(_, c)| c.name == "id") {
+                        faked.insert(k.clone(), json!(id));
+                    }
+                    // Unselected, the id still names the record.
+                    if child.fields.get("id").is_none_or(|c| c.name == "id") {
+                        faked.insert("id".into(), json!(id));
+                    }
+                    Value::Object(faked)
+                }
+                (None, _) => continue,
+            };
+            out.insert(key.clone(), expanded);
+        }
     }
 
     fn fake(&self, ty: &str, sel: &Selection) -> Map<String, Value> {

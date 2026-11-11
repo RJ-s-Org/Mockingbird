@@ -31,6 +31,10 @@
 //!   each anew). That the session took them is a record of its own ([`SERVED_TYPE`]),
 //!   so a reset of the session forgets it with the records.
 //!
+//! - [`create_fill`]: a create's members the request did not send (and the executor does
+//!   not mint) are a pool record's values, with that record's id written as the new
+//!   record's wherever a value embeds it; the model fills only what the pool record lacks.
+//!
 //! A record taken from a pool is a seeded record of the session, as a generated answer's
 //! mention is; the request record notes `pool` (how many records the call took).
 
@@ -348,6 +352,76 @@ fn id_text(v: &Value) -> Option<String> {
     }
 }
 
+/// Values for the members `names` of a record of type `t` (keyed by its member
+/// `field`) a create makes under `key`, from the pool (see the module's doc): those a
+/// pool record (the same `key` takes the same one) holds, with the pool record's own id
+/// written as `key` where a value names it as a path or a prefix (see [`rewrite_id`]).
+/// `None` when the pool holds no record of `t`, or none of `names`.
+pub(super) fn create_fill(
+    rt: &MockRuntime,
+    (t, field): (&str, &str),
+    key: &str,
+    names: &[String],
+) -> Option<serde_json::Map<String, Value>> {
+    if !rt.consistency || names.is_empty() {
+        return None;
+    }
+    let records = rt.pool.records(t, &digest(rt, t));
+    if records.is_empty() {
+        return None;
+    }
+    let pick = Sha256::digest(key.as_bytes());
+    let record = records.get(usize::from(pick[0]) % records.len())?;
+    let own_id = mb_mcm::member_at(record, field).and_then(id_text);
+    let mut out = serde_json::Map::new();
+    for name in names {
+        if let Some(value) = record.get(name) {
+            let mut value = value.clone();
+            if let Some(own) = own_id.as_deref() {
+                rewrite_id(&mut value, own, key);
+            }
+            out.insert(name.clone(), value);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Writes `to` for `from` in every string of `value` where `from` names the record: a
+/// path segment (after a `/`, not followed by a letter or digit: `/widgets/w1`,
+/// `/items/7/parts`), or, for an id that is not all digits, the whole string or its
+/// start before a `_` or `-` (`pi_1` in `pi_1_secret_x`). A number at the start of a
+/// string, or one in a query value, is left as written (`1.99`, `1 Main St`, `limit=7`).
+fn rewrite_id(value: &mut Value, from: &str, to: &str) {
+    match value {
+        Value::String(s) if !from.is_empty() && s.contains(from) => *s = rewritten(s, from, to),
+        Value::Array(items) => items.iter_mut().for_each(|v| rewrite_id(v, from, to)),
+        Value::Object(members) => members.values_mut().for_each(|v| rewrite_id(v, from, to)),
+        _ => {}
+    }
+}
+
+fn rewritten(s: &str, from: &str, to: &str) -> String {
+    let numeric = from.chars().all(|c| c.is_ascii_digit());
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    let mut before: Option<char> = None;
+    let mut start = true;
+    while let Some(at) = rest.find(from) {
+        let prev = rest[..at].chars().last().or(before);
+        let next = rest[at + from.len()..].chars().next();
+        let at_start = start && at == 0;
+        let segment = prev == Some('/') && next.is_none_or(|c| !c.is_alphanumeric());
+        let prefix = at_start && !numeric && next.is_none_or(|c| c == '_' || c == '-');
+        out.push_str(&rest[..at]);
+        out.push_str(if segment || prefix { to } else { from });
+        before = from.chars().last();
+        rest = &rest[at + from.len()..];
+        start = false;
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Whether `op` names its record by its key alone: an HTTP route with exactly one path
 /// parameter (one after an owner's would not tell owners apart), or a GraphQL field.
 fn keyed_alone(op: &Operation) -> bool {
@@ -471,7 +545,37 @@ pub(super) async fn list(
 
 #[cfg(test)]
 mod tests {
-    use super::RecordPool;
+    use super::{RecordPool, rewritten};
+
+    #[test]
+    fn an_id_is_rewritten_only_where_it_names_the_record() {
+        assert_eq!(rewritten("1.99", "1", "42"), "1.99");
+        assert_eq!(rewritten("1 Main St", "1", "42"), "1 Main St");
+        assert_eq!(rewritten("123 Main St", "123", "42"), "123 Main St");
+        assert_eq!(
+            rewritten("/widgets/7?limit=7", "7", "42"),
+            "/widgets/42?limit=7"
+        );
+        assert_eq!(rewritten("7", "7", "42"), "7");
+        assert_eq!(rewritten("w1", "w1", "new"), "new");
+        assert_eq!(
+            rewritten("https://x.test/widgets/w1", "w1", "new"),
+            "https://x.test/widgets/new"
+        );
+        assert_eq!(
+            rewritten("/widgets/w1/parts?id=w1", "w1", "new"),
+            "/widgets/new/parts?id=w1"
+        );
+        assert_eq!(rewritten("pi_1_secret_x", "pi_1", "pi_9"), "pi_9_secret_x");
+        assert_eq!(rewritten("/widgets/w12", "w1", "new"), "/widgets/w12");
+        assert_eq!(rewritten("+1 555-123-4567", "123", "77"), "+1 555-123-4567");
+        assert_eq!(rewritten("Order #1010", "101", "7"), "Order #1010");
+        assert_eq!(
+            rewritten("A red widget, discovered", "red", "blue"),
+            "A red widget, discovered"
+        );
+        assert_eq!(rewritten("/items/7", "7", "42"), "/items/42");
+    }
     use serde_json::json;
 
     #[test]
