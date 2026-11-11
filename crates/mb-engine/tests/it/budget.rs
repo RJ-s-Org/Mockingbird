@@ -202,7 +202,8 @@ async fn a_search_keeps_the_types_it_names_at_its_limit() {
     }
 }
 
-/// A page of things heavy enough to shape, with `query` its parameters, and beside
+/// A page of things heavy enough to shape (each with an optional list of details, which
+/// can go so the page keeps its size), with `query` its parameters, and beside
 /// the page's items what no page size counts: a list of a lighter object, and words.
 fn paged_things(query: &str, items: &str) -> Bundle {
     let detail: String = (0..30)
@@ -236,7 +237,7 @@ components:
       required: [id]
       properties:
         id: {{type: string}}
-        detail: {{type: object, properties: {{ {detail} }}}}
+        details: {{type: array, items: {{type: object, properties: {{ {detail} }}}}}}
 "##
     );
     compile(contract.as_bytes()).unwrap()
