@@ -259,6 +259,7 @@ fn bundle(title: &str) -> Bundle {
         channels: Vec::new(),
         webhooks: Vec::new(),
         api_key_names: None,
+        inferred: false,
     }
 }
 
@@ -285,6 +286,7 @@ pub(crate) async fn mock_behavior_round_trips(store: &Arc<dyn ControlStore>) {
         graphql_path: Some("/graphql.json".into()),
         faker_seed: Some(42),
         shares: None,
+        strict_requests: true,
     };
     store.update_mock(&mock).await.expect("update");
     let got = store

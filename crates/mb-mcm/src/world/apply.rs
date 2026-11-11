@@ -283,6 +283,7 @@ mod tests {
             channels: vec![],
             webhooks: vec![],
             api_key_names: None,
+            inferred: false,
         }
     }
 

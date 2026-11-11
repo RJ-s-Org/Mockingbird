@@ -64,6 +64,7 @@ mod http_rest;
 mod identity_by_contract;
 mod if_none_match_range;
 mod in_segment_keys;
+mod inferred_requests;
 mod issued_aliases;
 mod issued_scopes;
 mod nested_identity_patches;
