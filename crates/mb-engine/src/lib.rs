@@ -70,6 +70,7 @@ pub mod message;
 pub mod ndjson;
 pub mod persona;
 pub mod pii;
+mod pool;
 pub mod prompt;
 mod salvage;
 pub mod scenario;
@@ -85,6 +86,7 @@ pub use guards::{
 };
 pub use member_names::mend_member_names;
 pub use message::{GeneratedMessage, MessageContext};
+pub use pool::{POOL_CALL_TIMEOUT, Pooled};
 pub use prompt::{build_message_messages, build_messages, build_stream_messages};
 pub use scenario::{ScenarioSpec, apply_set};
 pub use seed::{DEFAULT_FAKER_SEED, SEED_HEADER};
@@ -2574,7 +2576,7 @@ impl Engine {
         &self,
         provider: &dyn Provider,
         validator: &SchemaValidator,
-        mut messages: Vec<ChatMessage>,
+        messages: Vec<ChatMessage>,
         format: &ResponseFormat,
         checks: &Checks<'_>,
         usage: &mut Usage,
@@ -2582,13 +2584,47 @@ impl Engine {
         // A fallback chain gets every hop's timeout, not just the first's, up to
         // the generation timeout.
         let limit = self.llm_limit(provider);
+        self.generate_with_llm_in(
+            provider, validator, messages, format, checks, usage, limit, false,
+        )
+        .await
+    }
+
+    /// [`Self::generate_with_llm`] with `limit` (the time the whole call may take) in
+    /// place of the configured one, and, for a `background` call (off the request path,
+    /// which may take longer than a request may wait), a slot only when one is spare
+    /// ([`Self::admit_spare`]).
+    #[allow(clippy::too_many_arguments)]
+    async fn generate_with_llm_in(
+        &self,
+        provider: &dyn Provider,
+        validator: &SchemaValidator,
+        mut messages: Vec<ChatMessage>,
+        format: &ResponseFormat,
+        checks: &Checks<'_>,
+        usage: &mut Usage,
+        limit: Duration,
+        background: bool,
+    ) -> Result<LlmAnswer, String> {
         let deadline = Instant::now() + limit;
-        let _permit = self.admit(deadline).await?;
-        let (first, (checked, cut, effects)) = self
-            .hedged(
+        // A call off the request path makes one call, never a hedge: a hedge would
+        // take a second slot. The slot is held for the whole call, repairs included.
+        let _permit;
+        let (first, (checked, cut, effects)) = if background {
+            _permit = self.admit_spare()?;
+            let first = self
+                .complete(provider, &messages, format, usage, deadline)
+                .await?;
+            let checked = tracing::info_span!("mb.validate")
+                .in_scope(|| self.check_reply(validator, &first, checks));
+            (first, checked)
+        } else {
+            _permit = self.admit(deadline).await?;
+            self.hedged(
                 provider, &messages, format, validator, checks, usage, deadline,
             )
-            .await?;
+            .await?
+        };
         let truncated = first.truncated.clone().filter(|_| cut);
         let errors = match checked {
             Checked::Valid(value) => {

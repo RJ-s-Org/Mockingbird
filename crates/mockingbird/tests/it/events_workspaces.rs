@@ -146,6 +146,7 @@ async fn setup() -> Setup {
         http: Default::default(),
         mode: mockingbird::runtime::ServeMode::Full,
         webhook_log: Default::default(),
+        record_pools: Default::default(),
     };
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await.unwrap();
@@ -443,6 +444,7 @@ async fn twins() -> Twins {
         http: Default::default(),
         mode: mockingbird::runtime::ServeMode::Full,
         webhook_log: Default::default(),
+        record_pools: Default::default(),
     };
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await.unwrap();

@@ -13,6 +13,8 @@ use tokio::time::Instant;
 use crate::validate::SchemaValidator;
 use crate::{Engine, ResourceEffect};
 
+/// Why a call off the request path was not made: no generation slot was spare.
+pub const BUSY: &str = "no spare generation slot";
 /// Gauge of generation permits held.
 pub const IN_FLIGHT_METRIC: &str = "mb_generation_in_flight";
 /// Counter of calls that gave up waiting for a generation permit.
@@ -58,6 +60,20 @@ impl GenerationLimiter {
     #[must_use]
     pub fn max(&self) -> usize {
         self.max
+    }
+
+    /// A permit now, only while another slot stays free after it is taken (a call
+    /// off the request path never takes the last slot, nor waits for one); `None`
+    /// otherwise.
+    fn try_acquire_spare(&self) -> Option<GenerationPermit> {
+        // Taken first, then given back if it was the last: checking before taking would
+        // let two callers each see two free and leave none.
+        let permit = Arc::clone(&self.semaphore).try_acquire_owned().ok()?;
+        if self.semaphore.available_permits() == 0 {
+            return None;
+        }
+        metrics::gauge!(IN_FLIGHT_METRIC).increment(1.0);
+        Some(GenerationPermit { _permit: permit })
     }
 
     /// A permit if one is free now, else `None`.
@@ -223,6 +239,22 @@ impl Engine {
         match &self.guards.limiter {
             None => Some(None),
             Some(limiter) => limiter.try_acquire().map(Some),
+        }
+    }
+
+    /// Admission for an LLM call off the request path: `Ok` only when a slot is free now
+    /// and another stays free for requests (see [`GenerationLimiter::try_acquire_spare`]);
+    /// `Err(`[`BUSY`]`)` when not, to try again later.
+    pub(crate) fn admit_spare(&self) -> Result<Option<GenerationPermit>, String> {
+        if self.budget_exhausted() {
+            return Err("token budget exhausted".into());
+        }
+        match &self.guards.limiter {
+            None => Ok(None),
+            Some(limiter) => limiter
+                .try_acquire_spare()
+                .map(Some)
+                .ok_or_else(|| BUSY.to_string()),
         }
     }
 
@@ -1761,6 +1793,21 @@ fn unwrap_envelope(validator: &SchemaValidator, value: &Value) -> Option<Value> 
 #[cfg(test)]
 mod tests {
     use super::words;
+
+    #[tokio::test]
+    async fn a_spare_slot_is_one_that_leaves_another_free() {
+        let limiter = super::GenerationLimiter::new_shared(2);
+        let first = limiter.try_acquire_spare();
+        assert!(first.is_some(), "two free: one is spare");
+        assert!(limiter.try_acquire_spare().is_none(), "the last is not");
+        drop(first);
+        assert!(limiter.try_acquire_spare().is_some());
+        let one = super::GenerationLimiter::new_shared(1);
+        assert!(
+            one.try_acquire_spare().is_none(),
+            "a single slot is never spare"
+        );
+    }
 
     #[test]
     fn effects_only_takes_the_list_and_nothing_else() {

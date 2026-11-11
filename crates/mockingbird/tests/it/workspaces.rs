@@ -61,6 +61,7 @@ fn deps(store: Arc<dyn ControlStore>, recorder: Option<Arc<dyn RequestRecorder>>
         http: Default::default(),
         mode: mockingbird::runtime::ServeMode::Full,
         webhook_log: Default::default(),
+        record_pools: Default::default(),
     }
 }
 

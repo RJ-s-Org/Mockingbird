@@ -541,6 +541,10 @@ pub struct MockLimits {
     /// Tokens per UTC day, across all replicas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daily_token_budget: Option<u64>,
+    /// Tokens the mock's record pool may spend writing records ahead of any call
+    /// ([`Self::DEFAULT_RECORD_POOL_TOKENS`] when unset); `0` keeps no pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_pool_tokens: Option<u64>,
     /// In bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_request_bytes: Option<u64>,
@@ -555,6 +559,15 @@ impl MockLimits {
     pub const MIN_BYTES: u64 = 1024;
     pub const MAX_REQUEST_BYTES: u64 = 67_108_864;
     pub const MAX_RESPONSE_BYTES: u64 = 16_777_216;
+    /// The record pool's token cap when `record_pool_tokens` is unset.
+    pub const DEFAULT_RECORD_POOL_TOKENS: u64 = 30_000;
+
+    /// The record pool's token cap: `record_pool_tokens`, else the default.
+    #[must_use]
+    pub fn record_pool_cap(&self) -> u64 {
+        self.record_pool_tokens
+            .unwrap_or(Self::DEFAULT_RECORD_POOL_TOKENS)
+    }
 
     /// Checks the ranges; the message names the offending field.
     ///

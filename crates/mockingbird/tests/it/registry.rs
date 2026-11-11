@@ -73,6 +73,7 @@ fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
         http: Default::default(),
         mode: mockingbird::runtime::ServeMode::Full,
         webhook_log: Default::default(),
+        record_pools: Default::default(),
     }
 }
 
@@ -93,7 +94,11 @@ async fn create_mock(
                 header_overrides: true,
                 source: ResourceSource::Api,
                 chaos: None,
-                limits: Default::default(),
+                // No record pool: these tests count the LLM calls of requests.
+                limits: mb_store::MockLimits {
+                    record_pool_tokens: Some(0),
+                    ..Default::default()
+                },
                 data_plane_auth: Default::default(),
                 hosts: vec![],
                 behavior: Default::default(),

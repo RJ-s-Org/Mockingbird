@@ -238,7 +238,11 @@ async fn answer(
         && !issued
         && !only_unscoped(rt, op, path, t)
         && q.as_ref().is_none_or(|q| q.scope.is_none());
-    if unscoped {
+    // A type the session never wrote: the mock's record pool, when it holds it. Its
+    // records then answer every unscoped list of the type in the session.
+    let scoped = q.as_ref().is_some_and(|q| q.scope.is_some());
+    let pooled = super::pool::list(state, plan, call, t, scoped).await;
+    if unscoped && !pooled {
         return Err("unscoped_list".into());
     }
     let envelope = envelope(rt, plan, call, &shape).ok_or(Stop::from("render_failed"))?;

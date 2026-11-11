@@ -56,6 +56,7 @@ fn deps(store: Arc<dyn ControlStore>, log: SharedDeliveryLog) -> RuntimeDeps {
         http: Default::default(),
         mode: ServeMode::Full,
         webhook_log: log,
+        record_pools: Default::default(),
     }
 }
 

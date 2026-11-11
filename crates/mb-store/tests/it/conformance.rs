@@ -3550,6 +3550,7 @@ pub(crate) async fn mock_chaos_and_limits_round_trip(store: &Arc<dyn ControlStor
             burst: 5,
         }),
         daily_token_budget: Some(10_000),
+        record_pool_tokens: None,
         max_request_bytes: Some(4096),
         max_response_bytes: None,
     };
@@ -3571,6 +3572,7 @@ pub(crate) async fn mock_chaos_and_limits_round_trip(store: &Arc<dyn ControlStor
     changed.limits = MockLimits {
         rate_limit: None,
         daily_token_budget: None,
+        record_pool_tokens: None,
         max_request_bytes: None,
         max_response_bytes: Some(2048),
     };

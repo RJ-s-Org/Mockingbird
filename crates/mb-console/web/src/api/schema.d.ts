@@ -1780,6 +1780,12 @@ export interface components {
              */
             max_response_bytes?: number | null;
             rate_limit?: components["schemas"]["RateLimit"] | null;
+            /**
+             * Format: int64
+             * @description Tokens the record pool may spend writing records ahead of any call (30000 when
+             *     unset); 0 keeps no pool.
+             */
+            record_pool_tokens?: number | null;
         };
         /** @description A mock with the number of its active contract version. */
         MockView: {

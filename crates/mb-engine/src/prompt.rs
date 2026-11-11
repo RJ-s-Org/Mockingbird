@@ -805,6 +805,53 @@ pub(crate) fn fill_messages(
     ]
 }
 
+const POOL_ROLE_STATEMENT: &str = "You write realistic synthetic records that an API holds \
+before anyone calls it, so its first answers read like a living account. Output only a single JSON \
+object conforming to the schema. Make the records distinct from each other and from the ones \
+already written, and consistent with the persona. Never output real personal data. Keep free-text \
+strings under 200 characters unless the schema allows more.";
+
+/// Messages asking for `count` records of `type_name`, as the operation `op` reads them
+/// ([`crate::Engine::pool_records`]): the persona and API lines, the operation, the
+/// response `schema` (an object whose `records` array holds the records), and the ids
+/// of records written before, which the new ones must not repeat.
+pub(crate) fn pool_messages(
+    bundle: &Bundle,
+    op: &Operation,
+    schema: &Value,
+    type_name: &str,
+    count: usize,
+    taken: &[String],
+    persona: Option<&str>,
+) -> Vec<ChatMessage> {
+    let mut system = String::new();
+    system.push_str(POOL_ROLE_STATEMENT);
+    system.push_str("\n\n");
+    binding_lines(&mut system, bundle, op, persona);
+    let _ = write!(system, "Response JSON Schema:\n{schema}");
+    let mut user = format!(
+        "Write {count} records of `{type_name}` under `records`, as the operation above answers \
+them: varied, plausible and consistent with the persona."
+    );
+    if !taken.is_empty() {
+        let _ = write!(
+            user,
+            "\nThese identifiers are taken; use none of them:\n{}",
+            truncated(taken.join(", "), MAX_BODY_BYTES)
+        );
+    }
+    vec![
+        ChatMessage {
+            role: Role::System,
+            content: system,
+        },
+        ChatMessage {
+            role: Role::User,
+            content: user,
+        },
+    ]
+}
+
 /// Persona, API, operation, binding, summary and hint lines.
 fn binding_lines(s: &mut String, bundle: &Bundle, op: &Operation, persona: Option<&str>) {
     api_lines(s, bundle, persona);

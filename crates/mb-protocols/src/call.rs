@@ -84,6 +84,7 @@ use creates::*;
 pub(crate) use described::Described;
 pub(crate) use effects::*;
 use entities::*;
+pub(crate) use exec::pool as exec_pool;
 pub(crate) use exprs::CallExprs;
 #[cfg(feature = "graphql")]
 pub(crate) use exprs::seed_notes;
