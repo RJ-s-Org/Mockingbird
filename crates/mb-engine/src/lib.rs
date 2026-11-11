@@ -2681,6 +2681,7 @@ impl Engine {
             response_format: format.clone(),
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
+            max_answer_bytes: answer_cap(format),
             timeout: self.config.timeout,
         };
         let span = llm_span();
@@ -2718,6 +2719,28 @@ impl Engine {
             Err(_) => Err("LLM request timed out".into()),
         }
     }
+}
+
+/// Times the estimated size of an answer its text may reach before the reply is
+/// stopped (see [`answer_cap`]).
+const ANSWER_CAP_FACTOR: f64 = 4.0;
+
+/// The fewest bytes of answer text a reply is allowed (see [`answer_cap`]).
+const MIN_ANSWER_CAP: usize = 8 * 1024;
+
+/// Most bytes of answer text to read for `format`: [`ANSWER_CAP_FACTOR`] times
+/// the estimated size of an answer to its schema, at least [`MIN_ANSWER_CAP`].
+/// Past it the model is running on (a URL repeating its fragment), and the text
+/// so far is salvaged as a truncated reply. `None` without a schema, or for one
+/// too large to estimate.
+fn answer_cap(format: &ResponseFormat) -> Option<usize> {
+    let ResponseFormat::JsonSchema { schema, .. } = format else {
+        return None;
+    };
+    let tokens = budget::estimated_tokens(schema)?;
+    // Compact JSON runs about 3.5 bytes a token.
+    let bytes = (tokens * 3.5 * ANSWER_CAP_FACTOR).ceil();
+    Some((bytes as usize).max(MIN_ANSWER_CAP))
 }
 
 /// An LLM answer that passed the checks.
@@ -5463,5 +5486,30 @@ components:
         let bundle = enveloped("data", "");
         let op = bundle.operation("getDeal").unwrap();
         assert!(engine.envelope_draws(&bundle, op, None).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod answer_cap_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn the_cap_is_a_few_times_the_estimated_answer_and_never_below_the_floor() {
+        let small = ResponseFormat::JsonSchema {
+            name: "s".into(),
+            schema: json!({"type": "object", "properties": {"id": {"type": "string"}}}),
+        };
+        assert_eq!(answer_cap(&small), Some(MIN_ANSWER_CAP));
+        let props: serde_json::Map<String, Value> = (0..400)
+            .map(|i| (format!("member_{i}"), json!({"type": "string"})))
+            .collect();
+        let large = ResponseFormat::JsonSchema {
+            name: "l".into(),
+            schema: json!({"type": "object", "properties": props}),
+        };
+        let cap = answer_cap(&large).unwrap_or_default();
+        assert!(cap > MIN_ANSWER_CAP, "{cap}");
+        assert_eq!(answer_cap(&ResponseFormat::JsonObject), None);
     }
 }

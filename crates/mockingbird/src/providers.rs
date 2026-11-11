@@ -560,6 +560,7 @@ pub async fn probe(profile: &FileProfile) -> anyhow::Result<ProbeReport> {
         },
         temperature: profile.temperature,
         max_tokens: 64,
+        max_answer_bytes: None,
         timeout,
     };
     let started = Instant::now();

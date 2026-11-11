@@ -15,6 +15,7 @@ fn req(format: ResponseFormat, timeout: Duration) -> ChatRequest {
         response_format: format,
         temperature: 0.2,
         max_tokens: 100,
+        max_answer_bytes: None,
         timeout,
     }
 }
@@ -1712,4 +1713,40 @@ async fn an_upstream_error_keeps_streaming() {
         .map(|r| serde_json::from_slice::<Value>(&r.body).unwrap()["stream"] == true)
         .collect();
     assert_eq!(streamed, vec![true, true]);
+}
+
+/// An answer that runs past `max_answer_bytes` is stopped there and returned as
+/// a truncation holding the text so far, without a retry; reasoning does not
+/// count against it.
+#[tokio::test]
+async fn an_answer_past_its_cap_is_stopped_with_its_text() {
+    let server = MockServer::start().await;
+    let reasoning = json!({"choices": [{"delta": {"reasoning": "r".repeat(4000)}}]});
+    let mut deltas = vec!["{\"url\": \"https://x.test/#"];
+    deltas.extend(std::iter::repeat_n("Zm9vYmFy", 1000));
+    let body = format!("data: {reasoning}\n\n{}", sse_of(&deltas, "length", None));
+    Mock::given(method("POST"))
+        .respond_with(sse(body))
+        .mount(&server)
+        .await;
+    let mut request = req(ResponseFormat::JsonObject, Duration::from_secs(5));
+    request.max_answer_bytes = Some(1000);
+    let err = client(&server, OutputMode::JsonObject)
+        .complete(request)
+        .await
+        .unwrap_err();
+    let LlmError::Truncated {
+        partial, message, ..
+    } = &err
+    else {
+        panic!("expected Truncated, got {err:?}");
+    };
+    assert!(
+        partial.len() > 1000 && partial.len() < 1100,
+        "{}",
+        partial.len()
+    );
+    assert!(partial.starts_with("{\"url\""), "{partial}");
+    assert!(message.contains("past the 1000"), "{message}");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }

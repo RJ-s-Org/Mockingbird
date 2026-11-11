@@ -268,6 +268,7 @@ async fn call(
         response_format: response_format(llm.provider.as_ref(), format_name, schema),
         temperature: 0.0,
         max_tokens: llm.settings.max_tokens,
+        max_answer_bytes: None,
         timeout: llm.settings.timeout,
     };
     let bound = llm.provider.total_timeout(llm.settings.timeout);
