@@ -1974,9 +1974,10 @@ pub(crate) async fn complete(
             );
         }
         // A retry of a cached fallback that cached nothing in its place
-        // leaves the next repeat to try again.
+        // leaves the next repeat to try again; a real answer clears the
+        // backoff of one that kept timing out.
         if retrying_fallback {
-            response_cache.release_retry(session, &key);
+            response_cache.release_retry(session, &key, generated.fallback_reason.is_none());
         }
     }
     generated
