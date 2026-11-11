@@ -985,14 +985,17 @@ async fn build_app_inner(
             let dir = cfg.proxy.effective_ca_dir().context("proxy.ca_dir")?;
             let ca = crate::proxy::ca::LocalCa::load_or_create(&dir)
                 .with_context(|| format!("proxy.ca_dir {}", dir.display()))?;
-            Some(crate::proxy::ProxyState::new(
-                registry.clone(),
-                data.clone(),
-                Arc::new(ca),
-                cfg.proxy.unmapped,
-                cfg.proxy.vendor_subdomains,
-                cfg.proxy.images.clone(),
-            )?)
+            Some(
+                crate::proxy::ProxyState::new(
+                    registry.clone(),
+                    data.clone(),
+                    Arc::new(ca),
+                    cfg.proxy.unmapped,
+                    cfg.proxy.vendor_subdomains,
+                    cfg.proxy.images.clone(),
+                )?
+                .with_origin(ops::Origin::current(args.config.as_deref())),
+            )
         }
         _ => None,
     };
@@ -1053,6 +1056,9 @@ async fn build_app_inner(
                 tls: cfg.server.tls.is_some(),
             }),
             origin: ops::Origin::current(args.config.as_deref()),
+            proxy: proxy
+                .as_ref()
+                .map(|_| std::net::SocketAddr::new(cfg.proxy.host, cfg.proxy.port)),
         },
         metrics_gate,
     );

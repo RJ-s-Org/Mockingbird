@@ -41,8 +41,8 @@ pub async fn serve(
                 continue;
             }
         };
-        let tcp = match accepted {
-            Ok((tcp, _)) => tcp,
+        let (tcp, peer) = match accepted {
+            Ok(accepted) => accepted,
             Err(error) => {
                 // Out of file descriptors and the like: back off briefly.
                 tracing::warn!(%error, "proxy: accept failed");
@@ -54,7 +54,16 @@ pub async fn serve(
         tokio::spawn(async move {
             let svc = service_fn(move |req: Request<Incoming>| {
                 let state = Arc::clone(&state);
-                async move { Ok::<_, Infallible>(handle(state, req.map(Body::new)).await) }
+                async move {
+                    Ok::<_, Infallible>(
+                        handle(
+                            state,
+                            req.map(Body::new),
+                            peer.ip().to_canonical().is_loopback(),
+                        )
+                        .await,
+                    )
+                }
             });
             if let Err(error) = hyper::server::conn::http1::Builder::new()
                 .serve_connection(TokioIo::new(tcp), svc)
@@ -96,6 +105,25 @@ fn pac(req: &Request) -> Response {
         .into_response()
 }
 
+/// Where the proxy says whose it is (`GET`, addressed to the proxy itself):
+/// `{"proxy": "mockingbird", "config", "dir"}`, the config and folder of the
+/// project it serves. `proxy env` and `run` read it to hand out only their
+/// own project's proxy. Callers that do not connect over loopback get
+/// `{"proxy": "mockingbird"}` only.
+pub const ORIGIN_PATH: &str = "/mockingbird-proxy.json";
+
+/// The [`ORIGIN_PATH`] answer of a proxy serving `origin`; `local` says
+/// whether the caller connected over loopback. Others never see the config
+/// and folder.
+fn origin_body(origin: Option<&crate::ops::Origin>, local: bool) -> serde_json::Value {
+    let mut body = serde_json::json!({"proxy": "mockingbird"});
+    if let Some(origin) = origin.filter(|_| local) {
+        body["config"] = serde_json::json!(origin.config);
+        body["dir"] = serde_json::json!(origin.dir);
+    }
+    body
+}
+
 fn blocked(host: &str) -> Response {
     problem(
         502,
@@ -130,12 +158,18 @@ fn sibling_blocked(host: &str, mapped: &[String]) -> Response {
         .into_response()
 }
 
-async fn handle(state: Arc<ProxyState>, req: Request) -> Response {
+async fn handle(state: Arc<ProxyState>, req: Request, local: bool) -> Response {
     if req.method() == Method::CONNECT {
         return connect(state, req);
     }
     if req.uri().authority().is_none() && req.uri().path() == PAC_PATH {
         return pac(&req);
+    }
+    if req.method() == Method::GET
+        && req.uri().authority().is_none()
+        && req.uri().path() == ORIGIN_PATH
+    {
+        return axum::Json(origin_body(state.origin(), local)).into_response();
     }
     let Some(host) = request_host(&req) else {
         return problem(
@@ -287,4 +321,35 @@ where
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::origin_body;
+    use crate::ops::Origin;
+    use serde_json::json;
+
+    #[test]
+    fn only_loopback_callers_learn_whose_proxy_it_is() {
+        let origin = Origin {
+            config: Some("/work/app/mockingbird.yaml".into()),
+            dir: Some("/work/app".into()),
+        };
+        assert_eq!(
+            origin_body(Some(&origin), true),
+            json!({"proxy": "mockingbird", "config": "/work/app/mockingbird.yaml", "dir": "/work/app"})
+        );
+        assert_eq!(
+            origin_body(Some(&origin), false),
+            json!({"proxy": "mockingbird"})
+        );
+        assert_eq!(origin_body(None, true), json!({"proxy": "mockingbird"}));
+    }
+
+    #[test]
+    fn an_ipv4_caller_of_a_dual_stack_proxy_is_local() {
+        let mapped: std::net::IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert!(!mapped.is_loopback());
+        assert!(mapped.to_canonical().is_loopback());
+    }
 }

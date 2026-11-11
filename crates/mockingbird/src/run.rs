@@ -1,8 +1,11 @@
 //! `mockingbird run -- <command…>`: runs a command against the mocks. Starts
-//! the server (with its proxy) unless one already answers, waits until it
-//! is ready, runs the command with the proxy environment for every runtime
-//! ([`crate::proxy::env`]), stops what it started and exits with the
-//! command's exit code.
+//! the server (with its proxy) unless the config's own server already
+//! answers, waits until it is ready, runs the command with the proxy
+//! environment for every runtime ([`crate::proxy::env`]), stops what it
+//! started and exits with the command's exit code. The command only ever
+//! gets the config's own proxy ([`crate::proxy::owner`]): when the server
+//! runs none, or another project's proxy holds its port, `run` puts a proxy
+//! of its own in front of the server for the command.
 
 use std::ffi::OsString;
 use std::net::{IpAddr, SocketAddr};
@@ -11,12 +14,13 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use crate::daemon::{self, StartArgs, StateArgs};
 use crate::file_config;
 use crate::proxy::env::{options_for, proxy_env};
+use crate::proxy::owner::{OwnProxy, held_message, own_proxy};
 use crate::proxy::{StandaloneOptions, run_standalone};
 
 /// The config `run` uses when `-c` is not given.
@@ -113,28 +117,20 @@ pub async fn run(args: RunArgs) -> anyhow::Result<ExitCode> {
         SocketAddr::new(server_ip, cfg.server.admin_port)
     );
     let data_url = format!("http://{}", SocketAddr::new(server_ip, cfg.server.port));
-    let opts = options_for(Some(&config), None)?;
-    let proxy_addr = SocketAddr::new(opts.host.parse()?, opts.port);
 
     let mut started = Started::default();
-    let result = prepare(
-        &args,
-        &config,
-        &cfg,
-        &admin_url,
-        &data_url,
-        proxy_addr,
-        &mut started,
-    )
-    .await;
+    let result = prepare(&args, &config, &cfg, &admin_url, &data_url, &mut started).await;
     let code = match result {
         // A server `run` started may have taken free ports in place of busy
         // defaults (written into the config): the proxy is read again.
-        Ok(()) if started.server.is_some() => match options_for(Some(&config), None) {
-            Ok(opts) => run_command(&args.command, &opts).await,
+        Ok(proxy) => match options_for(Some(&config), None) {
+            Ok(mut opts) => {
+                opts.host = proxy.ip().to_string();
+                opts.port = proxy.port();
+                run_command(&args.command, &opts).await
+            }
             Err(error) => Err(error),
         },
-        Ok(()) => run_command(&args.command, &opts).await,
         Err(error) => Err(error),
     };
     if args.keep
@@ -149,16 +145,17 @@ pub async fn run(args: RunArgs) -> anyhow::Result<ExitCode> {
     code
 }
 
-/// Makes sure the server and its proxy answer, starting what is missing.
+/// Makes sure the server and its proxy answer, starting what is missing;
+/// returns the address of the proxy the command is sent through, which is
+/// always the config's own.
 async fn prepare(
     args: &RunArgs,
     config: &std::path::Path,
     cfg: &file_config::FileConfig,
     admin_url: &str,
     data_url: &str,
-    proxy_addr: SocketAddr,
     started: &mut Started,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<SocketAddr> {
     let foreign = match readyz(admin_url).await {
         None => None,
         Some(body) => foreign_server(&body, config),
@@ -204,16 +201,33 @@ async fn prepare(
             args.state_dir.join("server.log").display(),
             info["proxy"].as_str().unwrap_or_default()
         );
-        return Ok(());
+        // Read again: the start may have written a free proxy port.
+        let opts = options_for(Some(config), None)?;
+        return Ok(SocketAddr::new(opts.host.parse()?, opts.port));
     }
     if let Some(warning) = reuse_warning(args, admin_url) {
         eprintln!("{warning}");
     }
     wait_ready(admin_url, Duration::from(args.wait)).await?;
-    if TcpStream::connect(proxy_addr).await.is_ok() {
-        return Ok(());
-    }
-    // A server without its proxy: run one in front of it for the command.
+    let proxy_addr = match own_proxy(config, None).await? {
+        OwnProxy::Running(addr) => return Ok(addr),
+        // A server without its proxy: run one in front of it for the
+        // command.
+        OwnProxy::Missing { addr, .. } => addr,
+        // Another proxy holds the port (often another project's server):
+        // it has none of these mocks and would pass the command's calls to
+        // the real APIs. A port the config leaves at its default is
+        // replaced by a free one for this run; a port it sets is not.
+        OwnProxy::Held { addr, holder } => {
+            let text = std::fs::read_to_string(config)
+                .with_context(|| format!("cannot read config file {}", config.display()))?;
+            let free = free_proxy_port(config, &text, addr, &holder, daemon::port_free)?;
+            eprintln!(
+                "mockingbird: {addr} is held by {holder}, not by this project's proxy; it is not used"
+            );
+            free
+        }
+    };
     let listener = TcpListener::bind(proxy_addr)
         .await
         .with_context(|| format!("cannot bind the proxy on {proxy_addr}"))?;
@@ -224,12 +238,48 @@ async fn prepare(
         unmapped: cfg.proxy.unmapped,
         vendor_subdomains: cfg.proxy.vendor_subdomains,
         images: cfg.proxy.images.clone(),
+        origin: Some(crate::ops::Origin::current(Some(config))),
     };
     let (stop_tx, stop_rx) = watch::channel(false);
     let task = tokio::spawn(run_standalone(listener, standalone, stop_rx));
     started.proxy = Some((stop_tx, task));
     eprintln!("mockingbird: proxy http://{proxy_addr} in front of the server at {admin_url}");
-    Ok(())
+    Ok(proxy_addr)
+}
+
+/// Where `run` puts its proxy for the config at `config` (whose text is
+/// `text`) when `holder` holds the proxy's address `addr`: the first free
+/// port above it (`is_free` says which are) while the config leaves
+/// `proxy.port` at its default, as `server start` does; a port the config
+/// sets is never moved.
+///
+/// # Errors
+///
+/// The config sets `proxy.port` ([`held_message`]), or no port near it is
+/// free.
+fn free_proxy_port(
+    config: &std::path::Path,
+    text: &str,
+    addr: SocketAddr,
+    holder: &str,
+    is_free: impl Fn(IpAddr, u16) -> bool,
+) -> anyhow::Result<SocketAddr> {
+    if file_config::explicit_ports(text).proxy_port {
+        bail!(held_message(config, addr, holder));
+    }
+    let slot = daemon::PortSlot {
+        key: "proxy.port",
+        host: addr.ip(),
+        port: addr.port(),
+        defaulted: true,
+    };
+    // The address is held, so a port is always chosen when one is free.
+    let port = daemon::choose_free_ports(&[slot], |host, port| {
+        port != addr.port() && is_free(host, port)
+    })?
+    .first()
+    .map_or(addr.port(), |&(_, port)| port);
+    Ok(SocketAddr::new(addr.ip(), port))
 }
 
 /// The warning `run` prints when it reuses the server at `admin_url`
@@ -362,4 +412,28 @@ fn exit_code(status: std::process::ExitStatus) -> ExitCode {
         }
     }
     ExitCode::from(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_held_default_proxy_port_is_replaced_and_a_set_one_is_not() {
+        let config = std::path::Path::new("/p/mockingbird.yaml");
+        let held: SocketAddr = "127.0.0.1:8888".parse().unwrap();
+        let holder = "the Mockingbird proxy of config /q/mockingbird.yaml (in /q)";
+        let free = |_: IpAddr, port: u16| port != 8889;
+        assert_eq!(
+            free_proxy_port(config, "hosts: [api.example.com]\n", held, holder, free).unwrap(),
+            "127.0.0.1:8890".parse::<SocketAddr>().unwrap()
+        );
+        let error = free_proxy_port(config, "proxy:\n  port: 8888\n", held, holder, free)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(holder) && error.contains("/p/mockingbird.yaml"),
+            "{error}"
+        );
+    }
 }

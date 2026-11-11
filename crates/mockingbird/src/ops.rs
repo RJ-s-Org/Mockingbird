@@ -49,6 +49,11 @@ pub struct OpsState {
     /// so that a local client (the MCP server) acts only on its own
     /// project's server.
     pub origin: Origin,
+    /// Where this node's intercepting proxy listens (`proxy.enabled` on a
+    /// node serving the data plane), which `/readyz` reports so that `proxy
+    /// env` and `run` hand out this server's own proxy, never another one on
+    /// the same port; `None` when it runs no proxy.
+    pub proxy: Option<std::net::SocketAddr>,
 }
 
 /// Where a server was started from, as `/readyz` reports it: its config
@@ -87,6 +92,7 @@ impl std::fmt::Debug for OpsState {
             .field("reload", &self.reload)
             .field("data_plane", &self.data_plane)
             .field("origin", &self.origin)
+            .field("proxy", &self.proxy)
             .finish_non_exhaustive()
     }
 }
@@ -103,7 +109,7 @@ impl std::fmt::Debug for OpsState {
 ///   serving statelessly or a mock's daily token budget is exhausted
 ///   (`mock <label>: daily token budget exhausted`), or the cross-node bus
 ///   is disconnected (`bus: <reason>`); else `200 ready`. The body always
-///   carries the node's `role`, whether it is the `leader`, the `config` file and working `dir` it was started with ([`Origin`]) and, on a node with a data plane, its `data_plane` (`port`, `tls`); like `reasons`, these three only authenticated callers see when auth is on. Each store ping is bounded by
+///   carries the node's `role`, whether it is the `leader`, the `config` file and working `dir` it was started with ([`Origin`]), its `proxy` address (`null` when it runs no proxy) and, on a node with a data plane, its `data_plane` (`port`, `tls`); like `reasons`, these only authenticated callers see when auth is on. Each store ping is bounded by
 ///   [`PING_TIMEOUT`]. With [`OpsState::readyz_auth`] set, `reasons` are
 ///   left out for callers without valid credentials.
 /// - `/metrics`: Prometheus text exposition.
@@ -213,6 +219,7 @@ async fn readyz(State(st): State<OpsState>, headers: HeaderMap) -> Response {
     if authorized {
         body["config"] = json!(st.origin.config);
         body["dir"] = json!(st.origin.dir);
+        body["proxy"] = json!(st.proxy.map(|a| a.to_string()));
     }
     (code, axum::Json(body)).into_response()
 }

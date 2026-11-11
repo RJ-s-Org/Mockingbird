@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 
-use super::env::{options_for, proxy_env};
+use super::env::proxy_env;
 
 #[derive(clap::Args, Debug)]
 pub struct ProxyBrowserArgs {
@@ -139,7 +139,10 @@ fn find_browser() -> anyhow::Result<PathBuf> {
 /// browser cannot be started or exits with an error.
 pub async fn run(args: ProxyBrowserArgs) -> anyhow::Result<()> {
     let config = super::env::config_or_local(args.config.as_deref());
-    let opts = options_for(config.as_deref(), args.port)?;
+    let (opts, warning) = super::owner::checked_options(config.as_deref(), args.port).await?;
+    if let Some(warning) = warning {
+        eprintln!("mockingbird: {warning}");
+    }
     let env = proxy_env(&opts)?;
     let profile = opts.ca_dir.join("chromium-profile");
     let browser = match args.browser {
