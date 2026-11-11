@@ -52,6 +52,11 @@ pub const RETENTION_PRUNE_INTERVAL: i64 = 100;
 /// an unreachable database fails fast instead of stalling every request.
 pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long a call on the in-memory store waits for its one connection. Nothing there
+/// can be unreachable: a wait only means another call holds the connection, which under
+/// load (several mocks built at once) can take longer than [`ACQUIRE_TIMEOUT`].
+pub const MEMORY_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Upper bound of [`ControlStore::list_import_jobs`]'s `limit`.
 pub const MAX_IMPORT_JOB_LIST: u32 = 200;
 
