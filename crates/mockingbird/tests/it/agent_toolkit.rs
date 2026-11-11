@@ -542,6 +542,7 @@ fn mcp_drives_a_background_server() {
             json!({ "method": "POST", "path": "/orders/orders", "body": { "customerId": "c1", "total": 10 }, "session": "t" }),
         );
         assert_eq!(created["status"], 201, "{created}");
+        assert!(created.get("expr_failed_unknown").is_none(), "{created}");
         // The state-first executor creates the order, with no LLM call.
         assert_eq!(created["headers"]["x-mockingbird-source"], "state");
         let id = created["body"]["id"].as_str().unwrap().to_string();
@@ -618,7 +619,9 @@ fn mcp_drives_a_background_server() {
             "call_mock",
             json!({ "path": "/orders/orders", "session": "t" }),
         );
+        // The call's record was found and lists no failure.
         assert!(clean.get("expr_failed").is_none(), "{clean}");
+        assert!(clean.get("expr_failed_unknown").is_none(), "{clean}");
 
         let imported = mcp.tool(
             "import_contract",

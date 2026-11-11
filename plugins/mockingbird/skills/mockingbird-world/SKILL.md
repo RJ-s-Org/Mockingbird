@@ -7,7 +7,7 @@ description: Review and write a Mockingbird mock's world description - how its c
 
 Every contract version has a **world description**: a small structured statement of how the API behaves as a world. Mockingbird's heuristics write one automatically (author `heuristic`). You improve it from the contract and its documentation, and Mockingbird validates every entry against the contract before it applies. A description is optional: a mock works without your entries, but a missing identity or record pointer cascades into lost records later.
 
-The format is the JSON Schema `get_world_schema` answers (`mockingbird world schema` on the CLI). Every key is optional; an absent key falls back to the heuristics. The mock answers from every entry that validates: lists filter, order and page as described, soft deletes keep the record, unique sets and concurrency tokens refuse before any LLM call, an idempotency header replays the first answer, and expressions (`set`, `computed`, `refuse`, `effects`; see [Expressions](#expressions)) compute members, refusals and writes to other records from the request and the stored records. So write only what the documentation states: a wrong entry changes answers.
+The format is the JSON Schema `get_world_schema` answers (`mockingbird world schema` on the CLI). Every key is optional; an absent key falls back to the heuristics. The mock answers from every entry that validates: lists filter, order and page as described, soft deletes keep the record, unique sets and concurrency tokens refuse before any LLM call, an idempotency header replays the first answer, and expressions (`set`, `computed`, `refuse`, `effects`, `list`; see [Expressions](#expressions)) compute members, refusals, writes to other records and list filters and orders from the request and the stored records. So write only what the documentation states: a wrong entry changes answers.
 
 ## The loop
 
@@ -54,7 +54,7 @@ Types (`types.<resource type>`):
 - `computed: {<member>: <expression>}`: a member the docs define from other data (a count of children, a total, a label), evaluated whenever a record is answered and never stored. See [Expressions](#expressions). (`derived`, the older count/sum form, still loads.)
 
 Operations (`operations.<operation id>`):
-- `kind`: `create`, `read`, `list`, `update`, `replace`, `delete` or `action`; `type`: the resource type. A `PUT` to an item path whose body is the whole record (`PUT /widgets/{id}` with a `Widget`) is `replace`, not `update`: it drops the members it does not send (identity, read-only, lifecycle and derived members stay), where an update merges.
+- `kind`: `create`, `read`, `list`, `update`, `replace`, `delete` or `action`; `type`: the resource type. A `PUT` to an item path whose body is the whole record (`PUT /widgets/{id}` with a `Widget`) is `replace`, not `update`: it drops the members it does not send (identity, read-only, lifecycle and computed members stay), where an update merges.
 - `target: {path_param | member}`: what names the record the operation acts on. It replaces tier 0's target whole: a field you leave out is not kept. For a `POST` create, name the new record by its body member, not by a parent's path parameter; a `PUT` create whose route ends in the record's parameter (`PUT /buckets/{name}`) keeps that `path_param`.
 - `request` and `answer`: `{record}` or `{records}` as JSON pointers into the body (nested envelopes, one-item arrays, bulk arrays); `answer.long_running: {done, result}` for long-running operations.
 - `answer.identity_header`: the declared 2xx response header a create names its new id in (`Location`, `Resource-ID`), or `false` when it names it in none. HTTP only.
@@ -89,78 +89,78 @@ What an expression can read:
 | Name | Value |
 | --- | --- |
 | `request` | `{body, path, query, headers}`: `request.body.email`, `request.path.id`, `request.query.status`, `request.headers['x-actor']` (header names in lower case) |
-| `record` | The target as stored before the call (`null` on a create); in `computed`, the record answered; in `effects`, the target as the call left it |
+| `record` | The target as stored before the call (`null` on a create); in `computed`, the record answered; in `effects`, the target as the call left it; not bound in `list` |
 | `now` | The request time, RFC 3339 text |
-| `it` | Each item inside `count`, `exists`, `sum` and the list macros; in an effect's `when` and `set`, the record it found |
+| `it` | Each record inside `count`, `exists` and `sum`, and in `list.where`; in an effect's `when` and `set`, the record it found. The macros name their own item: `record.items.map(x, x.price)` |
 | `value` | In `list.sort.by`, the sort parameter's value as sent |
 
 Functions: `held(type, id)` (a stored record of a type by its id, else `null`), `count(type, cond)`, `exists(type, cond)`, `sum(list, expr)`, `seq(scope)` (a counter per session, from 1), `mint(regex)` (a fresh id matching it), `md5`, `sha1`, `sha256`, `lower`, `upper`, `slug`, `size`, `string`, `int`, `double`, `startsWith`, `endsWith`, `contains`, `matches`, `split`, `substring`, `trim`, `replace`, `has(a.b)`, and `list.all/exists/map/filter(x, …)`. Operators: `?:`, `&&`, `||`, `!`, comparisons, `+ - * / %`, `in`. A member of `null` or a missing member is `null`, not an error. A value is written as its member's schema declares it (a number into a `string` member as its text).
 
-The six patterns below cover most of what documentation asks for. Each is generic: replace the names with the contract's.
+The six patterns below cover most of what documentation asks for. Each is generic: replace the names with the contract's. A `refuse` status must be one the operation declares, and a `request.headers`, `request.query` or `request.path` name one of its declared parameters, or `patch_world` refuses the entry.
 
-1. **Through-reference: a member copied from a record the request names.** "A charge takes the currency of its account."
+1. **Through-reference: a member copied from a record the request names.** "A parcel ships from its warehouse's country."
    ```yaml
    operations:
-     createCharge:
-       set: { currency: "held('accounts', request.body.account_id).currency" }
+     createParcel:
+       set: { origin_country: "held('warehouses', request.body.warehouse_id).country" }
    ```
-2. **Template: a member built from others.** "The number is `TCK-` and a sequence; the label is the name and the number."
+2. **Template: a member built from others.** "A plot's number is `PLT-` and a sequence; its label is its name and number."
    ```yaml
    operations:
-     createTicket:
-       set: { number: "'TCK-' + string(seq('tickets'))" }
+     createPlot:
+       set: { number: "'PLT-' + string(seq('plots'))" }
    types:
-     tickets:
-       computed: { label: "record.title + ' (' + record.number + ')'" }
+     plots:
+       computed: { label: "record.name + ' (' + record.number + ')'" }
    ```
-3. **Hash id: an identity the docs define as a hash.** "The subscriber id is the MD5 of the lower-cased email." Setting the identity member names the record by it, so a read by that hash finds it.
+3. **Hash id: an identity the docs define as a hash.** "A device's id is the SHA-256 of its lower-cased serial." Setting the identity member names the record by it, so a read by that hash finds it.
    ```yaml
    operations:
-     addSubscriber:
-       set: { id: "md5(lower(request.body.email))" }
+     registerDevice:
+       set: { id: "sha256(lower(request.body.serial))" }
    ```
-4. **Guarded refusal: a refusal under a condition.** "A closed ticket cannot be edited (409 `ticket_closed`); titles are unique ignoring case among open tickets (400 `duplicate_title`)."
+4. **Guarded refusal: a refusal under a condition.** "A harvested plot cannot be edited (409 `plot_harvested`); plot names are unique ignoring case among plots not retired (400 `duplicate_name`)."
    ```yaml
    operations:
-     updateTicket:
+     updatePlot:
        refuse:
-         - when: "record.status == 'closed'"
+         - when: "record.state == 'harvested'"
            status: 409
-           code: ticket_closed
-           message: { expr: "'ticket ' + string(record.id) + ' is closed'" }
-     createTicket:
+           code: plot_harvested
+           message: { expr: "'plot ' + string(record.id) + ' is harvested'" }
+     createPlot:
        refuse:
-         - when: "exists('tickets', lower(it.title) == lower(request.body.title) && it.status != 'closed')"
+         - when: "exists('plots', lower(it.name) == lower(request.body.name) && it.state != 'retired')"
            status: 400
-           code: duplicate_title
+           code: duplicate_name
    ```
-5. **Side-effect create: a write that adds or changes another record.** "Creating a project also creates its first activity entry and bumps the owner's project count."
+5. **Side-effect create: a write that adds or changes another record.** "Creating a garden adds its first log entry and stamps the gardener's `last_garden_at`."
    ```yaml
    operations:
-     createProject:
+     createGarden:
        effects:
          - op: create
-           type: activities
-           set: { project_id: "record.id", kind: "'created'", at: "now" }
+           type: logs
+           set: { garden_id: "record.id", kind: "'created'", at: "now" }
          - op: update
-           type: users
-           id: "record.owner_id"
-           set: { project_count: "it.project_count + 1" }
+           type: gardeners
+           id: "record.gardener_id"
+           set: { last_garden_at: "now" }
    ```
-   A conditional state change is a `set` with `?:`: `set: { status: "record.refunded + request.body.amount >= record.amount ? 'refunded' : 'partially_refunded'" }`.
-6. **Sort parameter: a list ordered by what the request asks.** "`sort` takes comma-separated members, `-` before one for descending (`sort=-price,name`); archived items are not listed." `by` turns the parameter's text (`value`) into a list of `{member, desc}`; `where` keeps only the stored records it holds for (`it`), before filters and paging.
+   A count or total of other records is a `computed` member (`count('gardens', it.gardener_id == record.id)`), not an effect that adds one: effects do not run on calls left to generation, and nothing takes one away on a delete. A conditional state change is a `set` with `?:`: `set: { status: "record.shipped + request.body.quantity >= record.quantity ? 'shipped' : 'partially_shipped'" }`.
+6. **Sort parameter: a list ordered by what the request asks.** "`order_by` takes comma-separated members, `-` before one for descending (`order_by=-rating,title`); draft recipes are not listed." `by` turns the parameter's text (`value`) into a list of `{member, desc}`; `where` keeps only the stored records it holds for (`it`), before filters and paging.
    ```yaml
    operations:
-     listProducts:
+     listRecipes:
        list:
-         where: "it.status != 'archived'"
+         where: "it.state != 'draft'"
          sort:
-           param: sort
+           param: order_by
            by: "value.split(',').map(s, s.startsWith('-') ? {'member': s.substring(1), 'desc': true} : {'member': s, 'desc': false})"
    ```
-   For `sort=price:desc` it is `[{'member': value.split(':')[0], 'desc': value.endsWith(':desc')}]`. Without the parameter the list keeps its `order`.
+   For `order_by=rating:desc` it is `[{'member': value.split(':')[0], 'desc': value.endsWith(':desc')}]`. Without the parameter the list keeps its `order`.
 
-Check every expression you write on the mock. `patch_world` refuses one that does not compile (code `invalid`, the message quoting the error at its line and column) or that reads a member, parameter or type the contract does not have (`unresolved`): fix it at the pointer it names. An expression that fails when it runs (a type mismatch, a `null` it did not expect) never fails the call; the engine answers as it would without it, and `call_mock`'s answer lists it under `expr_failed` (`[{pointer, error}]`, the request record keeps it too). When you see `expr_failed`, fix the expression at that pointer and call again.
+Check every expression you write on the mock. `patch_world` refuses one that does not compile (code `invalid`, the message quoting the error at its line and column) or that reads a member, parameter or type the contract does not have (`unresolved`): fix it at the pointer it names. An expression that fails when it runs (a type mismatch, a `null` it did not expect) never fails the call; the engine answers as it would without it, and `call_mock`'s answer lists it under `expr_failed` (`[{pointer, error}]`; the request record keeps it too). When you see `expr_failed`, fix the expression at that pointer and call again. When the answer has `expr_failed_unknown: true` instead, `call_mock` could not read the call's request record; read it with `list_requests {mock, session, include_bodies: true}`.
 
 ## Worked example
 

@@ -186,7 +186,7 @@ operations:
 | --- | --- |
 | `request` | `{body, path, query, headers}`: the parsed body, the path and query parameters, and the headers the mock records, their names in lower case (`request.headers['x-actor']`). |
 | `record` | In `set` and `refuse`, the target as stored before the call, or `null` (a create, a target the session does not hold). In `computed`, the record answered, as stored (a list item cut down to the list's item schema still reads the whole record). In `effects`, the target as the call's write left it (as it was held, for a delete). |
-| `it` | In `effects`' `when` and `set`, the record an `update` or `delete` found (`null` for a `create`); in `list.where`, each record of the list as stored; inside `count`, `exists`, `sum` and the list macros, each item. |
+| `it` | In `effects`' `when` and `set`, the record an `update` or `delete` found (`null` for a `create`); in `list.where`, each record of the list as stored; inside `count`, `exists` and `sum`, each item. The list macros name their own item: `record.items.map(x, x.price)`. |
 | `value` | In `list.sort.by`, the sort parameter as the request sent it (a deep object parameter, `sort[0][field]=x`, as the object its keys make). |
 | `now` | The request time, RFC 3339 text: the seeded time when the call's draws are seeded (as generated dates are), else the clock. |
 
