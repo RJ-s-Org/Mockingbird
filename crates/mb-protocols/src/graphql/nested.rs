@@ -357,10 +357,10 @@ impl Walk<'_> {
     }
 
     /// The id of an object of type `ty` answered without one, under
-    /// `parent`, from its lookup keys (`Issue.number`): the stored record's
-    /// under that parent with the same keys, else one made of them, so
-    /// that every answer naming it names the same record. `None` without
-    /// lookup keys or their values.
+    /// `parent`, from a lookup key (`Issue.number`): the stored record's
+    /// under that parent with the same key, else one made of it, so that
+    /// every answer naming it names the same record. `None` when the answer
+    /// holds no lookup key.
     fn id_by_keys(
         &self,
         ty: &str,
@@ -368,17 +368,24 @@ impl Walk<'_> {
         obj: &Map<String, Value>,
         parent: &Parent,
     ) -> Option<String> {
-        let keys = self.narrowed.lookup_keys(self.bundle, ty)?;
+        // The first lookup key the answer holds (keys sort by name), so
+        // that every list naming the record names it alike.
+        let (key, value) = self
+            .narrowed
+            .lookup_keys(self.bundle, ty)?
+            .iter()
+            .filter(|key| *key != "id")
+            .find_map(|key| {
+                let value = sel
+                    .fields
+                    .iter()
+                    .find(|(_, c)| c.name == *key)
+                    .and_then(|(k, _)| obj.get(k))
+                    .filter(|v| !v.is_null() && !v.is_object() && !v.is_array())?;
+                Some((key.clone(), value.clone()))
+            })?;
         let mut values = Map::new();
-        for key in keys {
-            let value = sel
-                .fields
-                .iter()
-                .find(|(_, c)| c.name == *key)
-                .and_then(|(k, _)| obj.get(k))
-                .filter(|v| !v.is_null() && !v.is_object() && !v.is_array())?;
-            values.insert(key.clone(), value.clone());
-        }
+        values.insert(key, value);
         if let Some(held) = self.held.get(ty).into_iter().flatten().find(|r| {
             refs(r).contains(&parent.id.as_str()) && matches(&values, r) == (true, values.len())
         }) {
