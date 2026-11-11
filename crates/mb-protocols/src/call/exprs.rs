@@ -66,7 +66,8 @@ pub(crate) struct CallExprs {
     notes: Mutex<Notes>,
     /// The call's `set` values, once evaluated: each member and its value (`None`
     /// when its expression failed or gave `null`).
-    set: Mutex<Option<SetValues>>,
+    /// The values, and for a create the record id they were evaluated against.
+    set: Mutex<Option<(Option<Value>, SetValues)>>,
 }
 
 #[derive(Debug, Default)]
@@ -606,16 +607,37 @@ pub(super) async fn set_values(
     (plan, call): (&CallPlan<'_>, &OperationCall),
     (before, building): (Option<&Value>, bool),
 ) -> SetValues {
+    let rt = state.rt;
+    // A create's identity member: its `set` entry is evaluated first, and the values
+    // are kept for the record id they read.
+    let identity = building
+        .then_some(plan.op.resource_type.as_deref())
+        .flatten()
+        .map(|t| identity_member(rt, t));
+    let id_of = |record: Option<&Value>| {
+        identity
+            .as_ref()
+            .and_then(|m| record?.get(m.as_str()).cloned())
+    };
     let kept = plan
         .exprs
         .set
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    if let Some(kept) = kept {
-        return kept;
+    // A create the executor gave up on is generated with another id: what read the
+    // executor's record is evaluated again, but not the identity entry (its draws
+    // stay the call's).
+    let mut kept_identity: Option<(String, Option<Value>)> = None;
+    if let Some((read_id, values)) = kept {
+        if identity.is_none() || read_id == id_of(before) {
+            return values;
+        }
+        kept_identity = identity
+            .as_ref()
+            .and_then(|m| values.into_iter().find(|(member, ..)| member == m))
+            .map(|(member, value, _)| (member, value));
     }
-    let rt = state.rt;
     let Some(ops) = rt
         .described()
         .expressions(&plan.op.id)
@@ -652,17 +674,18 @@ pub(super) async fn set_values(
         }
     };
     // A create's identity entry first: the others read the record by its id.
-    let identity = building
-        .then_some(plan.op.resource_type.as_deref())
-        .flatten()
-        .map(|t| identity_member(rt, t));
     let mut first: Option<(usize, Option<Value>)> = None;
     if let Some(identity) = &identity
         && let Some(i) = ops.set.iter().position(|e| e.member == *identity)
     {
-        let value = value_of(&ops.set[i], &bound, &mut host);
-        if let (Some(v), Value::Object(record)) = (&value, &mut bound.record) {
-            record.insert(identity.clone(), v.clone());
+        let value = match kept_identity.take() {
+            Some((_, value)) => value,
+            None => value_of(&ops.set[i], &bound, &mut host),
+        };
+        if let Some(v) = &value
+            && bound.record.is_object()
+        {
+            mb_mcm::set_member_at(&mut bound.record, identity, v.clone());
         }
         first = Some((i, value));
     }
@@ -682,7 +705,7 @@ pub(super) async fn set_values(
         .exprs
         .set
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(values.clone());
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((id_of(before), values.clone()));
     host.store_counters(state).await;
     values
 }
