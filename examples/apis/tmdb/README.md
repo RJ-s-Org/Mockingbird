@@ -6,12 +6,14 @@ playing, airing today, on the air), recommendations, search (movies and multi),
 discover, trending, genres, TV series and seasons, people and their combined credits,
 and the configuration endpoint on `api.themoviedb.org`, with placeholder posters for
 `image.tmdb.org` so an app's images load too. The details reads take
-`append_to_response` (`credits`, `videos`, `images`, `external_ids`, `release_dates`,
-`combined_credits`), and `language` takes `en` as well as `en-US`.
+`append_to_response`: a movie `credits`, `videos`, `images`, `external_ids` and
+`release_dates`; a TV show the same with `content_ratings` in place of
+`release_dates`; a person `combined_credits`, `images` and `external_ids`.
+`language` takes `en` as well as `en-US`.
 
 | | |
 | --- | --- |
-| Contract | [`tmdb.openapi.yaml`](tmdb.openapi.yaml), a hand-written subset (24 operations) whose operation ids are TMDB's reference slugs (`movie-details`, `search-movie`, ...) |
+| Contract | [`tmdb.openapi.yaml`](tmdb.openapi.yaml), a hand-written subset (27 operations) whose operation ids are TMDB's reference slugs (`movie-details`, `search-movie`, ...) |
 | Upstream | none: TMDB's OpenAPI file is under its API Terms of Use, not an open licence (see `notes` in [`example.json`](example.json)) |
 | Hosts | `api.themoviedb.org`; `image.tmdb.org` through `proxy.images` |
 | Scenarios | `rate-limited` (429), `not-found` (404), `invalid-api-key` (401), `outage` (503) |

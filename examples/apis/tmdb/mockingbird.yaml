@@ -20,9 +20,9 @@ mocks:
       titles, original titles, years, runtimes, genres and overviews (movie 550 is
       Fight Club, 27205 Inception, 603 The Matrix; tv 1396 is Breaking Bad; person
       287 is Brad Pitt). Translate titles and overviews when `language` is not
-      en-US. Image paths look like TMDB's: "/" + 27 alphanumerics + ".jpg". Lists
-      return 20 results per page with consistent page, total_pages and
-      total_results; search results match the query. Dates are YYYY-MM-DD,
+      English (en or en-US). Image paths look like TMDB's: "/" + 27
+      alphanumerics + ".jpg". Lists return 20 results per page with consistent
+      page, total_pages and total_results; search results match the query. Dates are YYYY-MM-DD,
       vote_average is 0-10 with one or three decimals, imdb_id is "tt" + 7 digits.
     scenarios:
       rate-limited:
