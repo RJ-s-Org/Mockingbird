@@ -958,6 +958,19 @@ impl SchemaValidator {
             .any(|node| node.get("maxLength").is_some())
     }
 
+    /// Whether the string at instance location `pointer` is held to a fixed form: a
+    /// schema there has an `enum`, `const`, `format` or `pattern`, or none is declared
+    /// there at all.
+    pub(crate) fn fixes_string(&self, pointer: &str) -> bool {
+        let nodes = self.nodes_at(pointer);
+        nodes.is_empty()
+            || nodes.iter().any(|node| {
+                ["enum", "const", "format", "pattern"]
+                    .iter()
+                    .any(|key| node.get(*key).is_some())
+            })
+    }
+
     /// Every schema reachable for the instance location `pointer` (through
     /// `properties`, `items`, `prefixItems`, a schema `additionalProperties`,
     /// and `$ref`, `allOf`, `oneOf`, `anyOf`); empty when none is.

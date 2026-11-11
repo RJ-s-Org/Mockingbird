@@ -183,6 +183,11 @@ components:
         name: {type: string}
         overview: {type: string}
         network_id: {type: integer}
+        poster_path: {type: string}
+        first_air_date: {type: string, format: date}
+        vote_average: {type: number}
+        status: {type: string, enum: [Ended, Returning Series]}
+        tagline: {type: string, pattern: "^[A-Za-z ]+$"}
 "##;
 
 /// A read in another language restates the stored record: its prompt holds that record
@@ -214,4 +219,48 @@ async fn a_variant_read_is_shown_only_its_stored_record() {
     assert!(variant.contains("Detectives and prosecutors."), "{variant}");
     assert!(!variant.contains("Studio Seventy-Seven"), "{variant}");
     assert!(!variant.contains("Drama"), "{variant}");
+}
+
+/// A read in another language answers the stored record itself: the model is asked to
+/// restate it, and only its text is taken from the answer. Its identity, references,
+/// paths, dates, numbers and enum values stay as stored, whatever the model wrote.
+#[tokio::test]
+async fn a_variant_keeps_the_stored_records_identity() {
+    let h = support::harness(
+        LINKED,
+        vec![
+            json!({"id": 549, "name": "Deadwood", "overview": "A western town.",
+                   "network_id": 6, "poster_path": "/dw.jpg", "first_air_date": "2004-03-21",
+                   "vote_average": 8.1, "status": "Ended", "tagline": "A lawless town"}),
+            json!({"id": 549, "name": "Deadwood (VF)", "overview": "Une ville de l'Ouest.",
+                   "network_id": 1399, "poster_path": "/got.jpg", "first_air_date": "2011-04-17",
+                   "vote_average": 8.4, "status": "Returning Series",
+                   "tagline": "Une ville sans loi"}),
+            json!({"id": 549, "name": "a third answer"}),
+        ],
+        &options(),
+        |rt| rt,
+    );
+    h.send("GET", "/tv/549", None, &[]).await;
+    let (_, _, french) = h.send("GET", "/tv/549?language=fr-FR", None, &[]).await;
+    assert_eq!(french["name"], "Deadwood (VF)");
+    assert_eq!(french["overview"], "Une ville de l'Ouest.");
+    assert_eq!(french["id"], 549);
+    assert_eq!(french["network_id"], 6);
+    assert_eq!(french["poster_path"], "/dw.jpg");
+    assert_eq!(french["first_air_date"], "2004-03-21");
+    assert_eq!(french["vote_average"], 8.1);
+    // Strings the schema holds to an enum or a pattern stay as stored, even where the
+    // model's value is one the schema allows.
+    assert_eq!(french["status"], "Ended");
+    assert_eq!(french["tagline"], "A lawless town");
+    // Read again in that language: the kept restatement, with no further generation.
+    let (_, _, again) = h.send("GET", "/tv/549?language=fr-FR", None, &[]).await;
+    assert_eq!(again, french);
+    let prompts = prompts(&h);
+    assert_eq!(prompts.len(), 2);
+    let variant = &prompts[1];
+    assert!(variant.contains("<existing_resource>"), "{variant}");
+    assert!(variant.contains("another representation"), "{variant}");
+    assert!(variant.contains("language=fr-FR"), "{variant}");
 }

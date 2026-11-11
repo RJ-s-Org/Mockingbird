@@ -304,6 +304,10 @@ pub struct GenerationContext<'a> {
     /// Where the mock's world description says a successful answer holds its records
     /// (`answer.records`): shaping to the output budget never leaves them out.
     pub answer_records: Option<&'a mb_mcm::world::Pointer>,
+    /// The representation a read asks its target in (`language=fr-FR`), when that is
+    /// not the one the target was stored in: the answer is the target itself, with its
+    /// text in that representation (see [`restate`]).
+    pub restates: Option<&'a str>,
 }
 
 /// What only the runtime knows of an update's stored target, for the answer to settle
@@ -3476,6 +3480,11 @@ fn reflect(
     let ahead = from_llm && !ctx.earlier_requests.is_empty() && !ctx.changes_by_effects;
     let body = match op.kind {
         OperationKind::Query => match ctx.target {
+            // A faker's text is no restatement: the stored record answers.
+            Some(target) if ctx.restates.is_some() && !from_llm => {
+                overlay_target(validator, target, body)
+            }
+            Some(target) if ctx.restates.is_some() => restate(validator, target, body),
             Some(target) if ahead => caught_up(validator, body, target, ctx.earlier_own_body),
             Some(target) => overlay_target(validator, target, body),
             None => body,
@@ -5072,6 +5081,151 @@ fn reflect_record(
     reflected
 }
 
+/// The stored resource as a read in another representation answers it: its members,
+/// structure and every value but its text as stored, each text value as `generated`
+/// wrote it at the same place (see [`is_text`]). A string the schema holds to a fixed
+/// form (an `enum`, `const`, `format` or `pattern`) or does not declare is no text. A
+/// value the schema then refuses is put back as stored. A result that still does not
+/// validate is the stored resource when that does, else `generated`, as
+/// [`overlay_target`] decides.
+fn restate(validator: &SchemaValidator, target: &StoredResource, generated: Value) -> Value {
+    let mut texts = Vec::new();
+    text_pointers(&target.data, &generated, None, String::new(), &mut texts);
+    let mut merged = target.data.clone();
+    for (pointer, text) in texts.into_iter().take(MAX_RESTATED_TEXTS) {
+        if validator.fixes_string(&pointer) {
+            continue;
+        }
+        if let Some(slot) = merged.pointer_mut(&pointer) {
+            *slot = Value::String(text);
+        }
+    }
+    for _ in 0..MAX_RESTATE_PASSES {
+        let violations = validator.violations(&merged);
+        if violations.is_empty() {
+            return merged;
+        }
+        for (pointer, _) in violations {
+            if let (Some(slot), Some(stored)) =
+                (merged.pointer_mut(&pointer), target.data.pointer(&pointer))
+            {
+                *slot = stored.clone();
+            }
+        }
+    }
+    if validator.is_valid(&merged) {
+        merged
+    } else if validator.is_valid(&target.data) {
+        target.data.clone()
+    } else {
+        generated
+    }
+}
+
+/// Rounds of putting values the schema refuses back as stored, in [`restate`].
+const MAX_RESTATE_PASSES: usize = 3;
+
+/// Text values [`restate`] takes from an answer at most.
+const MAX_RESTATED_TEXTS: usize = 256;
+
+/// Each place where `stored` holds a text value (see [`is_text`]) and `generated` holds
+/// another non-empty string, with that string: its JSON pointer below `at`. `member` is
+/// the name of the member `stored` is the value of. Arrays are matched item by item
+/// only when both have the same length; a member only one side has is left out.
+fn text_pointers(
+    stored: &Value,
+    generated: &Value,
+    member: Option<&str>,
+    at: String,
+    out: &mut Vec<(String, String)>,
+) {
+    match (stored, generated) {
+        (Value::Object(stored), Value::Object(generated)) => {
+            for (name, value) in stored {
+                if let Some(answered) = generated.get(name) {
+                    let step = name.replace('~', "~0").replace('/', "~1");
+                    text_pointers(value, answered, Some(name), format!("{at}/{step}"), out);
+                }
+            }
+        }
+        (Value::Array(stored), Value::Array(generated)) if stored.len() == generated.len() => {
+            for (i, (value, answered)) in stored.iter().zip(generated).enumerate() {
+                text_pointers(value, answered, member, format!("{at}/{i}"), out);
+            }
+        }
+        (Value::String(text), Value::String(answered))
+            if is_text(member, text) && !answered.is_empty() && answered != text =>
+        {
+            out.push((at, answered.clone()));
+        }
+        _ => {}
+    }
+}
+
+/// Name parts that say a member identifies, locates or codes something.
+const FIXED_NAME_PARTS: &[&str] = &[
+    "id", "ids", "key", "keys", "code", "codes", "slug", "uuid", "guid", "token", "path", "url",
+    "uri", "href", "email", "hash", "etag", "sha", "type", "kind", "status", "state", "currency",
+    "locale", "language", "lang", "country", "timezone", "mime", "format",
+];
+
+/// The parts of member name `name`, lower case: split at `_`, `-`, `.`, spaces and
+/// camelCase boundaries (`genreIds` → `genre`, `ids`; `userID` → `user`, `id`).
+fn name_parts(name: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut previous_lower = false;
+    for c in name.chars() {
+        if matches!(c, '_' | '-' | '.' | ' ') {
+            if !current.is_empty() {
+                parts.push(std::mem::take(&mut current));
+            }
+            previous_lower = false;
+            continue;
+        }
+        if c.is_uppercase() && previous_lower && !current.is_empty() {
+            parts.push(std::mem::take(&mut current));
+        }
+        previous_lower = c.is_lowercase() || c.is_ascii_digit();
+        current.extend(c.to_lowercase());
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+/// Whether string `value` of member `member` is text a representation may restate (a
+/// title, an overview), not a value that identifies, locates or codes something or is
+/// written in a fixed form. It is not when:
+/// - the member's last name part is one of [`FIXED_NAME_PARTS`] (`id`, `genreIds`,
+///   `country_code`, `poster_path`, `status`);
+/// - the value has no letter, or is shaped as a URL, a path, an address or a date;
+/// - the value is one token (no space) that is short (3 characters or fewer), all upper
+///   case, or mixes letters with digits or `/`, `#`, `:` (`en`, `USD`, `tt0348914`,
+///   `image/jpeg`, `#ff0000`).
+fn is_text(member: Option<&str>, value: &str) -> bool {
+    let fixed_name = member
+        .map(name_parts)
+        .and_then(|parts| parts.last().cloned())
+        .is_some_and(|last| FIXED_NAME_PARTS.contains(&last.as_str()));
+    let fixed_shape = value.contains("://")
+        || value.starts_with('/')
+        || value.contains('@')
+        || value
+            .as_bytes()
+            .get(..5)
+            .is_some_and(|head| head[..4].iter().all(u8::is_ascii_digit) && head[4] == b'-');
+    let token = !value.chars().any(char::is_whitespace);
+    let code = token
+        && (value.chars().count() <= 3
+            || value.chars().all(|c| !c.is_lowercase())
+            || value
+                .chars()
+                .any(|c| c.is_ascii_digit() || matches!(c, '/' | '#' | ':')));
+    value.chars().any(char::is_alphabetic) && !fixed_name && !fixed_shape && !code
+}
+
 /// Overlay the stored resource's top-level fields onto a generated object.
 /// If the merge is invalid, prefer the stored data when it validates, else
 /// keep the generated body.
@@ -6113,5 +6267,117 @@ mod answer_cap_tests {
         assert_eq!(answer_cap(&users, 0), None);
         // A 10 KB map of users fits the default cap.
         assert!(answer_cap(&users, 1500).unwrap_or_default() > 10_000);
+    }
+}
+
+#[cfg(test)]
+mod restate_tests {
+    use serde_json::json;
+
+    use super::{StoredResource, is_text, name_parts, restate};
+    use crate::validate::SchemaValidator;
+
+    fn held(data: serde_json::Value) -> StoredResource {
+        StoredResource {
+            resource_type: "show".into(),
+            id: "1".into(),
+            data,
+        }
+    }
+
+    #[test]
+    fn names_split_at_separators_and_camel_case() {
+        assert_eq!(name_parts("genreIds"), ["genre", "ids"]);
+        assert_eq!(name_parts("userID"), ["user", "id"]);
+        assert_eq!(name_parts("country_code"), ["country", "code"]);
+        assert_eq!(name_parts("x-api-key"), ["x", "api", "key"]);
+    }
+
+    #[test]
+    fn only_text_is_text() {
+        for (member, value) in [
+            ("name", "Deadwood"),
+            ("overview", "A western town."),
+            ("title", "Law & Order"),
+        ] {
+            assert!(is_text(Some(member), value), "{member}: {value}");
+        }
+        for (member, value) in [
+            ("id", "Deadwood"),
+            ("userID", "Someone"),
+            ("genreIds", "Drama"),
+            ("slug", "deadwood"),
+            ("country_code", "Great Britain"),
+            ("poster_path", "dw.jpg"),
+            ("status", "Ended"),
+            ("original_language", "English"),
+            ("name", "en"),
+            ("name", "USD"),
+            ("name", "tt0348914"),
+            ("name", "image/jpeg"),
+            ("name", "#ff0000"),
+            ("name", "https://example.com/a b"),
+            ("name", "/a/b c"),
+            ("name", "2004-03-21"),
+            ("name", "a@b.c d"),
+            ("name", "1234"),
+        ] {
+            assert!(!is_text(Some(member), value), "{member}: {value}");
+        }
+    }
+
+    #[test]
+    fn a_restatement_takes_only_text_from_the_answer() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "integer"},
+                "name": {"type": "string"},
+                "ref": {"type": "string", "format": "uuid"},
+                "network": {"type": "object", "properties": {
+                    "id": {"type": "integer"}, "name": {"type": "string"}}},
+                "genres": {"type": "array", "items": {"type": "object", "properties": {
+                    "id": {"type": "integer"}, "name": {"type": "string"}}}},
+                "seasons": {"type": "array", "items": {"type": "object", "properties": {
+                    "name": {"type": "string"}}}},
+                "summary": {"type": "string"}
+            }
+        });
+        let validator = SchemaValidator::new(&schema).unwrap();
+        let stored = held(json!({
+            "id": 1,
+            "name": "Deadwood",
+            "ref": "kept as stored value",
+            "network": {"id": 6, "name": "Home Box Office"},
+            "genres": [{"id": 37, "name": "Western"}, {"id": 18, "name": "Drama"}],
+            "seasons": [{"name": "Season One"}],
+            "summary": "A western town."
+        }));
+        let answer = json!({
+            "id": 2,
+            "name": "Deadwood (VF)",
+            "ref": "a translated value",
+            "network": {"id": 7, "name": "Chaîne Payante"},
+            "genres": [{"id": 1, "name": "Ouest"}, {"id": 2, "name": "Drame dramatique"}],
+            "seasons": [{"name": "Saison Un"}, {"name": "Saison Deux"}],
+            "summary": {"text": "an object, not a string"},
+            "added": "a member the record does not have"
+        });
+        let merged = restate(&validator, &stored, answer);
+        assert_eq!(
+            merged,
+            json!({
+                "id": 1,
+                "name": "Deadwood (VF)",
+                // Held to a format: never text.
+                "ref": "kept as stored value",
+                "network": {"id": 6, "name": "Chaîne Payante"},
+                "genres": [{"id": 37, "name": "Ouest"}, {"id": 18, "name": "Drame dramatique"}],
+                // Another length: matched to nothing.
+                "seasons": [{"name": "Season One"}],
+                // Not a string in the answer.
+                "summary": "A western town."
+            })
+        );
     }
 }
