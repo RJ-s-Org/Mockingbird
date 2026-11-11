@@ -82,8 +82,6 @@ curl -s localhost:8080/graphql \
 
 The sources of the root fields are reported in the response, under `extensions.mockingbird.sources`.
 
-A field that looks one object up by a value of it (`repository(name: "deno")`, where `Repository` has a scalar `name`) is generated as found, never `null`, even where the schema lets it be null: the query names a record that exists, as a REST read of a named id does. Root fields are the exception, since two of them may look up the same thing under different types.
-
 ### Batched GraphQL requests
 
 A `POST` whose JSON body is an array of operations is a batch, answered `200` with an array of responses in the same order:
@@ -125,6 +123,10 @@ SSE (an OpenAPI operation answering `text/event-stream`):
 ```sh
 curl -N localhost:8080/ticks -H 'X-Mockingbird-Stream-Items: 3'
 ```
+
+## GraphQL nested lookups
+
+A field below the root that returns one object, with a string or number argument naming a scalar, non-enum field of that object (`repository(name: "deno")`, where `Repository` has a `name`), is described to the model as a record that exists, so it is answered rather than `null` (which clients read as "not found"). Only the prompt says so: the schema still allows `null`, so a scenario, the world description or stored state can answer one. Fields returning a list, an interface or a union are not lookups.
 
 ## Streaming
 
