@@ -100,10 +100,38 @@ Minor:
 | Tokens | 846k prompt, 20k completion. Every Stripe call carries a 17k to 25k-token prompt |
 | OpenRouter spend | $0.20 at most: the shared key's usage went from $43.403 to $43.602 over the trial, and other sessions use the same key |
 
+## Rerun on 2026-11-11
+
+This rerun used the same mock, specs and flows, against `main` with #399, #400, #401, #413, #423 and #426, plus #430 and #433. The world gained a `PostCheckoutSessions` create that mints `cs_test_` ids and builds the hosted `url` from the session's id. The executor now serves Checkout creates, so this is the first run that needs it.
+
+| | 2026-11-10 | 2026-11-11 |
+| --- | --- | --- |
+| Spec examples passing | 14/16 | **16/16** |
+| Requests answered from state | 67% (39 of 58) | **100%** (31 of 31) |
+| All requests | | p50 1.8 s, p95 6.6 s |
+| Calls that used the model | p50 5.4 s, p95 22.5 s | p50 2.8 s, p95 8.8 s (n = 19) |
+| PaymentIntent creates | p50 5.1 s, p95 15.1 s | p50 2.3 s, p95 3.8 s (n = 13) |
+| Checkout creates | 10 to 50 s (full generation) | p50 8.8 s, p95 14.1 s (n = 4, executor plus fill) |
+| Tokens | 846k prompt, 20k completion | 244k prompt, 8.6k completion |
+| OpenRouter spend | $0.20 at most | $0.11 for this rerun and the one before it; $1.13 for all the latency work on this trial since 2026-11-10 (shared key, other sessions included) |
+
+What changed:
+- **Prompts are smaller** (#399): about 6k tokens for a PaymentIntent fill, down from 25k.
+- **Model calls are capped** in output and time (#400, #401), and a slow one is hedged after 2 s (#423).
+- **The executor and fill handle more:**
+  - a fill nulls nullable references and optional nullable objects instead of asking the model (#413, #433);
+  - a sent `line_items` list no longer pushes the Checkout create into full generation (#430).
+
+Still slow: a Checkout fill writes 800 to 1,750 tokens against a 13k to 20k-token prompt. It still asks for:
+- the session's required objects (`automatic_tax`, `custom_text`, `custom_fields`, `shipping_options`);
+- its optional non-nullable objects (`branding_settings`, `line_items`, `tax_id_collection`, …);
+- about 30 scalars.
+
 ## Files
 
 These are outside the repo, in `mockingbird-trials/accept-a-payment/mb-trial-1110/`:
 - `mockingbird.yaml` and `stripe-world.yaml`;
 - `selftest.sh`, `runall.sh` (the specs), `flows.sh` and `flows-checkout.sh`;
 - `stripe_ruby_proxy.rb`, the spec-side preload;
-- `run2.txt`, the spec output, and `run3.txt` and `run4.txt`, the flow output.
+- `run2.txt`, the spec output, and `run3.txt` and `run4.txt`, the flow output;
+- `rerun.sh` and `score.py`, and the 2026-11-11 rerun's `rerun-r5.txt` (specs), `rerun-r5.json` (request log) and `rerun-r5-world.json`.
