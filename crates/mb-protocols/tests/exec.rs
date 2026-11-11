@@ -4699,7 +4699,14 @@ async fn a_version_a_write_carries_starts_at_one() {
 #[tokio::test]
 async fn a_list_sent_for_a_member_the_reads_hold_as_an_object_is_dropped_not_refused() {
     let (capture, _guard) = Capture::install();
-    let h = support::harness(SERVER_SET, vec![], &HarnessOptions::default(), |rt| rt);
+    // Fill's answer: the sent items carried over into the list object.
+    let filled = json!({"line_items": {"object": "list", "data": [{"price": "p1", "quantity": 2}]}, "tags": []});
+    let h = support::harness(
+        SERVER_SET,
+        vec![filled.clone()],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
     // Stripe's shape: the create takes a list of prices, the record holds a list object.
     let sent = json!({"currency": "EUR", "line_items": [{"price": "p1", "quantity": 2}]});
     let (status, _, body) = h.send("POST", "/carts", Some(sent), &[]).await;
@@ -4708,8 +4715,17 @@ async fn a_list_sent_for_a_member_the_reads_hold_as_an_object_is_dropped_not_ref
         capture.of("createCart"),
         vec![create_line("createCart", None)]
     );
-    // Optional and never null: fill leaves it out rather than invent it.
-    assert!(body.get("line_items").is_none(), "{body}");
+    // Optional and never null, but sent: fill asks the model for it, so the record
+    // keeps the client's items.
+    assert_eq!(body["line_items"], filled["line_items"], "{body}");
+    let requests = h.provider.requests();
+    let asked = requests.iter().find_map(|r| match &r.response_format {
+        mb_llm::ResponseFormat::JsonSchema { schema, .. } => {
+            schema["properties"].get("line_items").cloned()
+        }
+        _ => None,
+    });
+    assert!(asked.is_some(), "line_items was not asked: {requests:?}");
 }
 
 #[tokio::test]

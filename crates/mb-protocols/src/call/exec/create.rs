@@ -368,7 +368,8 @@ pub(super) async fn run(
         // for the members nothing set at all (one the request sent part of is the
         // model's to complete), but those fill answers null with no model call and the
         // record's state (its lifecycle member, a soft-delete mark), which a create
-        // decides. The model fills only what is left.
+        // decides, and a member the request sent that was dropped for its shape (the
+        // model carries the sent items over). The model fills only what is left.
         let nulls = mb_engine::fill_nulls(rt.bundle(), &fill_schema(&missing, &required), &names);
         let state_member = rt
             .described()
@@ -379,6 +380,7 @@ pub(super) async fn run(
             .iter()
             .filter(|name| {
                 !known.contains_key(*name)
+                    && !sent.as_object().is_some_and(|s| s.contains_key(*name))
                     && !nulls.contains(name)
                     && state_member.as_ref() != Some(*name)
                     && !crate::world_gaps::SOFT_DELETE_MEMBERS

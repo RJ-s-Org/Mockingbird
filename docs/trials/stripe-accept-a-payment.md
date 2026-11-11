@@ -127,6 +127,40 @@ Still slow: a Checkout fill writes 800 to 1,750 tokens against a 13k to 20k-toke
 - its optional non-nullable objects (`branding_settings`, `line_items`, `tax_id_collection`, …);
 - about 30 scalars.
 
+## Rerun on the real install path (2026-11-11)
+
+This time the mock was built the way a user would build it, not by hand.
+- **Setup:** a fresh clone at `1a57c3b`, with the Mockingbird plugin installed from the marketplace at project scope.
+- **The agent:** a fresh `claude -p` with one prompt: "Mock the Stripe API for this app with Mockingbird so I can run it locally without a Stripe account", plus the OpenRouter model, the key variable and the ports already in use on this machine.
+- **Binary:** `main` plus #483 and #484.
+- **Untouched:** the specs, the flows and the `.env` placeholders are the same as above.
+
+**Build.** 443 s, 36 turns, $1.47 of Claude Code usage, using only skills, MCP and CLI.
+- **Contract:** `init_example stripe --full`, the catalog's pinned upstream spec at API version `2026-09-30`.
+- **World overlay:** ids with prefixes, the PaymentIntent `client_secret` and its initial status, open/unpaid Checkout Sessions, and a `url` or a `client_secret` by `ui_mode`.
+
+| | Agent's mock on `main` | Same mock, this PR and #498 |
+| --- | --- | --- |
+| Spec examples passing | 9/16 | **13/16** |
+| PaymentIntent creates (flows) | 0/8: 400 `'payment_method_types' was unexpected` | 8/8, p50 2.3 s |
+| Calls answered by the executor (`state`) | 10 of 23; 12 refused | 29 of 30 |
+| Calls with no model call | p50 2 ms | p50 2 ms, p95 152 ms (n = 11) |
+| Calls that used the model | p50 4.9 s (n = 8) | p50 2.4 s, p95 7.1 s (n = 19; creates' fills) |
+| Tokens | 39k prompt, 1.9k completion | 153k prompt, 5.2k completion (about $0.004) |
+
+**Fixed:**
+- **`payment_method_types` refused.** The catalog pins Stripe's newest spec, whose PaymentIntent create no longer declares `payment_method_types` (`additionalProperties: false`). The sample's older stripe-node still sends it, and real Stripe accepts it for that SDK's pinned API version. Every custom-payment-flow create was refused with 400. Now an undeclared member no longer refuses a request by default; `strict_requests: true` restores that (#498).
+- **`line_items` lost.** The executor drops a `line_items` array sent where the record holds a list object, leaving it to fill, and #445 then left the optional list object out of the fill. So the elements-with-checkout-sessions spec's `retrieve(expand: [line_items])` had no `line_items`. Fill now asks for an optional object the request sent (this PR).
+
+**Still failing (3):**
+- **Unknown session id answers 200.** `unknown_ids` stayed `generate`. The hand-back checklist in the main skill (#500) tells the agent to set `404`.
+- **No refusal for an AU-only method in USD.** The agent wrote no `refuse` entry for `au_becs_debit` with a non-AUD currency.
+- **Redirect URL lacks a fragment.** The prebuilt spec matches `cs_test….#…` in the redirect URL, and the agent's `url` rule has no `#fragment`. That's an exact format the spec checks.
+
+The last two are things the agent's world didn't state, not engine gaps.
+
+**Seen, not fixed:** the 12 refusals took about 6 s each with no model call. The server log shows `state backend: pool timed out while waiting for an open connection` at the machine's load average of 60. That's a follow-up for the SQLite pool under load.
+
 ## Files
 
 These are outside the repo, in `mockingbird-trials/accept-a-payment/mb-trial-1110/`:
@@ -135,3 +169,4 @@ These are outside the repo, in `mockingbird-trials/accept-a-payment/mb-trial-111
 - `stripe_ruby_proxy.rb`, the spec-side preload;
 - `run2.txt`, the spec output, and `run3.txt` and `run4.txt`, the flow output;
 - `rerun.sh` and `score.py`, and the 2026-11-11 rerun's `rerun-r5.txt` (specs), `rerun-r5.json` (request log) and `rerun-r5-world.json`.
+- The real-install rerun: `mockingbird-trials/stripe-real/` (the clone, with the agent's `mockingbird/` folder) and `mockingbird-trials/stripe-real-trial/` (`prompt.txt`, `agent.jsonl`, `run.txt`/`run2.txt`, `run-requests.json`/`run2-requests.json`).

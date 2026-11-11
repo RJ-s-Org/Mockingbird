@@ -47,6 +47,11 @@ components:
           allOf: [{$ref: "#/components/schemas/Action"}]
         excluded: {type: array, items: {$ref: "#/components/schemas/Action"}}
         method_types: {type: array, items: {type: string}}
+        items:
+          type: object
+          properties:
+            object: {type: string}
+            data: {type: array, items: {$ref: "#/components/schemas/Action"}}
     Action:
       type: object
       required: [type]
@@ -204,6 +209,89 @@ async fn an_optional_object_that_may_not_be_null_is_left_out() {
     let mut asked: Vec<&String> = schema["properties"].as_object().unwrap().keys().collect();
     asked.sort();
     assert_eq!(asked, vec!["method_types", "status"]);
+}
+
+/// An optional object that may not be null is asked of the model when the request
+/// sent a member of its name (the model carries the sent items over); one the
+/// request did not send stays left out.
+#[tokio::test]
+async fn an_optional_object_the_request_sent_is_asked() {
+    let bundle = compile(CONTRACT.as_bytes()).unwrap();
+    let op = bundle.operation("createIntent").unwrap();
+    let schema = op.success_output().unwrap().schema.clone().unwrap();
+    let items = json!({"object": "list", "data": [{"type": "card"}]});
+    let (provider, engine) = scripted(vec![Ok(
+        json!({"status": "open", "items": items}).to_string()
+    )]);
+    let call = OperationCall {
+        credentials: Default::default(),
+        operation_id: op.id.clone(),
+        path_params: Map::new(),
+        query: Map::new(),
+        headers: Map::new(),
+        body: Some(json!({"items": [{"type": "card"}]})),
+    };
+    let missing: Vec<String> = ["status", "items", "branding"].map(String::from).to_vec();
+    let filled = engine
+        .fill(
+            &bundle,
+            &schema,
+            &Map::new(),
+            &missing,
+            FillContext { op, call: &call },
+        )
+        .await;
+    assert_eq!(filled.members["items"], items);
+    assert!(
+        !filled.members.contains_key("branding"),
+        "{:?}",
+        filled.members
+    );
+    let sent = provider.requests();
+    let ResponseFormat::JsonSchema { schema, .. } = &sent[0].response_format else {
+        panic!("no schema sent");
+    };
+    let mut asked: Vec<&String> = schema["properties"].as_object().unwrap().keys().collect();
+    asked.sort();
+    assert_eq!(asked, vec!["items", "status"]);
+}
+
+/// When the model call fails, an optional object the request sent is absent, not
+/// faker items standing for what the client sent.
+#[tokio::test]
+async fn a_failed_call_leaves_a_sent_optional_object_absent() {
+    let bundle = compile(CONTRACT.as_bytes()).unwrap();
+    let op = bundle.operation("createIntent").unwrap();
+    let schema = op.success_output().unwrap().schema.clone().unwrap();
+    let (_provider, engine) = scripted(vec![Err(LlmError::Transport("down".into()))]);
+    let call = OperationCall {
+        credentials: Default::default(),
+        operation_id: op.id.clone(),
+        path_params: Map::new(),
+        query: Map::new(),
+        headers: Map::new(),
+        body: Some(json!({"items": [{"type": "card"}]})),
+    };
+    let missing: Vec<String> = ["status", "items"].map(String::from).to_vec();
+    let filled = engine
+        .fill(
+            &bundle,
+            &schema,
+            &Map::new(),
+            &missing,
+            FillContext { op, call: &call },
+        )
+        .await;
+    assert!(
+        filled.members.contains_key("status"),
+        "{:?}",
+        filled.members
+    );
+    assert!(
+        !filled.members.contains_key("items"),
+        "{:?}",
+        filled.members
+    );
 }
 
 /// When the model call fails, a required object that may be null is null, not a
