@@ -158,7 +158,7 @@ async fn update(
             .engine
             .fill(
                 rt.bundle(),
-                &create::fill_schema(&missing),
+                &create::fill_schema(&missing, &names),
                 known,
                 &names,
                 FillContext { op, call },

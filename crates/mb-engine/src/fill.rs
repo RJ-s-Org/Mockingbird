@@ -29,7 +29,8 @@ pub struct Filled {
 impl Engine {
     /// Values for the `missing` members of a record whose `schema` declares them, the
     /// record holding `known` already. A member that may be null and holds a reference
-    /// to another record (an id-or-object member) is null. The rest come from one
+    /// to another record (an id-or-object member) is null, and so is an optional one
+    /// (not in `required`) that holds any other object or list. The rest come from one
     /// structured-output LLM call whose schema is `schema` restricted to them, with
     /// `known` in the prompt so that the values agree with it; none is made when none
     /// is left. A member the answer leaves invalid is the faker's (the answer's local
@@ -53,16 +54,21 @@ impl Engine {
         if declared.is_empty() {
             return filled;
         }
-        // A nullable reference to another record (an id-or-object member) that
-        // nothing set (not the request, the world description or the executor) is
-        // null, not the model's to write: nothing named a record it could point at.
-        // Any other nullable object stays the model's, which knows when one is null
-        // (a fresh payment's `next_action`) and when it is present (an issue's
-        // `user`); a faker object there would tell a client to act on it.
-        let (references, asked): (Vec<_>, Vec<_>) = declared.iter().partition(|(_, schema)| {
-            admits_null(bundle, schema) && structured(bundle, schema) && reference(bundle, schema)
+        // A nullable object or list that nothing set (not the request, the world
+        // description or the executor) is null, not the model's to write, when it is
+        // a reference to another record (nothing named a record it could point at) or
+        // optional (a fresh payment's `next_action`, a checkout session's dozens of
+        // optional settings): null is what the contract allows for it, and writing
+        // them out was most of the model's output. A required one (an issue's `user`)
+        // stays the model's, as does every scalar; a faker object would tell a client
+        // to act on it.
+        let required = consistency::required_members(bundle, schema);
+        let (nulled, asked): (Vec<_>, Vec<_>) = declared.iter().partition(|(name, member)| {
+            admits_null(bundle, member)
+                && structured(bundle, member)
+                && (reference(bundle, member) || !required.iter().any(|r| r == name))
         });
-        for (name, _) in &references {
+        for (name, _) in &nulled {
             filled.members.insert((*name).to_string(), Value::Null);
         }
         if !asked.is_empty() {

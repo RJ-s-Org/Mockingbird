@@ -37,6 +37,12 @@ components:
           anyOf:
             - {type: string}
             - {$ref: "#/components/schemas/Charge"}
+        shipping:
+          nullable: true
+          allOf: [{$ref: "#/components/schemas/Action"}]
+        discounts: {type: array, nullable: true, items: {type: string}}
+        metadata: {type: object, nullable: true}
+        receipt_email: {type: string, nullable: true}
     Action:
       type: object
       required: [type]
@@ -49,16 +55,16 @@ components:
 "##;
 
 /// A nullable reference to another record that nothing set is null and not asked
-/// of the model; a nullable object, a nullable scalar and the other members are,
-/// and the model's null for the object is kept (no faker object a client would act
-/// on).
+/// of the model, and so are optional nullable objects and lists; a required nullable
+/// object, the scalars (nullable or not) and the other members are asked, and the
+/// model's null for the object is kept (no faker object a client would act on).
 #[tokio::test]
-async fn a_nullable_member_nothing_set_is_null_and_not_asked() {
+async fn a_nullable_reference_or_optional_object_nothing_set_is_null_and_not_asked() {
     let bundle = compile(CONTRACT.as_bytes()).unwrap();
     let op = bundle.operation("createIntent").unwrap();
     let schema = op.success_output().unwrap().schema.clone().unwrap();
     let (provider, engine) = scripted(vec![Ok(
-        json!({"status": "requires_payment_method", "description": "Order 42", "next_action": null})
+        json!({"status": "requires_payment_method", "description": "Order 42", "next_action": null, "receipt_email": null})
             .to_string(),
     )]);
     let call = OperationCall {
@@ -69,9 +75,18 @@ async fn a_nullable_member_nothing_set_is_null_and_not_asked() {
         body: Some(json!({})),
     };
     let known: Map<String, Value> = json!({"id": "pi_1"}).as_object().cloned().unwrap();
-    let missing: Vec<String> = ["status", "description", "next_action", "latest_charge"]
-        .map(String::from)
-        .to_vec();
+    let missing: Vec<String> = [
+        "status",
+        "description",
+        "next_action",
+        "latest_charge",
+        "shipping",
+        "discounts",
+        "metadata",
+        "receipt_email",
+    ]
+    .map(String::from)
+    .to_vec();
     let filled = engine
         .fill(
             &bundle,
@@ -85,18 +100,26 @@ async fn a_nullable_member_nothing_set_is_null_and_not_asked() {
     assert_eq!(filled.members["description"], "Order 42");
     assert_eq!(filled.members["latest_charge"], Value::Null);
     assert_eq!(filled.members["next_action"], Value::Null);
+    for optional in ["shipping", "discounts", "metadata"] {
+        assert_eq!(filled.members[optional], Value::Null, "{optional}");
+    }
+    assert_eq!(filled.members["receipt_email"], Value::Null);
     let sent = provider.requests();
     let ResponseFormat::JsonSchema { schema, .. } = &sent[0].response_format else {
         panic!("no schema sent");
     };
     let mut asked: Vec<&String> = schema["properties"].as_object().unwrap().keys().collect();
     asked.sort();
-    assert_eq!(asked, vec!["description", "next_action", "status"]);
+    assert_eq!(
+        asked,
+        vec!["description", "next_action", "receipt_email", "status"]
+    );
 }
 
-/// With only nullable references missing, no model call is made.
+/// With only nullable references and optional nullable objects missing, no model
+/// call is made.
 #[tokio::test]
-async fn only_nullable_members_ask_no_model() {
+async fn only_nullable_references_and_optional_objects_ask_no_model() {
     let bundle = compile(CONTRACT.as_bytes()).unwrap();
     let op = bundle.operation("createIntent").unwrap();
     let schema = op.success_output().unwrap().schema.clone().unwrap();
@@ -108,7 +131,9 @@ async fn only_nullable_members_ask_no_model() {
         headers: Map::new(),
         body: None,
     };
-    let missing: Vec<String> = ["latest_charge"].map(String::from).to_vec();
+    let missing: Vec<String> = ["latest_charge", "shipping", "discounts"]
+        .map(String::from)
+        .to_vec();
     let filled = engine
         .fill(
             &bundle,
@@ -118,6 +143,8 @@ async fn only_nullable_members_ask_no_model() {
             FillContext { op, call: &call },
         )
         .await;
-    assert_eq!(filled.members["latest_charge"], Value::Null);
+    for member in ["latest_charge", "shipping", "discounts"] {
+        assert_eq!(filled.members[member], Value::Null, "{member}");
+    }
     assert!(provider.requests().is_empty());
 }
