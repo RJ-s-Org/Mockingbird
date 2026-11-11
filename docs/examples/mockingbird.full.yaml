@@ -39,6 +39,7 @@ proxy:
   host: 127.0.0.1
   port: 8888
   unmapped: pass
+  vendor_subdomains: block
   images: [images.example.test, orders.example.test/img]
   ca_dir: /var/lib/mockingbird/ca
 

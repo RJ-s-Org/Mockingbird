@@ -77,6 +77,10 @@ pub struct ProxyConfig {
     pub port: u16,
     /// What happens to hosts no mock claims.
     pub unmapped: Unmapped,
+    /// What happens to an unmapped host that shares a registrable domain
+    /// with a host a mock claims (`verify.twilio.com` next to a mocked
+    /// `api.twilio.com`), whatever `unmapped` says.
+    pub vendor_subdomains: VendorSubdomains,
     /// Hosts answered with generated placeholder images.
     pub images: Vec<String>,
     /// Where the local CA lives; unset uses `MB_CA_DIR` or
@@ -92,6 +96,7 @@ impl Default for ProxyConfig {
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: crate::proxy::DEFAULT_PROXY_PORT,
             unmapped: Unmapped::Pass,
+            vendor_subdomains: VendorSubdomains::Block,
             images: Vec::new(),
             ca_dir: None,
         }
@@ -152,6 +157,38 @@ impl Unmapped {
 }
 
 impl std::fmt::Display for Unmapped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What the proxy does with an unmapped host of a mocked vendor's domain
+/// (`proxy.vendor_subdomains`): one sharing its registrable domain (eTLD+1
+/// by the Public Suffix List) with a host a mock claims.
+#[derive(
+    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Default, clap::ValueEnum,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum VendorSubdomains {
+    /// Answer 502 problem+json naming the host and the mocked hosts of its
+    /// domain, even under `proxy.unmapped: pass`.
+    #[default]
+    Block,
+    /// Treat it like any other unmapped host (`proxy.unmapped` decides).
+    Pass,
+}
+
+impl VendorSubdomains {
+    /// The setting's name (`block` or `pass`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VendorSubdomains::Block => "block",
+            VendorSubdomains::Pass => "pass",
+        }
+    }
+}
+
+impl std::fmt::Display for VendorSubdomains {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }

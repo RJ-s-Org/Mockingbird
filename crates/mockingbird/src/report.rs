@@ -139,6 +139,27 @@ pub struct HostReport {
     /// `pass` (forwarded upstream) or `block`.
     pub mode: String,
     pub requests: u64,
+    /// For a host blocked because it shares a registrable domain with
+    /// mocked hosts (`proxy.vendor_subdomains`): those hosts.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sibling_of: Vec<String>,
+}
+
+impl HostReport {
+    /// `host (mode)`, plus the mocked hosts of its domain for a blocked
+    /// vendor sibling.
+    fn describe(&self) -> String {
+        if self.sibling_of.is_empty() {
+            format!("{} ({})", self.host, self.mode)
+        } else {
+            format!(
+                "{} ({}, same domain as mocked {})",
+                self.host,
+                self.mode,
+                self.sibling_of.join(", ")
+            )
+        }
+    }
 }
 
 #[derive(Serialize, Debug, Default)]
@@ -229,6 +250,16 @@ pub async fn collect(
             host: labels.get("host").cloned().unwrap_or_default(),
             mode: labels.get("mode").cloned().unwrap_or_default(),
             requests: value,
+            sibling_of: labels
+                .get("sibling_of")
+                .map(|hosts| {
+                    hosts
+                        .split(',')
+                        .filter(|h| !h.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
         });
     }
     report
@@ -398,10 +429,7 @@ pub fn check(report: &Report, args: &VerifyArgs) -> anyhow::Result<Vec<Failure>>
             } else {
                 "no-blocked"
             };
-            fail(
-                check,
-                format!("{} ({}): {} requests", h.host, h.mode, h.requests),
-            );
+            fail(check, format!("{}: {} requests", h.describe(), h.requests));
         }
     }
     if args.exact_replay
@@ -636,7 +664,18 @@ fn markdown(report: &Report, failures: Option<&[Failure]>) -> String {
     if !report.unmapped_hosts.is_empty() {
         s.push_str("**Unmapped hosts** (no mock claims them)\n\n| Host | Mode | Requests |\n|---|---|---:|\n");
         for h in &report.unmapped_hosts {
-            let _ = writeln!(s, "| {} | {} | {} |", cell(&h.host), h.mode, h.requests);
+            let mode = if h.sibling_of.is_empty() {
+                h.mode.clone()
+            } else {
+                format!("{} (same domain as {})", h.mode, h.sibling_of.join(", "))
+            };
+            let _ = writeln!(
+                s,
+                "| {} | {} | {} |",
+                cell(&h.host),
+                cell(&mode),
+                h.requests
+            );
         }
         s.push('\n');
     }
@@ -699,8 +738,17 @@ fn junit(report: &Report, failures: Option<&[Failure]>) -> String {
         }
     }
     for h in &report.unmapped_hosts {
-        let failure = (h.mode == "block")
-            .then(|| format!("{} requests blocked: no mock claims the host", h.requests));
+        let failure = (h.mode == "block").then(|| {
+            if h.sibling_of.is_empty() {
+                format!("{} requests blocked: no mock claims the host", h.requests)
+            } else {
+                format!(
+                    "{} requests blocked: no mock claims the host, which shares its domain with mocked {}",
+                    h.requests,
+                    h.sibling_of.join(", ")
+                )
+            }
+        });
         case("mockingbird.proxy", &h.host, failure);
     }
     for f in failures.into_iter().flatten() {
@@ -752,6 +800,7 @@ mod tests {
             host: "api.example.com".into(),
             mode: "block".into(),
             requests: 2,
+            sibling_of: Vec::new(),
         });
         r
     }
@@ -860,6 +909,35 @@ mod tests {
         assert!(md.contains("api.example.com"));
         let xml = render(&r, None, Format::Junit).unwrap();
         assert!(xml.contains("tests=\"4\" failures=\"2\""), "{xml}");
+    }
+
+    #[test]
+    fn vendor_siblings_are_listed_and_fail_no_unmapped() {
+        let mut r = Report::default();
+        r.unmapped_hosts.push(HostReport {
+            host: "verify.twilio.com".into(),
+            mode: "block".into(),
+            requests: 1,
+            sibling_of: vec!["api.twilio.com".into()],
+        });
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(
+            json["unmapped_hosts"][0],
+            json!({"host": "verify.twilio.com", "mode": "block", "requests": 1, "sibling_of": ["api.twilio.com"]})
+        );
+        let f = check(&r, &verify(&["--no-unmapped"])).unwrap();
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].check, "no-unmapped");
+        assert!(
+            f[0].detail
+                .contains("verify.twilio.com (block, same domain as mocked api.twilio.com)"),
+            "{f:?}"
+        );
+        let md = render(&r, None, Format::Markdown).unwrap();
+        assert!(
+            md.contains("| verify.twilio.com | block (same domain as api.twilio.com) | 1 |"),
+            "{md}"
+        );
     }
 
     #[test]
