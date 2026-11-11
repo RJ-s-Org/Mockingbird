@@ -973,7 +973,7 @@ impl Engine {
                     guards::refusals(op, status, &ctx, call, &validator, effects_envelope);
                 // The refusals' shared error body, written by the model as well.
                 let refusal_error = guards::refusal_error_schema(op, &refusals)
-                    .map(|error| compact::response_prompt_schema(bundle, error));
+                    .map(|error| compact::response_prompt_schema(bundle, error, &HashSet::new()));
                 // The effects envelope's root is an object already.
                 let items_envelope = !effects_envelope
                     && guards::items_envelope(provider.capabilities(), validator.schema());
@@ -1002,7 +1002,11 @@ impl Engine {
                     op,
                     status,
                     call,
-                    compact::response_prompt_schema(bundle, written),
+                    compact::response_prompt_schema(
+                        bundle,
+                        written,
+                        &compact::expanded_members(call),
+                    ),
                 );
                 let format = ResponseFormat::JsonSchema {
                     name: format_name(&op.id),
@@ -1168,7 +1172,7 @@ impl Engine {
             "required": keys,
         });
         let validator = self.schema_validator(bundle, &combined).ok()?;
-        let prompt_schema = compact::response_prompt_schema(bundle, &combined);
+        let prompt_schema = compact::response_prompt_schema(bundle, &combined, &HashSet::new());
         let messages = tracing::info_span!("mb.prompt").in_scope(|| {
             prompt::build_joint_messages(
                 bundle,

@@ -2091,7 +2091,7 @@ impl Engine {
                 }
                 let format = mb_llm::ResponseFormat::JsonSchema {
                     name: crate::format_name(&op.id),
-                    schema: crate::compact::response_prompt_schema(bundle, schema),
+                    schema: crate::compact::response_prompt_schema(bundle, schema, &std::collections::HashSet::new()),
                 };
                 // Kept per operation, status and cause, whatever the call:
                 // its repairs are seeded by those alone.
