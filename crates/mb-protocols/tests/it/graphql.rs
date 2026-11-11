@@ -2998,7 +2998,11 @@ async fn a_read_by_a_lookup_argument_is_answered_from_state() {
         &session,
     )
     .await;
-    assert_eq!(first.body["data"]["user"]["name"], "The Octocat", "{}", first.body);
+    assert_eq!(
+        first.body["data"]["user"]["name"], "The Octocat",
+        "{}",
+        first.body
+    );
     // Other variables, the same record: no cache hit, no model call.
     let again = post(
         &base,
@@ -3006,8 +3010,16 @@ async fn a_read_by_a_lookup_argument_is_answered_from_state() {
         &session,
     )
     .await;
-    assert_eq!(again.headers["x-mockingbird-source"], "state", "{}", again.body);
-    assert_eq!(again.body["data"]["user"]["name"], "The Octocat", "{}", again.body);
+    assert_eq!(
+        again.headers["x-mockingbird-source"], "state",
+        "{}",
+        again.body
+    );
+    assert_eq!(
+        again.body["data"]["user"]["name"], "The Octocat",
+        "{}",
+        again.body
+    );
     assert_eq!(provider.requests().len(), 1);
     // More fields: what is held stays.
     let more = post(
@@ -3043,19 +3055,36 @@ async fn a_type_with_no_id_is_kept_by_its_lookup_member() {
     ))
     .await;
     let session = [("x-mockingbird-session", "s1")];
-    let read = |login: &str| json!({"query": format!(r#"{{ user(login: "{login}") {{ name login }} }}"#)});
+    let read =
+        |login: &str| json!({"query": format!(r#"{{ user(login: "{login}") {{ name login }} }}"#)});
     let first = post(&base, read("octocat"), &session).await;
-    assert_eq!(first.body["data"]["user"]["name"], "The Octocat", "{}", first.body);
+    assert_eq!(
+        first.body["data"]["user"]["name"], "The Octocat",
+        "{}",
+        first.body
+    );
     let other = post(&base, read("hubot"), &session).await;
-    assert_eq!(other.body["data"]["user"]["name"], "Hubot", "{}", other.body);
+    assert_eq!(
+        other.body["data"]["user"]["name"], "Hubot",
+        "{}",
+        other.body
+    );
     let again = post(
         &base,
         json!({"query": r#"{ user(login: "octocat") { login name } }"#}),
         &session,
     )
     .await;
-    assert_eq!(again.headers["x-mockingbird-source"], "state", "{}", again.body);
-    assert_eq!(again.body["data"]["user"]["name"], "The Octocat", "{}", again.body);
+    assert_eq!(
+        again.headers["x-mockingbird-source"], "state",
+        "{}",
+        again.body
+    );
+    assert_eq!(
+        again.body["data"]["user"]["name"], "The Octocat",
+        "{}",
+        again.body
+    );
     assert_eq!(provider.requests().len(), 2);
 }
 

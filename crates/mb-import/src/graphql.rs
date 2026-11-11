@@ -756,7 +756,10 @@ fn lookup_argument(schema: &Schema, f: &Field, fields: &[Field]) -> Option<Strin
         BaseType::Named(n) if matches!(n.as_str(), "Boolean" | "Float") => false,
         BaseType::Named(n) => {
             is_builtin(n.as_str())
-                || matches!(schema.types.get(n.as_str()).map(|t| &t.kind), Some(Kind::Scalar))
+                || matches!(
+                    schema.types.get(n.as_str()).map(|t| &t.kind),
+                    Some(Kind::Scalar)
+                )
         }
         BaseType::List(_) => false,
     };
@@ -941,9 +944,8 @@ fn operation(
         })
         // A type with no `id` is keyed by what a query looks it up by (`login`).
         .or_else(|| {
-            let fields = object_fields.filter(|_| {
-                returns_one && operation_type == GraphqlOperationType::Query
-            })?;
+            let fields = object_fields
+                .filter(|_| returns_one && operation_type == GraphqlOperationType::Query)?;
             let member = lookup_argument(schema, f, fields)?;
             Some(Identity {
                 path_param: None,
