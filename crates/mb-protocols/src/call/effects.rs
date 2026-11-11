@@ -22,19 +22,32 @@ pub(super) fn log_capped(text: &str) -> String {
 /// Applies what an answer says it changed in other resources, in this session
 /// only, and counts each effect. A rejected effect costs itself: the answer is
 /// served and the next effect still applies. One on `own`, the (type, id) an update
-/// just stored, keeps only what [`write_memory::own_effect_members`] allows.
+/// just stored, keeps only what [`write_memory::own_effect_members`] allows. One on a
+/// record not stored on its own that `acted`, the (type, id) the call acted on, holds
+/// (a cart's line) goes into that record ([`within_own`]).
 pub(super) async fn apply_effects(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     rt: &MockRuntime,
     effects: &[ResourceEffect],
-    own: Option<(&str, &str)>,
+    (own, acted): (Option<Record<'_>>, Option<Record<'_>>),
     source: (&CallPlan<'_>, &OperationCall, u16),
 ) -> Vec<EffectOutcome> {
     let mut outcomes = Vec::with_capacity(effects.len());
     for effect in effects {
         let on_own = own == Some((effect.resource_type.as_str(), effect.id.as_str()));
-        let result = apply_effect(state, session, rt, effect, on_own.then_some(source)).await;
+        let mut result = apply_effect(state, session, rt, effect, on_own.then_some(source)).await;
+        // A record not stored on its own may be an item the target holds (a cart's
+        // line): the effect goes into the target, in that item.
+        if let (Some("no schema to check against" | "no such resource"), Some(acted)) =
+            (result.as_ref().err().copied(), acted)
+            && acted != (effect.resource_type.as_str(), effect.id.as_str())
+            && let Some(within) = within_own(state, session, acted, effect).await
+        {
+            result = apply_effect(state, session, rt, &within, None)
+                .await
+                .map(|(merged, _)| (merged, effect.set.clone()));
+        }
         tracing::info!(
             mock = %rt.name,
             resource_type = %log_capped(&effect.resource_type),
@@ -75,6 +88,58 @@ pub(super) async fn apply_effects(
     }
     outcomes
 }
+
+/// `effect`, on a record the session does not hold on its own, as an effect on the
+/// record of type `t` and id `id` the operation acts on, when that holds an object
+/// with the effect's id (a cart's line): the top member of `own` holding it, with the
+/// effect's members set on that object. `None` when `own` holds no such object.
+async fn within_own(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    (t, id): (&str, &str),
+    effect: &ResourceEffect,
+) -> Option<ResourceEffect> {
+    let held = state.get(session, t, id).await?;
+    let Value::Object(members) = &held.data else {
+        return None;
+    };
+    for (name, value) in members {
+        let mut value = value.clone();
+        if let Some(item) = holding(&mut value, &effect.id, MAX_ENTITY_DEPTH) {
+            for (key, set) in &effect.set {
+                item.insert(key.clone(), set.clone());
+            }
+            let mut set = Map::new();
+            set.insert(name.clone(), value);
+            return Some(ResourceEffect {
+                resource_type: t.to_owned(),
+                id: id.to_owned(),
+                set,
+            });
+        }
+    }
+    None
+}
+
+/// The object within `value` whose `id` is `id`, at most `depth` levels down.
+fn holding<'v>(value: &'v mut Value, id: &str, depth: usize) -> Option<&'v mut Map<String, Value>> {
+    if depth == 0 {
+        return None;
+    }
+    match value {
+        Value::Object(fields) => {
+            if fields.get("id").and_then(Value::as_str) == Some(id) {
+                return Some(fields);
+            }
+            fields.values_mut().find_map(|v| holding(v, id, depth - 1))
+        }
+        Value::Array(items) => items.iter_mut().find_map(|v| holding(v, id, depth - 1)),
+        _ => None,
+    }
+}
+
+/// A record's (type, id).
+type Record<'a> = (&'a str, &'a str);
 
 /// Adds what became of `generated`'s effects to a request record's `request`
 /// (nothing when it listed none), under `effects`, what the world description

@@ -2789,3 +2789,178 @@ type Mutation {
     );
     assert_eq!(read.body["data"]["team"]["role"], "team", "{}", read.body);
 }
+
+const PAYLOAD_LISTS: &str = r#"
+type MoneyV2 { amount: String! currencyCode: String! }
+type CartCost { totalAmount: MoneyV2! }
+type CartLine { id: ID! quantity: Int! }
+type Cart { id: ID! checkoutUrl: String! totalQuantity: Int! cost: CartCost! lines: [CartLine!]! }
+type CartUserError { field: [String!] message: String! }
+type CartWarning { message: String! }
+type CartCreatePayload { cart: Cart userErrors: [CartUserError!]! warnings: [CartWarning!]! }
+input CartInput { note: String }
+type Query { cart(id: ID!): Cart }
+type Mutation { cartCreate(input: CartInput): CartCreatePayload }
+"#;
+
+/// A create whose payload holds lists beside the record (`userErrors`,
+/// `warnings`) is answered by the executor, the lists empty: a success
+/// reports no errors.
+#[tokio::test]
+async fn a_create_payload_with_error_lists_is_rendered_locally() {
+    let provider = scripted(vec![json!({
+        "checkoutUrl": "https://shop/c/1", "totalQuantity": 0,
+        "cost": {"__typename": "CartCost", "totalAmount": {"__typename": "MoneyV2", "amount": "0.00", "currencyCode": "USD"}}, "lines": []
+    })]);
+    let rt = MockRuntime::new(
+        "shop",
+        Arc::new(compile(PAYLOAD_LISTS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    let base = serve(rt).await;
+    let created = post(
+        &base,
+        json!({"query": "mutation { cartCreate { cart { id totalQuantity lines { id } } userErrors { message } warnings { message } } }"}),
+        &[],
+    )
+    .await;
+    assert!(created.body.get("errors").is_none(), "{}", created.body);
+    let payload = &created.body["data"]["cartCreate"];
+    assert_eq!(payload["userErrors"], json!([]), "{payload}");
+    assert_eq!(payload["warnings"], json!([]), "{payload}");
+    assert_ne!(created.headers["x-mockingbird-source"], "llm", "{payload}");
+}
+
+const CART_LINES: &str = r#"
+type CartLine { id: ID! quantity: Int! }
+type Cart { id: ID! totalQuantity: Int! lines: [CartLine!]! }
+type CartLinesUpdatePayload { cart: Cart }
+input CartLineUpdateInput { id: ID! quantity: Int }
+type Query { cart(id: ID!): Cart }
+type Mutation { cartLinesUpdate(cartId: ID!, lines: [CartLineUpdateInput!]!): CartLinesUpdatePayload }
+"#;
+
+/// An effect on a line held inside the cart an action acts on changes that line in
+/// the stored cart, so the cart's lines and its totals agree.
+#[tokio::test]
+async fn an_effect_on_a_line_inside_the_target_cart_changes_it_there() {
+    let cart = "gid://shopify/Cart/c1";
+    let line = "gid://shopify/CartLine/1";
+    let provider = scripted(vec![json!({
+        "response": {"__typename": "CartLinesUpdatePayload"},
+        "effects": [
+            {"type": "cartline", "id": line, "set": {"quantity": 3}},
+            {"type": "cart", "id": cart, "set": {"totalQuantity": 3}},
+        ],
+    })]);
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let rt = MockRuntime::new(
+        "shop",
+        Arc::new(compile(CART_LINES.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        state.clone(),
+    );
+    let base = serve(rt).await;
+    let session = [("x-mockingbird-session", "s1")];
+    let key = mb_state::SessionKey {
+        workspace: "default".into(),
+        mock: "shop".into(),
+        session: "s1".into(),
+    };
+    let held = mb_state::StoredResource {
+        resource_type: "cart".into(),
+        id: cart.into(),
+        data: json!({"__typename": "Cart", "id": cart, "totalQuantity": 1,
+                     "lines": [{"__typename": "CartLine", "id": line, "quantity": 1}]}),
+    };
+    mb_state::StateStore::upsert(state.as_ref(), &key, held)
+        .await
+        .unwrap();
+    let updated = post(
+        &base,
+        json!({
+            "query": "mutation($c: ID!, $l: [CartLineUpdateInput!]!) { cartLinesUpdate(cartId: $c, lines: $l) { cart { totalQuantity lines { id quantity } } } }",
+            "variables": {"c": cart, "l": [{"id": line, "quantity": 3}]},
+        }),
+        &session,
+    )
+    .await;
+    assert!(updated.body.get("errors").is_none(), "{}", updated.body);
+    let read = post(
+        &base,
+        json!({"query": "query($c: ID!) { cart(id: $c) { totalQuantity lines { id quantity } } }", "variables": {"c": cart}}),
+        &session,
+    )
+    .await;
+    assert_eq!(
+        read.headers["x-mockingbird-source"], "state",
+        "{}",
+        read.body
+    );
+    assert_eq!(
+        read.body["data"]["cart"]["totalQuantity"], 3,
+        "{}",
+        read.body
+    );
+    assert_eq!(
+        read.body["data"]["cart"]["lines"][0]["quantity"], 3,
+        "{}",
+        read.body
+    );
+}
+
+const PRODUCTS: &str = r#"
+type Product { id: ID! handle: String! title: String! }
+type ProductEdge { node: Product! }
+type ProductConnection { edges: [ProductEdge!]! }
+type Query { product(id: ID, handle: String): Product products(first: Int): ProductConnection! }
+"#;
+
+/// A read whose target is a member other than the record's key (`product(handle:)`,
+/// described `target: {member: handle}`) keeps the answer's own id, sets the member,
+/// and a second read by that member is served from the record stored under its id.
+#[tokio::test]
+async fn a_read_by_another_member_than_the_key_keeps_the_id_and_finds_the_record() {
+    let provider = scripted(vec![json!({
+        "__typename": "Product", "id": "gid://shopify/Product/7", "handle": "other", "title": "Fern Tee"
+    })]);
+    let mut bundle = compile(PRODUCTS.as_bytes()).unwrap();
+    let product = bundle
+        .operations
+        .iter_mut()
+        .find(|o| o.id == "Query.product")
+        .unwrap();
+    // What the world description's `target: {member: handle}` sets.
+    product.identity.as_mut().unwrap().input_field = Some("handle".into());
+    let rt = MockRuntime::new(
+        "shop",
+        Arc::new(bundle),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    let base = serve(rt).await;
+    let session = [("x-mockingbird-session", "s1")];
+    let q = json!({"query": r#"{ product(handle: "fern-tee") { id handle title } }"#});
+    let first = post(&base, q.clone(), &session).await;
+    let read = &first.body["data"]["product"];
+    assert_eq!(read["id"], "gid://shopify/Product/7", "{}", first.body);
+    assert_eq!(read["handle"], "fern-tee", "{}", first.body);
+    let second = post(&base, q, &session).await;
+    assert_eq!(
+        second.headers["x-mockingbird-source"], "state",
+        "{}",
+        second.body
+    );
+    assert_eq!(second.body["data"]["product"], *read);
+    assert_eq!(provider.requests().len(), 1);
+}

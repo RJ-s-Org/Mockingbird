@@ -1454,6 +1454,7 @@ impl Engine {
         member: &str,
         kept: Option<&Map<String, Value>>,
     ) -> Option<()> {
+        let schema = consistency::non_null(bundle, schema);
         for name in consistency::required_members(bundle, schema) {
             if name == member || envelope.contains_key(&name) {
                 continue;
@@ -1485,7 +1486,8 @@ impl Engine {
     /// record's, which the state-first executor renders from the faker
     /// (`docs/superpowers/specs/2026-11-06-state-first-engine-design.md`, §4). A
     /// boolean is `true`, as the answer it is in is a success (a random one could say
-    /// `success: false`); any other is drawn
+    /// `success: false`), a list that may be empty is `[]` (a success's `userErrors`
+    /// lists none); any other is drawn
     /// from the engine's seed (`0` without one) mixed with the contract, the operation
     /// and the member, so every read of the operation answers them the same. Empty
     /// when the answer holds its record in no envelope.
@@ -1503,6 +1505,7 @@ impl Engine {
         ) else {
             return drawn;
         };
+        let schema = consistency::non_null(bundle, schema);
         for name in consistency::required_members(bundle, schema) {
             if name == member {
                 continue;
@@ -1516,6 +1519,12 @@ impl Engine {
             // The answer is a success: a boolean beside its record says so.
             if consistency::declares_boolean(bundle, &member_schema) {
                 drawn.insert(name, Value::Bool(true));
+                continue;
+            }
+            // A list beside the record (GraphQL's `userErrors`, `warnings`) holds
+            // nothing on a success.
+            if consistency::declares_empty_array(bundle, &member_schema) {
+                drawn.insert(name, Value::Array(Vec::new()));
                 continue;
             }
             let validator = self.schema_validator(bundle, &member_schema).ok();
@@ -4332,8 +4341,23 @@ fn force_identity(
     if declared.is_none() && op.kind == OperationKind::Command(Effect::Delete) {
         return body;
     }
-    let Some(field) = declared_member(declared.as_ref(), field) else {
-        return body;
+    // A request member naming another member of the record than its key (GraphQL's
+    // `product(handle:)`) sets that member: the key keeps the answer's own value.
+    let input = identity
+        .input_field
+        .as_deref()
+        .filter(|f| from_path.is_none() && *f != identity.field);
+    let declares = |f: &&str| {
+        declared
+            .as_ref()
+            .is_some_and(|d| consistency::declares_member(d, f))
+    };
+    let field = match input.filter(declares) {
+        Some(member) => member,
+        None => match declared_member(declared.as_ref(), field) {
+            Some(field) => field,
+            None => return body,
+        },
     };
     // A path value that reached a held record by another member than its key (a
     // template read by its id where its alias is its key) names that record: its key
