@@ -480,6 +480,7 @@ pub(super) async fn read(
     }
     // As a generated read's own answer is.
     rt.own_reads().remember(&plan.session, &stored);
+    rt.variants().remember(&plan.session, op, call, &stored);
     plan.exprs.pooled(1);
     Some(stored)
 }

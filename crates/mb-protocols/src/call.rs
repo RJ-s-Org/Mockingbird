@@ -73,6 +73,7 @@ mod streams;
 mod tokens;
 mod transitions;
 mod value_index;
+mod variants;
 mod world;
 mod write_memory;
 mod writes;
@@ -101,6 +102,7 @@ pub(crate) use state_access::*;
 #[cfg(any(feature = "sse", feature = "graphql", feature = "grpc"))]
 pub(crate) use streams::*;
 pub(crate) use value_index::{ValueFeed, ValueIndex};
+pub(crate) use variants::Variants;
 pub(crate) use writes::*;
 
 const SESSION_HEADER: &str = "x-mockingbird-session";
@@ -333,17 +335,19 @@ pub(crate) async fn generate_pending(
     mut pending: Pending<'_>,
     response_schema: Option<&Value>,
 ) -> Result<GeneratedResponse, EngineError> {
-    let guard = pending
-        .target
-        .as_ref()
-        .filter(|_| response_schema.is_none())
-        .map(|held| write_memory::SettleGuard {
-            rt,
-            plan,
-            call,
-            held,
-            advancing: &pending.tokens.advancing,
-        });
+    // A read in another language is shown its held record beside it, not as the target
+    // its answer takes members from: the language's values are its own.
+    let target = pending.target.as_ref().filter(|_| !pending.variant);
+    let guard =
+        target
+            .filter(|_| response_schema.is_none())
+            .map(|held| write_memory::SettleGuard {
+                rt,
+                plan,
+                call,
+                held,
+                advancing: &pending.tokens.advancing,
+            });
     // A client's retry of a write answering no body is shown nothing beyond its target,
     // so it is asked for no effects a second time (see [`write_memory::is_retry`]).
     pending.retry = write_memory::is_retry(&mut pending.state, plan, call)
@@ -357,7 +361,7 @@ pub(crate) async fn generate_pending(
     };
     let ctx = GenerationContext {
         related,
-        target: pending.target.as_ref(),
+        target,
         forced_status: plan.forced_status,
         scenario: plan.scenario.map(|s| &s.spec),
         response_schema,
@@ -370,7 +374,7 @@ pub(crate) async fn generate_pending(
         created_since,
         alongside: &pending.alongside,
         same_values: &pending.same_values,
-        changes_by_effects: write_memory::by_effects(&pending.earlier, pending.target.as_ref()),
+        changes_by_effects: write_memory::by_effects(&pending.earlier, target),
         update_guard: guard.as_ref().map(|g| g as &dyn mb_engine::UpdateGuard),
         answer_records: rt
             .described()
@@ -462,6 +466,9 @@ pub(crate) struct Pending<'a> {
     retry: bool,
     /// What a fill the executor ran before falling back to generation spent.
     fill_usage: Usage,
+    /// A read in another language than its held target (see [`variants`]): its record
+    /// is kept as that language's variant, and the target stays.
+    variant: bool,
 }
 
 /// Whether a GraphQL delete that removed record `id` of type `t` here leaves the marker
@@ -712,9 +719,18 @@ pub(crate) async fn prepare<'a>(
     // answered from the store; any other, and one it falls back on, goes on below. Whether
     // a stored answer stands depends on what is remembered; otherwise what is remembered
     // waits until the cache has had its say.
+    // A read in another language than the held record was stored in: that language's
+    // variant, or a generation that knows the record (see [`variants`]).
+    let variant = target
+        .as_ref()
+        .and_then(|held| rt.variants().of(session, op, call, held));
     let held = exec::Held {
-        target: target.as_ref(),
+        target: match &variant {
+            Some(variants::Variant::Kept(kept)) => Some(kept),
+            _ => target.as_ref(),
+        },
         target_id: target_id.as_deref().filter(|_| !foreign_key),
+        generates: matches!(variant, Some(variants::Variant::New)),
     };
     let (recalled, fill_usage) =
         match exec::run(&mut state, plan, call, held, response_schema).await {
@@ -870,6 +886,11 @@ pub(crate) async fn prepare<'a>(
         .instrument(state_span())
         .await;
     let (alongside, same_values) = alongside;
+    if let (Some(variants::Variant::New), Some(held)) = (&variant, target.as_ref())
+        && !holds(&related, held)
+    {
+        related.insert(0, held.clone());
+    }
     let created_since =
         write_memory::created_since(&mut state, plan, &earlier, target.as_ref(), &mut related)
             .instrument(state_span())
@@ -894,6 +915,7 @@ pub(crate) async fn prepare<'a>(
         tokens,
         retry: false,
         fill_usage,
+        variant: matches!(variant, Some(variants::Variant::New)),
     }))
 }
 
@@ -1064,6 +1086,7 @@ pub(crate) async fn complete(
         same_values,
         tokens,
         retry,
+        variant,
         ..
     } = pending;
     let acted_on = target_id.clone();
@@ -1595,10 +1618,20 @@ pub(crate) async fn complete(
             )
             .await;
         }
+        // A read in another language than its target: its record is that language's.
+        if variant
+            && plain(plan)
+            && (200..300).contains(&generated.status)
+            && !transient_fallback(&generated)
+            && let (Some(held), Some(record)) = (target.as_ref(), generated.body.as_ref())
+        {
+            rt.variants().keep(session, (op, call), held, record);
+        }
         // A request naming a seed asks for that seed's answer, and a query for
         // one view: the cache keeps those apart, so neither is the resource.
         if rt.consistency
             && plain(plan)
+            && !variant
             && mb_engine::seed::request_seed(call).is_none()
             // A catch-up's answer has the whole resource's schema, whatever the
             // query asked: it settles as a plain read does.

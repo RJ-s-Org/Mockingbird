@@ -70,6 +70,7 @@ mod in_segment_keys;
 mod inferred_requests;
 mod issued_aliases;
 mod issued_scopes;
+mod language_variants;
 mod nested_identity_patches;
 mod optional_null;
 mod partial_creates;

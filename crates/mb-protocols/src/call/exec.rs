@@ -108,6 +108,9 @@ pub(super) struct Held<'h> {
     pub(super) target: Option<&'h StoredResource>,
     /// Its id, `None` when the key holds another owner's record.
     pub(super) target_id: Option<&'h str>,
+    /// A read in another language than the target was stored in, with no variant kept
+    /// for it (see [`super::variants`]): generated, knowing the target.
+    pub(super) generates: bool,
 }
 
 /// The kind the description gives `plan`'s operation when the executor handles that
@@ -289,6 +292,9 @@ pub(super) async fn run(
             answered(state.rt, plan, kind);
         }
         return Ran::Answered(Box::new(refusal));
+    }
+    if held.generates {
+        return Ran::Generate(None);
     }
     match classified {
         Some(Ok(kind)) => match kind {

@@ -423,6 +423,9 @@ pub struct MockRuntime {
     /// Which stored resources are a plain read's own answer (see
     /// [`call::OwnReads`]).
     own_reads: call::OwnReads,
+    /// The language each record a read stored was answered in, and its variants (see
+    /// [`call::Variants`]).
+    variants: call::Variants,
     /// Which collection a stored resource was listed or written under (see
     /// [`call::Collections`]).
     collections: call::Collections,
@@ -561,6 +564,7 @@ impl MockRuntime {
             written_types: call::WrittenTypes::default(),
             mint_counts: call::MintCounts::default(),
             own_reads: call::OwnReads::default(),
+            variants: call::Variants::default(),
             collections: call::Collections::default(),
             described: call::Described::default(),
             path_targets: std::collections::BTreeSet::new(),
@@ -710,6 +714,11 @@ impl MockRuntime {
 
     pub(crate) fn own_reads(&self) -> &call::OwnReads {
         &self.own_reads
+    }
+
+    /// The language each record a read stored was answered in, and its variants.
+    pub(crate) fn variants(&self) -> &call::Variants {
+        &self.variants
     }
 
     /// The name this mock's sessions are kept under: its `shares` group, or
