@@ -20,6 +20,7 @@ A mock is ready for an app only after its world description is reviewed. Importi
 
 | The user wants to… | Do this | Details |
 | --- | --- | --- |
+| Mock a well-known public API an app calls (Stripe, GitHub, TMDB, Twilio, Shopify, Slack, ...) | Check the catalog first: a ready contract and config | `list_examples` (each example's `hosts`), `init_example {name, dir}`; CLI `mockingbird examples list`, `mockingbird examples init <name> --dir <dir>` |
 | Install Mockingbird, pick an LLM (OpenRouter, Google AI Studio, Cloudflare AI Gateway, OpenAI, Anthropic, local, any OpenAI-compatible endpoint) | `mockingbird-setup` skill | `install.sh`, `mockingbird init`, `mockingbird llm configure/test` |
 | Mock an API from a contract, docs page, HAR or Postman collection; add scenarios, state, fixtures, chaos, events | `mockingbird-mock-api` skill | `import_contract`, `put_scenario`, `call_mock` |
 | Review or fix how a mock's contract behaves as a world (record identity, where answers hold the record, lifecycles, soft deletes, unique members, paging; computed members, generated ids, conditional refusals and side effects as expressions), after every import | `mockingbird-world` skill | `get_world`, `patch_world` |
@@ -43,7 +44,7 @@ Every response carries `X-Mockingbird-Source: llm | patched | repaired | fallbac
 
 When the `mockingbird` MCP server is connected, prefer its tools over shell commands; they return JSON. All of them work against the Admin API at `MB_ADMIN_URL` (default `http://127.0.0.1:9090`) in workspace `MB_WORKSPACE` (default `default`).
 
-- Setup and lifecycle: `doctor`, `list_llm_providers`, `init_config`, `configure_llm`, `test_llm`, `validate_contract`, `start_server`, `server_status`, `server_logs`, `stop_server`, `proxy_env`
+- Setup and lifecycle: `doctor`, `list_examples`, `init_example`, `list_llm_providers`, `init_config`, `configure_llm`, `test_llm`, `validate_contract`, `start_server`, `server_status`, `server_logs`, `stop_server`, `proxy_env`
 - Mocks: `list_mocks`, `get_mock`, `create_mock`, `update_mock`, `delete_mock`, `import_contract`, `list_contract_versions`, `activate_contract_version`
 - Drafts (imported documentation, HAR, Postman): `get_draft`, `edit_draft`, `approve_draft`; an active contract stricter than the real API: `edit_contract`
 - World descriptions (how a contract version behaves as a world, with its gaps): `get_world`, `get_world_schema`, `put_world`, `patch_world`, `list_world_revisions`, `get_world_revision`, `restore_world_revision`, `diff_world`
