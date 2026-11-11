@@ -506,6 +506,10 @@ impl Walk<'_> {
         parent: Option<&Parent>,
         generated: Option<&str>,
     ) -> Option<(String, StoredResource)> {
+        // Of several records the arguments name (one the session uses and a
+        // copy written since, by a record pool or a model's answer), the one
+        // the most held records refer to; the most recent among equals.
+        let mut best: Option<(usize, &String, &StoredResource)> = None;
         for ty in types {
             for record in self.held.get(ty).into_iter().flatten() {
                 if generated == Some(record.id.as_str()) {
@@ -517,11 +521,23 @@ impl Walk<'_> {
                 if let (true, compared) = matches(args, record)
                     && compared > 0
                 {
-                    return Some((ty.clone(), record.clone()));
+                    let referred = self.referrers(&record.id);
+                    if best.is_none_or(|(n, _, _)| referred > n) {
+                        best = Some((referred, ty, record));
+                    }
                 }
             }
         }
-        None
+        best.map(|(_, ty, record)| (ty.clone(), record.clone()))
+    }
+
+    /// How many held records refer to the record `id`.
+    fn referrers(&self, id: &str) -> usize {
+        self.held
+            .values()
+            .flatten()
+            .filter(|r| refs(r).contains(&id))
+            .count()
     }
 
     /// Whether `record` refers to `parent`, or to no record of its type.
