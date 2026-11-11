@@ -1284,16 +1284,63 @@ fn read_shapes(rt: &crate::MockRuntime, t: &str) -> Vec<(Value, bool)> {
         }
     }
     // A type nothing reads at the top (GraphQL's records read only below another
-    // type: a repository's pull requests) is read as the definition named for it.
+    // type: a repository's pull requests) is read as the scalar members of the
+    // definition named for it, none required: what an input sends is kept, and
+    // fill writes no nested record a read never asked for.
     if schemas.is_empty()
-        && let Some(name) = rt.bundle().defs.keys().find(|d| d.eq_ignore_ascii_case(t))
+        && let Some(schema) = scalar_members(rt.bundle(), t)
     {
-        schemas.push((
-            serde_json::json!({"$ref": format!("#/$defs/{name}")}),
-            false,
-        ));
+        schemas.push((schema, false));
     }
     schemas
+}
+
+/// An object schema of the scalar and enum members of the definition named `t`
+/// (case aside, an exact name first), none required; `None` when there is none.
+fn scalar_members(bundle: &mb_mcm::Bundle, t: &str) -> Option<Value> {
+    let name = bundle
+        .defs
+        .keys()
+        .find(|d| d.as_str() == t)
+        .or_else(|| bundle.defs.keys().find(|d| d.eq_ignore_ascii_case(t)))?;
+    let props = bundle.defs.get(name)?.get("properties")?.as_object()?;
+    let scalar = |schema: &Value| {
+        let mut schema = schema;
+        for _ in 0..8 {
+            if schema.get("enum").is_some() || schema.get("const").is_some() {
+                return true;
+            }
+            if let Some(def) = schema
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|r| r.strip_prefix("#/$defs/"))
+                .and_then(|n| bundle.defs.get(n))
+            {
+                schema = def;
+                continue;
+            }
+            let branch = ["anyOf", "oneOf"]
+                .iter()
+                .filter_map(|k| schema.get(*k).and_then(Value::as_array))
+                .flatten()
+                .find(|b| b.get("type").and_then(Value::as_str) != Some("null"));
+            if let Some(branch) = branch {
+                schema = branch;
+                continue;
+            }
+            return matches!(
+                schema.get("type").and_then(Value::as_str),
+                Some("string" | "integer" | "number" | "boolean")
+            );
+        }
+        false
+    };
+    let kept: Map<String, Value> = props
+        .iter()
+        .filter(|(_, schema)| scalar(schema))
+        .map(|(m, schema)| (m.clone(), schema.clone()))
+        .collect();
+    (!kept.is_empty()).then(|| serde_json::json!({"type": "object", "properties": kept}))
 }
 
 /// The members `schemas` declare, each with the first schema declaring it.

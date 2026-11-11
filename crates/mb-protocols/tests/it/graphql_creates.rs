@@ -1,6 +1,6 @@
 //! A GraphQL create of a type read only below another type (a repository's pull
-//! requests): the record stored keeps what the input sent, whatever the mutation
-//! selects.
+//! requests, with required object and connection members): the record stored
+//! keeps what the input sent, whatever the mutation selects.
 #![cfg(feature = "graphql")]
 
 use std::sync::Arc;
@@ -23,7 +23,13 @@ type PullRequest {
   baseRefName: String!
   state: PullRequestState!
   url: String!
+  repository: Repository!
+  author: Actor!
+  commits(first: Int): PullRequestCommitConnection!
 }
+type Actor { login: String! avatarUrl: String! }
+type PullRequestCommit { id: ID! oid: String! }
+type PullRequestCommitConnection { nodes: [PullRequestCommit!]! totalCount: Int! }
 input CreatePullRequestInput { repositoryId: ID! title: String! headRefName: String! baseRefName: String! }
 type CreatePullRequestPayload { pullRequest: PullRequest }
 type Query { repository(owner: String!, name: String!): Repository }
