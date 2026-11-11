@@ -1079,7 +1079,14 @@ pub(crate) async fn complete(
                 .and_then(|o| o.schema.as_ref())
         });
         let skip = op.resource_type.as_deref().zip(acted_on.as_deref());
-        reused_ids::remint(&mut state, session, rt, body, schema, skip)
+        // A record named by another member than its key (`product(handle:)`).
+        let named_by = op
+            .identity
+            .as_ref()
+            .filter(|i| i.path_param.is_none())
+            .and_then(|i| i.input_field.as_deref().filter(|f| *f != i.field))
+            .zip(acted_on.as_deref());
+        reused_ids::remint(&mut state, session, rt, body, schema, (skip, named_by))
             .instrument(state_span())
             .await;
     }

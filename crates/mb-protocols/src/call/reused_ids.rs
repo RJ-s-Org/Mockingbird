@@ -3,14 +3,20 @@
 //! A model writing one answer, or one answer after another, may give a record an id
 //! another record already has: the next variant of another product under the id the
 //! first had. Stored, the first record wins and the second is lost; served, the client
-//! sends that id back and gets the first. Before an answer is stored or served, each
-//! record below its root whose identity duplicates another record of the same type in
-//! the answer, or one the session holds, gets a new id in the same shape, when the two
-//! are different records: a member that names a record (its `name`, `title`, `handle`,
-//! ...) differs between them, and, against a held record, the record the answer shows
-//! it inside is another one than the held record refers to as its parent (a variant
-//! inside one product, held as another product's). The same record shown twice keeps
-//! its id, and so does a held one the answer only renames.
+//! sends that id back and gets the first. Before an answer is stored or served, a
+//! record whose identity another record of its type has gets a new id in the same
+//! shape, when the two are different records:
+//!
+//! - in the same answer, a member that names a record (its `name`, `title`, `handle`,
+//!   ...) differs between them;
+//! - against a record the session holds, the answer shows it inside another record than
+//!   the held one refers to as its parent (a variant inside one product, held as
+//!   another product's), the parent counted by the id it has after this; or, for the
+//!   answer's root, the call names it by a member (`product(handle:)`) the held record
+//!   has another value in.
+//!
+//! The record the call acts on, the same record shown twice, and a held one the answer
+//! only renames keep their ids.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -21,25 +27,39 @@ use super::*;
 /// different records.
 const NAMING: [&str; 7] = ["name", "title", "handle", "login", "slug", "sku", "email"];
 
+/// Two texts: a (type, id), or a (member, value).
+type Pair<'a> = (&'a str, &'a str);
+
+/// The naming members and parent id of the first record an answer shows under an id.
+type Seen = (Map<String, Value>, Option<String>);
+
+/// The record another is shown inside: its type, id and path.
+type Parent = (String, String, Vec<Step>);
+
 /// How many new ids are drawn for one record before it is left as it was.
 const DRAWS: u64 = 8;
 
-/// Gives each record below `body`'s root that reuses another record's id a new one
-/// (see the module doc). `skip` is the record the call acts on, which keeps its id.
+/// Gives each record of `body` that reuses another record's id a new one (see the
+/// module doc). `skip` is the record the call acts on, which keeps its id; `named_by`
+/// the member and value the call names its record by besides its id (GraphQL's
+/// `product(handle:)`): the answer's root under a held id whose record has another
+/// value there is another record.
 pub(super) async fn remint(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     rt: &MockRuntime,
     body: &mut Value,
     schema: Option<&Value>,
-    skip: Option<(&str, &str)>,
+    (skip, named_by): (Option<Pair<'_>>, Option<Pair<'_>>),
 ) {
     let mut found = Vec::new();
     collect(rt, (body, schema), 0, (&mut Vec::new(), None), &mut found);
-    // (type, id) → the naming members of the first record seen with it, and what each
-    // record shown again under it became.
-    let mut seen: HashMap<(String, String), Map<String, Value>> = HashMap::new();
+    // (type, id) → the naming members and parent of the first record seen with it;
+    // what each record shown again under an id became; the new id of the record at
+    // each path.
+    let mut seen: HashMap<(String, String), Seen> = HashMap::new();
     let mut renamed: HashMap<(String, String, String), String> = HashMap::new();
+    let mut moved: HashMap<Vec<Step>, String> = HashMap::new();
     for Found {
         path,
         t,
@@ -55,20 +75,39 @@ pub(super) async fn remint(
             continue;
         };
         let names = naming(object);
+        // The record it is shown inside, by the id it now has.
+        let parent = parent.map(|(pt, pid, ppath)| {
+            let pid = moved.get(&ppath).cloned().unwrap_or(pid);
+            (pt, pid)
+        });
+        let parent_id = parent.as_ref().map(|(_, id)| id.clone());
         let key = (t.clone(), id.clone());
-        let other = match seen.get(&key) {
-            Some(first) => Some(first.clone()),
-            None => state
-                .get(session, &t, &id)
-                .await
-                .filter(|held| under_another(&held.data, parent.as_ref()))
-                .map(|held| naming(&held.data)),
+        let another = match seen.get(&key) {
+            Some((first, _)) => differs(first, &names),
+            None => match state.get(session, &t, &id).await {
+                None => false,
+                Some(held) if path.is_empty() => named_by.is_some_and(|(m, v)| {
+                    held.data
+                        .get(m)
+                        .and_then(Value::as_str)
+                        .is_some_and(|h| h != v)
+                }),
+                Some(held) => under_another(&held.data, parent.as_ref()),
+            },
         };
-        if !other.as_ref().is_some_and(|other| differs(other, &names)) {
-            seen.entry(key).or_insert(names);
+        if !another {
+            seen.entry(key).or_insert((names, parent_id));
             continue;
         }
-        let shown = (t.clone(), id.clone(), fingerprint(&names));
+        let shown = (
+            t.clone(),
+            id.clone(),
+            format!(
+                "{}{}",
+                fingerprint(&names),
+                parent_id.clone().unwrap_or_default()
+            ),
+        );
         let new_id = match renamed.get(&shown) {
             Some(new_id) => Some(new_id.clone()),
             None => fresh(state, session, (&t, &id), &shown.2, &seen).await,
@@ -81,11 +120,12 @@ pub(super) async fn remint(
         }
         tracing::info!(mock = %rt.name, resource_type = %t, "a generated record reused another's id");
         renamed.insert(shown, new_id.clone());
-        seen.entry((t, new_id)).or_insert(names);
+        moved.insert(path, new_id.clone());
+        seen.entry((t, new_id)).or_insert((names, parent_id));
     }
 }
 
-/// A record an answer shows below its root.
+/// A record an answer shows.
 struct Found {
     path: Vec<Step>,
     /// Its type.
@@ -93,8 +133,8 @@ struct Found {
     /// Its identity member, and the id there.
     member: String,
     id: String,
-    /// The record it is shown inside, as (type, id).
-    parent: Option<(String, String)>,
+    /// The record it is shown inside, as (type, id, path).
+    parent: Option<Parent>,
 }
 
 /// Each object below the root with a record type and an identity (see [`Found`]).
@@ -102,7 +142,7 @@ fn collect<'a>(
     rt: &'a MockRuntime,
     (value, schema): (&Value, Option<&'a Value>),
     depth: usize,
-    (path, parent): (&mut Vec<Step>, Option<&(String, String)>),
+    (path, parent): (&mut Vec<Step>, Option<&Parent>),
     out: &mut Vec<Found>,
 ) {
     if depth > MAX_ENTITY_DEPTH || out.len() >= MAX_ENTITIES {
@@ -129,9 +169,7 @@ fn collect<'a>(
                     .find_map(|m| Some((m, fields.get(m).and_then(Value::as_str)?)))?;
                 Some((t, member.to_owned(), id.to_owned()))
             });
-            if depth > 0
-                && let Some((t, member, id)) = &record
-            {
+            if let Some((t, member, id)) = &record {
                 out.push(Found {
                     path: path.clone(),
                     t: t.clone(),
@@ -140,7 +178,7 @@ fn collect<'a>(
                     parent: parent.cloned(),
                 });
             }
-            let this = record.map(|(t, _, id)| (t, id));
+            let this = record.map(|(t, _, id)| (t, id, path.clone()));
             let inner = this.as_ref().or(parent);
             for (field, value) in fields {
                 if value.is_object() || value.is_array() {
@@ -182,7 +220,7 @@ fn under_another(held: &Value, parent: Option<&(String, String)>) -> bool {
 }
 
 /// One step into a JSON value.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum Step {
     Key(String),
     Index(usize),
@@ -223,7 +261,7 @@ async fn fresh(
     session: &SessionKey,
     (t, id): (&str, &str),
     names: &str,
-    seen: &HashMap<(String, String), Map<String, Value>>,
+    seen: &HashMap<(String, String), Seen>,
 ) -> Option<String> {
     for salt in 0..DRAWS {
         let mut hasher = DefaultHasher::new();

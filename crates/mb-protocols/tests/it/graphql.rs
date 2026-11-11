@@ -2989,10 +2989,21 @@ async fn a_generated_record_reusing_another_records_id_gets_its_own() {
         ]}),
         // A later answer reusing the id the session now holds for the hoodie's L.
         product("gid://shopify/Product/3", "cap", variant("One size")),
+        // A product read by handle under the hoodie's id, its variant under the
+        // hoodie's variant id and with the same title.
+        product("gid://shopify/Product/1", "fern-tee", variant("L")),
     ]);
+    let mut bundle = compile(VARIANTS.as_bytes()).unwrap();
+    let by_handle = bundle
+        .operations
+        .iter_mut()
+        .find(|o| o.id == "Query.product")
+        .unwrap();
+    // What the world description's `target: {member: handle}` sets.
+    by_handle.identity.as_mut().unwrap().input_field = Some("handle".into());
     let base = serve(MockRuntime::new(
         "shop",
-        Arc::new(compile(VARIANTS.as_bytes()).unwrap()),
+        Arc::new(bundle),
         Arc::new(Engine::new(
             Some(provider.clone() as Arc<dyn Provider>),
             EngineConfig::default(),
@@ -3035,4 +3046,21 @@ async fn a_generated_record_reusing_another_records_id_gets_its_own() {
         .unwrap();
     assert_ne!(cap_variant, reused, "{}", cap.body);
     assert_ne!(cap_variant, ids[1], "{}", cap.body);
+
+    let tee = post(
+        &base,
+        json!({"query": r#"{ product(handle: "fern-tee") { id handle variants { id title } } }"#}),
+        &session,
+    )
+    .await;
+    let tee = &tee.body["data"]["product"];
+    assert_ne!(tee["id"], "gid://shopify/Product/1", "{tee}");
+    assert!(
+        tee["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("gid://shopify/Product/"),
+        "{tee}"
+    );
+    assert_ne!(tee["variants"][0]["id"], reused, "{tee}");
 }
