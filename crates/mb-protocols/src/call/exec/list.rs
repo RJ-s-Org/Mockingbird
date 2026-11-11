@@ -266,7 +266,7 @@ async fn answer(
             .iter()
             .all(|(param, f)| knows(param) || lists::holds_wanted(&item, f));
         if kept {
-            items.push(item);
+            items.push((item, r.data.clone()));
         }
     }
     // Records of the type are held, none in this collection, which was never listed and
@@ -284,7 +284,7 @@ async fn answer(
     }
     let ids: Vec<String> = items
         .iter()
-        .filter_map(|item| mb_mcm::member_at(item, &field).and_then(id_string))
+        .filter_map(|(item, _)| mb_mcm::member_at(item, &field).and_then(id_string))
         .collect();
     let none_kept = items.is_empty();
     let mut served = state_lists::page(

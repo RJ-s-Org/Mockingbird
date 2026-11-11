@@ -50,6 +50,10 @@ fn schema_rejects_unknown_keys_and_bad_pointers() {
         json!({"operations": {"o": {"fields": {"separator": ","}}}}),
         json!({"operations": {"o": {"fields": {"param": "f", "separator": ""}}}}),
         json!({"operations": {"o": {"queue": {"effect": "peek"}}}}),
+        json!({"operations": {"o": {"effects": [{"op": "move", "type": "t"}]}}}),
+        json!({"operations": {"o": {"effects": [{"op": "delete", "id": "'x'"}]}}}),
+        json!({"operations": {"o": {"effects": [{"op": "create", "type": "t", "then": 1}]}}}),
+        json!({"types": {"t": {"computed": {"n": 1}}}}),
         json!({"operations": {"o": {"queue": {"effect": "take", "count": "count"}}}}),
         json!({"operations": {"o": {"queue": {"effect": "take", "requeue": {"at": "/m"}}}}}),
         json!({"types": {"t": {"lifecycle": {"member": "s", "soft_delete": {"state": "x", "unless": {"param": "force"}}}}}}),
@@ -83,7 +87,8 @@ fn schema_accepts_every_serialized_field() {
                 "derived": {
                     "entry_count": {"kind": "count", "of": "entry"},
                     "balance": {"kind": "sum", "of": "entry", "member": "amount", "where": {"state": "posted"}}
-                }
+                },
+                "computed": {"label": "record.name + ' (' + record.status + ')'"}
             }
         },
         "operations": {
@@ -104,6 +109,13 @@ fn schema_accepts_every_serialized_field() {
                 "answer": {"record": "/result", "records": "/results", "long_running": {"done": "done", "result": "response"}, "identity_header": "Location"},
                 "transition": {"status": "closed"},
                 "changes": {"name": {"from_request": "/name"}, "flag": {"value": false}},
+                "set": {"name": "lower(request.body.name)"},
+                "refuse": [{"when": "record.status == 'closed'", "status": 409, "code": "closed", "message": {"expr": "'closed: ' + record.id"}}],
+                "effects": [
+                    {"op": "create", "type": "entry", "set": {"amount": "0"}, "when": "true"},
+                    {"op": "update", "type": "org", "id": "record.org_id", "set": {"touched": "now"}},
+                    {"op": "delete", "type": "entry", "id": "'e-' + record.id"}
+                ],
                 "scope": {"param": "/path", "member": "path", "kind": "prefix", "recursive": "/recursive"},
                 "filters": [
                     {"param": "q", "member": "name", "kind": "text"},

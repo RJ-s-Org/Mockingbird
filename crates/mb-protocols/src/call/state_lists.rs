@@ -610,7 +610,7 @@ pub(super) async fn answer(
             filters.iter().all(|(_, f)| lists::holds_wanted(i, f))
         });
         if kept {
-            items.push(item);
+            items.push((item, r.data.clone()));
         }
     }
     page(
@@ -626,8 +626,9 @@ pub(super) async fn answer(
 }
 
 /// The page list `call` asks for of `items`, the records of type `t` its query keeps,
-/// each as the items declare it, in the collection's order, placed in `envelope` (an
-/// empty page of `shape`): each item's derived members filled, ordered by `q`'s
+/// each as the items declare it beside the record as held, in the collection's order,
+/// placed in `envelope` (an empty page of `shape`): each item's computed members filled
+/// from its held record, ordered by `q`'s
 /// described order, counted, and cut by its described page (a page number or offset
 /// from state, a token's later pages kept as a [`pages`] cut), else by the page size a
 /// parameter asks for (see the module's doc). Tagged `State`. A cut with no place for
@@ -639,7 +640,7 @@ pub(super) async fn page(
     (plan, call): (&CallPlan<'_>, &OperationCall),
     (t, q): (&str, Option<&ListQuery>),
     (shape, envelope): (&Shape, &Value),
-    mut items: Vec<Value>,
+    listed: Vec<(Value, Value)>,
     served_anyway: bool,
 ) -> Result<GeneratedResponse, Unserved> {
     let rt = state.rt;
@@ -648,8 +649,10 @@ pub(super) async fn page(
     let (schema, path) = (&shape.schema, &shape.path);
     let (array_parts, _) = schema_parts(bundle, Some(&shape.array));
     let size = list_query::requested_page(rt, op, call);
-    // Each item's derived members, from one listing per child type.
-    derived::fill_page(state, &plan.session, t, &mut items, Some(&shape.items)).await;
+    // Each item's computed members, from its held record and one listing per child type.
+    let (mut items, held): (Vec<Value>, Vec<Value>) = listed.into_iter().unzip();
+    let items_at = (&mut items[..], Some(&shape.items));
+    computed::fill_page(state, (plan, call), t, items_at, Some(&held)).await;
     if let Some(q) = q {
         list_query::sort(q, &mut items);
     }

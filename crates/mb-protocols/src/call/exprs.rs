@@ -1,6 +1,8 @@
 //! World expressions at runtime: an operation's `refuse` and `set` (its `changes`
 //! read as `set`, see [`mb_mcm::world::Expressions`]), compiled once with the
-//! effective world ([`super::Described::expressions`]) and evaluated here per call.
+//! effective world ([`super::Described::expressions`]) and evaluated here per call. Its
+//! `effects` are [`super::side_writes`]'s, a type's computed members
+//! [`super::computed`]'s, through the same [`SessionHost`].
 //!
 //! - The bindings: `request` is `{body, path, query, headers}` (header names lower
 //!   case), `record` the target as stored before the call (`null` without one), `now`
@@ -10,8 +12,9 @@
 //!   (in its identity pattern's forms too), looked up in the store whatever the type
 //!   holds ([`resolve_held`]), else by its identity member, else by a described
 //!   alternate (one record only), among the type's first [`MAX_SCAN`]; `count` and
-//!   `exists` read the type's held records, at most [`MAX_SCAN`]; `seq(scope)` is a per-session counter
-//!   ([`SeqCounters`]); `mint(pattern)` draws an id matching the pattern from the
+//!   `exists` read the type's held records, at most [`MAX_SCAN`]; `seq(scope)` is a
+//!   per-session counter, read before and stored after the call's expressions are
+//!   evaluated ([`COUNTERS_TYPE`]); `mint(pattern)` draws an id matching the pattern from the
 //!   seeded minting ([`super::header_ids::draw_id_as`]). The records of the types an
 //!   operation's expressions name are read once, before they are evaluated.
 //! - A call's `set` values are evaluated once and kept on its plan
@@ -22,7 +25,7 @@
 //!   value stays as the engine would have made it, and a refusal whose `when` fails
 //!   does not fire.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use mb_engine::consistency::property_schema;
@@ -33,39 +36,21 @@ use mb_mcm::world::{OpExpressions, SetValue, TextValue};
 use mb_state::{SessionKey, StoredResource};
 use serde_json::{Map, Value, json};
 
+use super::computed::{Children, holds};
 use super::header_ids::{MintSeed, draw_id_as};
 use super::write_memory::read_schema;
 use super::{CallPlan, MAX_SCAN, StateAccess, id_string, records};
 use crate::MockRuntime;
 
-/// Sessions [`SeqCounters`] holds at most; it is emptied when full.
-const MAX_SEQ_SESSIONS: usize = 1024;
+/// The resource type a session's `seq()` counters are stored under, as one document
+/// ([`COUNTERS_ID`]) of `{scope: last value}`. It is stored, exported and seeded as a
+/// resource is, so a session reset clears the counters, a snapshot carries them, and a
+/// world patch or a rebuild of the runtime does not restart them.
+pub(crate) const COUNTERS_TYPE: &str = "__mockingbird.seq";
+/// The id of the counters document.
+const COUNTERS_ID: &str = "counters";
 /// Scopes one session counts at most; its counters are emptied when full.
 const MAX_SEQ_SCOPES: usize = 1024;
-
-/// Each session's `seq(scope)` counters, from 1, per runtime.
-#[derive(Debug, Default)]
-pub(crate) struct SeqCounters(Mutex<HashMap<SessionKey, HashMap<String, i64>>>);
-
-impl SeqCounters {
-    /// The next value of `session`'s counter `scope`.
-    fn next(&self, session: &SessionKey, scope: &str) -> i64 {
-        let mut all = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !all.contains_key(session) && all.len() >= MAX_SEQ_SESSIONS {
-            all.clear();
-        }
-        let counters = all.entry(session.clone()).or_default();
-        if !counters.contains_key(scope) && counters.len() >= MAX_SEQ_SCOPES {
-            counters.clear();
-        }
-        let n = counters.entry(scope.to_string()).or_insert(0);
-        *n = n.saturating_add(1);
-        *n
-    }
-}
 
 /// A call's `set` values: each member, its value (`None` when its expression failed
 /// or gave `null`, or its `from_request` pointer reads nothing), and whether it is a
@@ -107,13 +92,20 @@ impl CallExprs {
         self.with_notes(|n| n.fallback = Some((reason.to_string(), on.map(str::to_string))));
     }
 
-    /// Notes that the expression at `pointer` failed with `error`.
-    pub(super) fn failed(&self, pointer: &str, error: &str) {
+    /// Notes that the expression at `pointer` failed with `error`, once per pointer
+    /// (a computed member fails alike on each item of a list); whether it is new.
+    pub(super) fn failed(&self, pointer: &str, error: &str) -> bool {
+        let mut new = false;
         self.with_notes(|n| {
+            if n.failed.iter().any(|f| f["pointer"] == pointer) {
+                return;
+            }
+            new = true;
             if n.failed.len() < MAX_FAILED {
                 n.failed.push(json!({"pointer": pointer, "error": error}));
             }
         });
+        new
     }
 
     /// The notes, as a request record's `request` keeps them: `exec_fallback`,
@@ -160,6 +152,14 @@ pub(super) struct SessionHost<'r> {
     probing: bool,
     /// What `held` asked for while probing that is not looked up yet.
     asked: Vec<(String, String)>,
+    /// The session's `seq()` counters, once read ([`SessionHost::read_counters`]),
+    /// and whether a call moved them.
+    counters: Option<Map<String, Value>>,
+    counted: bool,
+    /// The children of the record a computed member is answered for, by child type
+    /// ([`super::computed`]), and that record's bare id.
+    pub(super) children: HashMap<String, Children>,
+    pub(super) parent: Option<String>,
 }
 
 /// Rounds of [`resolve_held`] at most: a `held` whose id is another's answer needs
@@ -172,7 +172,7 @@ const MAX_HELD_LOOKUPS: usize = 64;
 /// finds a record whatever the type holds (not only among the records [`SessionHost`]
 /// read). The programs are evaluated first with `seq` and `mint` drawing nothing, to
 /// learn what they ask for, again for a `held` whose id another `held` gave.
-async fn resolve_held(
+pub(super) async fn resolve_held(
     state: &mut StateAccess<'_>,
     host: &mut SessionHost<'_>,
     programs: &[&Program],
@@ -221,23 +221,67 @@ impl<'r> SessionHost<'r> {
             resolved: HashMap::new(),
             probing: false,
             asked: Vec::new(),
+            counters: None,
+            counted: false,
+            children: HashMap::new(),
+            parent: None,
         }
     }
 
-    /// The member type `t`'s records are named by: the described identity member,
-    /// else that of the type's read by id, else `id`.
-    fn identity_member(&self, t: &str) -> String {
-        self.rt
-            .described()
-            .type_desc(t)
-            .and_then(|d| d.identity.as_ref()?.member.clone())
-            .or_else(|| {
-                let i = self.rt.index().detail_reads.get(t)?;
-                let read = self.rt.bundle().operations.get(*i)?;
-                read.identity.as_ref().map(|i| i.field.clone())
-            })
-            .unwrap_or_else(|| "id".to_string())
+    /// Reads the session's `seq()` counters.
+    pub(super) async fn read_counters(&mut self, state: &mut StateAccess<'_>) {
+        let held = state.get(self.session, COUNTERS_TYPE, COUNTERS_ID).await;
+        self.counters = Some(match held.map(|r| r.data) {
+            Some(Value::Object(counters)) => counters,
+            _ => Map::new(),
+        });
     }
+
+    /// Stores the session's `seq()` counters, when a call moved them.
+    pub(super) async fn store_counters(&mut self, state: &mut StateAccess<'_>) {
+        if !self.counted {
+            return;
+        }
+        let Some(counters) = &self.counters else {
+            return;
+        };
+        let record = StoredResource {
+            resource_type: COUNTERS_TYPE.to_string(),
+            id: COUNTERS_ID.to_string(),
+            data: Value::Object(counters.clone()),
+        };
+        state.upsert(self.session, record).await;
+        self.counted = false;
+    }
+
+    /// Reads again the records of the types it reads, and forgets what `held` looked
+    /// up: a write since changed them.
+    pub(super) async fn refresh(&mut self, state: &mut StateAccess<'_>) {
+        let types: Vec<String> = self.records.keys().cloned().collect();
+        for t in types {
+            let held = state.list(self.session, &t, MAX_SCAN).await;
+            self.records.insert(t, held);
+        }
+        self.resolved.clear();
+    }
+
+    fn identity_member(&self, t: &str) -> String {
+        identity_member(self.rt, t)
+    }
+}
+
+/// The member type `t`'s records are named by: the described identity member, else
+/// that of the type's read by id, else `id`.
+pub(super) fn identity_member(rt: &MockRuntime, t: &str) -> String {
+    rt.described()
+        .type_desc(t)
+        .and_then(|d| d.identity.as_ref()?.member.clone())
+        .or_else(|| {
+            let i = rt.index().detail_reads.get(t)?;
+            let read = rt.bundle().operations.get(*i)?;
+            read.identity.as_ref().map(|i| i.field.clone())
+        })
+        .unwrap_or_else(|| "id".to_string())
 }
 
 impl Host for SessionHost<'_> {
@@ -288,7 +332,47 @@ impl Host for SessionHost<'_> {
         if self.probing {
             return 0;
         }
-        self.rt.seq_counters().next(self.session, scope)
+        let counters = self.counters.get_or_insert_with(Map::new);
+        if !counters.contains_key(scope) && counters.len() >= MAX_SEQ_SCOPES {
+            counters.clear();
+        }
+        let n = counters
+            .get(scope)
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .saturating_add(1);
+        counters.insert(scope.to_string(), Value::from(n));
+        self.counted = true;
+        n
+    }
+
+    fn children(&mut self, t: &str, r#where: &Value) -> Result<Vec<Value>, String> {
+        let group = self
+            .children
+            .get(t)
+            .ok_or_else(|| format!("no children of type `{t}` are read here"))?;
+        if group.cut {
+            return Err(format!(
+                "more than {MAX_SCAN} children of type `{t}`: the count would not be exact"
+            ));
+        }
+        let parent = self
+            .parent
+            .as_deref()
+            .ok_or_else(|| "the record answered has no id".to_string())?;
+        let wanted: Option<BTreeMap<String, Value>> = match r#where {
+            Value::Null => None,
+            Value::String(text) => {
+                Some(serde_json::from_str(text).map_err(|e| format!("children(): {e}"))?)
+            }
+            _ => return Err("children() takes its condition as JSON text".to_string()),
+        };
+        Ok(group
+            .under(parent)
+            .iter()
+            .filter(|child| holds(child, wanted.as_ref()))
+            .cloned()
+            .collect())
     }
 
     fn mint(&mut self, pattern: &str) -> Option<String> {
@@ -335,34 +419,37 @@ fn now_value(rt: &MockRuntime, call: &OperationCall) -> Value {
 }
 
 /// What one evaluation reads: the request, the target before the call and the time.
-struct Bound {
-    request: Value,
-    record: Value,
-    now: Value,
+pub(super) struct Bound {
+    pub(super) request: Value,
+    pub(super) record: Value,
+    pub(super) now: Value,
+    /// `it`, where a key binds it at the top (an effect's other record).
+    pub(super) it: Option<Value>,
 }
 
 impl Bound {
-    fn new(rt: &MockRuntime, call: &OperationCall, record: Option<&Value>) -> Self {
+    pub(super) fn new(rt: &MockRuntime, call: &OperationCall, record: Option<&Value>) -> Self {
         Self {
             request: request_value(call),
             record: record.cloned().unwrap_or(Value::Null),
             now: now_value(rt, call),
+            it: None,
         }
     }
 
-    fn bindings(&self) -> Bindings<'_> {
+    pub(super) fn bindings(&self) -> Bindings<'_> {
         Bindings {
             request: &self.request,
             record: &self.record,
             now: &self.now,
-            it: None,
+            it: self.it.as_ref(),
         }
     }
 }
 
 /// Evaluates `program` (at `pointer` in the world); a failure is logged and noted on
 /// the plan, and is `None`.
-fn eval(
+pub(super) fn eval(
     plan: &CallPlan<'_>,
     rt: &MockRuntime,
     (program, pointer): (&Program, &str),
@@ -378,7 +465,10 @@ fn eval(
     }
 }
 
-fn failed(plan: &CallPlan<'_>, rt: &MockRuntime, pointer: &str, error: &str) {
+pub(super) fn failed(plan: &CallPlan<'_>, rt: &MockRuntime, pointer: &str, error: &str) {
+    if !plan.exprs.failed(pointer, error) {
+        return;
+    }
     tracing::info!(
         mock = %rt.name,
         operation = %plan.op.id,
@@ -386,17 +476,20 @@ fn failed(plan: &CallPlan<'_>, rt: &MockRuntime, pointer: &str, error: &str) {
         error = %error,
         "a world expression failed: the value stays as the engine makes it"
     );
-    plan.exprs.failed(pointer, error);
 }
 
 /// Reads what `ops`' expressions need of the session.
-async fn host<'r>(
+pub(super) async fn host<'r>(
     state: &mut StateAccess<'_>,
     rt: &'r MockRuntime,
     (plan, call): (&'r CallPlan<'_>, &'r OperationCall),
     ops: &OpExpressions,
 ) -> SessionHost<'r> {
-    SessionHost::load(state, (rt, &plan.session, call), &ops.types).await
+    let mut host = SessionHost::load(state, (rt, &plan.session, call), &ops.types).await;
+    if ops.reads_seq {
+        host.read_counters(state).await;
+    }
+    host
 }
 
 /// The refusal `plan`'s operation states for this call: its first `refuse` entry whose
@@ -470,6 +563,7 @@ pub(super) async fn refusal(
                 &facts,
             )
             .await;
+        host.store_counters(state).await;
         tracing::info!(
             mock = %rt.name,
             operation = %plan.op.id,
@@ -480,6 +574,7 @@ pub(super) async fn refusal(
         );
         return refusal;
     }
+    host.store_counters(state).await;
     None
 }
 
@@ -546,6 +641,7 @@ pub(super) async fn set_values(
         .set
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(values.clone());
+    host.store_counters(state).await;
     values
 }
 

@@ -183,6 +183,15 @@
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/derived"
+          },
+          "description": "Read as `computed` members: `count` is the number of held children of `of`, `sum` the exact sum of their `member` (where they hold the `where` values)."
+        },
+        "computed": {
+          "type": "object",
+          "description": "Members computed whenever a record of the type is answered, and never stored, keyed by member path: each value an expression (a CEL subset, see docs/world.md) over `record` (the record answered), `request` and `now`.",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
           }
         }
       }
@@ -559,6 +568,47 @@
             "required": [
               "when",
               "status"
+            ]
+          }
+        },
+        "effects": {
+          "type": "array",
+          "maxItems": 8,
+          "description": "Writes to other records, in order, after the operation's own write of its target and only when it happened: `create` a record of `type` with `set`, `update` the held record `id` names with `set`, `delete` it; `when` must be true. In `set` and `when`, `record` is the target as written and `it` the record an update or delete finds. Effects do not cascade.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "op": {
+                "enum": [
+                  "create",
+                  "update",
+                  "delete"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "minLength": 1
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "set": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "when": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "op",
+              "type"
             ]
           }
         },

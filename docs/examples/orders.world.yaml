@@ -2,6 +2,11 @@
 # (`mocks.orders.world`). Only the entries to set: the importer's
 # heuristics fill in the rest. See docs/world.md.
 version: 1
+types:
+  orders:
+    # Answered on every read of an order, never stored (docs/world.md#expressions).
+    computed:
+      note: "'order of ' + record.customerId + ', ' + record.status"
 operations:
   createOrder:
     # Expressions (docs/world.md#expressions): a new order starts pending,

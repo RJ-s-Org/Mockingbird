@@ -27,9 +27,9 @@ use tracing::Instrument;
 use super::write_memory::Earlier;
 use super::writes::store_one;
 use super::{
-    CallPlan, OperationCall, StateAccess, collection_of, deleted, derived, envelopes, id_string,
-    minted, named_target, plain, records, replays, serve_held, state_lists, state_span, tokens,
-    world, write_memory,
+    CallPlan, OperationCall, StateAccess, collection_of, computed, deleted, envelopes, id_string,
+    minted, named_target, plain, records, replays, serve_held, side_writes, state_lists,
+    state_span, tokens, world, write_memory,
 };
 
 /// Why a classified call goes on to generation.
@@ -85,6 +85,7 @@ mod patches;
 mod queue;
 mod writes;
 
+pub(super) use create::unreadable;
 pub(super) use queue::forget as forget_queue;
 
 /// What [`run`] did with a call.
@@ -431,7 +432,7 @@ async fn held_read(
         values.extend(kept.cloned().unwrap_or_default());
         (!values.is_empty()).then_some(values)
     };
-    let derived = derived::filled(state, &plan.session, stored)
+    let derived = computed::filled(state, (plan, call), stored)
         .instrument(state_span())
         .await;
     let held = |kept: Option<&Map<String, Value>>| {
@@ -586,6 +587,20 @@ fn kind_name(kind: OpKind) -> &'static str {
     }
 }
 
+/// The record a write's answer renders, as [`writes::written`] rendered it: rendered
+/// again by [`commit`] once the operation's effects wrote, since its computed members
+/// may read what they wrote.
+pub(super) struct Rendered<'a> {
+    /// The id the answer names.
+    pub(super) id: String,
+    /// The record as written, before its computed members are filled.
+    pub(super) record: StoredResource,
+    /// The schema the answer is rendered to.
+    pub(super) schema: Option<&'a Value>,
+    /// Whether it is a create's record ([`computed::filled_new`]).
+    pub(super) new: bool,
+}
+
 /// What a write does to its record.
 pub(super) enum Write {
     /// Stores `data` under `id`, over what is held there.
@@ -627,20 +642,41 @@ pub(super) enum Write {
 /// and its tokens ended, the requests write memory kept for it forgotten (the executor's
 /// record is authoritative), the entity tag's state, the answer kept for a repeat of its
 /// idempotency key, the session's cached answers cleared, the webhooks sent, and the
-/// session kept alive. The store publishes the change.
+/// session kept alive. The store publishes the change. The operation's effects run once
+/// the write landed ([`side_writes::apply`]); when one wrote, the record `rendered`
+/// names is rendered again into the answer's body, its computed members reading the
+/// session as the effects left it.
 pub(super) async fn commit(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
     call: &OperationCall,
     (t, held): (&str, Option<&StoredResource>),
-    write: Write,
-    answer: GeneratedResponse,
+    (write, rendered): (Write, Option<Rendered<'_>>),
+    mut answer: GeneratedResponse,
 ) -> GeneratedResponse {
     async {
         let rt = state.rt;
         let op = plan.op;
         let session = &plan.session;
         let collection = collection_of(op, call);
+        // What the operation's effects see of its target, when it has any: the record
+        // as the write leaves it (as it was held, for a removal or a write within its
+        // parent), and its type.
+        let effected = rt
+            .described()
+            .expressions(&op.id)
+            .is_some_and(|o| !o.effects.is_empty())
+            .then(|| match &write {
+                Write::Put { data, .. } => (t.to_string(), data.clone()),
+                Write::Remove { .. } => {
+                    (t.to_string(), held.map_or(Value::Null, |h| h.data.clone()))
+                }
+                // The child as written, when the answer renders it.
+                Write::Within { child, .. } => match &rendered {
+                    Some(r) => (child.resource_type.clone(), r.record.data.clone()),
+                    None => (child.resource_type.clone(), child.data.clone()),
+                },
+            });
         // The record the write was of: the child for a write within its parent.
         let mut written = None;
         let id = match write {
@@ -721,6 +757,17 @@ pub(super) async fn commit(
                 id
             }
         };
+        // The operation's effects, once its own write landed.
+        if let Some((target_type, target)) = &effected
+            && state.available()
+        {
+            let target_id = written.as_deref().unwrap_or(&id);
+            let wrote =
+                side_writes::apply(state, (plan, call), target_type, (target_id, target)).await;
+            if wrote && let Some(rendered) = &rendered {
+                render_again(state, (plan, call), rendered, &mut answer).await;
+            }
+        }
         // What earlier answers said of a deleted record goes, a soft-deleted one too.
         world::after_delete(
             state,
@@ -757,6 +804,51 @@ pub(super) async fn commit(
     }
     .instrument(state_span())
     .await
+}
+
+/// `answer`'s body rendered again from `rendered`'s record with its computed members
+/// filled as the session now holds it (a long-running answer's result member set in
+/// the body it has); left as it is when that does not render.
+async fn render_again(
+    state: &mut StateAccess<'_>,
+    at: (&CallPlan<'_>, &OperationCall),
+    rendered: &Rendered<'_>,
+    answer: &mut GeneratedResponse,
+) {
+    let (plan, call) = at;
+    let rt = state.rt;
+    if !computed::describes(rt, &rendered.record.resource_type) {
+        return;
+    }
+    let filled = match rendered.new {
+        true => computed::filled_new(state, at, &rendered.record).await,
+        false => computed::filled(state, at, &rendered.record).await,
+    };
+    let record = filled.as_ref().unwrap_or(&rendered.record);
+    let long_running = rt
+        .described()
+        .op(&plan.op.id)
+        .and_then(|d| d.answer.as_ref())
+        .and_then(|a| a.long_running.as_ref());
+    let body = match long_running {
+        Some(lr) => answer.body.clone().and_then(|mut body| {
+            mb_mcm::set_member_at(&mut body, &lr.result, record.data.clone()).then_some(())?;
+            rt.engine
+                .serve_stored(rt.bundle(), plan.op, &body, rendered.schema)?
+                .body
+        }),
+        None => writes::written(
+            rt,
+            plan,
+            call,
+            (&rendered.id, &record.data),
+            rendered.schema,
+        )
+        .and_then(|again| again.body),
+    };
+    if let Some(body) = body {
+        answer.body = Some(body);
+    }
 }
 
 /// The new id of `held`, held under `id`, once a write leaves it as `data`: the value of

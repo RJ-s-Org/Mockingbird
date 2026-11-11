@@ -9,9 +9,9 @@ use serde_json::Value;
 use tracing::Instrument;
 
 use super::writes::written;
-use super::{Fallback, Held, Ran, Write, answered, commit, fell_back};
+use super::{Fallback, Held, Ran, Rendered, Write, answered, commit, fell_back};
 use crate::call::{
-    CallPlan, OperationCall, StateAccess, derived, state_span, transitions, write_memory,
+    CallPlan, OperationCall, StateAccess, computed, state_span, transitions, write_memory,
 };
 
 /// Whether the executor takes these calls.
@@ -58,7 +58,7 @@ pub(super) async fn run(
     }
     let mut changed = stored.clone();
     transitions::apply(state, (plan, call), Some(&stored.data), &mut changed.data).await;
-    let derived = derived::filled(state, &plan.session, &changed)
+    let derived = computed::filled(state, (plan, call), &changed)
         .instrument(state_span())
         .await;
     let answer = derived
@@ -68,12 +68,19 @@ pub(super) async fn run(
         fell_back(rt, plan, kind, Fallback::RenderFailed.as_str());
         return Ran::Generate(None);
     };
+    let rendered = Rendered {
+        id: id.to_owned(),
+        record: changed.clone(),
+        schema: response_schema,
+        new: false,
+    };
     let write = Write::Put {
         id: id.to_owned(),
         data: changed.data,
     };
     let t = stored.resource_type.as_str();
-    let answer = commit(state, plan, call, (t, Some(stored)), write, answer).await;
+    let held = (t, Some(stored));
+    let answer = commit(state, plan, call, held, (write, Some(rendered)), answer).await;
     answered(rt, plan, kind);
     Ran::Answered(Box::new(answer))
 }

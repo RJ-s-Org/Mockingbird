@@ -78,6 +78,9 @@ pub(super) enum Func {
     Sha256,
     Seq,
     Mint,
+    /// Internal (see [`super::Program::compile_internal`]): the exact sum of a
+    /// member over a list's items, as decimal text.
+    DecimalSum,
 }
 
 impl Func {
@@ -118,12 +121,17 @@ impl Func {
             Func::Sha256 => "sha256",
             Func::Seq => "seq",
             Func::Mint => "mint",
+            Func::DecimalSum => "decimal_sum",
         }
     }
 
     pub fn arity(self) -> usize {
         match self {
-            Func::StartsWith | Func::EndsWith | Func::Contains | Func::Matches => 2,
+            Func::StartsWith
+            | Func::EndsWith
+            | Func::Contains
+            | Func::Matches
+            | Func::DecimalSum => 2,
             _ => 1,
         }
     }
@@ -176,6 +184,9 @@ pub(super) enum Kind {
     ExistsType(TypeArg, Box<Node>),
     /// `sum(list, expr)`, `it` bound to each item.
     Sum(Box<Node>, Box<Node>),
+    /// Internal (see [`super::Program::compile_internal`]): `children(type, where?)`,
+    /// the held children of type `type` of the record being answered.
+    Children(TypeArg, Option<Box<Node>>),
 }
 
 impl Node {
@@ -184,6 +195,7 @@ impl Node {
             Kind::Lit(_) | Kind::Ident(_) => Vec::new(),
             Kind::Member(a, _) | Kind::Not(a) | Kind::Neg(a) | Kind::Has(a, _) => vec![a],
             Kind::Held(_, a) | Kind::Count(_, a) | Kind::ExistsType(_, a) => vec![a],
+            Kind::Children(_, w) => w.iter().map(AsRef::as_ref).collect(),
             Kind::Index(a, b)
             | Kind::Bin(_, a, b)
             | Kind::And(a, b)
@@ -197,14 +209,16 @@ impl Node {
     }
 }
 
-/// Parses `src` into a tree, then resolves its names.
-pub(super) fn parse(src: &str) -> Result<Node, Fail> {
+/// Parses `src` into a tree, then resolves its names. `internal` admits the
+/// runtime's own functions (`children`, `decimal_sum`), which a world cannot call.
+pub(super) fn parse(src: &str, internal: bool) -> Result<Node, Fail> {
     let toks = lex(src)?;
     let mut p = Parser {
         toks,
         i: 0,
         nodes: 0,
         depth: 0,
+        internal,
     };
     let root = p.expr()?;
     if !matches!(p.peek(), Tok::Eof) {
@@ -223,6 +237,8 @@ struct Parser {
     nodes: usize,
     /// Current nesting of `expr` calls (parentheses, arguments, brackets).
     depth: usize,
+    /// Whether the internal functions are known.
+    internal: bool,
 }
 
 const EOF: Tok = Tok::Eof;
@@ -559,6 +575,21 @@ impl Parser {
                     return Err(Fail::new(pos, "sum() takes 2 arguments"));
                 };
                 self.mk(Kind::Sum(Box::new(list), Box::new(e)), pos)
+            }
+            "children" if self.internal => {
+                if !(1..=2).contains(&args.len()) {
+                    return Err(Fail::new(pos, "children() takes 1 or 2 arguments"));
+                }
+                let mut args = args.into_iter();
+                let Some(ty) = args.next() else {
+                    return Err(Fail::new(pos, "children() takes 1 or 2 arguments"));
+                };
+                let ty = type_arg(&name, ty)?;
+                self.mk(Kind::Children(ty, args.next().map(Box::new)), pos)
+            }
+            "decimal_sum" if self.internal => {
+                arity(2)?;
+                self.call(Func::DecimalSum, args, pos)
             }
             "all" | "map" | "filter" => Err(Fail::new(
                 pos,
