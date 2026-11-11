@@ -52,11 +52,26 @@ impl Engine {
         if declared.is_empty() {
             return filled;
         }
-        let properties: Map<String, Value> = declared
+        // An object, list or reference to another record that may be null and that
+        // nothing set (not the request, the world description or the executor) is
+        // stored as null, as an API leaves the parts a create does not ask for: a
+        // reference nothing named points at no record the session holds. Writing
+        // them out was most of the model's output, and their schemas most of its
+        // prompt. Scalars (a client secret, a description) are still the model's.
+        let (nullable, asked): (Vec<_>, Vec<_>) = declared
+            .iter()
+            .partition(|(_, schema)| admits_null(bundle, schema) && structured(bundle, schema));
+        for (name, _) in &nullable {
+            filled.members.insert((*name).to_string(), Value::Null);
+        }
+        if asked.is_empty() {
+            return filled;
+        }
+        let properties: Map<String, Value> = asked
             .iter()
             .map(|(name, schema)| ((*name).to_string(), schema.clone()))
             .collect();
-        let names: Vec<&str> = declared.iter().map(|(name, _)| *name).collect();
+        let names: Vec<&str> = asked.iter().map(|(name, _)| *name).collect();
         let restricted = json!({"type": "object", "properties": properties, "required": names});
         if let (Some(provider), Ok(validator)) =
             (&self.provider, self.schema_validator(bundle, &restricted))
@@ -124,4 +139,53 @@ impl Engine {
         }
         filled
     }
+}
+
+/// Whether `schema` (a member's, through one `$ref`) admits `null`: a `null`
+/// type, `nullable: true`, or a `null` branch of an `anyOf`/`oneOf`.
+fn admits_null(bundle: &Bundle, schema: &Value) -> bool {
+    fn direct(schema: &Value) -> bool {
+        let null_type = match schema.get("type") {
+            Some(Value::String(t)) => t == "null",
+            Some(Value::Array(ts)) => ts.iter().any(|t| t == "null"),
+            _ => false,
+        };
+        null_type
+            || schema.get("nullable") == Some(&Value::Bool(true))
+            || ["anyOf", "oneOf"].iter().any(|k| {
+                schema
+                    .get(*k)
+                    .and_then(Value::as_array)
+                    .is_some_and(|bs| bs.iter().any(direct))
+            })
+    }
+    direct(schema) || direct(bundle.resolve(schema))
+}
+
+/// Whether `schema` (a member's) holds an object, an array, or a reference to
+/// another record (a union with an object branch, such as an id-or-object member):
+/// anything but a plain scalar, `null` branches aside.
+fn structured(bundle: &Bundle, schema: &Value) -> bool {
+    fn walk(bundle: &Bundle, schema: &Value, depth: usize) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        let schema = bundle.resolve(schema);
+        let typed = |t: &str| t == "object" || t == "array";
+        let by_type = match schema.get("type") {
+            Some(Value::String(t)) => typed(t),
+            Some(Value::Array(ts)) => ts.iter().filter_map(Value::as_str).any(typed),
+            _ => false,
+        };
+        by_type
+            || schema.get("properties").is_some()
+            || schema.get("items").is_some()
+            || ["anyOf", "oneOf", "allOf"].iter().any(|k| {
+                schema
+                    .get(*k)
+                    .and_then(Value::as_array)
+                    .is_some_and(|bs| bs.iter().any(|b| walk(bundle, b, depth + 1)))
+            })
+    }
+    walk(bundle, schema, 0)
 }
