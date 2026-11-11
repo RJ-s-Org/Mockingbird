@@ -165,6 +165,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Fixed
 
+- `mockingbird mcp` waits up to 15 seconds (was 5) for the login shell's environment, and logs a warning when it gives up: a login shell that loads version managers or a framework no longer silently loses its variables, such as the LLM key a profile references.
 - A mock built from config under load no longer fails, and then answers 503 until the next change, because the in-memory store's one connection was busy: a call on the in-memory store waits up to 30 seconds for it (`MEMORY_ACQUIRE_TIMEOUT`), where a database server still fails after 2.
 - A mock whose build fails (a transient store error, say) is rebuilt after 1 second, then after a delay that doubles up to 60 seconds, until a build succeeds, instead of staying failed (and answering 503 when nothing else was mounted) until the next change of its config. A successful build, a change that removes or rebuilds the mock, or the registry stopping cancels the retry.
 - `mockingbird server start` on a port another process holds no longer reports `ready: true` from whatever answers there. It binds the data-plane and admin ports, and the gRPC port when set, before it spawns the server, and fails with exit 1 and `{"ready": false, "error", "listener", "address", "os_error"}` on stdout, leaving no server process or pid file behind. The MCP `start_server` tool and `mockingbird run` fail with the same bind error.
