@@ -60,6 +60,7 @@ mod graphql_creates;
 mod graphql_links;
 mod graphql_nested;
 mod graphql_references;
+mod graphql_relay_inputs;
 mod graphql_ws;
 mod grpc;
 mod header_identity;

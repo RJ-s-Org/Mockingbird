@@ -4735,9 +4735,11 @@ fn force_identity(
         .path_param
         .as_ref()
         .and_then(|p| call.path_params.get(p));
+    // A dotted input field (`input.id`, a GraphQL field's one input object) is read as
+    // a path, as the runtime reads the target.
     let from_body = || {
         let field = identity.input_field.as_ref()?;
-        call.body.as_ref()?.get(field)
+        mb_mcm::member_at(call.body.as_ref()?, field)
     };
     let Some(id) = from_path.or_else(from_body) else {
         return body;
@@ -5774,6 +5776,19 @@ components:
         );
         let out = force_identity(&v, &op, &call, None, json!({"rev": "1-abc"}));
         assert_eq!(out, json!({"rev": "1-abc", "_id": "order-001"}));
+    }
+
+    #[test]
+    fn an_input_field_inside_an_input_object_names_the_id() {
+        let (mut op, v, mut call) = acknowledged_put("{type: object}");
+        if let Some(identity) = op.identity.as_mut() {
+            identity.path_param = None;
+            identity.input_field = Some("input.id".into());
+        }
+        call.path_params = Map::new();
+        call.body = Some(json!({"input": {"id": "order-001"}}));
+        let out = force_identity(&v, &op, &call, None, json!({"ok": true}));
+        assert_eq!(out, json!({"ok": true, "_id": "order-001"}));
     }
 
     #[test]
