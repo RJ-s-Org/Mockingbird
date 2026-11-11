@@ -352,17 +352,18 @@ fn id_text(v: &Value) -> Option<String> {
     }
 }
 
-/// Values for the members `names` of a record of type `t` a create makes under `key`,
-/// from the pool (see the module's doc): those a pool record (the same `key` takes the
-/// same one) holds, with the pool record's own id written as `key` wherever a value
-/// embeds it (a `url`, a `client_secret`). `None` when the pool holds no record of `t`.
+/// Values for the members `names` of a record of type `t` (keyed by its member
+/// `field`) a create makes under `key`, from the pool (see the module's doc): those a
+/// pool record (the same `key` takes the same one) holds, with the pool record's own id
+/// written as `key` where a value names it as a path or a prefix (see [`rewrite_id`]).
+/// `None` when the pool holds no record of `t`, or none of `names`.
 pub(super) fn create_fill(
     rt: &MockRuntime,
-    t: &str,
+    (t, field): (&str, &str),
     key: &str,
     names: &[String],
 ) -> Option<serde_json::Map<String, Value>> {
-    if !rt.consistency {
+    if !rt.consistency || names.is_empty() {
         return None;
     }
     let records = rt.pool.records(t, &digest(rt, t));
@@ -371,13 +372,12 @@ pub(super) fn create_fill(
     }
     let pick = Sha256::digest(key.as_bytes());
     let record = records.get(usize::from(pick[0]) % records.len())?;
-    let id_member = crate::call::exprs::identity_member(rt, t);
-    let own_id = record.get(&id_member).and_then(id_text);
+    let own_id = mb_mcm::member_at(record, field).and_then(id_text);
     let mut out = serde_json::Map::new();
     for name in names {
         if let Some(value) = record.get(name) {
             let mut value = value.clone();
-            if let Some(own) = own_id.as_deref().filter(|own| own.len() >= 3) {
+            if let Some(own) = own_id.as_deref() {
                 rewrite_id(&mut value, own, key);
             }
             out.insert(name.clone(), value);
@@ -386,14 +386,36 @@ pub(super) fn create_fill(
     (!out.is_empty()).then_some(out)
 }
 
-/// Writes `to` for `from` in every string of `value`.
+/// Writes `to` for `from` in every string of `value` where `from` names the record:
+/// the whole string, or an occurrence that starts the string or follows a `/` or `=`
+/// (a path, a query value) and is not followed by a letter or digit (`pi_1` in
+/// `pi_1_secret_x` and `/widgets/pi_1`, never in `/widgets/pi_12`, nor `123` in
+/// `555-123-4567`).
 fn rewrite_id(value: &mut Value, from: &str, to: &str) {
     match value {
-        Value::String(s) if s.contains(from) => *s = s.replace(from, to),
+        Value::String(s) if !from.is_empty() && s.contains(from) => *s = rewritten(s, from, to),
         Value::Array(items) => items.iter_mut().for_each(|v| rewrite_id(v, from, to)),
         Value::Object(members) => members.values_mut().for_each(|v| rewrite_id(v, from, to)),
         _ => {}
     }
+}
+
+fn rewritten(s: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    let mut before: Option<char> = None;
+    while let Some(at) = rest.find(from) {
+        let prev = rest[..at].chars().last().or(before);
+        let next = rest[at + from.len()..].chars().next();
+        let names_it =
+            prev.is_none_or(|c| c == '/' || c == '=') && next.is_none_or(|c| !c.is_alphanumeric());
+        out.push_str(&rest[..at]);
+        out.push_str(if names_it { to } else { from });
+        before = from.chars().last();
+        rest = &rest[at + from.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Whether `op` names its record by its key alone: an HTTP route with exactly one path
@@ -519,7 +541,29 @@ pub(super) async fn list(
 
 #[cfg(test)]
 mod tests {
-    use super::RecordPool;
+    use super::{RecordPool, rewritten};
+
+    #[test]
+    fn an_id_is_rewritten_only_where_it_names_the_record() {
+        assert_eq!(rewritten("w1", "w1", "new"), "new");
+        assert_eq!(
+            rewritten("https://x.test/widgets/w1", "w1", "new"),
+            "https://x.test/widgets/new"
+        );
+        assert_eq!(
+            rewritten("/widgets/w1/parts?id=w1", "w1", "new"),
+            "/widgets/new/parts?id=new"
+        );
+        assert_eq!(rewritten("pi_1_secret_x", "pi_1", "pi_9"), "pi_9_secret_x");
+        assert_eq!(rewritten("/widgets/w12", "w1", "new"), "/widgets/w12");
+        assert_eq!(rewritten("+1 555-123-4567", "123", "77"), "+1 555-123-4567");
+        assert_eq!(rewritten("Order #1010", "101", "7"), "Order #1010");
+        assert_eq!(
+            rewritten("A red widget, discovered", "red", "blue"),
+            "A red widget, discovered"
+        );
+        assert_eq!(rewritten("/items/7", "7", "42"), "/items/42");
+    }
     use serde_json::json;
 
     #[test]

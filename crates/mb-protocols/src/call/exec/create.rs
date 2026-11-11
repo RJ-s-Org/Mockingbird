@@ -337,16 +337,37 @@ pub(super) async fn run(
     // A member a read never shows (`writeOnly`) is the client's to send, never filled.
     missing.retain(|(_, member)| !write_only(rt.bundle(), member));
     let mut usage = mb_llm::Usage::default();
+    let mut from_pool = false;
     if !missing.is_empty()
         && let Value::Object(known) = &mut data
     {
         let mut names: Vec<String> = missing.iter().map(|(name, _)| name.clone()).collect();
-        // From the mock's record pool, when it holds the type: a pool record's values,
-        // under the request's; the model fills only what the pool record lacks.
-        if let Some(pooled) = super::pool::create_fill(rt, t, &key, &names) {
+        // From the mock's record pool, when it holds the type: a pool record's values
+        // for the members nothing set at all (one the request sent part of is the
+        // model's to complete), but those fill answers null with no model call and the
+        // record's state (its lifecycle member, a soft-delete mark), which a create
+        // decides. The model fills only what is left.
+        let nulls = mb_engine::fill_nulls(rt.bundle(), &fill_schema(&missing, &required), &names);
+        let state_member = rt
+            .described()
+            .type_desc(t)
+            .and_then(|d| d.lifecycle.as_ref())
+            .map(|l| l.member.clone());
+        let poolable: Vec<String> = names
+            .iter()
+            .filter(|name| {
+                !known.contains_key(*name)
+                    && !nulls.contains(name)
+                    && state_member.as_ref() != Some(*name)
+                    && !crate::world_gaps::SOFT_DELETE_MEMBERS
+                        .contains(&name.to_ascii_lowercase().as_str())
+            })
+            .cloned()
+            .collect();
+        if let Some(pooled) = super::pool::create_fill(rt, (t, field), &key, &poolable) {
             names.retain(|name| !pooled.contains_key(name));
             fill_into(known, pooled);
-            plan.exprs.pooled(1);
+            from_pool = true;
         }
         if !names.is_empty() {
             let asked: Vec<(String, Value)> = missing
@@ -390,6 +411,9 @@ pub(super) async fn run(
     if let Some(why) = unreadable(rt, t, &data, filled.as_ref().map(|f| &f.data)) {
         invalid(rt, plan, &why);
         return Ran::Filled(usage);
+    }
+    if from_pool {
+        plan.exprs.pooled(1);
     }
     let answer = filled
         .and_then(|f| written(rt, plan, call, (&key, &f.data), response_schema))
