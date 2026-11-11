@@ -140,15 +140,12 @@ fn proxy_url(config: Option<&Path>) -> anyhow::Result<String> {
 /// The proxy's address when the server `args` start runs it (`--proxy`
 /// or `proxy.enabled`).
 fn proxy_listener(args: &StartArgs) -> anyhow::Result<Option<SocketAddr>> {
-    let enabled = match &args.config {
-        Some(path) => file_config::load(path)?.proxy.enabled,
-        None => false,
+    let mut cfg = match &args.config {
+        Some(path) => file_config::load(path)?,
+        None => file_config::FileConfig::default(),
     };
-    if !(args.proxy || enabled) {
-        return Ok(None);
-    }
-    let opts = crate::proxy::env::options_for(args.config.as_deref(), None)?;
-    Ok(Some(SocketAddr::new(opts.host.parse()?, opts.port)))
+    file_config::apply_env(&mut cfg)?;
+    Ok((args.proxy || cfg.proxy.enabled).then(|| SocketAddr::new(cfg.proxy.host, cfg.proxy.port)))
 }
 
 fn env_port(name: &str) -> Option<u16> {
@@ -245,6 +242,10 @@ pub async fn holder(address: SocketAddr) -> Option<String> {
 
 /// [`holder`] from the `/readyz` body `body`.
 pub(crate) fn describe_holder(body: &Value) -> Option<String> {
+    // Every Mockingbird `/readyz` carries `status` and `role`.
+    if !(body["status"].is_string() && body["role"].is_string()) {
+        return None;
+    }
     if let Some(dir) = body["dir"].as_str() {
         return Some(match body["config"].as_str() {
             Some(config) => {
@@ -253,9 +254,15 @@ pub(crate) fn describe_holder(body: &Value) -> Option<String> {
             None => format!("the Mockingbird server started without a config in {dir}"),
         });
     }
-    body["status"]
-        .is_string()
-        .then(|| "another Mockingbird server (it does not say whose)".to_owned())
+    Some("another Mockingbird server (it does not say whose)".to_owned())
+}
+
+/// Whether the `/readyz` body `body` is that of a server started with the
+/// config `config`.
+pub(crate) fn started_with(body: &Value, config: &Path) -> bool {
+    body["config"]
+        .as_str()
+        .is_some_and(|c| same_file_key(Path::new(c)) == same_file_key(config))
 }
 
 /// Whether nothing listens on `port` of `host`: binds it and lets go.
@@ -315,22 +322,33 @@ pub(crate) fn choose_free_ports(
     Ok(chosen)
 }
 
+/// A port `server start` takes in place of a busy default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChosenPort {
+    /// `server.port`, `server.admin_port`, `server.grpc_port` or
+    /// `proxy.port`.
+    pub key: &'static str,
+    /// The busy default.
+    pub busy: u16,
+    pub port: u16,
+}
+
 /// For `server start -c`: each listener (and the proxy, when it runs)
-/// whose port is only the default and is taken gets a free port, written
-/// into the config file, so that every command reading that config (the
-/// client subcommands, `proxy env`, `run`, the MCP server) finds it.
-/// Returns what was chosen, as JSON.
+/// whose port is only the default (no flag, `MB_*` variable or config key)
+/// and is taken, with the free port it gets instead. [`write_ports`] then
+/// records them in the config, so that every command reading it (the
+/// client subcommands, `proxy env`, `run`, the MCP server) finds them.
 ///
 /// # Errors
 ///
-/// The config cannot be read, does not load, or cannot be rewritten, or no
-/// free port is near a busy default.
-fn claim_free_ports(
+/// The config cannot be read or does not load, or no free port is near a
+/// busy default.
+fn plan_free_ports(
     args: &StartArgs,
     is_free: impl Fn(IpAddr, u16) -> bool,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<Vec<ChosenPort>> {
     let Some(path) = &args.config else {
-        return Ok(Value::Null);
+        return Ok(Vec::new());
     };
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("cannot read config file {}", path.display()))?;
@@ -368,16 +386,26 @@ fn claim_free_ports(
             defaulted: !explicit.proxy_port,
         });
     }
-    let chosen = choose_free_ports(&slots, is_free)?;
-    if chosen.is_empty() {
-        return Ok(Value::Null);
-    }
+    Ok(choose_free_ports(&slots, is_free)?
+        .into_iter()
+        .map(|(i, port)| ChosenPort {
+            key: slots[i].key,
+            busy: slots[i].port,
+            port,
+        })
+        .collect())
+}
+
+/// Writes `chosen` into the config at `path`; returns what was written,
+/// as JSON.
+///
+/// # Errors
+///
+/// The config cannot be rewritten.
+fn write_ports(path: &Path, chosen: &[ChosenPort]) -> anyhow::Result<Value> {
     let backup = crate::onboard::rewrite_config(path, |root| {
-        for &(i, port) in &chosen {
-            let (section, key) = slots[i]
-                .key
-                .split_once('.')
-                .unwrap_or(("server", slots[i].key));
+        for chosen in chosen {
+            let (section, key) = chosen.key.split_once('.').unwrap_or(("server", chosen.key));
             let entry = root.entry(section).or_insert_with(|| json!({}));
             if entry.is_null() {
                 *entry = json!({});
@@ -385,15 +413,23 @@ fn claim_free_ports(
             entry
                 .as_object_mut()
                 .ok_or_else(|| anyhow!("{section}: is not a mapping"))?
-                .insert(key.into(), json!(port));
+                .insert(key.into(), json!(chosen.port));
         }
         Ok(())
     })?;
     let ports: Vec<Value> = chosen
         .iter()
-        .map(|&(i, port)| json!({"key": slots[i].key, "busy": slots[i].port, "port": port}))
+        .map(|c| json!({"key": c.key, "busy": c.busy, "port": c.port}))
         .collect();
     Ok(json!({"written": path, "backup": backup, "ports": ports}))
+}
+
+/// `port` with `chosen`'s replacement for `key` applied.
+fn chosen_or(chosen: &[ChosenPort], key: &str, port: u16) -> u16 {
+    chosen
+        .iter()
+        .find(|c| c.key == key)
+        .map_or(port, |c| c.port)
 }
 
 /// The JSON `server start` prints when it fails: `ready: false` and the
@@ -545,22 +581,44 @@ pub async fn start_child(args: &StartArgs) -> anyhow::Result<(Value, std::proces
             "a background server already runs (pid {pid}); stop it with `mockingbird server stop`"
         );
     }
-    let ports_chosen = claim_free_ports(args, port_free)?;
+    let chosen = plan_free_ports(args, port_free)?;
     let (host, port, admin, grpc, grpc_explicit) = effective(args)?;
+    if let (Some(config), true) = (&args.config, chosen.iter().any(|c| c.key != "proxy.port")) {
+        // A busy default may be this config's own server, started another
+        // way (`serve`, another state directory): never start a second one.
+        let (_, _, body) = readyz(&url(host, admin)).await;
+        if started_with(&body, config) {
+            bail!(
+                "a server of {} already runs at {} (started outside this state directory); use it, or stop it before starting another",
+                config.display(),
+                url(host, admin)
+            );
+        }
+    }
+    let port = chosen_or(&chosen, "server.port", port);
+    let admin = chosen_or(&chosen, "server.admin_port", admin);
+    let grpc = chosen_or(&chosen, "server.grpc_port", grpc);
     let mut listeners = vec![
         ("data_plane", SocketAddr::new(host, port)),
         ("admin", SocketAddr::new(host, admin)),
     ];
-    if grpc_explicit {
+    if grpc_explicit || chosen.iter().any(|c| c.key == "server.grpc_port") {
         listeners.push(("grpc", SocketAddr::new(host, grpc)));
     }
-    if let Some(proxy) = proxy_listener(args)? {
+    if let Some(mut proxy) = proxy_listener(args)? {
+        proxy.set_port(chosen_or(&chosen, "proxy.port", proxy.port()));
         listeners.push(("proxy", proxy));
     }
     if let Err(mut error) = check_free(&listeners) {
         error.holder = holder(error.address).await;
         return Err(error.into());
     }
+    // Only once every port is known to be free: a failed start leaves the
+    // config as it was.
+    let ports_chosen = match &args.config {
+        Some(path) if !chosen.is_empty() => write_ports(path, &chosen)?,
+        _ => Value::Null,
+    };
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let exe = std::env::current_exe().context("locating the mockingbird binary")?;
     let mut cmd = Command::new(exe);
@@ -1231,7 +1289,8 @@ mod tests {
             ..start_args(&config)
         };
         let taken = |_: IpAddr, p: u16| !matches!(p, 9090 | 8888 | 8889);
-        let out = claim_free_ports(&args, taken).unwrap();
+        let chosen = plan_free_ports(&args, taken).unwrap();
+        let out = write_ports(&config, &chosen).unwrap();
         assert_eq!(
             out["ports"],
             json!([
@@ -1246,8 +1305,8 @@ mod tests {
         assert_eq!(cfg.server.port, 8080);
         assert_eq!(cfg.proxy.port, 8890);
         // The ports are now set: a second start keeps them.
-        let again = claim_free_ports(&args, |_, p| !matches!(p, 9091 | 8890)).unwrap();
-        assert!(again.is_null(), "{again}");
+        let again = plan_free_ports(&args, |_, p| !matches!(p, 9091 | 8890)).unwrap();
+        assert!(again.is_empty(), "{again:?}");
     }
 
     #[test]
@@ -1260,8 +1319,8 @@ mod tests {
         let original = std::fs::read_to_string(&config).unwrap();
         // Everything is taken, but every port is set (flag or config key);
         // the proxy is off.
-        let out = claim_free_ports(&args, |_, _| false).unwrap();
-        assert!(out.is_null(), "{out}");
+        let out = plan_free_ports(&args, |_, _| false).unwrap();
+        assert!(out.is_empty(), "{out:?}");
         assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
     }
 
@@ -1293,19 +1352,31 @@ mod tests {
     fn the_holder_of_a_port_is_named_from_its_readyz() {
         assert_eq!(
             describe_holder(
-                &json!({"status": "ready", "config": "/a/mockingbird.yaml", "dir": "/a"})
+                &json!({"status": "ready", "role": "all", "config": "/a/mockingbird.yaml", "dir": "/a"})
             )
             .as_deref(),
             Some("the Mockingbird server started with config /a/mockingbird.yaml (in /a)")
         );
         assert_eq!(
-            describe_holder(&json!({"status": "ready", "config": null, "dir": "/b"})).as_deref(),
+            describe_holder(
+                &json!({"status": "ready", "role": "all", "config": null, "dir": "/b"})
+            )
+            .as_deref(),
             Some("the Mockingbird server started without a config in /b")
         );
         assert_eq!(
-            describe_holder(&json!({"status": "ready"})).as_deref(),
+            describe_holder(&json!({"status": "ready", "role": "all"})).as_deref(),
             Some("another Mockingbird server (it does not say whose)")
         );
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("mockingbird.yaml");
+        std::fs::write(&config, "").unwrap();
+        let ours = json!({"status": "ready", "role": "all", "config": std::fs::canonicalize(&config).unwrap()});
+        assert!(started_with(&ours, &config));
+        assert!(!started_with(&ours, &dir.path().join("other.yaml")));
+        assert!(!started_with(&json!({"status": "ready"}), &config));
+        // Another service's health answer is not taken for Mockingbird.
+        assert_eq!(describe_holder(&json!({"status": "ok"})), None);
         assert_eq!(describe_holder(&json!({"status": 404})), None);
         assert_eq!(describe_holder(&Value::Null), None);
     }

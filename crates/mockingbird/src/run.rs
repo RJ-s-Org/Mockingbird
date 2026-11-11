@@ -165,7 +165,7 @@ async fn prepare(
     };
     if let Some(holder) = &foreign {
         eprintln!(
-            "mockingbird: {admin_url} is {holder}, not the server of {}; starting this config's own server",
+            "mockingbird: {admin_url} is {holder}, not the server of {}; it is not used",
             config.display()
         );
     }
@@ -200,8 +200,9 @@ async fn prepare(
             );
         }
         eprintln!(
-            "mockingbird: server started (log {}), proxy http://{proxy_addr}",
-            args.state_dir.join("server.log").display()
+            "mockingbird: server started (log {}), proxy {}",
+            args.state_dir.join("server.log").display(),
+            info["proxy"].as_str().unwrap_or_default()
         );
         return Ok(());
     }
@@ -279,8 +280,7 @@ async fn readyz(admin_url: &str) -> Option<serde_json::Value> {
 /// not report its origin (an older version) counts as `config`'s.
 fn foreign_server(body: &serde_json::Value, config: &std::path::Path) -> Option<String> {
     body["dir"].as_str()?;
-    let theirs = body["config"].as_str().map(std::path::Path::new);
-    if theirs.is_some_and(|c| daemon::same_file_key(c) == daemon::same_file_key(config)) {
+    if daemon::started_with(body, config) {
         return None;
     }
     daemon::describe_holder(body)

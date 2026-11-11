@@ -170,6 +170,7 @@ async fn run_refuses_another_configs_server_on_its_admin_port() {
         .respond_with(
             wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "status": "ready",
+                "role": "all",
                 "config": "/elsewhere/other/mockingbird.yaml",
                 "dir": "/elsewhere/other",
             })),

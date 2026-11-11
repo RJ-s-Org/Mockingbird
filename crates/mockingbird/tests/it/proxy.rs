@@ -385,6 +385,7 @@ fn proxy_env_prints_exports_and_json() {
         assert_cmd::Command::cargo_bin("mockingbird")
             .unwrap()
             .env("MB_CA_DIR", dir.path())
+            .current_dir(dir.path())
             .args(args)
             .assert()
             .success()
@@ -396,6 +397,15 @@ fn proxy_env_prints_exports_and_json() {
     assert!(text.contains("export NODE_USE_ENV_PROXY='1'"), "{text}");
     let json: Value = serde_json::from_slice(&cmd(&["proxy", "env", "--json"])).unwrap();
     assert_eq!(json["vars"]["HTTPS_PROXY"], "http://127.0.0.1:8888");
+    // Without -c, ./mockingbird.yaml's proxy.port (as `init` or `server
+    // start` wrote it) applies.
+    std::fs::write(
+        dir.path().join("mockingbird.yaml"),
+        "proxy:\n  port: 8899\n",
+    )
+    .unwrap();
+    let json: Value = serde_json::from_slice(&cmd(&["proxy", "env", "--json"])).unwrap();
+    assert_eq!(json["vars"]["HTTPS_PROXY"], "http://127.0.0.1:8899");
 }
 
 /// Serves an app with the `orders` mock on `host` (proxy disabled): data

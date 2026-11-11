@@ -347,6 +347,7 @@ async fn server_start_names_the_mockingbird_server_holding_its_port() {
     Mock::given(path("/readyz"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "status": "ready",
+            "role": "all",
             "config": "/elsewhere/other/mockingbird.yaml",
             "dir": "/elsewhere/other",
         })))
@@ -462,4 +463,43 @@ async fn the_stop_file_shuts_the_server_down_gracefully() {
         !stop_file.exists(),
         "serve removes the stop file it acted on"
     );
+}
+
+/// With the proxy on, a taken `proxy.port` set in the config fails the
+/// start before anything is spawned, and the config is left as it was.
+#[test]
+fn server_start_fails_on_a_busy_proxy_port_set_in_the_config() {
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy = held.local_addr().unwrap().port();
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("mockingbird.yaml");
+    let ports = Ports::new();
+    let text = format!(
+        "storage:\n  url: \"sqlite::memory:\"\nserver:\n  port: {}\n  admin_port: {}\n  grpc_port: {}\nproxy:\n  port: {proxy}\n",
+        ports.data, ports.admin, ports.grpc
+    );
+    std::fs::write(&config, &text).unwrap();
+    let state = tmp.path().join("state");
+    let out = mockingbird(
+        &[
+            "server",
+            "start",
+            "--state-dir",
+            state.to_str().unwrap(),
+            "-c",
+            config.to_str().unwrap(),
+            "--proxy",
+            "--offline",
+            "--wait",
+            "5s",
+        ],
+        &[],
+    );
+    let _server = Server(state.clone());
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let body = json_out(&out);
+    assert_eq!(body["listener"], "proxy", "{body}");
+    assert_eq!(body["address"], format!("127.0.0.1:{proxy}"), "{body}");
+    assert!(!state.join("server.pid").exists(), "no server was spawned");
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), text);
 }
