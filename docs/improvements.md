@@ -50,7 +50,7 @@ Five more open-source apps in other stacks, unmodified, under `mockingbird run` 
 
 ### From the proxy trials (2026-10-28)
 
-- Go binaries built with Go < 1.27 on macOS (keychain verifier) and macOS's system Ruby (LibreSSL) ignore `SSL_CERT_FILE`, so HTTPS to mocked hosts fails for them on a Mac; Linux, OpenSSL Rubies and Go 1.27+ (with the `GODEBUG` that `proxy env` now sets) work. A documented opt-in keychain install would close the rest.
+- Go binaries built with Go < 1.27 on macOS (keychain verifier) ignore `SSL_CERT_FILE`, so HTTPS to mocked hosts fails for them on a Mac; Linux and Go 1.27+ (with the `GODEBUG` that `proxy env` now sets) work, and the Ruby preload adds the CA to `Net::HTTP` on macOS's system Ruby. A documented opt-in keychain install would close the rest.
 
 ### From the examples catalog (2026-10-28)
 
