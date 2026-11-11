@@ -1457,6 +1457,17 @@ impl Operation {
             .or_else(|| self.default_output())
     }
 
+    /// Whether `op` declares a response for the error status `code`: by that very
+    /// code, else, for a 4xx or 5xx, by a `default` response, which covers every status
+    /// the operation does not list.
+    #[must_use]
+    pub fn declares_status(&self, code: u16) -> bool {
+        self.outputs.iter().any(|o| match o.status {
+            StatusSelector::Code(c) => c == code,
+            StatusSelector::Default => (400..600).contains(&code),
+        })
+    }
+
     /// First exact match from `preferred`, else any 4xx `Code`.
     #[must_use]
     pub fn error_output(&self, preferred: &[u16]) -> Option<&OutputVariant> {

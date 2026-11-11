@@ -1651,15 +1651,15 @@ impl Engine {
 
     /// A refusal decided from state alone, before generating (a unique value
     /// another record holds, a stale concurrency token, a record the description says
-    /// is gone): `op`'s response declared for `code` by that very status, its body
-    /// [`Engine::error_answer`]'s for `cause` (written once per operation, status and
+    /// is gone): `op`'s response declared for `code`, by that status or `default`, its
+    /// body [`Engine::error_answer`]'s for `cause` (written once per operation, status and
     /// cause by the model, else the faker's), refusing the repeated value of `facts`'
     /// members, with `facts` laid over it while it still validates: their message in
     /// its message-like member, and their members in its path-like ones (see
     /// [`error_body::with_reasons`]). Tagged `State` (`Fallback` when the faker could
     /// not make its body valid), with the usage of a body written now. `None` when `op`
-    /// declares no response for `code` itself (a `default` one is not a refusal the
-    /// contract names).
+    /// declares no response for `code`, by that status or, for a 4xx or 5xx, by a
+    /// `default` one (whose schema the body then follows).
     pub async fn refuse_held(
         &self,
         bundle: &Bundle,
