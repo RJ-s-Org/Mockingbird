@@ -108,7 +108,7 @@ Run 3: the same build of `gh`, config, schema and model, on the engine-fixes bra
 
 The question this time was whether one `gh` command sees what an earlier one did. The mock was built the way a user's coding agent would build it: `examples init github-rest --full` and `examples init github-graphql --full` merged into one config, `llm configure --provider openrouter --model deepseek/deepseek-v4.1-flash-1017` (key as `env:OPENROUTER_API_KEY`), `agent install claude-code`, `server start --proxy`, then the `mockingbird-world` loop: world files referenced from the config, checked with `world show` and with self-test calls to the data plane. `gh` (same `f7a06a1` build) went through the proxy with `GH_HOST=github.com` and a dummy `GH_TOKEN`. The binary was lane-2 `mockingbird 0.1.0` from today's `main`. Files are in `mockingbird-trials/gh-cli/mockingbird/trial4/` (`flows.sh`, `world-*.yaml`, `run1.txt`, `run2.txt`, `req-*.json`).
 
-The flow is 21 commands. It covers `api user`, `repo view` and `repo list`. It creates an issue, then lists and views it, comments on it, views it with `--comments`, closes it, views it again, and lists closed and open issues. It reads the issue through REST `gh api`. It runs `pr list`, then `pr create`, `pr list` and `pr view` (twice). Last come a `gh api graphql` read of the issue and a REST `gh api` read of the PR.
+The flow is 20 commands. It covers `api user`, `repo view` and `repo list`. It creates an issue, then lists and views it, comments on it, views it with `--comments`, closes it, views it again, and lists closed and open issues. It reads the issue through REST `gh api`. It runs `pr list`, then `pr create`, `pr list` and `pr view` (twice). Last come a `gh api graphql` read of the issue and a REST `gh api` read of the PR.
 
 Run 1 used only the heuristic world description. Run 2 added the agent's world entries:
 - GraphQL: `issue` and `pullrequest` lifecycles; `createIssue`, `addComment` and `createPullRequest` as creates reading `/input`; `closeIssue` and `reopenIssue` as actions on target `input.issueId`; `Query.node` as a read of `issue`.
@@ -143,9 +143,28 @@ What `gh` asks through nested fields never sees state. So the stateful checks fa
 
 | | Run 1 (heuristic world) | Run 2 (agent world) |
 | --- | --- | --- |
-| Commands exiting 0 | 18 of 21 (`repo view` base64, `pr create` "already exists", `issue view --json` not found) | 21 of 21 |
+| Commands exiting 0 | 17 of 20 (`repo view` base64, `pr create` "already exists", `issue view --json` not found) | 20 of 20 |
 | Stateful checks passing (listed after create, view matches, comment shown, closed shows closed, REST sees it) | 0 of 5 | 0 of 5 |
 | Mock calls | 24 GraphQL, 4 REST | 25 GraphQL, 4 REST (plus 10 self-test calls) |
 
 - **Model-served latency**, 59 calls answered `llm` across both runs and self-tests: **p50 2.3 s, p95 9.7 s**. The worst were `createIssue` at 144 s (failure 4) and `pulls/get` at 28 s (a faker fallback, not counted above). State-served calls took 1–20 ms.
 - **OpenRouter spend**: about **$0.03**. The request log records 204k prompt and 27k completion tokens, plus about 16k truncated fill tokens it does not record (failure 5). At $0.006/M prompt and $0.50/M completion that is about $0.03. The key's daily counter showed $0.21, but other trials share the key.
+
+### Run 5: after nested fields from state (#406 and its follow-up)
+
+Run 5 used the same config, world (minus the `request.record: /input` entries) and `gh` build, on a binary built from `claude/gql-nested-2`. Fields below a query's top-level field now read stored records: an object read by arguments, and a list or connection under a stored parent, filtered by its arguments. Records that `gh` reads or writes without selecting their `id` are named by a lookup key (`Issue.number`, `PullRequest.number`), or get an id of their own.
+
+| Stateful check | Run 2 | Run 5 |
+| --- | --- | --- |
+| Created issue is listed | no | yes: `issue list` shows only #418, `Router panics on empty path` |
+| `issue view` matches it | no | yes: title, body and state |
+| The comment shows | no | yes in `issue view --json comments` (`Reproduced on main; fix incoming.`). `issue view --comments` exits 1 (below) |
+| Closed shows closed | no | yes: `--state closed` lists #418 `CLOSED`, `--state open` is empty, and `gh api graphql … issue(number: 418)` gives `CLOSED` |
+| REST sees it | no | no (two mocks, failure 8) |
+
+That is **4 of 5**. `pr create` now succeeds and `pr list`, `pr view` and `pr view --json` show the new PR (#421, `fix-empty-path`). 19 of 20 commands exit 0.
+
+New in run 5:
+- **Engine bug:** `issue view --comments` fails with `parsing time "garnet"`. The comment is served from state, and a field no record holds (the comment's `createdAt`) is filled by the faker. GitHub's custom `DateTime` scalar is compiled as an unconstrained value (`{"description": "GraphQL scalar DateTime"}`), so the faker writes a word. Fix in the importer: map date and time scalars to `format: date-time`.
+- `createIssue` (145 s) and `closeIssue` (33 s) still take the fill path (failure 4). Model-served latency over 23 calls: p50 2.0 s, p95 31.6 s.
+- OpenRouter: the key's daily counter is $1.23 across every trial sharing it. This session's calls stay well under $1.
