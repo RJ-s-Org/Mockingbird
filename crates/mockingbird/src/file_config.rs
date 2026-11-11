@@ -295,6 +295,11 @@ pub struct LimitsConfig {
     /// How long, in bytes, a reply must have been of low variety before the
     /// guard stops it.
     pub repetition_guard_span: usize,
+    /// Longest an answer the mock serves waits on the LLM (its repairs
+    /// included) before the faker answers: the profile's `timeout` when that is
+    /// shorter. Contract imports keep the profile's `timeout`.
+    #[serde(with = "humantime_serde")]
+    pub generation_timeout: Duration,
 }
 
 impl Default for LimitsConfig {
@@ -306,9 +311,17 @@ impl Default for LimitsConfig {
             output_budget_tokens: mb_engine::budget::DEFAULT_OUTPUT_BUDGET,
             repetition_guard: true,
             repetition_guard_span: mb_llm::repetition::DEFAULT_SPAN,
+            generation_timeout: DEFAULT_GENERATION_TIMEOUT,
         }
     }
 }
+
+/// `limits.generation_timeout`'s default.
+pub const DEFAULT_GENERATION_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Accepted `limits.generation_timeout` values.
+const GENERATION_TIMEOUT_RANGE: std::ops::RangeInclusive<Duration> =
+    Duration::from_secs(1)..=Duration::from_secs(600);
 
 /// The `import:` section.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -1693,6 +1706,12 @@ impl FileConfig {
                 l.output_budget_tokens,
                 MIN_OUTPUT_BUDGET..=MAX_OUTPUT_BUDGET,
             )?;
+        }
+        if !GENERATION_TIMEOUT_RANGE.contains(&l.generation_timeout) {
+            return Err(format!(
+                "limits.generation_timeout must be between 1s and 600s, got {}",
+                humantime::format_duration(l.generation_timeout)
+            ));
         }
         in_range(
             "limits.repetition_guard_span",

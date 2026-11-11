@@ -49,6 +49,7 @@ limits:
   output_budget_tokens: 1500
   repetition_guard: true
   repetition_guard_span: 32768
+  generation_timeout: 20s
 
 pii:
   enabled: true

@@ -299,7 +299,7 @@ async fn bare_engine(
                 .first()
                 .map(hop_settings)
                 .ok_or_else(|| anyhow!("empty LLM profile chain"))?;
-            config.timeout = head.timeout;
+            config.timeout = served_timeout(head.timeout, &deps.limits);
             config.temperature = head.temperature;
             config.max_tokens = head.max_tokens;
             Some(chain_provider(deps, &chain, hop_settings).await?)
@@ -312,6 +312,12 @@ async fn bare_engine(
         Some(seed) => engine.with_faker_seed(seed),
         None => engine,
     })
+}
+
+/// How long a served answer waits on the LLM: the profile's `timeout`, at most
+/// `limits.generation_timeout`.
+fn served_timeout(profile: Duration, limits: &LimitsConfig) -> Duration {
+    profile.min(limits.generation_timeout)
 }
 
 /// The provider an import of `mock` extracts with, or `None` when the
@@ -1002,6 +1008,21 @@ mod tests {
             repetition_guard,
             source: mb_store::ResourceSource::Api,
         }
+    }
+
+    /// A served answer waits at most `limits.generation_timeout`, and a shorter
+    /// profile timeout stays.
+    #[test]
+    fn a_served_answer_waits_at_most_the_generation_timeout() {
+        let limits = LimitsConfig::default();
+        assert_eq!(
+            served_timeout(Duration::from_secs(60), &limits),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            served_timeout(Duration::from_secs(5), &limits),
+            Duration::from_secs(5)
+        );
     }
 
     /// The guard is on only when both the server and the profile want it.
