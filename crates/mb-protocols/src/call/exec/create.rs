@@ -728,18 +728,47 @@ pub(in crate::call) fn initial_token(
     }
 }
 
-/// The described alternates of type `t` that no read of it declares: values the server
-/// issues for a record beside it (Plaid's `access_token` for an Item), kept with the
+/// The described alternates of type `t` that a create of it answers and no read of it
+/// declares: values the server issues for a record beside it (Plaid's `access_token` for an Item), kept with the
 /// record so a later request names it by them, and never shown by a read.
 pub(in crate::call) fn issued_aliases(rt: &crate::MockRuntime, t: &str) -> Vec<String> {
+    let alternates = crate::call::records::alternates(rt, t);
+    if alternates.is_empty() {
+        return alternates;
+    }
     let bundle = rt.bundle();
     let reads = read_schemas(rt, t);
-    crate::call::records::alternates(rt, t)
+    // What the type's creates answer their record in, where it is held.
+    let answers: Vec<Value> = bundle
+        .operations
+        .iter()
+        .filter(|op| {
+            let desc = rt.described().op(&op.id);
+            desc.and_then(|d| d.kind).or_else(|| OpKind::of(op)) == Some(OpKind::Create)
+                && desc
+                    .and_then(|d| d.r#type.as_deref())
+                    .or(op.resource_type.as_deref())
+                    == Some(t)
+        })
+        .filter_map(|op| {
+            let answer = op.success_output()?.schema.as_ref()?;
+            Some(
+                op.identity
+                    .as_ref()
+                    .and_then(|i| record_schema_of(bundle, i, answer))
+                    .unwrap_or_else(|| answer.clone()),
+            )
+        })
+        .collect();
+    alternates
         .into_iter()
         .filter(|m| {
             !reads
                 .iter()
                 .any(|s| property_schema(bundle, s, m).is_some())
+                && answers
+                    .iter()
+                    .any(|s| property_schema(bundle, s, m).is_some())
         })
         .collect()
 }

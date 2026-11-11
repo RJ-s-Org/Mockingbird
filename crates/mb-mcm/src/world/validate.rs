@@ -4488,6 +4488,89 @@ mod tests {
         b
     }
 
+    /// `POST /exchange` answers `{token, id}` and creates a `thing`, which
+    /// `GET /things/{id}` reads as `{id, name}`; `GET /parts?token=` lists parts.
+    fn issued() -> Bundle {
+        let mut b = bundle(&[
+            (
+                "exchange",
+                "POST",
+                "/exchange",
+                json!({"type": "object", "properties": {"token": {"type": "string"}, "id": {"type": "string"}}}),
+            ),
+            (
+                "getThing",
+                "GET",
+                "/things/{id}",
+                json!({"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}}}),
+            ),
+            (
+                "listParts",
+                "GET",
+                "/parts",
+                json!({"type": "array", "items": {"type": "object", "properties": {"part_id": {"type": "string"}}}}),
+            ),
+        ]);
+        typed(&mut b, "exchange", "thing", None, "id");
+        typed(&mut b, "getThing", "thing", Some("id"), "id");
+        typed(&mut b, "listParts", "part", None, "part_id");
+        op(&mut b, "listParts").input.query = Some(
+            json!({"type": "object", "properties": {"token": {"type": "string"}, "q": {"type": "string"}}}),
+        );
+        b
+    }
+
+    #[test]
+    fn an_alternate_a_create_issues_beside_the_record_is_kept() {
+        let b = issued();
+        let w = world(
+            json!({"types": {"thing": {"identity": {"member": "id", "alternates": ["token"]}}}}),
+        );
+        let v = validate(&w, &b);
+        assert_eq!(v.refused, vec![]);
+        assert_eq!(v.applied, w);
+    }
+
+    #[test]
+    fn a_scope_without_member_takes_only_a_token_issued_to_the_parent() {
+        let b = issued();
+        let scoped = |types: Value, param: &str| {
+            let mut doc =
+                json!({"types": types, "operations": {"listParts": {"scope": {"param": param}}}});
+            doc["types"]["part"]["identity"] = json!({"member": "part_id"});
+            world(doc)
+        };
+        let thing = json!({"identity": {"member": "id", "alternates": ["token"]}});
+        let w = scoped(
+            json!({"thing": thing, "part": {"parent": {"type": "thing"}}}),
+            "token",
+        );
+        let v = validate(&w, &b);
+        assert_eq!(v.refused, vec![]);
+        assert!(
+            v.applied.operations["listParts"]
+                .scope
+                .as_ref()
+                .is_some_and(|s| s.member.is_none())
+        );
+
+        // No parent, a parameter the parent's alternates do not name, or one no create
+        // issues: refused.
+        let at = "/operations/listParts/scope/param";
+        let w = scoped(json!({"thing": thing, "part": {}}), "token");
+        refused_with(&validate(&w, &b), at, "`token` is not one");
+        let w = scoped(
+            json!({"thing": {"identity": {"member": "id"}}, "part": {"parent": {"type": "thing"}}}),
+            "token",
+        );
+        refused_with(&validate(&w, &b), at, "`token` is not one");
+        let w = scoped(
+            json!({"thing": thing, "part": {"parent": {"type": "thing"}}}),
+            "q",
+        );
+        refused_with(&validate(&w, &b), at, "`q` is not one");
+    }
+
     #[test]
     fn alternates_must_be_members_of_the_record() {
         let v = validate(
