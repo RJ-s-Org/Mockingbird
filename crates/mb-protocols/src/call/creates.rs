@@ -170,8 +170,8 @@ pub(super) fn path_set(
     }
     let scopes = list_scopes(rt, t);
     for scope in &scopes {
-        if let Some(value) = call.path_params.get(&scope.param) {
-            add(&scope.member, value.clone(), &mut out);
+        if let (Some(member), Some(value)) = (&scope.member, call.path_params.get(&scope.param)) {
+            add(member, value.clone(), &mut out);
         }
     }
     if parent.is_none() {
@@ -185,7 +185,7 @@ pub(super) fn path_set(
         .and_then(|p| p.member.as_deref())
         .into_iter()
         .collect();
-    named.extend(scopes.iter().map(|s| s.member.as_str()));
+    named.extend(scopes.iter().filter_map(|s| s.member.as_deref()));
     for set in desc.map(|d| d.unique.as_slice()).unwrap_or_default() {
         named.extend(set.members.iter().map(String::as_str));
         named.extend(set.scope.as_deref());

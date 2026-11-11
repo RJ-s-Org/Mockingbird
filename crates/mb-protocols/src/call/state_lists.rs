@@ -119,6 +119,34 @@ fn collection_key(op: &Operation, collection: Option<&Collection>) -> Option<Str
     }
 }
 
+/// A list's described scope with no member ([`mb_mcm::world::ScopeDesc::member`]):
+/// `(parent type, parameter, value)`, the parameter naming a value a create of the
+/// items' parent type issues (Plaid's `access_token`), when the request gives it. All
+/// lists of the type with that scope share one collection: the parent's records.
+pub(super) fn issued_scope(
+    rt: &MockRuntime,
+    op: &Operation,
+    call: &OperationCall,
+) -> Option<(String, String, String)> {
+    let desc = rt.described().op(&op.id)?;
+    let scope = desc.scope.as_ref().filter(|s| s.member.is_none())?;
+    let t = desc.r#type.as_deref().or(op.resource_type.as_deref())?;
+    let parent = rt.described().type_desc(t)?.parent.as_ref()?.r#type.clone();
+    let name = scope.param.strip_prefix('/').unwrap_or(&scope.param);
+    let value = call
+        .body
+        .as_ref()
+        .and_then(|b| b.get(name))
+        .or_else(|| call.query.get(name))
+        .and_then(id_string)?;
+    Some((parent, name.to_owned(), value))
+}
+
+/// The collection key of an [`issued_scope`] list.
+fn issued_key(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Option<String> {
+    issued_scope(rt, op, call).map(|(parent, param, value)| format!("{parent}?{param}={value}"))
+}
+
 /// The id of the mark of type `t`'s collection `key`.
 fn mark_id(t: &str, key: &str) -> String {
     format!("{PREFIX}{t}/{key}")
@@ -159,6 +187,8 @@ fn described_list_of(rt: &MockRuntime, t: &str) -> bool {
 /// nothing but the described paging's members.
 fn asks_only_a_page(rt: &MockRuntime, op: &Operation, call: &OperationCall, q: &ListQuery) -> bool {
     let bundle = rt.bundle();
+    // An issued scope names the collection, not a part of it.
+    let issued = issued_scope(rt, op, call).map(|(_, param, _)| param);
     let paged = |name: &str| {
         q.pages_with(name)
             || q.page.as_ref().is_some_and(|p| {
@@ -183,7 +213,9 @@ fn asks_only_a_page(rt: &MockRuntime, op: &Operation, call: &OperationCall, q: &
                     Value::Object(inner) => inner.is_empty(),
                     _ => false,
                 };
-                asks_nothing || paged(&format!("/{}", name.replace('~', "~0").replace('/', "~1")))
+                asks_nothing
+                    || issued.as_deref() == Some(name.as_str())
+                    || paged(&format!("/{}", name.replace('~', "~0").replace('/', "~1")))
             })
         });
     if !body_pages_only {
@@ -220,7 +252,9 @@ pub(super) async fn mark_listed(
     if !asks_only_a_page(rt, op, call, &q) {
         return;
     }
-    let Some(key) = collection_key(op, collection_of(op, call).as_ref()) else {
+    let Some(key) =
+        issued_key(rt, op, call).or_else(|| collection_key(op, collection_of(op, call).as_ref()))
+    else {
         return;
     };
     let body = generated.body.as_ref().unwrap_or(&Value::Null);
@@ -244,7 +278,9 @@ pub(super) async fn marked(
     (plan, call): (&CallPlan<'_>, &OperationCall),
     t: &str,
 ) -> Vec<String> {
-    let Some(key) = collection_key(plan.op, collection_of(plan.op, call).as_ref()) else {
+    let Some(key) = issued_key(state.rt, plan.op, call)
+        .or_else(|| collection_key(plan.op, collection_of(plan.op, call).as_ref()))
+    else {
         return Vec::new();
     };
     match read_mark(state, &plan.session, &mark_id(t, &key)).await {
@@ -260,7 +296,9 @@ pub(super) async fn listed(
     (plan, call): (&CallPlan<'_>, &OperationCall),
     t: &str,
 ) -> bool {
-    let Some(key) = collection_key(plan.op, collection_of(plan.op, call).as_ref()) else {
+    let Some(key) = issued_key(state.rt, plan.op, call)
+        .or_else(|| collection_key(plan.op, collection_of(plan.op, call).as_ref()))
+    else {
         return false;
     };
     read_mark(state, &plan.session, &mark_id(t, &key))

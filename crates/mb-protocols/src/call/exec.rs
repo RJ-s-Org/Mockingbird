@@ -78,6 +78,7 @@ impl Fallback {
 
 mod action;
 mod create;
+pub(super) use create::issued_aliases;
 mod embedded;
 mod fields;
 mod list;

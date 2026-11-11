@@ -62,6 +62,9 @@
 //! - `never_written`, `scope_unresolved`: see above;
 //! - `unknown_token`: a described cursor no kept cut of this session minted;
 //! - `unscoped_list`: see above;
+//! - `never_listed`: a scope with no member, by a value the items' parent was issued
+//!   ([`state_lists::issued_scope`]), whose collection no list marked yet: the first
+//!   list of it generates, and marks it;
 //! - `over_cap`: more than [`MAX_SCAN`] records of the type;
 //! - `not_http`: a GraphQL field (whose selection narrows its answer) or a stream, or a
 //!   list that is no read. A SOAP or gRPC list reads its request body as a `POST` list
@@ -225,7 +228,14 @@ async fn answer(
     if let Some(on) = q.as_ref().and_then(|q| q.unparsed.as_deref()) {
         return Err(Stop::on("unparsed_filter", on));
     }
+    // A scope by a value the items' parent was issued: the parent's collection, which
+    // a first list of it (generated) marks; until then the store cannot tell it.
+    let issued = state_lists::issued_scope(rt, op, call).is_some();
+    if issued && !state_lists::listed(state, (plan, call), t).await {
+        return Err("never_listed".into());
+    }
     let unscoped = call.path_params.is_empty()
+        && !issued
         && !only_unscoped(rt, op, path, t)
         && q.as_ref().is_none_or(|q| q.scope.is_none());
     if unscoped {
@@ -271,9 +281,12 @@ async fn answer(
     let mut listed_where = list_exprs::Where::of(state, rt, (plan, call)).await;
     let mut in_scope = false;
     for r in &records {
-        if !(placed.contains_key(r.id.as_str())
-            || lists::in_collection(rt, (plan, call), t, &field, r)
-            || under_parent(rt, call, t, r))
+        let placed_here = placed.contains_key(r.id.as_str());
+        // Another parent's records are in no collection of this one.
+        if !(placed_here
+            || !issued
+                && (lists::in_collection(rt, (plan, call), t, &field, r)
+                    || under_parent(rt, call, t, r)))
         {
             continue;
         }

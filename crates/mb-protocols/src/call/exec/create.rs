@@ -231,6 +231,7 @@ pub(super) async fn run(
     // Its tokens' first values; a token none can be minted for is filled as any member.
     let seed = crate::call::header_ids::MintSeed::new(rt, &plan.session, call);
     initial_token(rt, (seed, t), &mut data);
+    issue_aliases(rt, (seed, t, op), response_schema, &mut data);
     let tokens = token_members(rt, t);
     owned.retain(|m| !tokens.contains(m) || mb_mcm::member_at(&data, m).is_some());
     // A request member that does not fit the record's is never stored as sent: the
@@ -722,6 +723,83 @@ pub(in crate::call) fn initial_token(
             false => crate::call::header_ids::draw_id_as(rt, (seed, t, &member), &schema),
         };
         if let Some(value) = value.filter(|v| fits(rt, &schema, v)) {
+            mb_mcm::set_member_at(record, &member, value);
+        }
+    }
+}
+
+/// The described alternates of type `t` that a create of it answers and no read of it
+/// declares: values the server issues for a record beside it (Plaid's `access_token` for an Item), kept with the
+/// record so a later request names it by them, and never shown by a read.
+pub(in crate::call) fn issued_aliases(rt: &crate::MockRuntime, t: &str) -> Vec<String> {
+    let alternates = crate::call::records::alternates(rt, t);
+    if alternates.is_empty() {
+        return alternates;
+    }
+    let bundle = rt.bundle();
+    let reads = read_schemas(rt, t);
+    // What the type's creates answer their record in, where it is held.
+    let answers: Vec<Value> = bundle
+        .operations
+        .iter()
+        .filter(|op| {
+            let desc = rt.described().op(&op.id);
+            desc.and_then(|d| d.kind).or_else(|| OpKind::of(op)) == Some(OpKind::Create)
+                && desc
+                    .and_then(|d| d.r#type.as_deref())
+                    .or(op.resource_type.as_deref())
+                    == Some(t)
+        })
+        .filter_map(|op| {
+            let answer = op.success_output()?.schema.as_ref()?;
+            Some(
+                op.identity
+                    .as_ref()
+                    .and_then(|i| record_schema_of(bundle, i, answer))
+                    .unwrap_or_else(|| answer.clone()),
+            )
+        })
+        .collect();
+    alternates
+        .into_iter()
+        .filter(|m| {
+            !reads
+                .iter()
+                .any(|s| property_schema(bundle, s, m).is_some())
+                && answers
+                    .iter()
+                    .any(|s| property_schema(bundle, s, m).is_some())
+        })
+        .collect()
+}
+
+/// Mints on `record` each of [`issued_aliases`] the create `op` answers beside the
+/// record and the request did not send, drawn as its answer declares it.
+fn issue_aliases(
+    rt: &crate::MockRuntime,
+    (seed, t, op): (crate::call::header_ids::MintSeed<'_>, &str, &Operation),
+    response_schema: Option<&Value>,
+    record: &mut Value,
+) {
+    let bundle = rt.bundle();
+    let Some(answer) = response_schema.or_else(|| op.success_output()?.schema.as_ref()) else {
+        return;
+    };
+    let held = op
+        .identity
+        .as_ref()
+        .and_then(|i| record_schema_of(bundle, i, answer))
+        .unwrap_or_else(|| answer.clone());
+    for member in issued_aliases(rt, t) {
+        if mb_mcm::member_at(record, &member).is_some() {
+            continue;
+        }
+        let Some(declared) = property_schema(bundle, &held, &member) else {
+            continue;
+        };
+        if let Some(value) = crate::call::header_ids::draw_id_as(rt, (seed, t, &member), &declared)
+            .filter(|v| fits(rt, &declared, v))
+        {
             mb_mcm::set_member_at(record, &member, value);
         }
     }
