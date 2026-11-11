@@ -539,6 +539,9 @@ def write_config(directory, model, base_url, ports, mocks, suite, tag_journeys=F
             lines.append(f"    route_prefix: {prefix}\n")
             if persona:
                 lines.append(f"    persona: {json.dumps(persona)}\n")
+            # No record pool: its background calls at start would race the suite's own
+            # (a recording could not match them), and a suite measures each call.
+            lines.append("    limits: {record_pool_tokens: 0}\n")
             if tag_journeys:
                 lines.append(f"    llm_profile: bench_{name}\n    faker_seed: 1\n")
     path = os.path.join(directory, "mockingbird.yaml")
