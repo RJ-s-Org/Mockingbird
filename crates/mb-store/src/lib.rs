@@ -856,6 +856,18 @@ pub(crate) fn missing_workspace(name: &str) -> StoreError {
     StoreError::NotFound(format!("workspace {name:?}"))
 }
 
+/// The route prefix of a mock created without one: `/` when it is bound to `hosts`
+/// (the host tells it apart from other mocks, and the proxy forwards the app's own
+/// paths), else `/<name>`.
+#[must_use]
+pub fn default_route_prefix(name: &str, hosts: &[String]) -> String {
+    if hosts.is_empty() {
+        format!("/{name}")
+    } else {
+        "/".to_owned()
+    }
+}
+
 /// `"/"` or `"/seg(/seg)*"` where each segment is `[A-Za-z0-9._-]+`.
 ///
 /// # Errors

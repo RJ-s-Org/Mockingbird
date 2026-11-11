@@ -1464,7 +1464,7 @@ export interface components {
             name: string;
             path_rewrite?: components["schemas"]["PathRewrite"] | null;
             persona?: string | null;
-            /** @description Defaults to `/<name>`. */
+            /** @description Defaults to `/<name>`, or `/` when `hosts` is given. */
             route_prefix?: string | null;
             /** @description `generate` (default) or `404`. */
             unknown_ids?: string | null;

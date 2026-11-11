@@ -791,7 +791,9 @@ impl ControlStore for SqliteControlStore {
 
     async fn create_mock(&self, ws: &str, m: NewMock) -> Result<Mock, StoreError> {
         validate_mock_name(&m.name)?;
-        let route_prefix = m.route_prefix.unwrap_or_else(|| format!("/{}", m.name));
+        let route_prefix = m
+            .route_prefix
+            .unwrap_or_else(|| crate::default_route_prefix(&m.name, &m.hosts));
         validate_route_prefix(&route_prefix)?;
         validate_hosts(&m.hosts)?;
         validate_header_name(&m.data_plane_auth.header)?;
