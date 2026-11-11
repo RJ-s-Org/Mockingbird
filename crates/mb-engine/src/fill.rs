@@ -55,7 +55,9 @@ impl Engine {
     /// record holding `known` already. A member that may be null and holds a reference
     /// to another record (an id-or-object member) is null, and so is an optional one
     /// (not in `schema`'s `required`) that holds any other object or list; an optional
-    /// object or list of objects that may not be null gets no value. The rest come from one
+    /// object or list of objects that may not be null gets no value unless the request
+    /// body sent a member of its name (absent too when the model writes it no valid
+    /// value). The rest come from one
     /// structured-output LLM call whose schema is `schema` restricted to them, with
     /// `known` in the prompt so that the values agree with it; none is made when none
     /// is left. A member the answer leaves invalid is the faker's (the answer's local
@@ -88,11 +90,15 @@ impl Engine {
         // them out was most of the model's output. A required one (an issue's `user`)
         // stays the model's, as does every scalar; a faker object would tell a client
         // to act on it.
-        // An optional object, or list of objects, that may not be null is left out:
-        // absent is what the contract allows for it, and its schema was most of the
-        // prompt (a checkout session's branding, its line items). A list of scalars
-        // (a payment's method types) costs little and clients read it; it stays
-        // asked. A world `set` gives a left-out member a client reads.
+        // An optional object, or list of objects, that may not be null is left out
+        // when the request did not send a member of that name: absent is what the
+        // contract allows for it, and its schema was most of the prompt (a checkout
+        // session's branding). One the request sent stays asked (a checkout session's
+        // line items, sent as a plain array while the record holds a list object the
+        // executor leaves to fill): the model sees the request and carries the sent
+        // items over, and leaving it out would drop what the client sent. A list of
+        // scalars (a payment's method types) costs little and clients read it; it
+        // stays asked. A world `set` gives a left-out member a client reads.
         let required = consistency::required_members(bundle, schema);
         let mut asked = Vec::new();
         let mut left_out = Vec::new();
@@ -103,7 +109,11 @@ impl Engine {
                 continue;
             }
             let optional = !required.iter().any(|r| r == name);
-            if optional && structured(bundle, schema) && holds_objects(bundle, schema) {
+            if optional
+                && !sent(call, name)
+                && structured(bundle, schema)
+                && holds_objects(bundle, schema)
+            {
                 left_out.push(*name);
                 continue;
             }
@@ -127,6 +137,15 @@ impl Engine {
             // null, not a faker object a client would act on (a payment's next step).
             if admits_null(bundle, member) && structured(bundle, member) {
                 filled.members.insert((*name).to_string(), Value::Null);
+                continue;
+            }
+            // An optional object or list of objects the request sent and the model did
+            // not carry over is absent, like one left out: faker items would stand for
+            // what the client sent.
+            if !required.iter().any(|r| r == name)
+                && structured(bundle, member)
+                && holds_objects(bundle, member)
+            {
                 continue;
             }
             let value = self.fake_field(bundle, name, member, &mut draws);
@@ -254,6 +273,14 @@ fn structured(bundle: &Bundle, schema: &Value) -> bool {
             })
     }
     walk(bundle, schema, 0)
+}
+
+/// Whether `call`'s request body sends a top-level member `name`.
+fn sent(call: &OperationCall, name: &str) -> bool {
+    call.body
+        .as_ref()
+        .and_then(Value::as_object)
+        .is_some_and(|body| body.contains_key(name))
 }
 
 /// Whether `schema` (a member's) holds an object or a list of objects (through
