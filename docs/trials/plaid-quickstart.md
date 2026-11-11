@@ -224,3 +224,41 @@ All of it applies in one `patch_world` (no refusals; #397). `call_mock {mock: "p
 | 1 | The agent wrote its mock from the vendor's full spec instead of the catalog example, so only `institutions/get_by_id` was answered from state and the model's prompts ran to 11–19k tokens. | skills gap | fixed by #481 (the skills check the catalog first) |
 | 2 | `update_mock {route_prefix: "/"}` on a running server succeeded, and the mock's view showed `/`, but the agent saw the mock answer only under `/plaid` until it restarted the server. | engine (suspected) | not reproduced on `main`: a PATCH of `route_prefix` and `hosts` remounts the mock live on the data plane and the proxy's host list (`proxy::patching_prefix_and_hosts_remounts_the_mock_live`). One possible cause: the agent had started the server twice, and the second start hit "address in use" with the first still running. A PATCH answered by one process does not reach another's data plane. #474 (a host-bound mock defaults to `/`) removes the need for the edit |
 | 3 | `/transactions/sync` returns 1 transaction; the persona and a default scenario asking for more were ignored. | model answer | out of scope (the bar is testability) |
+
+## Rerun 2 (2026-11-11): the catalog first
+
+`main` at `0d68585b`, which includes #474 and #481. Same harness as the rerun above: a fresh headless Claude Code, the plugin installed the README way, `main`'s binary on `PATH`, the same one prompt.
+
+**How the agent built it:**
+- It started from `list_examples` and `init_example plaid`, the catalog's contract and config, as the skills now say.
+- Another project's server held the default ports, so it moved to 8180, admin 9190 and proxy 8988.
+- It wrote a small world: link token, public token, and the Item with `access_token` as an issued alternate.
+- It added `minItems: 6` to `/transactions/sync`'s `added`, after the model returned one or two transactions.
+- `verify --no-unmapped --no-unmatched --no-fallbacks` passed on 62 requests.
+- **Tools:** 60 turns. 33 `Bash` calls, and MCP `call_mock` ×5, `get_world` ×4, `list_requests` ×3, `list_examples` ×2, `init_example`, `configure_llm`, `start_server`, `test_llm` and `get_request`.
+- **Time:** **7.7 min** from the prompt to all ten flows passing. Agent cost $2.47 at API prices (on the subscription here).
+
+### Scorecard (measured run)
+
+| # | Measure | Result |
+| --- | --- | --- |
+| 1 | Flows pass | 10 of 10 routes answer 200 |
+| 2 | Consistency the flows check | `/item/get` returns the exchanged Item, from state. Account ids agree across the five account calls, but only because the model was given the same context: those calls are generated |
+| 3 | Agent build | **7.7 min** (target ≤ 15) |
+| 4 | State-served latency | p50 26 ms, p95 590 ms (4 calls: link token, exchange, item, institution). The repeated `accounts/get` came from `cache` in 25 ms |
+| 5 | Model-served latency | **p50 4.6 s, p95 5.4 s** (5 calls: accounts, auth, identity, transactions, balance; fails < 2 s) |
+| 6 | Spend per session | $0.0022 (27.6k prompt / 4.1k completion tokens) |
+| 7 | Errors | not exercised by the flows |
+
+**Sources:** 10 calls: 4 `state`, 1 `cache`, 5 `llm`.
+
+### Failures
+
+| # | Repro | Class | Status |
+| --- | --- | --- | --- |
+| 1 | `world show plaid` reported **0 gaps**, while every account call carried `request.world_gap: ["no_identity"]` and was generated. The agent trusted the gap list and stopped. | engine (reporting) | fix in progress (separate PR) |
+| 2 | The catalog's Plaid example shipped no world description, so the account calls had nothing to answer from. | catalog | fixed in this PR: `plaid.world.yaml` describes accounts as children of the Item, scoped by the issued token. Later account lists come from state |
+| 3 | Lists with `client_id`/`secret` in the request body stay `never_listed` despite `ignores: [client_id, secret]` (`asks_only_a_page` does not consult `ignores`). The Python SDK sends credentials as headers, so the quickstart is unaffected. | engine | open (follow-up PR) |
+| 4 | A list's envelope `item.item_id` is generated on every call and doesn't match the exchanged Item. `/auth/get`'s `numbers.ach[].account_id` can name an unlisted account. | engine | open (follow-up PR) |
+| 5 | `set` on the link-token create was ignored with no `expr_failed`. The `token` type has no read operation, so it has no record schema (the open follow-up from #494). | engine | open |
+| 6 | Identical requests are answered from the response cache, so two identical `link/token/create` calls give the same token. | engine default | noted; not blocking the flows |
