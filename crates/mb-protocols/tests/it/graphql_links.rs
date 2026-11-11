@@ -14,12 +14,19 @@ use serde_json::{Value, json};
 
 const SDL: &str = r#"
 type Repository { id: ID! name: String! issues(first: Int): IssueConnection! }
-type Issue { id: ID! number: Int! title: String! repository: Repository! }
+type Milestone { id: ID! title: String! }
+enum IssueState { OPEN CLOSED }
+type Issue { id: ID! number: Int! title: String! state: IssueState repository: Repository! milestone: Milestone }
 type IssueConnection { nodes: [Issue] totalCount: Int! }
-input CreateIssueInput { repositoryId: ID! title: String! }
+input CreateIssueInput { repositoryId: ID! title: String! milestoneId: ID }
+input CloseIssueInput { issueId: ID! milestoneId: ID }
 type CreateIssuePayload { issue: Issue }
-type Query { repository(owner: String!, name: String!): Repository }
-type Mutation { createIssue(input: CreateIssueInput!): CreateIssuePayload }
+type CloseIssuePayload { issue: Issue }
+type Query { repository(owner: String!, name: String!): Repository issue(id: ID!): Issue }
+type Mutation {
+  createIssue(input: CreateIssueInput!): CreateIssuePayload
+  closeIssue(input: CloseIssueInput!): CloseIssuePayload
+}
 "#;
 
 async fn gql(base: &str, query: &str) -> Value {
@@ -42,8 +49,13 @@ async fn gql(base: &str, query: &str) -> Value {
 async fn an_executor_create_is_linked_to_the_record_its_id_argument_names() {
     let world: mb_mcm::world::World = serde_json::from_value(json!({
         "version": 1,
+        "types": {"issue": {"identity": {"member": "id"}, "lifecycle": {"member": "state", "states": ["OPEN", "CLOSED"], "initial": "OPEN"}}},
         "operations": {
-            "Mutation.createIssue": {"kind": "create", "type": "issue", "answer": {"record": "/issue"}}
+            "Query.issue": {"kind": "read", "type": "issue", "target": {"member": "id"}},
+            "Mutation.createIssue": {"kind": "create", "type": "issue", "answer": {"record": "/issue"}},
+            "Mutation.closeIssue": {"kind": "action", "type": "issue",
+                "target": {"member": "input.issueId"}, "transition": {"state": "CLOSED"},
+                "answer": {"record": "/issue"}}
         }
     }))
     .unwrap();
@@ -60,6 +72,17 @@ async fn an_executor_create_is_linked_to_the_record_its_id_argument_names() {
                 resource_type: "repository".into(),
                 id: "R_1".into(),
                 data: json!({"__typename": "Repository", "id": "R_1", "name": "trellis"}),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .upsert(
+            &key,
+            StoredResource {
+                resource_type: "milestone".into(),
+                id: "M_1".into(),
+                data: json!({"__typename": "Milestone", "id": "M_1", "title": "v1"}),
             },
         )
         .await
@@ -102,4 +125,20 @@ async fn an_executor_create_is_linked_to_the_record_its_id_argument_names() {
         .as_array()
         .unwrap();
     assert!(nodes.iter().any(|n| n["id"] == id.as_str()), "{listed}");
+    // An action the executor answers wrote what it meant to: an id argument
+    // naming a record links nothing it left unset.
+    let closed = gql(
+        &base,
+        &format!(
+            r#"mutation {{ closeIssue(input: {{issueId: "{id}", milestoneId: "M_1"}}) {{ issue {{ id state }} }} }}"#
+        ),
+    )
+    .await;
+    assert_eq!(
+        closed["extensions"]["mockingbird"]["sources"]["closeIssue"], "state",
+        "{closed}"
+    );
+    let held = store.get(&key, "issue", &id).await.unwrap().unwrap();
+    assert_eq!(held.data["state"], "CLOSED", "{}", held.data);
+    assert!(held.data["milestone"].is_null(), "{}", held.data);
 }
