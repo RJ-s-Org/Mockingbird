@@ -3086,6 +3086,64 @@ async fn a_lookup_read_not_selecting_the_member_keeps_its_own_id() {
     assert_eq!(provider.requests().len(), 1);
 }
 
+const OWNERS_REPOS: &str = r#"
+type Lang { name: String! }
+type LangConn { nodes: [Lang!]! }
+type Repo { id: ID! name: String! stars: Int! languages(first: Int): LangConn }
+type RepoConn { nodes: [Repo!]! }
+type User { id: ID! login: String! name: String repositories(first: Int): RepoConn! }
+type Query { user(login: String!): User }
+"#;
+
+/// A second read of a held record selecting more below a member the first read
+/// answered (the stats card, then the top-langs card) gets those fields, not nulls.
+#[tokio::test]
+async fn a_lookup_read_selecting_more_below_a_held_member_gets_it() {
+    let provider = scripted(vec![
+        json!({"__typename": "User", "id": "U_1", "login": "octocat", "name": "The Octocat",
+               "repositories": {"__typename": "RepoConn", "nodes": [
+                   {"__typename": "Repo", "id": "R_1", "name": "hello", "stars": 3}]}}),
+        json!({"__typename": "User", "id": "U_1", "login": "octocat",
+               "repositories": {"__typename": "RepoConn", "nodes": [
+                   {"__typename": "Repo", "id": "R_1", "name": "hello",
+                    "languages": {"__typename": "LangConn", "nodes": [{"__typename": "Lang", "name": "Rust"}]}}]}}),
+    ]);
+    let base = serve(MockRuntime::new(
+        "gh",
+        Arc::new(compile(OWNERS_REPOS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    ))
+    .await;
+    let session = [("x-mockingbird-session", "s1")];
+    let stats = post(
+        &base,
+        json!({"query": r#"{ user(login: "octocat") { name repositories(first: 100) { nodes { name stars } } } }"#}),
+        &session,
+    )
+    .await;
+    assert_eq!(
+        stats.body["data"]["user"]["repositories"]["nodes"][0]["stars"], 3,
+        "{}",
+        stats.body
+    );
+    let langs = post(
+        &base,
+        json!({"query": r#"{ user(login: "octocat") { repositories(first: 100) { nodes { name languages(first: 10) { nodes { name } } } } } }"#}),
+        &session,
+    )
+    .await;
+    let node = &langs.body["data"]["user"]["repositories"]["nodes"][0];
+    assert_eq!(
+        node["languages"]["nodes"][0]["name"], "Rust",
+        "{}",
+        langs.body
+    );
+}
+
 /// A type with no `id` read by a lookup argument is stored under that member's value,
 /// so a later read by it is answered from state.
 #[tokio::test]
