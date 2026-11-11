@@ -391,6 +391,8 @@ async fn a_listed_connection_item_is_read_back_by_its_arguments() {
             product("P_9", "tee", "Made up"),
             product("P_7", "tee", "Made up again"),
             product("P_8", "other", "Made up too"),
+            // Another real product's id, answered for the handle "tee".
+            product("P_2", "tee", "Made up"),
         ],
     )
     .await;
@@ -416,4 +418,8 @@ async fn a_listed_connection_item_is_read_back_by_its_arguments() {
         by_id["product"],
         json!({"id": "P_2", "handle": "mug", "title": "Mug"})
     );
+    gql(&base, r#"{ product(handle: "tee") { id title } }"#).await;
+    // P_2 is a record of its own, not a copy of P_1: it stays.
+    let held = gql(&base, r#"{ product(id: "P_2") { id } }"#).await;
+    assert_eq!(held["product"], json!({"id": "P_2"}));
 }

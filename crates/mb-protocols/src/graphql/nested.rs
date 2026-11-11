@@ -318,7 +318,13 @@ impl Walk<'_> {
                     *value = self.render(&ty, &record, sel, base);
                     // What the engine stored of this answer is a second
                     // record of the one found: it goes.
-                    if let Some(generated) = generated.filter(|g| *g != record.id) {
+                    // Only a copy: a held record the arguments do not name
+                    // (the model answered another real one's id) stays.
+                    if let Some(generated) = generated.filter(|g| *g != record.id)
+                        && self.held.get(&ty).into_iter().flatten().any(|r| {
+                            r.id == generated && matches(&sel.args, r) == (true, sel.args.len())
+                        })
+                    {
                         self.superseded.push((ty.to_lowercase(), generated));
                     }
                 } else if parent.is_none()
