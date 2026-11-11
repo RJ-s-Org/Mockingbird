@@ -3368,6 +3368,10 @@ fn limits_ranges_named() {
             "limits.repetition_guard_span",
         ),
         (
+            "limits:\n  generation_timeout: 0s\n",
+            "limits.generation_timeout",
+        ),
+        (
             "mocks:\n  orders:\n    contract: orders.yaml\n    limits: {rate_limit: {requests_per_second: 0, burst: 1}}\n",
             "mocks.orders.limits.rate_limit.requests_per_second",
         ),

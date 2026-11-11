@@ -303,7 +303,7 @@ impl StreamState {
         let timeout = self.engine.config.timeout;
         let deadline = Instant::now()
             + match self.upstream {
-                Upstream::Pending(_) => provider.total_timeout(timeout),
+                Upstream::Pending(_) => self.engine.llm_limit(provider.as_ref()),
                 _ => timeout,
             };
         loop {
@@ -501,7 +501,7 @@ impl StreamState {
             schema: crate::compact::prompt_schema(&self.bundle, &self.schema),
         };
         let request = engine.chat_request(messages, format);
-        let limit = provider.total_timeout(engine.config.timeout);
+        let limit = engine.llm_limit(provider);
         let span = llm_span();
         let call = provider.complete(request).instrument(span.clone());
         let text = match tokio::time::timeout(limit, call).await {
