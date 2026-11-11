@@ -29,7 +29,7 @@ impl Decimal {
     }
 
     /// The decimal a JSON number or numeric string holds (`12.50`, `-3`, `1e-2`);
-    /// `None` for anything else, or more than [`MAX_DIGITS`] digits.
+    /// `None` for anything else, or more than `MAX_DIGITS` digits.
     pub fn parse(value: &Value) -> Option<Self> {
         match value {
             Value::Number(n) => Self::parse_text(&n.to_string(), MAX_DIGITS),
@@ -39,7 +39,7 @@ impl Decimal {
     }
 
     /// The decimal [`Self::text`] wrote, whatever its number of digits (a sum may hold
-    /// more than [`MAX_DIGITS`]); `None` for anything else.
+    /// more than `MAX_DIGITS`); `None` for anything else.
     pub fn read_back(value: &Value) -> Option<Self> {
         match value {
             Value::String(text) => Self::parse_text(text, usize::MAX),
