@@ -3,28 +3,36 @@
 //! A response the contract declares as JSON (or `+json`) is generated as
 //! usual. Any other media type of an HTTP operation is answered without
 //! the LLM, whose JSON-mode answer could not be that media type: from the
-//! schema's first `examples` entry when it declares one, else faked for
-//! `text/*`, else left empty (`application/octet-stream` and other binary
-//! media are served only from a declared example). XML without an example
+//! schema's first `examples` entry when it declares one, else from the value
+//! the schema fixes through `$ref`s (a `const` or a one-value `enum` or,
+//! failing those, a `default`), else faked for `text/*`, else left empty
+//! (`application/octet-stream` and other binary media are served only from a
+//! declared example). XML without an example
 //! is generated as JSON like any other body; the data plane renders it.
 
-use mb_mcm::{Binding, Operation, OutputVariant};
+use std::borrow::Cow;
+
+use mb_mcm::{Binding, Bundle, Operation, OutputVariant};
 use serde_json::Value;
+
+use crate::consistency;
 
 /// How a non-JSON response is answered.
 #[derive(Debug, PartialEq)]
 pub(crate) enum MediaAnswer<'a> {
-    /// The declared example, served as written.
-    Example(&'a Value),
+    /// The declared example, or the value the schema fixes, served as written.
+    Example(Cow<'a, Value>),
     /// A faker value for this schema (a text media type).
     Fake(&'a Value),
     /// No body: a binary media type without an example.
     Empty,
 }
 
-/// How `op` answers `variant` (whose body schema is `schema`), when its
-/// media type is not answered by JSON generation; `None` when it is.
+/// How `op` answers `variant` (whose body schema is `schema`, its `$ref`s
+/// resolved in `bundle`), when its media type is not answered by JSON
+/// generation; `None` when it is.
 pub(crate) fn answer<'a>(
+    bundle: &Bundle,
     op: &Operation,
     variant: &OutputVariant,
     schema: &'a Value,
@@ -41,10 +49,12 @@ pub(crate) fn answer<'a>(
         .and_then(Value::as_array)
         .and_then(|e| e.first())
     {
-        return Some(MediaAnswer::Example(example));
+        return Some(MediaAnswer::Example(Cow::Borrowed(example)));
     }
     if is_xml(&base) {
         None
+    } else if let Some(value) = consistency::fixed_value(bundle, schema) {
+        Some(MediaAnswer::Example(Cow::Owned(value)))
     } else if base.starts_with("text/") {
         Some(MediaAnswer::Fake(schema))
     } else {
