@@ -3788,6 +3788,117 @@ async fn non_json_text_responses_come_from_the_example_or_the_faker() {
     assert!(provider.requests().is_empty());
 }
 
+const FIXED_TEXT_CONTRACT: &str = r##"
+openapi: 3.1.0
+info: {title: T, version: "1"}
+paths:
+  /enum:
+    post:
+      operationId: postEnum
+      responses:
+        "200":
+          description: ok
+          content:
+            text/plain:
+              schema: {type: string, enum: [ok]}
+  /const:
+    post:
+      operationId: postConst
+      responses:
+        "200":
+          description: ok
+          content:
+            text/plain:
+              schema: {type: string, const: accepted}
+  /default:
+    post:
+      operationId: postDefault
+      responses:
+        "200":
+          description: ok
+          content:
+            text/plain:
+              schema: {type: string, default: done}
+  /ref:
+    post:
+      operationId: postRef
+      responses:
+        "200":
+          description: ok
+          content:
+            text/plain:
+              schema: {$ref: '#/components/schemas/Ok'}
+  /declared:
+    post:
+      operationId: postDeclared
+      responses:
+        "200":
+          description: ok
+          content:
+            text/plain:
+              schema: {type: string, enum: [ok]}
+              example: accepted
+  /free:
+    post:
+      operationId: postFree
+      responses:
+        "200":
+          description: ok
+          content:
+            text/plain:
+              schema: {type: string, enum: [ok, no]}
+components:
+  schemas:
+    Ok: {type: string, enum: [ok]}
+"##;
+
+/// A non-JSON answer whose value the schema fixes, through `$ref`s (a
+/// one-value `enum`, a `const` or, failing those, a `default`: Slack's
+/// incoming webhook `ok`) is the contract's own answer: source `example`, no
+/// fallback reason, in generation and in the fallback path alike. A declared
+/// example wins over the fixed value. Free text the faker draws stays
+/// `fallback`.
+#[tokio::test]
+async fn non_json_text_fixed_by_the_schema_has_source_example() {
+    let bundle = compile(FIXED_TEXT_CONTRACT.as_bytes()).unwrap();
+    let (provider, engine) = scripted(vec![]);
+    for (id, body) in [
+        ("postEnum", "ok"),
+        ("postConst", "accepted"),
+        ("postDefault", "done"),
+        ("postRef", "ok"),
+        // A declared example wins over the value the schema fixes.
+        ("postDeclared", "accepted"),
+    ] {
+        let op = bundle.operation(id).unwrap();
+        let out = engine
+            .generate(&bundle, op, &call(id), ctx())
+            .await
+            .unwrap();
+        assert_eq!(out.content_type.as_deref(), Some("text/plain"), "{id}");
+        assert_eq!(out.body, Some(json!(body)), "{id}");
+        assert_eq!(out.source, Source::Example, "{id}");
+        assert_eq!(out.fallback_reason, None, "{id}");
+        let variant = op.success_output().unwrap();
+        let fallback = engine.fallback(&bundle, op, variant, 200, &call(id), &ctx());
+        assert_eq!(fallback.source, Source::Example, "{id}");
+        assert_eq!(fallback.fallback_reason, None, "{id}");
+    }
+
+    let free = bundle.operation("postFree").unwrap();
+    let out = engine
+        .generate(&bundle, free, &call("postFree"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Fallback);
+    let reason = out.fallback_reason.unwrap();
+    assert!(
+        reason.starts_with(mb_engine::NON_JSON_MEDIA_REASON),
+        "{reason}"
+    );
+    assert!(provider.requests().is_empty());
+}
+
 /// An engine whose provider replays `script` in JSON-object mode (no
 /// structured outputs), and that provider.
 fn json_mode(script: Vec<Result<String, LlmError>>) -> (Arc<ScriptedProvider>, Engine) {

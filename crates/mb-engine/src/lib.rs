@@ -349,8 +349,10 @@ pub enum Source {
     /// The request failed validation: the contract's error shape (or a
     /// problem) answered it, without the LLM.
     Rejected,
-    /// The contract's declared example of a response in a non-JSON media type
-    /// (Slack's literal `ok`), which the LLM never writes: a normal answer.
+    /// The contract's declared example of a response in a non-JSON media type,
+    /// or the value its schema fixes (a `const`, a one-value `enum` or,
+    /// failing those, a `default`: Slack's literal `ok`), which the LLM never
+    /// writes: a normal answer.
     Example,
 }
 
@@ -618,8 +620,9 @@ pub const OFFLINE_REASON: &str = "no LLM is configured for this mock (offline)";
 pub const FAKER_INVALID_REASON: &str = "faker output does not validate against the schema";
 
 /// The fallback reason of a REST answer in a non-JSON media type (`text/*`, an
-/// empty binary body) with no declared example, which the LLM never writes. A
-/// declared example is source [`Source::Example`], not a fallback.
+/// empty binary body) with no declared example or fixed value, which the LLM
+/// never writes. A declared example or a value the schema fixes is source
+/// [`Source::Example`], not a fallback.
 pub const NON_JSON_MEDIA_REASON: &str =
     "the response media type is not JSON: answered by the faker";
 
@@ -941,7 +944,7 @@ impl Engine {
             return false;
         };
         self.has_provider()
-            && media::answer(op, variant, schema).is_none()
+            && media::answer(bundle, op, variant, schema).is_none()
             && self
                 .validator(bundle, op, status, schema)
                 .is_ok_and(|v| guards::refusable(op, status, &v))
@@ -1032,7 +1035,7 @@ impl Engine {
                 exec_notes: serde_json::Map::new(),
             });
         };
-        if let Some(answer) = media::answer(op, variant, schema) {
+        if let Some(answer) = media::answer(bundle, op, variant, schema) {
             return Ok(self.media_response(bundle, op, variant, status, call, answer));
         }
 
@@ -1417,7 +1420,7 @@ impl Engine {
                 exec_notes: serde_json::Map::new(),
             };
         };
-        if let Some(answer) = media::answer(op, variant, schema) {
+        if let Some(answer) = media::answer(bundle, op, variant, schema) {
             return self.media_response(bundle, op, variant, status, call, answer);
         }
         let mut draws = self.call_draws(bundle, &op.id, status, call);
@@ -2375,12 +2378,13 @@ impl Engine {
         answer: media::MediaAnswer<'_>,
     ) -> GeneratedResponse {
         let (body, faker_note) = match answer {
-            // The declared example is the contract's own answer, not a fallback.
+            // The declared example (or the value the schema fixes) is the
+            // contract's own answer, not a fallback.
             media::MediaAnswer::Example(example) => {
                 return GeneratedResponse {
                     status,
                     content_type: variant.content_type.clone(),
-                    body: Some(example.clone()),
+                    body: Some(example.into_owned()),
                     source: Source::Example,
                     usage: Usage::default(),
                     fallback_reason: None,
