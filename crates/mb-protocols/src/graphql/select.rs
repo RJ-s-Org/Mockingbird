@@ -441,7 +441,7 @@ pub(crate) fn rekey(value: Value, sel: &Selection) -> Value {
 /// A narrowed body (keyed by response key) made whole. The engine overlays
 /// the stored `target` of a read and the forced `identity` field by field
 /// name; here each generated key takes its field's member of `target`
-/// (re-keyed below), and each key reading the identity field takes the
+/// (re-keyed below, and merged over what was generated there), and each key reading the identity field takes the
 /// body's member under that name. Then every child with `shares` gets a
 /// copy of the shared key's value (recursively, through lists).
 pub(crate) fn settle(
@@ -454,7 +454,14 @@ pub(crate) fn settle(
         if let Some(Value::Object(stored)) = target {
             for (key, child) in sel.generated() {
                 if let Some(member) = child.names().find_map(|n| stored.get(n)) {
-                    obj.insert(key.clone(), rekey(member.clone(), child));
+                    // Over what was generated: a wider selection keeps what the stored
+                    // member lacks below it.
+                    let stored = rekey(member.clone(), child);
+                    let value = match obj.remove(key) {
+                        Some(generated) => mb_engine::merge_stored(&stored, generated),
+                        None => stored,
+                    };
+                    obj.insert(key.clone(), value);
                 }
             }
         }

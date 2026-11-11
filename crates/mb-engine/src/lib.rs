@@ -5119,7 +5119,13 @@ const MAX_MERGE_DEPTH: usize = 24;
 /// `stored` over `generated`: an object keeps `generated`'s members `stored` lacks and
 /// merges those both hold; a list keeps `stored`'s items, each over the generated item
 /// with its `id`, else over the next generated item no stored item's `id` claims;
-/// anything else is `stored`.
+/// anything else is `stored`. How a GraphQL read lays the record it holds over what it
+/// generated for a wider selection.
+pub fn merge_stored(stored: &Value, generated: Value) -> Value {
+    merge_deep(stored, generated, 0)
+}
+
+/// [`merge_stored`], `depth` deep.
 fn merge_deep(stored: &Value, generated: Value, depth: usize) -> Value {
     if depth > MAX_MERGE_DEPTH {
         return stored.clone();

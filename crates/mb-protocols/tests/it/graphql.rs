@@ -3144,6 +3144,48 @@ async fn a_lookup_read_selecting_more_below_a_held_member_gets_it() {
     );
 }
 
+/// The same with aliases, in the other order: a read that stored the languages, then an
+/// aliased one asking for the stars keeps both.
+#[tokio::test]
+async fn an_aliased_lookup_read_selecting_more_below_a_held_member_gets_it() {
+    let provider = scripted(vec![
+        json!({"__typename": "User", "id": "U_1", "login": "octocat",
+               "repositories": {"__typename": "RepoConn", "nodes": [
+                   {"__typename": "Repo", "id": "R_1", "name": "hello",
+                    "languages": {"__typename": "LangConn", "nodes": [{"__typename": "Lang", "name": "Rust"}]}}]}}),
+        json!({"__typename": "User", "id": "U_1", "login": "octocat", "who": "The Octocat",
+               "repos": {"__typename": "RepoConn", "nodes": [
+                   {"__typename": "Repo", "id": "R_1", "name": "hello", "stars": 3}]}}),
+    ]);
+    let base = serve(MockRuntime::new(
+        "gh",
+        Arc::new(compile(OWNERS_REPOS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    ))
+    .await;
+    let session = [("x-mockingbird-session", "s1")];
+    post(
+        &base,
+        json!({"query": r#"{ user(login: "octocat") { repositories(first: 100) { nodes { name languages(first: 10) { nodes { name } } } } } }"#}),
+        &session,
+    )
+    .await;
+    let stats = post(
+        &base,
+        json!({"query": r#"{ user(login: "octocat") { who: name repos: repositories(first: 100) { nodes { name stars } } } }"#}),
+        &session,
+    )
+    .await;
+    let user = &stats.body["data"]["user"];
+    assert_eq!(user["who"], "The Octocat", "{}", stats.body);
+    assert_eq!(user["repos"]["nodes"][0]["stars"], 3, "{}", stats.body);
+    assert_eq!(user["repos"]["nodes"][0]["name"], "hello", "{}", stats.body);
+}
+
 /// A type with no `id` read by a lookup argument is stored under that member's value,
 /// so a later read by it is answered from state.
 #[tokio::test]
