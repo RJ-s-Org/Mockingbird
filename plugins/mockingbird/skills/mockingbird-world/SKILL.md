@@ -11,6 +11,7 @@ The format is the JSON Schema `get_world_schema` answers (`mockingbird world sch
 
 ## The loop
 
+0. **Scope to what the app calls.** A large contract has far more gaps than any one app reaches (an imported bot or cloud API can show hundreds), and working through them one by one never ends. First list the operations the app calls: read its client code for the paths, methods or GraphQL fields it uses, or take them from `list_requests` after a first run. Then pass them to `get_world` as `operations` (and the types they read or write as `types`), or on the CLI `mockingbird world show <mock> --operation <id> --type <type>` (both repeatable). Fix the gaps in that answer only, and leave the rest of the contract to the heuristics.
 1. **Read the gaps first.** After `import_contract` (or `approve_draft`), call `get_world {mock, version}`: pass `version`, the version number the import or approval answered, unless that version is now the active one. Without it every world tool acts on the active version, and a later import that was not activated, or an unapproved draft, is not that version: you would review the old version's gaps and write onto it. The answer holds `world` (the effective description), `authors` (who set each entry; unlisted entries are `heuristic`), `revision` (`0` when only the heuristics wrote it), `refused` and `gaps`. Work through `gaps`:
    - `no_identity`: a type operations write to has no `identity`.
    - `no_target`: a read, update, replace, delete or action does not say which path parameter or body member names its record.
