@@ -617,7 +617,7 @@ pub(super) async fn set_values(
     let id_of = |record: Option<&Value>| {
         identity
             .as_ref()
-            .and_then(|m| record?.get(m.as_str()).cloned())
+            .and_then(|m| mb_mcm::member_at(record?, m).cloned())
     };
     let kept = plan
         .exprs
