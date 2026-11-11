@@ -303,8 +303,7 @@ impl BundleIndex {
                     rank_defs(op, (t, own), by_path, &lists, &mut ranked_defs);
                     record_shapes(
                         bundle,
-                        op,
-                        i,
+                        (op, i),
                         (t, own),
                         by_path,
                         &members,
