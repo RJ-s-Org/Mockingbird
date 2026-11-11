@@ -71,7 +71,8 @@ pub(crate) fn with_collection_format(mut schema: Value, param: &Value) -> Value 
 ///
 /// `ref_prefix` is the source component prefix (e.g. `#/components/schemas/`)
 /// which is rewritten to `#/$defs/`. When `oas30` is set, the OpenAPI 3.0
-/// dialect keywords (`nullable`, boolean `exclusiveMinimum`, ...) are converted.
+/// dialect keywords (`nullable`, boolean `exclusiveMinimum`, ...) are converted,
+/// and a singular `example` joins `examples`, the keyword the engine reads.
 /// Refs are rewritten, never inlined, so recursive schemas are safe.
 pub(crate) fn normalize_schema(schema: &Value, ref_prefix: &str, oas30: bool) -> Value {
     match schema {
@@ -134,10 +135,26 @@ fn normalize_object(obj: &Map<String, Value>, ref_prefix: &str, oas30: bool) -> 
         out.insert(key.clone(), new);
     }
     if oas30 {
+        if let Some(example) = obj.get("example") {
+            merge_example(&mut out, example);
+        }
         fix_exclusive_bounds(&mut out);
         apply_nullable(&mut out);
     }
     out
+}
+
+/// 3.0 `example: v` -> `examples: [v]`, or `v` appended to the `examples` already
+/// there unless they hold it. An `examples` that is no array is left as it is.
+fn merge_example(obj: &mut Map<String, Value>, example: &Value) {
+    let examples = obj
+        .entry("examples")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Value::Array(list) = examples
+        && !list.contains(example)
+    {
+        list.push(example.clone());
+    }
 }
 
 /// 3.0: `exclusiveMinimum: true` + `minimum: n` -> `exclusiveMinimum: n` (same for max).
@@ -300,6 +317,35 @@ mod perf {
                 .unwrap_or_default();
             println!("PERF-8 n={n}: collect_refs {t:?}");
         }
+    }
+
+    #[test]
+    fn oas30_example_joins_examples_at_every_level() {
+        let schema = json!({
+            "type": "object",
+            "example": {"id": "a"},
+            "properties": {
+                "id": {"type": "string", "example": "pi_1"},
+                "tags": {"type": "array", "items": {"type": "string", "example": "t"}},
+                "kind": {"allOf": [{"type": "string", "example": "k"}]},
+                "both": {"type": "string", "example": "b", "examples": ["a"]},
+                "held": {"type": "string", "example": "a", "examples": ["a"]},
+                "note": {"type": "string", "nullable": true, "example": "n"}
+            }
+        });
+        let out = super::normalize_schema(&schema, "#/components/schemas/", true);
+        assert_eq!(out.get("example"), None);
+        assert_eq!(out["examples"], json!([{"id": "a"}]));
+        let props = &out["properties"];
+        assert_eq!(props["id"], json!({"type": "string", "examples": ["pi_1"]}));
+        assert_eq!(props["tags"]["items"]["examples"], json!(["t"]));
+        assert_eq!(props["kind"]["allOf"][0]["examples"], json!(["k"]));
+        assert_eq!(props["both"]["examples"], json!(["a", "b"]));
+        assert_eq!(props["held"]["examples"], json!(["a"]));
+        assert_eq!(
+            props["note"],
+            json!({"type": ["string", "null"], "examples": ["n"]})
+        );
     }
 
     #[test]

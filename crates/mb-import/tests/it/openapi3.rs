@@ -3559,3 +3559,34 @@ fn dangling_ref_in_a_non_default_request_media_type_is_checked() {
         "{message}"
     );
 }
+
+/// A 3.0 schema's singular `example`, on a component's property, keeps its value as
+/// the schema's `examples`, which the engine reads.
+#[test]
+fn a_30_schema_example_imports_as_examples() {
+    let contract = r##"
+openapi: 3.0.3
+info: {title: T, version: "1"}
+paths:
+  /payment_intents:
+    post:
+      operationId: createPaymentIntent
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PaymentIntent"}
+components:
+  schemas:
+    PaymentIntent:
+      type: object
+      properties:
+        id: {type: string, example: pi_3MtwBwLkdIwHu7ix28a3tqPa}
+"##;
+    let bundle = compile(contract.as_bytes()).unwrap();
+    assert_eq!(
+        bundle.defs["PaymentIntent"]["properties"]["id"],
+        json!({"type": "string", "examples": ["pi_3MtwBwLkdIwHu7ix28a3tqPa"]})
+    );
+}

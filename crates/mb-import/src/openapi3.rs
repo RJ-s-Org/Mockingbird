@@ -208,6 +208,7 @@ pub(crate) fn non_json_schema(
     if let (Some(obj), Some(example)) = (schema.as_object_mut(), example) {
         let examples = obj.entry("examples").or_insert_with(|| json!([]));
         if let Some(list) = examples.as_array_mut() {
+            list.retain(|e| *e != example);
             list.insert(0, example);
         }
     }
