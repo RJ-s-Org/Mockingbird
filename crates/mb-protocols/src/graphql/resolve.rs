@@ -640,23 +640,41 @@ async fn store_answer(
     if !seeding {
         super::nested::link_args(rt, &plan.session, &mut objects, args).await;
     }
-    // A query's own object (the first found) keeps what it was read by.
-    let read_by = match objects.first() {
+    // A query's own object (the first found) keeps what it was read by
+    // (`repository(owner:, name:)` → its `name`), so that a later read by
+    // the same arguments finds it.
+    let read_by = match objects.first_mut() {
         Some(root) if seeding && super::nested::answers_type(op, &root.resource_type) => {
             let members = super::state::read_args(&rt.bundle, op, args);
-            (!members.is_empty()).then(|| mb_state::StoredResource {
-                resource_type: root.resource_type.clone(),
-                id: root.id.clone(),
-                data: Value::Object(members),
-            })
+            if let Value::Object(data) = &mut root.data {
+                for (name, value) in &members {
+                    data.entry(name.clone()).or_insert_with(|| value.clone());
+                }
+            }
+            (!members.is_empty()).then(|| (root.resource_type.clone(), root.id.clone(), members))
         }
         _ => None,
     };
     if !objects.is_empty() {
         call::store_resources(rt, &plan.session, objects, !seeding).await;
     }
-    if let Some(read_by) = read_by {
-        call::store_resources(rt, &plan.session, vec![read_by], true).await;
+    // The engine may have stored the object before (a seed is then left
+    // alone): the members it lacks are added to what the session holds. A
+    // deleted record is not held, so nothing brings it back.
+    if let Some((t, id, members)) = read_by
+        && let Some(held) = call::stored(rt, &plan.session, &t, &id).await
+        && let Value::Object(data) = &held.data
+        && members.keys().any(|k| !data.contains_key(k))
+    {
+        let mut data = data.clone();
+        for (name, value) in members {
+            data.entry(name).or_insert(value);
+        }
+        let held = mb_state::StoredResource {
+            data: Value::Object(data),
+            ..held
+        };
+        call::store_resources(rt, &plan.session, vec![held], true).await;
     }
 }
 

@@ -20,7 +20,7 @@ type Repository implements Node {
   issue(number: Int!): Issue
   issueOrPullRequest(number: Int!): IssueOrPullRequest
   issues(states: [IssueState!], first: Int): IssueConnection!
-  pullRequests(headRefName: String, states: [IssueState!], first: Int): PullRequestConnection!
+  pullRequests(headRefName: String, states: [IssueState!], first: Int, after: String): PullRequestConnection!
 }
 type Issue implements Node {
   id: ID!
@@ -42,7 +42,8 @@ type PullRequest implements Node {
 type IssueConnection { nodes: [Issue] totalCount: Int! }
 type IssueCommentConnection { nodes: [IssueComment] totalCount: Int! }
 type PullRequestEdge { cursor: String! node: PullRequest }
-type PullRequestConnection { edges: [PullRequestEdge] totalCount: Int! }
+type PageInfo { hasNextPage: Boolean! endCursor: String }
+type PullRequestConnection { edges: [PullRequestEdge] totalCount: Int! pageInfo: PageInfo! }
 union IssueOrPullRequest = Issue | PullRequest
 input CreateIssueInput { repositoryId: ID! title: String! }
 input CloseIssueInput { issueId: ID! }
@@ -234,6 +235,48 @@ async fn nested_fields_answer_from_state() {
     // No pull request is stored yet: the generated one is kept unless the
     // filter rules it out, as here.
     assert_eq!(closed["repository"]["prs"]["edges"], json!([]), "{closed}");
+}
+
+/// Stored edges page by `first` and `after`, with a cursor per edge, even
+/// when the generated connection has no edges.
+#[tokio::test]
+async fn stored_edges_page_with_cursors() {
+    let prs = |edges: Vec<Value>| {
+        json!({"__typename": "Repository", "id": "R_1", "pullRequests": {
+            "__typename": "PullRequestConnection", "totalCount": edges.len(),
+            "pageInfo": {"__typename": "PageInfo", "hasNextPage": false, "endCursor": null},
+            "edges": edges}})
+    };
+    let edge = |id: &str, n: u64| json!({"__typename": "PullRequestEdge", "cursor": "g", "node": pull(id, n, "main")});
+    let base = serve(vec![
+        prs(vec![edge("PR_1", 1), edge("PR_2", 2)]),
+        prs(vec![]),
+        prs(vec![]),
+    ])
+    .await;
+    let page = |after: &str| {
+        format!(
+            r#"{{ repository(owner: "o", name: "r") {{ id pullRequests(first: 1{after}) {{
+                totalCount edges {{ cursor node {{ id }} }} pageInfo {{ hasNextPage endCursor }} }} }} }}"#
+        )
+    };
+    gql(&base, &page("")).await;
+    let first = gql(&base, &page("")).await;
+    let prs = &first["repository"]["pullRequests"];
+    assert_eq!(prs["totalCount"], 2, "{first}");
+    assert_eq!(prs["edges"].as_array().unwrap().len(), 1);
+    let cursor = prs["edges"][0]["cursor"].as_str().unwrap().to_string();
+    assert_eq!(prs["pageInfo"]["hasNextPage"], true);
+    assert_eq!(prs["pageInfo"]["endCursor"], cursor.as_str());
+
+    let next = gql(&base, &page(&format!(r#", after: "{cursor}""#))).await;
+    let prs = &next["repository"]["pullRequests"];
+    assert_eq!(prs["edges"].as_array().unwrap().len(), 1, "{next}");
+    assert_ne!(
+        prs["edges"][0]["node"]["id"],
+        first["repository"]["pullRequests"]["edges"][0]["node"]["id"]
+    );
+    assert_eq!(prs["pageInfo"]["hasNextPage"], false);
 }
 
 const SHOP: &str = r#"

@@ -263,6 +263,15 @@ fn collect(
     }
 }
 
+/// One page of a list answered from state.
+struct Page {
+    records: Vec<(String, StoredResource)>,
+    /// The records that match, on every page.
+    total: usize,
+    has_previous: bool,
+    has_next: bool,
+}
+
 struct Walk<'a> {
     bundle: &'a Bundle,
     /// By definition name, most recent first.
@@ -286,7 +295,7 @@ impl Walk<'_> {
             Shape::One(types) => {
                 // The engine may have stored this very answer already: it
                 // is not the record the arguments name.
-                let generated = generated_id(value, sel);
+                let generated = parent.is_none().then(|| generated_id(value, sel)).flatten();
                 if !sel.args.is_empty()
                     && let Some((ty, record)) =
                         self.find(&types, &sel.args, parent, generated.as_deref())
@@ -308,7 +317,7 @@ impl Walk<'_> {
             }
             Shape::Connection(types, node) => {
                 if let Some(parent) = parent {
-                    self.connection(&types, sel, value, parent);
+                    self.connection(schema, &types, sel, value, parent);
                 }
                 self.connection_items(&node, sel, value, parent, depth);
             }
@@ -449,14 +458,10 @@ impl Walk<'_> {
             .collect()
     }
 
-    /// The records a list with `args` shows, and how many match in all;
-    /// `None` when the session holds none under `parent`.
-    fn listed(
-        &self,
-        types: &[String],
-        args: &Map<String, Value>,
-        parent: &Parent,
-    ) -> Option<(Vec<(String, StoredResource)>, usize)> {
+    /// The page of records a list with `args` shows; `None` when the session
+    /// holds none under `parent`. A record's cursor is its id: `after` and
+    /// `before` start and end the page there, `first` and `last` cut it.
+    fn listed(&self, types: &[String], args: &Map<String, Value>, parent: &Parent) -> Option<Page> {
         let held = self.under(types, parent);
         if held.is_empty() {
             return None;
@@ -466,20 +471,28 @@ impl Walk<'_> {
             .filter(|(_, r)| matches(args, r).0)
             .collect();
         let total = matching.len();
+        let at = |name: &str| {
+            let cursor = args.get(name)?.as_str()?;
+            matching.iter().position(|(_, r)| r.id == cursor)
+        };
+        let mut start = at("after").map_or(0, |i| i + 1);
+        let mut end = at("before").unwrap_or(total).max(start);
         let count = |name: &str| {
             args.get(name)
                 .and_then(Value::as_u64)
                 .and_then(|n| usize::try_from(n).ok())
         };
-        let shown = match (count("first"), count("last")) {
-            (Some(n), _) => matching.into_iter().take(n).collect(),
-            (None, Some(n)) => {
-                let skip = total.saturating_sub(n);
-                matching.into_iter().skip(skip).collect()
-            }
-            (None, None) => matching.into_iter().take(DEFAULT_PAGE).collect(),
-        };
-        Some((shown, total))
+        match (count("first"), count("last")) {
+            (Some(n), _) => end = end.min(start + n),
+            (None, Some(n)) => start = start.max(end.saturating_sub(n)),
+            (None, None) => end = end.min(start + DEFAULT_PAGE),
+        }
+        Some(Page {
+            records: matching[start..end].to_vec(),
+            total,
+            has_previous: start > 0,
+            has_next: end < total,
+        })
     }
 
     /// A plain list's `items` (selected by `item_sel`, read with `sel`'s
@@ -493,18 +506,25 @@ impl Walk<'_> {
         parent: &Parent,
     ) {
         match self.listed(types, &sel.args, parent) {
-            Some((records, _)) => *items = self.render_all(&records, item_sel, items),
+            Some(page) => *items = self.render_all(&page.records, item_sel, items),
             None => items.retain(|v| allowed(&sel.args, v, item_sel)),
         }
     }
 
     /// A connection `value` from state, or its generated items the
     /// arguments allow.
-    fn connection(&self, types: &[String], sel: &Selection, value: &mut Value, parent: &Parent) {
+    fn connection(
+        &self,
+        schema: &Value,
+        types: &[String],
+        sel: &Selection,
+        value: &mut Value,
+        parent: &Parent,
+    ) {
         let Value::Object(obj) = value else {
             return;
         };
-        let Some((records, total)) = self.listed(types, &sel.args, parent) else {
+        let Some(page) = self.listed(types, &sel.args, parent) else {
             for (key, child) in &sel.fields {
                 match (child.name.as_str(), obj.get_mut(key)) {
                     ("nodes", Some(Value::Array(items))) => {
@@ -523,7 +543,11 @@ impl Walk<'_> {
             }
             return;
         };
-        let more = total > records.len();
+        let records = &page.records;
+        let edge_ty = def_of(self.bundle, schema)
+            .and_then(|d| d.get("properties")?.get("edges"))
+            .and_then(list_item)
+            .and_then(def_ref);
         for (key, child) in &sel.fields {
             match child.name.as_str() {
                 "nodes" => {
@@ -533,7 +557,7 @@ impl Walk<'_> {
                     };
                     obj.insert(
                         key.clone(),
-                        Value::Array(self.render_all(&records, child, &generated)),
+                        Value::Array(self.render_all(records, child, &generated)),
                     );
                 }
                 "edges" => {
@@ -543,43 +567,48 @@ impl Walk<'_> {
                     };
                     let mut edges = Vec::new();
                     for (i, (ty, record)) in records.iter().enumerate() {
-                        let mut edge = generated
-                            .get(i % generated.len().max(1))
-                            .cloned()
-                            .filter(Value::is_object)
-                            .unwrap_or_else(|| json!({}));
-                        for (node_key, node_sel) in &child.fields {
-                            if node_sel.name != "node" {
-                                continue;
-                            }
-                            let base = generated
-                                .iter()
-                                .filter_map(|e| e.get(node_key))
-                                .find(|n| same_id(n, &record.id, node_sel));
-                            let node = self.render(ty, record, node_sel, base);
-                            if let Value::Object(edge) = &mut edge {
-                                edge.insert(node_key.clone(), node);
+                        let mut edge = match generated.get(i) {
+                            Some(Value::Object(edge)) => edge.clone(),
+                            _ => edge_ty.map(|t| self.fake(t, child)).unwrap_or_default(),
+                        };
+                        for (edge_key, edge_sel) in &child.fields {
+                            match edge_sel.name.as_str() {
+                                "cursor" => {
+                                    edge.insert(edge_key.clone(), json!(record.id));
+                                }
+                                "node" => {
+                                    let base = generated
+                                        .iter()
+                                        .filter_map(|e| e.get(edge_key))
+                                        .find(|n| same_id(n, &record.id, edge_sel));
+                                    let node = self.render(ty, record, edge_sel, base);
+                                    edge.insert(edge_key.clone(), node);
+                                }
+                                _ => {}
                             }
                         }
+                        let edge = Value::Object(edge);
                         edges.push(edge);
                     }
                     obj.insert(key.clone(), Value::Array(edges));
                 }
                 "totalCount" => {
-                    obj.insert(key.clone(), json!(total));
+                    obj.insert(key.clone(), json!(page.total));
                 }
                 "pageInfo" => {
                     if let Some(Value::Object(info)) = obj.get_mut(key) {
+                        let cursor = |r: Option<&(String, StoredResource)>| {
+                            r.map_or(Value::Null, |(_, r)| json!(r.id))
+                        };
                         for (info_key, info_sel) in &child.fields {
-                            match info_sel.name.as_str() {
-                                "hasNextPage" => {
-                                    info.insert(info_key.clone(), json!(more));
-                                }
-                                "hasPreviousPage" => {
-                                    info.insert(info_key.clone(), json!(false));
-                                }
-                                _ => {}
-                            }
+                            let set = match info_sel.name.as_str() {
+                                "hasNextPage" => json!(page.has_next),
+                                "hasPreviousPage" => json!(page.has_previous),
+                                "startCursor" => cursor(records.first()),
+                                "endCursor" => cursor(records.last()),
+                                _ => continue,
+                            };
+                            info.insert(info_key.clone(), set);
                         }
                     }
                 }
