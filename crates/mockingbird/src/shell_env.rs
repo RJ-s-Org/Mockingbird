@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 /// Set to skip the import.
 pub const DISABLE_ENV: &str = "MB_NO_SHELL_ENV";
 
-const TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the login shell may take. A shell that loads version managers or a
+/// framework can take several seconds, and one cut short gives no variables at all.
+const TIMEOUT: Duration = Duration::from_secs(15);
 const MARKER: &str = "__MOCKINGBIRD_ENV__";
 
 /// Shell bookkeeping that describes the shell, not the user's setup.
@@ -85,6 +87,10 @@ fn login_env() -> Option<Vec<(String, String)>> {
             Ok(Some(_)) => break,
             Ok(None) if start.elapsed() < TIMEOUT => std::thread::sleep(Duration::from_millis(20)),
             _ => {
+                tracing::warn!(
+                    timeout_secs = TIMEOUT.as_secs(),
+                    "the login shell did not print its environment in time: its variables (such as an LLM key a profile references) were not imported"
+                );
                 let _ = child.kill();
                 let _ = child.wait();
                 break;
