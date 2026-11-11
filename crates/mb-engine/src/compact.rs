@@ -485,8 +485,8 @@ fn require_at(doc: &mut Value, path: &[Step], name: &str, defs: &Value) -> bool 
 /// `doc` (a schema carrying `$defs`) fitted to `budget` bytes of compact
 /// JSON: unchanged when it fits; else with descriptions cut to
 /// [`MAX_DESCRIPTION`] characters; else also with the definitions furthest from
-/// the root stubbed (see [`fill`]); else also with descriptions cut to
-/// [`SHORT_DESCRIPTION`].
+/// the root stubbed (see [`fill`]); else stubbed again from descriptions cut
+/// to [`SHORT_DESCRIPTION`].
 pub(crate) fn fit(doc: Value, budget: usize) -> Value {
     if size(&doc) <= budget {
         return doc;
@@ -495,11 +495,12 @@ pub(crate) fn fit(doc: Value, budget: usize) -> Value {
     if size(&doc) <= budget {
         return doc;
     }
-    let doc = fill(doc, budget);
-    if size(&doc) <= budget {
-        return doc;
+    let filled = fill(doc.clone(), budget);
+    if size(&filled) <= budget {
+        return filled;
     }
-    cut_descriptions(doc, SHORT_DESCRIPTION)
+    // Shorter descriptions, then stubs again: the stubs keep their whole text.
+    fill(cut_descriptions(doc, SHORT_DESCRIPTION), budget)
 }
 
 /// Adds the definitions nearest the root first (smallest first at one depth)
@@ -524,7 +525,7 @@ fn fill(mut doc: Value, budget: usize) -> Value {
         .get("$ref")
         .and_then(Value::as_str)
         .and_then(|r| r.strip_prefix("#/$defs/"))
-        .map(String::from);
+        .map(def_name);
     let needed = non_null_refs(&doc);
     let Some(defs) = doc.get_mut("$defs").and_then(Value::as_object_mut) else {
         return doc;
@@ -608,8 +609,10 @@ fn fill(mut doc: Value, budget: usize) -> Value {
     doc
 }
 
-/// The definitions the root's members reference where the member cannot be null
-/// (no `null` type or branch on the way to the reference).
+/// The definitions the root needs whole to show its own shape: those it reaches
+/// through `$ref`, `items`, `allOf`, union branches, and members that cannot
+/// be null, without passing a member or branch that may be null (the model can
+/// write null there) or another definition.
 fn non_null_refs(doc: &Value) -> HashSet<String> {
     fn admits_null(schema: &Value) -> bool {
         let null_type = |s: &Value| match s.get("type") {
@@ -626,16 +629,43 @@ fn non_null_refs(doc: &Value) -> HashSet<String> {
                     .is_some_and(|bs| bs.iter().any(admits_null))
             })
     }
-    let mut out = HashSet::new();
-    let Some(props) = doc.get("properties").and_then(Value::as_object) else {
-        return out;
-    };
-    for member in props.values() {
-        if !admits_null(member) {
-            let mut found = Vec::new();
-            refs(member, &mut found);
-            out.extend(found);
+    fn walk(schema: &Value, out: &mut HashSet<String>) {
+        let Value::Object(obj) = schema else {
+            return;
+        };
+        if let Some(rest) = obj
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+        {
+            out.insert(def_name(rest));
         }
+        if let Some(items) = obj.get("items") {
+            walk(items, out);
+        }
+        if let Some(Value::Array(parts)) = obj.get("allOf") {
+            parts.iter().for_each(|p| walk(p, out));
+        }
+        // A union that admits null may be null: its other branches can go.
+        if !admits_null(schema) {
+            for key in ["anyOf", "oneOf"] {
+                if let Some(Value::Array(branches)) = obj.get(key) {
+                    branches.iter().for_each(|b| walk(b, out));
+                }
+            }
+        }
+        if let Some(Value::Object(members)) = obj.get("properties") {
+            members
+                .values()
+                .filter(|m| !admits_null(m))
+                .for_each(|m| walk(m, out));
+        }
+    }
+    let mut out = HashSet::new();
+    if let Value::Object(root) = doc {
+        let mut root = root.clone();
+        root.remove("$defs");
+        walk(&Value::Object(root), &mut out);
     }
     out
 }
@@ -700,6 +730,13 @@ fn def_depths(doc: &Value) -> HashMap<String, u64> {
     depths
 }
 
+/// The definition a `#/$defs/` reference's `rest` names: its first step, with
+/// the JSON Pointer escapes decoded (`a~1b` is `a/b`), as the bundle names them.
+fn def_name(rest: &str) -> String {
+    let name = rest.split('/').next().unwrap_or(rest);
+    name.replace("~1", "/").replace("~0", "~")
+}
+
 fn refs(value: &Value, out: &mut Vec<String>) {
     match value {
         Value::Object(obj) => {
@@ -708,9 +745,7 @@ fn refs(value: &Value, out: &mut Vec<String>) {
                     k.as_str(),
                     v.as_str().and_then(|r| r.strip_prefix("#/$defs/")),
                 ) {
-                    ("$ref", Some(name)) => {
-                        out.push(name.split('/').next().unwrap_or(name).to_string())
-                    }
+                    ("$ref", Some(rest)) => out.push(def_name(rest)),
                     _ => refs(v, out),
                 }
             }
@@ -1002,6 +1037,61 @@ mod expand_tests {
 mod root_member_tests {
     use super::*;
     use serde_json::json;
+
+    fn big() -> Value {
+        json!({"type": "object", "properties": {"v": {"enum": (0..300).map(|i| format!("v{i}")).collect::<Vec<_>>()}}})
+    }
+
+    #[test]
+    fn a_definition_named_with_a_slash_survives_a_collapse() {
+        let mut doc = json!({
+            "type": "object",
+            "properties": {
+                "x": {"$ref": "#/$defs/a~1b"},
+                "c": {"anyOf": [{"type": "string"}, {"$ref": "#/$defs/C"}]}
+            },
+            "$defs": {"a/b": {"type": "object"}, "C": {"type": "object"}}
+        });
+        assert!(collapse_expandables(&mut doc, None, &HashSet::new()));
+        drop_unreachable_defs(&mut doc);
+        assert!(doc["$defs"].get("a/b").is_some(), "{doc}");
+        assert!(doc["$defs"].get("C").is_none(), "{doc}");
+    }
+
+    #[test]
+    fn an_array_root_keeps_its_item_definition() {
+        let doc = json!({"type": "array", "items": {"$ref": "#/$defs/Pet"}, "$defs": {"Pet": big(), "Other": big()}});
+        let out = fit(doc, 200);
+        assert!(out["$defs"]["Pet"]["properties"].is_object(), "{out}");
+    }
+
+    #[test]
+    fn short_descriptions_come_before_stubs_which_keep_their_text() {
+        let long = "d".repeat(150);
+        let props: serde_json::Map<String, Value> = (0..40)
+            .map(|i| {
+                (
+                    format!("m{i}"),
+                    json!({"type": "string", "description": long}),
+                )
+            })
+            .collect();
+        let mut props = props;
+        props.insert(
+            "optional".into(),
+            json!({"anyOf": [{"$ref": "#/$defs/Optional"}, {"type": "null"}]}),
+        );
+        let doc = json!({"type": "object", "properties": props, "$defs": {"Optional": big()}});
+        let out = fit(doc, 4000);
+        let cut = out["properties"]["m0"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(cut.chars().count() <= SHORT_DESCRIPTION + 1, "{cut}");
+        let stub = out["$defs"]["Optional"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(stub.ends_with("null where allowed)"), "{stub}");
+    }
 
     #[test]
     fn a_member_that_cannot_be_null_keeps_its_definition_and_a_nullable_one_is_stubbed() {
