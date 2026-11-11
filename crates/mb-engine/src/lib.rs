@@ -441,6 +441,10 @@ pub struct EngineConfig {
     /// Completion tokens an answer is shaped to (see [`budget`]); 0 turns
     /// shaping off.
     pub output_budget: u32,
+    /// How long an LLM call may go unanswered before the same request is sent
+    /// once more, the first answer that passes its check being taken
+    /// (`limits.hedge_after`); `None` or zero: never.
+    pub hedge_after: Option<Duration>,
     /// The longest a served answer's LLM calls may take in all, whatever a
     /// provider chain's hops add up to (`limits.generation_timeout`); `None`:
     /// the provider's total.
@@ -548,6 +552,7 @@ impl Default for EngineConfig {
             faker_depth: 6,
             stream: StreamConfig::default(),
             output_budget: budget::DEFAULT_OUTPUT_BUDGET,
+            hedge_after: None,
             generation_timeout: None,
         }
     }
@@ -2579,11 +2584,11 @@ impl Engine {
         let limit = self.llm_limit(provider);
         let deadline = Instant::now() + limit;
         let _permit = self.admit(deadline).await?;
-        let first = self
-            .complete(provider, &messages, format, usage, deadline)
+        let (first, (checked, cut, effects)) = self
+            .hedged(
+                provider, &messages, format, validator, checks, usage, deadline,
+            )
             .await?;
-        let (checked, cut, effects) = tracing::info_span!("mb.validate")
-            .in_scope(|| self.check_reply(validator, &first, checks));
         let truncated = first.truncated.clone().filter(|_| cut);
         let errors = match checked {
             Checked::Valid(value) => {
@@ -2653,6 +2658,164 @@ impl Engine {
         }
         .instrument(tracing::info_span!("mb.repair"))
         .await
+    }
+
+    /// One LLM call and its check, hedged: when it has not finished within
+    /// [`EngineConfig::hedge_after`] (its whole reply, not its first token), or
+    /// finishes with an answer that does not pass its check, the same request is
+    /// sent once more (a provider router such as OpenRouter usually serves it
+    /// from another provider), and the first answer that passes is taken. A call
+    /// that errors is not hedged: the provider has retried what is worth retrying.
+    /// The second call needs what any call does: the token budget, and a free
+    /// generation slot now (it never waits for one), and time before `deadline`.
+    /// When neither answer passes, the first that is merely invalid goes on to the
+    /// repair round (else a rejected one); when neither answered, the first call's
+    /// error is returned. The call still running when the other wins is dropped,
+    /// which cancels its request; it is charged its prompt, estimated at four bytes
+    /// a token.
+    #[allow(clippy::too_many_arguments)]
+    async fn hedged(
+        &self,
+        provider: &dyn Provider,
+        messages: &[ChatMessage],
+        format: &ResponseFormat,
+        validator: &SchemaValidator,
+        checks: &Checks<'_>,
+        usage: &mut Usage,
+        deadline: Instant,
+    ) -> Result<CheckedReply, String> {
+        let check = |reply: &Reply| {
+            tracing::info_span!("mb.validate")
+                .in_scope(|| self.check_reply(validator, reply, checks))
+        };
+        let passes = |c: &Checked| matches!(c, Checked::Valid(_) | Checked::Patched(_));
+        let attempt = || async {
+            let mut spent = Usage::default();
+            let reply = self
+                .complete(provider, messages, format, &mut spent, deadline)
+                .await;
+            (reply, spent)
+        };
+        let Some(after) = self.config.hedge_after.filter(|d| !d.is_zero()) else {
+            let (reply, spent) = attempt().await;
+            *usage = *usage + spent;
+            let reply = reply?;
+            let checked = check(&reply);
+            return Ok((reply, checked));
+        };
+        // What a dropped call is charged: its prompt.
+        let dropped = || {
+            let bytes: usize = messages.iter().map(|m| m.content.len()).sum();
+            Usage {
+                prompt_tokens: u32::try_from(bytes / 4).unwrap_or(u32::MAX),
+                ..Usage::default()
+            }
+        };
+        let charge_dropped = |usage: &mut Usage| {
+            let spent = dropped();
+            self.spend(spent);
+            *usage = *usage + spent;
+        };
+        // A second call when the budget, a free slot and the deadline allow one.
+        let hedge = || {
+            let permit = self.admit_hedge()?;
+            (Instant::now() < deadline).then(|| (permit, Box::pin(attempt())))
+        };
+        let first = attempt();
+        tokio::pin!(first);
+        let timer = tokio::time::sleep(after);
+        tokio::pin!(timer);
+        let mut second = None;
+        let mut hedged = false;
+        let mut first_pending = true;
+        let mut second_pending = false;
+        // What came back without passing: the first call's, then the second's.
+        let mut failed: [Option<Result<CheckedReply, String>>; 2] = [None, None];
+        loop {
+            tokio::select! {
+                (reply, spent) = &mut first, if first_pending => {
+                    first_pending = false;
+                    *usage = *usage + spent;
+                    let errored = match reply {
+                        Ok(reply) => {
+                            let checked = check(&reply);
+                            if passes(&checked.0) {
+                                if second_pending {
+                                    charge_dropped(usage);
+                                }
+                                return Ok((reply, checked));
+                            }
+                            failed[0] = Some(Ok((reply, checked)));
+                            false
+                        }
+                        Err(e) => {
+                            failed[0] = Some(Err(e));
+                            true
+                        }
+                    };
+                    if !hedged && !errored {
+                        hedged = true;
+                        second = hedge();
+                        second_pending = second.is_some();
+                        if second_pending {
+                            tracing::info!("hedging the LLM call: the first answer did not pass");
+                        }
+                    }
+                    if !second_pending {
+                        break;
+                    }
+                }
+                () = &mut timer, if !hedged && first_pending => {
+                    hedged = true;
+                    second = hedge();
+                    second_pending = second.is_some();
+                    if second_pending {
+                        let after_ms = u64::try_from(after.as_millis()).unwrap_or(u64::MAX);
+                        tracing::info!(after_ms, "hedging the LLM call: no answer yet");
+                    }
+                }
+                Some((reply, spent)) = async {
+                    match second.as_mut() {
+                        Some((_, call)) => Some(call.await),
+                        None => None,
+                    }
+                }, if second_pending => {
+                    second_pending = false;
+                    *usage = *usage + spent;
+                    match reply {
+                        Ok(reply) => {
+                            let checked = check(&reply);
+                            if passes(&checked.0) {
+                                if first_pending {
+                                    charge_dropped(usage);
+                                }
+                                return Ok((reply, checked));
+                            }
+                            failed[1] = Some(Ok((reply, checked)));
+                        }
+                        Err(e) => failed[1] = Some(Err(e)),
+                    }
+                    if !first_pending {
+                        break;
+                    }
+                }
+            }
+        }
+        let invalid = |a: &Option<Result<CheckedReply, String>>| {
+            matches!(a, Some(Ok((_, (Checked::Invalid(_), _, _)))))
+        };
+        let [one, two] = failed;
+        // An invalid answer can be repaired; a rejected one cannot.
+        let (one, two) = if !invalid(&one) && invalid(&two) {
+            (two, one)
+        } else {
+            (one, two)
+        };
+        match (one, two) {
+            (Some(Ok(answer)), _) | (_, Some(Ok(answer))) => Ok(answer),
+            (Some(Err(e)), _) | (None, Some(Err(e))) => Err(e),
+            (None, None) => Err("LLM request timed out".into()),
+        }
     }
 
     /// [`Engine::check_output`] of `reply`; when the provider cut it at
@@ -2792,6 +2955,9 @@ struct Refusal<'a> {
     /// The error body the LLM wrote for it, when it did: not checked yet.
     written: Option<Value>,
 }
+
+/// An LLM reply with its check: what [`Engine::check_reply`] made of it.
+type CheckedReply = (Reply, (Checked, bool, guards::AnswerEffects));
 
 /// An LLM reply: its text, and, when the provider stopped it at
 /// `max_tokens`, the error saying so (the text is then the part received).

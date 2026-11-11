@@ -300,6 +300,11 @@ pub struct LimitsConfig {
     /// shorter. Contract imports keep the profile's `timeout`.
     #[serde(with = "humantime_serde")]
     pub generation_timeout: Duration,
+    /// How long an LLM call of a served answer may go unanswered before the same
+    /// request is sent once more, the first answer that passes its check being
+    /// taken; an answer that does not pass sends it at once. `0s`: never.
+    #[serde(with = "humantime_serde")]
+    pub hedge_after: Duration,
 }
 
 impl Default for LimitsConfig {
@@ -312,9 +317,13 @@ impl Default for LimitsConfig {
             repetition_guard: true,
             repetition_guard_span: mb_llm::repetition::DEFAULT_SPAN,
             generation_timeout: DEFAULT_GENERATION_TIMEOUT,
+            hedge_after: DEFAULT_HEDGE_AFTER,
         }
     }
 }
+
+/// `limits.hedge_after`'s default.
+pub const DEFAULT_HEDGE_AFTER: Duration = Duration::from_secs(2);
 
 /// `limits.generation_timeout`'s default.
 pub const DEFAULT_GENERATION_TIMEOUT: Duration = Duration::from_secs(20);
@@ -1706,6 +1715,12 @@ impl FileConfig {
                 l.output_budget_tokens,
                 MIN_OUTPUT_BUDGET..=MAX_OUTPUT_BUDGET,
             )?;
+        }
+        if l.hedge_after > Duration::from_secs(60) {
+            return Err(format!(
+                "limits.hedge_after must be at most 60s, got {}",
+                humantime::format_duration(l.hedge_after)
+            ));
         }
         if !GENERATION_TIMEOUT_RANGE.contains(&l.generation_timeout) {
             return Err(format!(

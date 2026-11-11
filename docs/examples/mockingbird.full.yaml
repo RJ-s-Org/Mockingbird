@@ -50,6 +50,7 @@ limits:
   repetition_guard: true
   repetition_guard_span: 32768
   generation_timeout: 20s
+  hedge_after: 2s
 
 pii:
   enabled: true

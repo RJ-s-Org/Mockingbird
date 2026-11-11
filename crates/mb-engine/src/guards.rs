@@ -60,6 +60,13 @@ impl GenerationLimiter {
         self.max
     }
 
+    /// A permit if one is free now, else `None`.
+    fn try_acquire(&self) -> Option<GenerationPermit> {
+        let permit = Arc::clone(&self.semaphore).try_acquire_owned().ok()?;
+        metrics::gauge!(IN_FLIGHT_METRIC).increment(1.0);
+        Some(GenerationPermit { _permit: permit })
+    }
+
     /// A permit, or `None` once `deadline` passes first.
     async fn acquire_until(&self, deadline: Instant) -> Option<GenerationPermit> {
         let acquire = Arc::clone(&self.semaphore).acquire_owned();
@@ -203,6 +210,19 @@ impl Engine {
                 Some(permit) => Ok(Some(permit)),
                 None => Err("timed out waiting for a generation slot".into()),
             },
+        }
+    }
+
+    /// Admission for a hedged second call, which never waits: `Some` with the
+    /// permit to hold (none without a limiter) when the budget allows a call and
+    /// a generation slot is free now, else `None` (no hedge).
+    pub(crate) fn admit_hedge(&self) -> Option<Option<GenerationPermit>> {
+        if self.budget_exhausted() {
+            return None;
+        }
+        match &self.guards.limiter {
+            None => Some(None),
+            Some(limiter) => limiter.try_acquire().map(Some),
         }
     }
 

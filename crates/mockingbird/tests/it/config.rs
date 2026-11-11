@@ -3367,6 +3367,7 @@ fn limits_ranges_named() {
             "limits:\n  repetition_guard_span: 1048577\n",
             "limits.repetition_guard_span",
         ),
+        ("limits:\n  hedge_after: 61s\n", "limits.hedge_after"),
         (
             "limits:\n  generation_timeout: 0s\n",
             "limits.generation_timeout",
