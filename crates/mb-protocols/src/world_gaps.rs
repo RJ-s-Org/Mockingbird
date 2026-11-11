@@ -255,7 +255,7 @@ pub fn structural_gaps(bundle: &Bundle, world: &World, refused: &[Refusal]) -> V
 }
 
 /// Member names a record keeps when a delete only marks it.
-const SOFT_DELETE_MEMBERS: &[&str] = &[
+pub(crate) const SOFT_DELETE_MEMBERS: &[&str] = &[
     "deleted",
     "is_deleted",
     "isdeleted",
