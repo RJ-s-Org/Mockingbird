@@ -340,12 +340,13 @@ struct Ctx<'a> {
 
 impl<'a> Ctx<'a> {
     fn new(world: &'a World, bundle: &'a Bundle) -> Self {
-        // A type the description itself gives an operation of the contract
-        // is known too, so one write can name a new type and describe it.
+        // A type the description both describes and gives an operation of
+        // the contract is known too, so one write can introduce a new type.
+        // An operation's type alone (a typo) stays unknown.
         let named = world.operations.iter().filter_map(|(id, d)| {
-            d.r#type
-                .as_deref()
-                .filter(|_| bundle.operations.iter().any(|o| &o.id == id))
+            d.r#type.as_deref().filter(|t| {
+                world.types.contains_key(*t) && bundle.operations.iter().any(|o| &o.id == id)
+            })
         });
         let types = bundle
             .operations
@@ -3633,6 +3634,11 @@ mod tests {
         }));
         let v = validate(&w, &b);
         refused_with(&v, "/types/ghost", "no operation has resource type `ghost`");
+
+        // An operation's type that no `types` entry describes is a typo.
+        let w = world(json!({"operations": {"listAccounts": {"type": "acount"}}}));
+        let v = validate(&w, &b);
+        refused_with(&v, "/operations/listAccounts/type", "`acount`");
     }
 
     #[test]
