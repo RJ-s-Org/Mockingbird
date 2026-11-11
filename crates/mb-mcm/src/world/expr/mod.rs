@@ -3,7 +3,7 @@
 //!
 //! An expression is compiled once into a [`Program`] (`Send + Sync`) and
 //! evaluated per request against [`Bindings`] (`request`, `record`, `now` and,
-//! where a key binds one, `it`) and a [`Host`] that answers the session
+//! where a key binds them, `it` and `value`) and a [`Host`] that answers the session
 //! functions (`held`, `count`, `exists`, `seq`, `mint`).
 //!
 //! The syntax is CEL's: literals (int, double, string, bool, null, lists,
@@ -42,7 +42,7 @@
 //!
 //! let p = Program::compile("'k_' + lower(request.body.name)")?;
 //! let request = json!({"body": {"name": "Ada"}});
-//! let b = Bindings { request: &request, record: &Value::Null, now: &Value::Null, it: None };
+//! let b = Bindings { request: &request, record: &Value::Null, now: &Value::Null, it: None, value: None };
 //! assert_eq!(p.eval(&b, &mut NoSession)?, json!("k_ada"));
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
@@ -75,6 +75,9 @@ pub const MAX_STEPS: u64 = 10_000;
 
 /// The largest compiled size of a `matches` pattern, in bytes.
 pub const MAX_REGEX_BYTES: usize = 1 << 20;
+
+/// The most items `split` gives.
+pub const MAX_SPLIT_ITEMS: usize = 1000;
 
 /// The members of `request`.
 const REQUEST_PARTS: [&str; 4] = ["body", "query", "path", "headers"];
@@ -179,6 +182,8 @@ pub struct Bindings<'a> {
     pub now: &'a Value,
     /// The item a key binds at the top level (another record, a list item), if any.
     pub it: Option<&'a Value>,
+    /// The value a key binds at the top level (a list's sort parameter as sent), if any.
+    pub value: Option<&'a Value>,
 }
 
 /// The session behind `held`, `count`, `exists`, `seq` and `mint`.
@@ -244,6 +249,17 @@ impl Program {
         check::refs(&self.source, &self.root)
     }
 
+    /// The string literals a map literal of the expression gives `key`, each with
+    /// where it is: `[{'member': 'price'}]` gives `price` for `member`. A value that
+    /// is not a literal is not listed.
+    pub fn map_literals(&self, key: &str) -> Vec<(String, Position)> {
+        let mut out = Vec::new();
+        check::map_literals(&self.root, key, &mut |text, pos| {
+            out.push((text.to_string(), position(&self.source, pos)));
+        });
+        out
+    }
+
     /// Evaluates with the default budget of [`MAX_STEPS`].
     pub fn eval(&self, bindings: &Bindings<'_>, host: &mut dyn Host) -> Result<Value, EvalError> {
         self.eval_with_budget(bindings, host, MAX_STEPS)
@@ -285,6 +301,8 @@ pub enum Root {
     Record,
     /// `it` as the caller binds it
     It,
+    /// `value` as the caller binds it
+    Value,
     /// A record of this type: `held('T', id)`, or `it` inside `count('T', ...)`
     /// and `exists('T', ...)`.
     Type(String),
@@ -319,6 +337,7 @@ impl fmt::Display for MemberRef {
             Root::Headers => f.write_str("request.headers")?,
             Root::Record => f.write_str("record")?,
             Root::It => f.write_str("it")?,
+            Root::Value => f.write_str("value")?,
             Root::Type(t) => write!(f, "{t}")?,
         }
         for s in &self.path {

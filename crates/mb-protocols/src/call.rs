@@ -46,6 +46,7 @@ mod exec;
 mod exprs;
 mod header_ids;
 mod lifecycle;
+mod list_exprs;
 mod list_query;
 mod lists;
 mod lookup;

@@ -78,13 +78,17 @@ pub(super) enum Func {
     Sha256,
     Seq,
     Mint,
+    Split,
+    Substring,
+    Trim,
+    Replace,
     /// Internal (see [`super::Program::compile_internal`]): the exact sum of a
     /// member over a list's items, as decimal text.
     DecimalSum,
 }
 
 impl Func {
-    const ALL: [Func; 16] = [
+    const ALL: [Func; 20] = [
         Func::Size,
         Func::StartsWith,
         Func::EndsWith,
@@ -101,6 +105,10 @@ impl Func {
         Func::Sha256,
         Func::Seq,
         Func::Mint,
+        Func::Split,
+        Func::Substring,
+        Func::Trim,
+        Func::Replace,
     ];
 
     pub fn name(self) -> &'static str {
@@ -121,18 +129,26 @@ impl Func {
             Func::Sha256 => "sha256",
             Func::Seq => "seq",
             Func::Mint => "mint",
+            Func::Split => "split",
+            Func::Substring => "substring",
+            Func::Trim => "trim",
+            Func::Replace => "replace",
             Func::DecimalSum => "decimal_sum",
         }
     }
 
-    pub fn arity(self) -> usize {
+    /// The fewest and the most arguments it takes.
+    pub fn arity(self) -> (usize, usize) {
         match self {
             Func::StartsWith
             | Func::EndsWith
             | Func::Contains
             | Func::Matches
-            | Func::DecimalSum => 2,
-            _ => 1,
+            | Func::Split
+            | Func::DecimalSum => (2, 2),
+            Func::Substring => (2, 3),
+            Func::Replace => (3, 3),
+            _ => (1, 1),
         }
     }
 
@@ -598,7 +614,18 @@ impl Parser {
             _ => {
                 let func = Func::by_name(&name)
                     .ok_or_else(|| Fail::new(pos, format!("unknown function {name}()")))?;
-                arity(func.arity())?;
+                let (min, max) = func.arity();
+                if min == max {
+                    arity(min)?;
+                } else if !(min..=max).contains(&args.len()) {
+                    return Err(Fail::new(
+                        pos,
+                        format!(
+                            "{name}() takes {min} to {max} arguments, got {}",
+                            args.len()
+                        ),
+                    ));
+                }
                 self.call(func, args, pos)
             }
         }
@@ -654,14 +681,19 @@ impl Parser {
         let mut all = Vec::with_capacity(args.len() + 1);
         all.push(recv);
         all.extend(args);
-        if all.len() != func.arity() {
-            let want = func.arity() - 1;
+        let (min, max) = func.arity();
+        if !(min..=max).contains(&all.len()) {
+            let (min, max) = (min.saturating_sub(1), max.saturating_sub(1));
+            let want = if min == max {
+                format!("{min} argument{}", if min == 1 { "" } else { "s" })
+            } else {
+                format!("{min} to {max} arguments")
+            };
             return Err(Fail::new(
                 pos,
                 format!(
-                    "{name}() as a method takes {want} argument{}, got {}",
-                    if want == 1 { "" } else { "s" },
-                    all.len() - 1
+                    "{name}() as a method takes {want}, got {}",
+                    all.len().saturating_sub(1)
                 ),
             ));
         }
@@ -745,7 +777,7 @@ fn describe(t: &Tok) -> String {
 }
 
 /// The names an expression may use free: the bindings.
-const FREE: [&str; 4] = ["request", "record", "now", "it"];
+const FREE: [&str; 5] = ["request", "record", "now", "it", "value"];
 
 /// Checks every name is a binding or a macro variable in scope, and that
 /// `request` is only reached through one of its parts.
@@ -755,7 +787,9 @@ fn resolve<'a>(n: &'a Node, scope: &mut Vec<&'a str>) -> Result<(), Fail> {
             if !scope.contains(&name.as_str()) && !FREE.contains(&name.as_str()) {
                 return Err(Fail::new(
                     n.pos,
-                    format!("unknown name '{name}' (the bindings are request, record, now and it)"),
+                    format!(
+                        "unknown name '{name}' (the bindings are request, record, now, it and value)"
+                    ),
                 ));
             }
             Ok(())

@@ -124,6 +124,7 @@ YAML or JSON, `version: 1`. Every key is optional; an absent key falls back to t
 | `scope` | `{param, member, kind?, recursive?}` | The parameter that limits a list to one scope. `kind`: `eq` (the default), the member holds the parameter's value; `prefix`, the member is a `/`-separated path directly under the parameter's (`/a/b` under `/a`; any one-step path under a blank or `/` root), or anywhere below it when the `recursive` parameter is `true`; a member value holding no upper-case letter (`path_lower`) is compared with the path in lower case. |
 | `filters` | `[{param, member?, kind}]` or `[{param, grammar, member_prefix?}]` | `kind`: `eq`, `contains`, `gte`, `lte`, `flag`, `text`. `grammar`, for a parameter whose value is a filter expression: `scim`, `odata`, `field_value`, `deep_object` ([Filter grammars](#filter-grammars)); its attribute paths are member paths, below `member_prefix` when set. |
 | `order` | `{member, descending?}` | The order of a list. |
+| `list` | `{where?, sort?: {param, by}}` | A list's [expressions](#expressions): `where`, the default item filter (`it` each record as stored); `sort`, a sort parameter whose `by` turns the value sent into `[{member, desc?}]`. |
 | `paging` | `{style, request?, response?, response_header?, size?}` | `style`: `cursor`, `page`, `offset`, `next_url`, `header_cursor`. A `response_header` named `Link` carries an RFC 8288 link to the next page's URL, the cursor or position under `request` (`<https://…/bookmarks?limit=1&max_id=…>; rel="next"`), and no `next` link on the last page, nor where no URL can be made (off HTTP, or a query holding an object); any other `response_header` carries the next page's URL with `next_url`, else the bare cursor or position. |
 | `ignores` | `[param]` | Request parameters that ask nothing of a list's items (an API version, a detail level, an include switch): a list from state reads past them. One the list's `filters`, `scope` or `paging` reads, or named as an item member, is refused. A `deep_object` filter's `param` is a query parameter, never a body pointer. |
 | `idempotency` | `{header}` | The header that makes a replay answer as the first call did. |
@@ -179,13 +180,14 @@ operations:
 
 ### Expressions
 
-`set`, `refuse` (and its `code` and `message`), `computed` and `effects` take expressions in a subset of [CEL](https://cel.dev) (the Common Expression Language Kubernetes admission policies use): literals (numbers, text in `'…'` or `"…"`, `true`, `false`, `null`, lists `[…]`, maps `{'k': v}`), members (`a.b`, `a['b-c']`, `a[0]`), `?:`, `&&`, `||`, `!`, comparisons, `+ - * / %`, `in`, `has(a.b)`, and the macros `list.all(x, p)`, `list.exists(x, p)`, `list.map(x, e)`, `list.filter(x, p)`. Text is joined with `+`; there is no other template syntax. An expression is compiled once, when the world is loaded, and evaluated with a step budget.
+`set`, `refuse` (and its `code` and `message`), `computed`, `effects` and a list's `list` (`where` and `sort.by`) take expressions in a subset of [CEL](https://cel.dev) (the Common Expression Language Kubernetes admission policies use): literals (numbers, text in `'…'` or `"…"`, `true`, `false`, `null`, lists `[…]`, maps `{'k': v}`), members (`a.b`, `a['b-c']`, `a[0]`), `?:`, `&&`, `||`, `!`, comparisons, `+ - * / %`, `in`, `has(a.b)`, and the macros `list.all(x, p)`, `list.exists(x, p)`, `list.map(x, e)`, `list.filter(x, p)`. Text is joined with `+`; there is no other template syntax. An expression is compiled once, when the world is loaded, and evaluated with a step budget.
 
 | Name | Value |
 | --- | --- |
 | `request` | `{body, path, query, headers}`: the parsed body, the path and query parameters, and the headers the mock records, their names in lower case (`request.headers['x-actor']`). |
 | `record` | In `set` and `refuse`, the target as stored before the call, or `null` (a create, a target the session does not hold). In `computed`, the record answered, as stored (a list item cut down to the list's item schema still reads the whole record). In `effects`, the target as the call's write left it (as it was held, for a delete). |
-| `it` | In `effects`' `when` and `set`, the record an `update` or `delete` found (`null` for a `create`); inside `count`, `exists`, `sum` and the list macros, each item. |
+| `it` | In `effects`' `when` and `set`, the record an `update` or `delete` found (`null` for a `create`); in `list.where`, each record of the list as stored; inside `count`, `exists`, `sum` and the list macros, each item. |
+| `value` | In `list.sort.by`, the sort parameter as the request sent it (a deep object parameter, `sort[0][field]=x`, as the object its keys make). |
 | `now` | The request time, RFC 3339 text: the seeded time when the call's draws are seeded (as generated dates are), else the clock. |
 
 | Function | What it does |
@@ -195,7 +197,12 @@ operations:
 | `sum(list, expr)` | The sum of `expr` over `list`, with `it` bound to each item. |
 | `seq(scope)` | A counter per session and scope, from 1: `seq('incident')`, `seq('pr:' + request.path.repo)`. The counters are the session's state: a reset clears them, a snapshot carries them, and a world patch or a restart does not start them again. They are kept as one record of type `__mockingbird.seq`, which counts among the session's resources and shows in its exports and change feed like any other. |
 | `mint(pattern)` | A fresh id matching a regular expression, drawn from the seeded minting: `mint('[0-9]{12}')`. |
-| `md5`, `sha1`, `sha256`, `lower`, `upper`, `slug`, `size`, `string`, `int`, `double`, `startsWith`, `endsWith`, `contains`, `matches` | Text and conversion helpers: `md5(lower(request.body.email))`. |
+| `md5`, `sha1`, `sha256`, `lower`, `upper`, `slug`, `size`, `string`, `int`, `double`, `startsWith`, `endsWith`, `contains`, `matches`, `trim` | Text and conversion helpers: `md5(lower(request.body.email))`. |
+| `split(s, sep)` | The parts of `s` between each `sep`, as a list (each character for an empty `sep`); more than 1000 parts is an error. |
+| `substring(s, start, end?)` | The characters of `s` from `start` up to `end` (the end when left out), counted in characters and clamped to the text: `substring('-price', 1)` is `price`. |
+| `replace(s, from, to)` | `s` with every `from` replaced by `to`; what it would build is charged to the step budget before it is built. |
+
+Every function is also a method of its first argument: `request.query.sort.split(',')`, `p.substring(1)`.
 
 Deliberate differences from CEL:
 
@@ -270,6 +277,32 @@ operations:
   deleteLine:
     effects:
       - {op: delete, type: events, id: "'ev-' + record.id"}
+```
+
+**`list`.** A list's expressions, beside its `paging`, `filters`, `scope` and `order`, applied when the list is answered from state; only a list takes them.
+
+- `where` is its default item filter: only the records it is `true` for are listed, `it` bound to each record as stored (the whole record, not the item cut to the list's schema) and `request` the call's; `record` is not bound. It applies before paging, scope, filters and order, and with them: a page holds only the records it keeps, and the next page's cursor or count counts only those. A record it fails on (a type mismatch, its step budget) is left out, and the failure is listed once per call under `expr_failed`.
+- `sort` reads the parameter `param` (one the operation declares). When the request sends it, `by` is evaluated with `value` the parameter as sent (and `request`), and gives `[{member, desc?}]` (or one such map): the items are ordered by each member in turn, as `order` orders them (numbers by value, date-times by time, text by text, an item not holding the member, or holding `null`, last either way, and items equal on every member kept in their order), before the page is cut. When the request does not send it, the list keeps its `order`. A `by` that fails, gives no member, or gives one the items' schema does not declare is listed under `expr_failed`, and the list keeps its `order` too. The parameter counts as described: a list never leaves it to generation as a parameter it does not read. Validation refuses `list` on an operation that is no list, a `param` the operation does not declare, a `where` reading a member the type's records do not have, `record` in either expression, `it` in `by`, and a `member` written as text in `by` that the records do not have; a member `by` computes is checked when it runs.
+
+```yaml
+operations:
+  listItems:
+    list:
+      # A default status filter: only the active items, unless a status is asked for.
+      where: "has(request.query.status) || it.status == 'active'"
+      # sort=-price, sort=price:desc, sort=price and sort=category,-price.
+      sort:
+        param: sort
+        by: >-
+          value.split(',').map(p, trim(p).startsWith('-')
+            ? {'member': trim(p).substring(1), 'desc': true}
+            : {'member': trim(p).split(':')[0], 'desc': trim(p).endsWith(':desc')})
+  listRecords:
+    list:
+      # sort[0][field]=price&sort[0][dir]=desc, a deep object parameter.
+      sort:
+        param: sort
+        by: "[{'member': request.query.sort['0'].field, 'desc': request.query.sort['0'].dir == 'desc'}]"
 ```
 
 `derived` (`{<member>: {kind: count, of} | {kind: sum, of, member, where?}}`), the key `computed` replaces, still loads and answers as before: each member is read as a `computed` entry, `count` as the number of the record's held children of type `of` and `sum` as the exact decimal sum of their `member` over those holding the `where` values, its children found as before (named by the child type's `parent.member`, or stored under the collection its `parent.path_param` names; not soft-deleted). It is set only on a record created in the session or one with a child held; a sum goes into an `integer` member only when integral, a `number` member as a number and a `string` member at the children's largest scale, and nothing is set when a child's member is not a number or more than 500 children would have to be read. A `computed` entry for the same member wins. Write `computed` in new descriptions.

@@ -423,8 +423,11 @@ pub(super) struct Bound {
     pub(super) request: Value,
     pub(super) record: Value,
     pub(super) now: Value,
-    /// `it`, where a key binds it at the top (an effect's other record).
+    /// `it`, where a key binds it at the top (an effect's other record, a listed
+    /// record).
     pub(super) it: Option<Value>,
+    /// `value`, where a key binds it (a list's sort parameter as sent).
+    pub(super) value: Option<Value>,
 }
 
 impl Bound {
@@ -434,6 +437,7 @@ impl Bound {
             record: record.cloned().unwrap_or(Value::Null),
             now: now_value(rt, call),
             it: None,
+            value: None,
         }
     }
 
@@ -443,6 +447,7 @@ impl Bound {
             record: &self.record,
             now: &self.now,
             it: self.it.as_ref(),
+            value: self.value.as_ref(),
         }
     }
 }

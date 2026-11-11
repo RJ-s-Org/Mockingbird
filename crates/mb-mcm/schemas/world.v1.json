@@ -733,6 +733,34 @@
             "member"
           ]
         },
+        "list": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "A list's expressions (a CEL subset, see docs/world.md). `where`: the default item filter, `it` bound to each record as stored; only records it is true for are listed, before paging, scope, filters and order. `sort`: when the request sends `param`, `by` (with `value` bound to the parameter as sent) gives `[{member, desc?}]`, the members to order the items by in turn.",
+          "properties": {
+            "where": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sort": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "param": {
+                  "$ref": "#/$defs/param"
+                },
+                "by": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "param",
+                "by"
+              ]
+            }
+          }
+        },
         "paging": {
           "type": "object",
           "additionalProperties": false,

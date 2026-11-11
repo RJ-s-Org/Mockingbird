@@ -28,14 +28,17 @@
 //! marks the collection listed
 //! ([`state_lists::mark_listed`]), so it survives a rebuild of the runtime.
 //!
-//! The query then narrows them as [`list_query`] says: the described scope and filters
+//! A described `list.where` keeps only the records it is `true` for, each as held,
+//! before anything else narrows them ([`list_exprs`]). The query then narrows them as
+//! [`list_query`] says: the described scope and filters
 //! (a `grammar` filter's expression among them; every key bracketed below a
 //! `deep_object` one is its own),
 //! the soft delete unless its `listed_with` parameter is sent, the name-matched filters
 //! of [`lists::filters_of`] for parameters the description does not name (a described
 //! `fields` parameter is no filter: it narrows each item served, [`super::fields`]). Then the page
-//! is cut and rendered by [`state_lists::page`]: derived members filled, the described
-//! order, the count, a page number or offset from state, a next page of a cursor,
+//! is cut and rendered by [`state_lists::page`]: derived members filled, the order a
+//! sort parameter's `list.sort` gives ([`list_exprs`]), else the described order, the
+//! count, a page number or offset from state, a next page of a cursor,
 //! next-URL or header cursor as a [`pages`] token (whose later pages [`pages::serve`]
 //! answers here). A page cut with nowhere to say where the rest is is served whole
 //! under a described paging (as a generated one is), and cut to the size a parameter
@@ -47,8 +50,8 @@
 //! ([`lists::no_content`]).
 //!
 //! It falls back, and the call is generated as before, for:
-//! - `undescribed_param`: a query parameter that is no described filter, scope or
-//!   paging parameter, no name-matched filter, no page size and none the description
+//! - `undescribed_param`: a query parameter that is no described filter, scope,
+//!   paging or sort parameter, no name-matched filter, no page size and none the description
 //!   `ignores`, unless its value asks nothing (blank, its declared `default`, or the
 //!   first page of a page position); or a member of a request body (a list asked by a
 //!   POST, a SOAP or gRPC request) that no described parameter names or holds, looked
@@ -82,8 +85,8 @@ use crate::MockRuntime;
 use crate::call::state_lists::Shape;
 use crate::call::{
     CallPlan, MAX_SCAN, OperationCall, StateAccess, bundle_index, cursors, id_string,
-    item_identity, list_query, lists, pages, property_schema, ranges, runs, schema_parts,
-    state_lists, state_span,
+    item_identity, list_exprs, list_query, lists, pages, property_schema, ranges, runs,
+    schema_parts, state_lists, state_span,
 };
 
 /// Whether the executor takes these calls.
@@ -172,8 +175,13 @@ async fn answer(
     let size = list_query::requested_page(rt, op, call);
     let size_ref = size.as_ref().map(|(name, limit)| (name.as_str(), *limit));
     let fields_param = super::fields::param(rt, op);
-    let knows =
-        |param: &str| q.as_ref().is_some_and(|q| q.knows(param)) || fields_param == Some(param);
+    let sort_param = list_exprs::sort_param(rt, op);
+    let sorts_with = |param: &str| sort_param.is_some_and(|s| list_exprs::is_sort_param(s, param));
+    let knows = |param: &str| {
+        q.as_ref().is_some_and(|q| q.knows(param))
+            || fields_param == Some(param)
+            || sorts_with(param)
+    };
     let filters: Vec<_> = lists::filters_of(
         bundle,
         op,
@@ -183,7 +191,7 @@ async fn answer(
         size_ref,
     )
     .into_iter()
-    .filter(|(param, _)| !q.as_ref().is_some_and(|q| q.pages_with(param)))
+    .filter(|(param, _)| !q.as_ref().is_some_and(|q| q.pages_with(param)) && !sorts_with(param))
     .collect();
     let paging = runs::Paging::of(bundle, op, size_ref.map(|(name, _)| name));
     let undescribed = call.query.iter().find(|(param, raw)| {
@@ -194,10 +202,14 @@ async fn answer(
     });
     // A list asked by a body (a POST query, a SOAP request) reads the members the
     // description names; another that asks something is undescribed.
-    let body_asks = call
-        .body
-        .as_ref()
-        .and_then(|body| unread(bundle, op, q.as_ref(), body, ""));
+    let body_asks = call.body.as_ref().and_then(|body| {
+        let mut body = body.clone();
+        // The sort parameter, sent as a body member, is read.
+        if let (Some(param), Some(members)) = (sort_param, body.as_object_mut()) {
+            members.remove(param);
+        }
+        unread(bundle, op, q.as_ref(), &body, "")
+    });
     if let Some((on, _)) = undescribed {
         return Err(Stop::on("undescribed_param", on));
     }
@@ -250,6 +262,8 @@ async fn answer(
     let mut items = Vec::new();
     // The record as held, beside its item, only for computed members to read.
     let computes = crate::call::computed::describes(rt, t);
+    // The described default filter, over each record as held.
+    let mut listed_where = list_exprs::Where::of(state, rt, (plan, call)).await;
     let mut in_scope = false;
     for r in &records {
         if !(placed.contains_key(r.id.as_str())
@@ -259,6 +273,11 @@ async fn answer(
             continue;
         }
         in_scope = true;
+        if let Some(w) = listed_where.as_mut()
+            && !w.keeps(state, plan, &r.data).await
+        {
+            continue;
+        }
         let item = lists::projected(bundle, Some(&shape.items), &r.data, 0);
         // The described keys, else the name-matched filters; and those the description
         // does not name besides.
@@ -294,13 +313,14 @@ async fn answer(
         .filter_map(|(item, _)| mb_mcm::member_at(item, &field).and_then(id_string))
         .collect();
     let none_kept = items.is_empty();
+    let sort = list_exprs::sort_keys(state, (plan, call), &shape.items, &items).await;
     let mut served = state_lists::page(
         state,
         (plan, call),
         (t, q.as_ref()),
         (&shape, &envelope),
         items,
-        true,
+        (sort.as_deref(), true),
     )
     .await
     // Served anyway, a page is refused only when it does not render, or says no page

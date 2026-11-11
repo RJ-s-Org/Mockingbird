@@ -17,6 +17,11 @@ operations:
       - when: "request.body.total > 10000"
         status: 400
         message: {expr: "'an order total is at most 10000, not ' + string(request.body.total)"}
+  listOrders:
+    # A default status filter: shipped orders are listed only when the
+    # request asks for a status (docs/world.md#expressions).
+    list:
+      where: "has(request.query.status) || it.status != 'shipped'"
   getOrder:
     not_found: 404
   deleteOrder:

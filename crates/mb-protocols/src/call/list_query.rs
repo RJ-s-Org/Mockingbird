@@ -961,13 +961,27 @@ pub(super) fn sort(q: &ListQuery, items: &mut [Value]) {
     let Some((member, descending)) = &q.order else {
         return;
     };
-    let held = |v: &Value| mb_mcm::member_at(v, member).is_some_and(|h| !h.is_null());
-    items.sort_by(|a, b| match (held(a), held(b)) {
-        (true, true) if *descending => order_of(member, b, a),
-        (true, true) => order_of(member, a, b),
-        (true, false) => Ordering::Less,
-        (false, true) => Ordering::Greater,
-        (false, false) => Ordering::Equal,
+    sort_by(items, &[(member.as_str(), *descending)]);
+}
+
+/// Sorts `items` by `keys`, each a member and whether largest first, in turn: as the
+/// described order sorts, items not holding a member (or holding `null`) going last
+/// either way, and items that compare equal on every key keeping their order.
+pub(super) fn sort_by(items: &mut [Value], keys: &[(&str, bool)]) {
+    let held = |v: &Value, member: &str| mb_mcm::member_at(v, member).is_some_and(|h| !h.is_null());
+    items.sort_by(|a, b| {
+        keys.iter()
+            .map(
+                |&(member, descending)| match (held(a, member), held(b, member)) {
+                    (true, true) if descending => order_of(member, b, a),
+                    (true, true) => order_of(member, a, b),
+                    (true, false) => Ordering::Less,
+                    (false, true) => Ordering::Greater,
+                    (false, false) => Ordering::Equal,
+                },
+            )
+            .find(|o| o.is_ne())
+            .unwrap_or(Ordering::Equal)
     });
 }
 

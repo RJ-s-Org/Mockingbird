@@ -565,14 +565,17 @@ pub(super) async fn answer(
     let size = list_query::requested_page(rt, op, call);
     let size_ref = size.as_ref().map(|(name, limit)| (name.as_str(), *limit));
     let query = op.input.query.as_ref();
+    let sort_param = list_exprs::sort_param(rt, op);
+    let sorts_with = |param: &str| sort_param.is_some_and(|s| list_exprs::is_sort_param(s, param));
     let filters: Vec<_> = lists::filters_of(bundle, op, query, &item_parts, call, size_ref)
         .into_iter()
-        .filter(|(param, _)| !q.pages_with(param))
+        .filter(|(param, _)| !q.pages_with(param) && !sorts_with(param))
         .collect();
     // A value no record can be shown to answer (a search, an undescribed position).
     if call.query.keys().any(|param| {
         !filters.iter().any(|(name, _)| name == param)
             && !q.knows(param)
+            && !sorts_with(param)
             && size_ref.is_none_or(|(name, _)| name != param)
     }) {
         return None;
@@ -601,9 +604,15 @@ pub(super) async fn answer(
     let mut items = Vec::new();
     // The record as held, beside its item, only for computed members to read.
     let computes = crate::call::computed::describes(rt, t);
+    let mut listed_where = list_exprs::Where::of(state, rt, (plan, call)).await;
     for r in &records {
         if !placed.contains_key(r.id.as_str())
             && !lists::in_collection(rt, (plan, call), t, &field, r)
+        {
+            continue;
+        }
+        if let Some(w) = listed_where.as_mut()
+            && !w.keeps(state, plan, &r.data).await
         {
             continue;
         }
@@ -620,13 +629,14 @@ pub(super) async fn answer(
             items.push((item, held));
         }
     }
+    let sort = list_exprs::sort_keys(state, (plan, call), &shape.items, &items).await;
     page(
         state,
         (plan, call),
         (t, Some(&q)),
         (&shape, &envelope),
         items,
-        false,
+        (sort.as_deref(), false),
     )
     .await
     .ok()
@@ -635,8 +645,8 @@ pub(super) async fn answer(
 /// The page list `call` asks for of `items`, the records of type `t` its query keeps,
 /// each as the items declare it beside the record as held, in the collection's order,
 /// placed in `envelope` (an empty page of `shape`): each item's computed members filled
-/// from its held record, ordered by `q`'s
-/// described order, counted, and cut by its described page (a page number or offset
+/// from its held record, ordered by `sort` (a sort parameter's members, see
+/// [`list_exprs`]) when given, else by `q`'s described order, counted, and cut by its described page (a page number or offset
 /// from state, a token's later pages kept as a [`pages`] cut), else by the page size a
 /// parameter asks for (see the module's doc). Tagged `State`. A cut with no place for
 /// a token, nor a run, is not served, unless `served_anyway`: then a described page is
@@ -648,7 +658,7 @@ pub(super) async fn page(
     (t, q): (&str, Option<&ListQuery>),
     (shape, envelope): (&Shape, &Value),
     listed: Vec<(Value, Value)>,
-    served_anyway: bool,
+    (sort, served_anyway): (Option<&[list_exprs::SortKey]>, bool),
 ) -> Result<GeneratedResponse, Unserved> {
     let rt = state.rt;
     let op = plan.op;
@@ -660,8 +670,14 @@ pub(super) async fn page(
     let (mut items, held): (Vec<Value>, Vec<Value>) = listed.into_iter().unzip();
     let items_at = (&mut items[..], Some(&shape.items));
     computed::fill_page(state, (plan, call), t, items_at, Some(&held)).await;
-    if let Some(q) = q {
-        list_query::sort(q, &mut items);
+    match (sort, q) {
+        (Some(keys), _) => {
+            let keys: Vec<(&str, bool)> =
+                keys.iter().map(|k| (k.member.as_str(), k.desc)).collect();
+            list_query::sort_by(&mut items, &keys);
+        }
+        (None, Some(q)) => list_query::sort(q, &mut items),
+        (None, None) => {}
     }
     // What the query keeps, before the page is cut: the list's count on every page.
     let total = items.len();

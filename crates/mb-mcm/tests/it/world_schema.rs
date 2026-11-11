@@ -54,6 +54,9 @@ fn schema_rejects_unknown_keys_and_bad_pointers() {
         json!({"operations": {"o": {"effects": [{"op": "delete", "id": "'x'"}]}}}),
         json!({"operations": {"o": {"effects": [{"op": "create", "type": "t", "then": 1}]}}}),
         json!({"types": {"t": {"computed": {"n": 1}}}}),
+        json!({"operations": {"o": {"list": {"sort": {"param": "sort"}}}}}),
+        json!({"operations": {"o": {"list": {"where": ""}}}}),
+        json!({"operations": {"o": {"list": {"filter": "true"}}}}),
         json!({"operations": {"o": {"queue": {"effect": "take", "count": "count"}}}}),
         json!({"operations": {"o": {"queue": {"effect": "take", "requeue": {"at": "/m"}}}}}),
         json!({"types": {"t": {"lifecycle": {"member": "s", "soft_delete": {"state": "x", "unless": {"param": "force"}}}}}}),
@@ -122,6 +125,7 @@ fn schema_accepts_every_serialized_field() {
                     {"param": "filter", "grammar": "deep_object", "member_prefix": "meta"}
                 ],
                 "order": {"member": "created", "descending": true},
+                "list": {"where": "it.status != 'closed'", "sort": {"param": "sort", "by": "[{'member': value, 'desc': false}]"}},
                 "paging": {"style": "header_cursor", "request": "cursor", "response": "next", "response_header": "Link", "size": "limit"},
                 "ignores": ["version", "/ActiveList/Include"],
                 "idempotency": {"header": "Idempotency-Key"},
