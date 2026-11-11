@@ -1283,6 +1283,16 @@ fn read_shapes(rt: &crate::MockRuntime, t: &str) -> Vec<(Value, bool)> {
             schemas.push((shape.items, true));
         }
     }
+    // A type nothing reads at the top (GraphQL's records read only below another
+    // type: a repository's pull requests) is read as the definition named for it.
+    if schemas.is_empty()
+        && let Some(name) = rt.bundle().defs.keys().find(|d| d.eq_ignore_ascii_case(t))
+    {
+        schemas.push((
+            serde_json::json!({"$ref": format!("#/$defs/{name}")}),
+            false,
+        ));
+    }
     schemas
 }
 
