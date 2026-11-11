@@ -561,6 +561,15 @@ impl SchemaValidator {
         filled.then_some(out)
     }
 
+    /// Whether `instance` itself (not an object inside it) lacks a required
+    /// member.
+    pub(crate) fn lacks_root_member(&self, instance: &Value) -> bool {
+        self.inner.iter_errors(instance).any(|e| {
+            matches!(e.kind(), ValidationErrorKind::Required { .. })
+                && e.instance_path().as_str().is_empty()
+        })
+    }
+
     /// The location of the schema holding the keyword that failed at
     /// `evaluation_path`: a JSON pointer into the schema that restarts at a
     /// `$ref`'s target.
