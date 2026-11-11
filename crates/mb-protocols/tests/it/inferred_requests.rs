@@ -31,8 +31,24 @@ paths:
                 text: {{type: string}}
                 mode: {{type: string, enum: [plain, rich]}}
                 details: {{type: object, additionalProperties: {{type: string}}}}
+                responder: {{anyOf: [{{$ref: "#/components/schemas/Responder"}}, {{type: "null"}}]}}
       responses:
         "200": {{description: ok, content: {{application/json: {{schema: {{type: object, properties: {{ok: {{type: boolean}}}}}}}}}}}}
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - {{name: limit, in: query, required: true, schema: {{type: integer}}}}
+      responses:
+        "200": {{description: ok, content: {{application/json: {{schema: {{type: object, properties: {{ok: {{type: boolean}}}}}}}}}}}}
+components:
+  schemas:
+    Responder:
+      type: object
+      required: [id, type]
+      properties:
+        id: {{type: string}}
+        type: {{type: string}}
 "##
     )
 }
@@ -51,7 +67,28 @@ async fn status_of(inferred: bool, strict: bool, body: Value) -> StatusCode {
 }
 
 fn healthchecks_body() -> Value {
-    json!({"attachments": [{"color": "danger"}], "details": {"Total pings": 0}})
+    // `responder` is a guessed nullable member (`anyOf` with `null`) lacking a guessed
+    // required member.
+    json!({"attachments": [{"color": "danger"}], "details": {"Total pings": 0}, "responder": {"id": "r1"}})
+}
+
+async fn query_status(inferred: bool, query: &str) -> StatusCode {
+    let h = support::harness(
+        &contract(inferred),
+        vec![json!({"ok": true})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    h.send("GET", &format!("/items{query}"), None, &[]).await.0
+}
+
+/// The query of an inferred contract is lenient too: a missing or mistyped
+/// parameter is taken.
+#[tokio::test]
+async fn an_inferred_contract_takes_a_query_its_guesses_refuse() {
+    assert_eq!(query_status(true, "").await, StatusCode::OK);
+    assert_eq!(query_status(true, "?limit=ten").await, StatusCode::OK);
+    assert_eq!(query_status(false, "").await, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

@@ -596,6 +596,15 @@ impl SchemaValidator {
     /// Whether `e` is what an inferred request schema gets wrong: a required member,
     /// a closed object, or the scalar type of a member that holds a scalar.
     fn is_guesswork(&self, e: &jsonschema::ValidationError<'_>, instance: &Value) -> bool {
+        // A failed `anyOf`/`oneOf` (the smart import writes one for a nullable or mixed
+        // member) is a guess when one of its branches failed only on guesses.
+        if let ValidationErrorKind::AnyOf { context }
+        | ValidationErrorKind::OneOfNotValid { context } = e.kind()
+        {
+            return context.iter().any(|branch| {
+                !branch.is_empty() && branch.iter().all(|b| self.is_guesswork(b, instance))
+            });
+        }
         match e.kind().keyword() {
             "required" | "additionalProperties" | "unevaluatedProperties" => true,
             "type" => {
@@ -605,8 +614,11 @@ impl SchemaValidator {
                     .location(e.evaluation_path().as_str())
                     .and_then(|l| self.at(&l))
                     .and_then(|node| node.get("type"));
-                let wants_scalar =
-                    |t: &Value| t.as_str().is_some_and(|t| !matches!(t, "object" | "array"));
+                // Wanting `null` is no guess at a scalar's type.
+                let wants_scalar = |t: &Value| {
+                    t.as_str()
+                        .is_some_and(|t| !matches!(t, "object" | "array" | "null"))
+                };
                 held.is_some_and(|v| scalar(v) && !v.is_null())
                     && wanted.is_some_and(|t| match t {
                         Value::Array(ts) => ts.iter().all(wants_scalar),
