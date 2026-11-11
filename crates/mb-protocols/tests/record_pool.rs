@@ -371,3 +371,48 @@ async fn a_type_whose_lists_show_a_summary_of_its_record_is_still_pooled() {
         "a summary: {listed}"
     );
 }
+
+#[tokio::test]
+async fn a_create_takes_what_it_did_not_send_from_a_pool_record_with_no_model_call() {
+    let (contract, mut w) = writable();
+    w["operations"]["createWidget"] = json!({"kind": "create", "type": "widgets"});
+    let contract = contract.replace(
+        "      required: [id, name]\n      properties:\n        id: {type: string}\n        name: {type: string}\n",
+        "      required: [id, name, color, url]\n      properties:\n        id: {type: string}\n        name: {type: string}\n        color: {type: string}\n        url: {type: string}\n",
+   )
+    .replace(
+        "requestBody: {content: {application/json: {schema: {$ref: \"#/components/schemas/Widget\"}}}}",
+        "requestBody: {content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}}}}}}",
+    );
+    let colored = |i: usize| {
+        json!({"id": format!("wdg{i}"), "name": format!("Widget {i}"), "color": format!("color-{i}"),
+               "url": format!("https://example.test/widgets/wdg{i}")})
+    };
+    let batch = json!({"records": (1..=5).map(colored).collect::<Vec<_>>()});
+    let h = support::described(&contract, w, vec![batch]);
+    mb_protocols::fill_record_pool(Arc::downgrade(&h.rt), 60_000).await;
+    assert_eq!(h.rt.pool.sizes().get("widgets"), Some(&5));
+    let calls = h.provider.requests().len();
+    let (status, _, made) = h
+        .send("POST", "/widgets", Some(json!({"name": "Brand new"})), &[])
+        .await;
+    assert!(status.is_success(), "{made}");
+    assert_eq!(h.provider.requests().len(), calls, "no model call: {made}");
+    assert_eq!(made["name"], "Brand new", "the request wins: {made}");
+    let id = made["id"].as_str().unwrap();
+    assert!(
+        !id.starts_with('w') || !(1..=5).any(|i| id == format!("w{i}")),
+        "a new id: {made}"
+    );
+    let color = made["color"].as_str().unwrap();
+    assert!(color.starts_with("color-"), "from a pool record: {made}");
+    assert_eq!(
+        made["url"],
+        format!("https://example.test/widgets/{id}"),
+        "{made}"
+    );
+    assert_eq!(pool_note(&h), Some(json!(1)));
+    // Stored as answered.
+    let (_, _, read) = h.send("GET", &format!("/widgets/{id}"), None, &[]).await;
+    assert_eq!(read, made);
+}

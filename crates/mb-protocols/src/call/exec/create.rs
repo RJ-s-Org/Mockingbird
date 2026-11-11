@@ -340,19 +340,33 @@ pub(super) async fn run(
     if !missing.is_empty()
         && let Value::Object(known) = &mut data
     {
-        let names: Vec<String> = missing.iter().map(|(name, _)| name.clone()).collect();
-        let filled = plan
-            .engine
-            .fill(
-                rt.bundle(),
-                &fill_schema(&missing, &required),
-                known,
-                &names,
-                FillContext { op, call },
-            )
-            .await;
-        usage = filled.usage;
-        fill_into(known, filled.members);
+        let mut names: Vec<String> = missing.iter().map(|(name, _)| name.clone()).collect();
+        // From the mock's record pool, when it holds the type: a pool record's values,
+        // under the request's; the model fills only what the pool record lacks.
+        if let Some(pooled) = super::pool::create_fill(rt, t, &key, &names) {
+            names.retain(|name| !pooled.contains_key(name));
+            fill_into(known, pooled);
+            plan.exprs.pooled(1);
+        }
+        if !names.is_empty() {
+            let asked: Vec<(String, Value)> = missing
+                .iter()
+                .filter(|(name, _)| names.contains(name))
+                .cloned()
+                .collect();
+            let filled = plan
+                .engine
+                .fill(
+                    rt.bundle(),
+                    &fill_schema(&asked, &required),
+                    known,
+                    &names,
+                    FillContext { op, call },
+                )
+                .await;
+            usage = filled.usage;
+            fill_into(known, filled.members);
+        }
         settle_filled(rt, (field, &shape.schemas), (&missing, &required), known);
     }
     unique_keys(state, (seed, t), &filled_keys, &mut data)

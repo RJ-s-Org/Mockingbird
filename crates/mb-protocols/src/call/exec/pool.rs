@@ -348,6 +348,50 @@ fn id_text(v: &Value) -> Option<String> {
     }
 }
 
+/// Values for the members `names` of a record of type `t` a create makes under `key`,
+/// from the pool (see the module's doc): those a pool record (the same `key` takes the
+/// same one) holds, with the pool record's own id written as `key` wherever a value
+/// embeds it (a `url`, a `client_secret`). `None` when the pool holds no record of `t`.
+pub(super) fn create_fill(
+    rt: &MockRuntime,
+    t: &str,
+    key: &str,
+    names: &[String],
+) -> Option<serde_json::Map<String, Value>> {
+    if !rt.consistency {
+        return None;
+    }
+    let records = rt.pool.records(t, &digest(rt, t));
+    if records.is_empty() {
+        return None;
+    }
+    let pick = Sha256::digest(key.as_bytes());
+    let record = records.get(usize::from(pick[0]) % records.len())?;
+    let id_member = crate::call::exprs::identity_member(rt, t);
+    let own_id = record.get(&id_member).and_then(id_text);
+    let mut out = serde_json::Map::new();
+    for name in names {
+        if let Some(value) = record.get(name) {
+            let mut value = value.clone();
+            if let Some(own) = own_id.as_deref().filter(|own| own.len() >= 3) {
+                rewrite_id(&mut value, own, key);
+            }
+            out.insert(name.clone(), value);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Writes `to` for `from` in every string of `value`.
+fn rewrite_id(value: &mut Value, from: &str, to: &str) {
+    match value {
+        Value::String(s) if s.contains(from) => *s = s.replace(from, to),
+        Value::Array(items) => items.iter_mut().for_each(|v| rewrite_id(v, from, to)),
+        Value::Object(members) => members.values_mut().for_each(|v| rewrite_id(v, from, to)),
+        _ => {}
+    }
+}
+
 /// Whether `op` names its record by its key alone: an HTTP route with exactly one path
 /// parameter (one after an owner's would not tell owners apart), or a GraphQL field.
 fn keyed_alone(op: &Operation) -> bool {
