@@ -322,3 +322,23 @@ async fn a_session_that_wrote_the_type_first_lists_its_own_records() {
     assert_eq!(listed, json!([widget(9)]));
     assert_eq!(pool_note(&h), None);
 }
+
+#[tokio::test]
+async fn a_list_whose_items_are_another_type_never_shapes_the_pool() {
+    // `/widget-kinds` lists kinds (ids from an enum) but is typed as widgets. The pool's
+    // widgets are written from the read by id's schema, so no record takes a kind's id;
+    // none reads as a kind either, so the type is left unpooled instead of corrupted.
+    let contract = WIDGETS.replace(
+        "  /widgets/{id}:",
+        "  /widget-kinds:\n    get:\n      operationId: listKinds\n      responses:\n        \"200\": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: \"#/components/schemas/Kind\"}}}}}\n  /widgets/{id}:",
+    ) + "    Kind:\n      type: object\n      required: [id, name]\n      properties:\n        id: {type: string, enum: [k1, k2, k3]}\n        name: {type: string}\n";
+    let mut w = world();
+    w["operations"]["listKinds"] = json!({"kind": "list", "type": "widgets"});
+    let batch = json!({"records": (1..=5).map(widget).collect::<Vec<_>>()});
+    let h = support::described(&contract, w, vec![batch, widget(9)]);
+    mb_protocols::fill_record_pool(Arc::downgrade(&h.rt), 60_000).await;
+    assert_eq!(h.rt.pool.sizes().get("widgets").copied().unwrap_or(0), 0);
+    let (_, headers, body) = h.send("GET", "/widgets/w9", None, &[]).await;
+    assert_ne!(headers["x-mockingbird-source"], "state", "{body}");
+    assert_ne!(body["id"], "k1", "{body}");
+}

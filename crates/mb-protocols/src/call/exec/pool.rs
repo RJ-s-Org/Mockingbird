@@ -6,8 +6,10 @@
 //! its world). For each type the executor stores (one with an identity, read by id or
 //! listed), it asks the model for [`POOL_SIZE`] records with the mock's persona (no more
 //! than one page of each of the type's lists admits, its `maxItems`), in calls of
-//! [`PER_CALL`], each record checked against every schema the type is read by
-//! ([`super::create::unreadable`]). It stops at the mock's token cap, counted per build of
+//! [`PER_CALL`], written as the type's own record (its read by id's schema, else its first
+//! list's items) and then checked against every schema the type is read by
+//! ([`super::create::unreadable`]): a type whose shapes no record meets, such as one with
+//! a list whose items are another type's, is left unpooled. It stops at the mock's token cap, counted per build of
 //! the runtime (and per replica: each fills its own), and a call is made only while a
 //! generation slot (`limits.max_concurrent_generations`) stays free for requests after it
 //! takes one, so requests are never queued behind it; otherwise it tries again a second
@@ -265,12 +267,14 @@ pub async fn fill(rt: Weak<MockRuntime>, cap: u64) {
                 let Some(op) = rt.bundle().operations.get(op_index).cloned() else {
                     break;
                 };
-                // A record must read as every shape the type is read by (its read by
-                // id, each list's items): one schema holding them all.
-                let schema = match super::read_schemas(&rt, &t).as_slice() {
-                    [] => break,
-                    [one] => one.clone(),
-                    many => serde_json::json!({"allOf": many}),
+                // The model writes the type's own record: its read by id's schema, else
+                // its first list's items. Never every shape at once: a list whose items
+                // are another type's (a list of genres typed as movies) would make the
+                // model, or the local patching of its answer, take that type's ids and
+                // members. Each record is then checked against every shape the type is
+                // read by, and a type whose shapes no record meets is left unpooled.
+                let Some(schema) = super::read_schemas(&rt, &t).into_iter().next() else {
+                    break;
                 };
                 let id_member = crate::call::exprs::identity_member(&rt, &t);
                 let taken: Vec<String> = have
