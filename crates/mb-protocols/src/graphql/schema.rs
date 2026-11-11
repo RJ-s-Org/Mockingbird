@@ -425,10 +425,8 @@ pub(super) fn input_value(v: &InputValueDefinition) -> InputValue {
     out
 }
 
-/// The scalar fields each object type is looked up by: for every field
-/// returning one object (not a list) of a type, or of a union's or an
-/// interface's member types, each of its arguments that names a scalar or
-/// enum field of that type (`Repository.issue(number:)` → `Issue.number`).
+/// [`lookup_keys`] of `bundle`'s SDL; none when it has none or it does
+/// not parse.
 pub(super) fn lookup_keys_of(bundle: &mb_mcm::Bundle) -> super::select::LookupKeys {
     match &bundle.protocol_payload {
         Some(ProtocolPayload::Graphql { sdl }) => {
@@ -438,6 +436,10 @@ pub(super) fn lookup_keys_of(bundle: &mb_mcm::Bundle) -> super::select::LookupKe
     }
 }
 
+/// The scalar fields each object type is looked up by: for every field
+/// returning one object (not a list) of a type, or of a union's or an
+/// interface's member types, each of its arguments that names a scalar or
+/// enum field of that type (`Repository.issue(number:)` → `Issue.number`).
 fn lookup_keys(sdl: &Sdl) -> super::select::LookupKeys {
     let fields_of = |name: &str| match sdl.types.get(name).map(|d| &d.kind) {
         Some(Kind::Object { fields, .. } | Kind::Interface { fields, .. }) => Some(fields),

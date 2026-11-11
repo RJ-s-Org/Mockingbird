@@ -647,7 +647,7 @@ async fn store_answer(
         body
     } else {
         let mut copy = body.clone();
-        super::nested::name_written(&rt.bundle, op, selection, &mut copy);
+        super::nested::name_written(&rt.bundle, op, selection, args, &mut copy);
         named = copy;
         &named
     };

@@ -283,6 +283,19 @@ pub(crate) async fn stored(
         .await
 }
 
+/// Removes the resource of type `t` under `id` from the session, if held.
+#[cfg(feature = "graphql")]
+pub(crate) async fn forget_stored(rt: &MockRuntime, session: &SessionKey, t: &str, id: &str) {
+    let mut state = StateAccess::new(rt);
+    async {
+        if state.delete(session, t, id).await {
+            state.touch(session).await;
+        }
+    }
+    .instrument(state_span())
+    .await;
+}
+
 /// The resources of type `t` the session holds, most recent first, at most
 /// `limit`.
 #[cfg(feature = "graphql")]

@@ -220,6 +220,7 @@ pub(crate) async fn from_state(
     let mut walk = Walk {
         bundle: &rt.bundle,
         narrowed: rt.narrowed(),
+        superseded: Vec::new(),
         held,
     };
     // A root selection carries no arguments of its own.
@@ -228,6 +229,9 @@ pub(crate) async fn from_state(
         ..sel.clone()
     };
     walk.field(schema, &sel, body, None, 0);
+    for (t, id) in walk.superseded {
+        call::forget_stored(rt, session, &t, &id).await;
+    }
 }
 
 /// The keyed types `sel` reaches below `schema`.
@@ -276,6 +280,8 @@ struct Page {
 struct Walk<'a> {
     bundle: &'a Bundle,
     narrowed: &'a super::select::NarrowCache,
+    /// Records the engine stored from this answer that name one found.
+    superseded: Vec<(String, String)>,
     /// By definition name, most recent first.
     held: HashMap<String, Vec<StoredResource>>,
 }
@@ -310,7 +316,13 @@ impl Walk<'_> {
                 {
                     let base = Some(&*value).filter(|v| v.is_object() && typename_is(v, &ty));
                     *value = self.render(&ty, &record, sel, base);
-                } else if !sel.args.is_empty()
+                    // What the engine stored of this answer is a second
+                    // record of the one found: it goes.
+                    if let Some(generated) = generated.filter(|g| *g != record.id) {
+                        self.superseded.push((ty.to_lowercase(), generated));
+                    }
+                } else if parent.is_none()
+                    && !sel.args.is_empty()
                     && let Value::Object(obj) = value
                     && !obj.contains_key("id")
                     && sel.fields.get("id").is_none_or(|c| c.name == "id")
@@ -391,7 +403,13 @@ impl Walk<'_> {
         }) {
             return Some(held.id.clone());
         }
-        let named: Vec<String> = values.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let named: Vec<String> = values
+            .iter()
+            .map(|(k, v)| match v {
+                Value::String(v) => format!("{k}={v}"),
+                v => format!("{k}={v}"),
+            })
+            .collect();
         Some(format!("mb_{ty}_{}_{}", parent.id, named.join("_")))
     }
 
@@ -483,9 +501,7 @@ impl Walk<'_> {
         generated: Option<&str>,
     ) -> Option<(String, StoredResource)> {
         for ty in types {
-            // Oldest first: a later record with the same arguments is one
-            // the model made up since.
-            for record in self.held.get(ty).into_iter().flatten().rev() {
+            for record in self.held.get(ty).into_iter().flatten() {
                 if generated == Some(record.id.as_str()) {
                     continue;
                 }
@@ -728,7 +744,17 @@ impl Walk<'_> {
             .filter(|r| r.id != record.id)
             .max_by_key(|r| r.data.as_object().map_or(0, Map::len))
         {
-            overlay(&mut out, &template.data, sel);
+            // Its scalars only: another record's objects and lists are not
+            // this one's.
+            let scalars: Map<String, Value> = template
+                .data
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(_, v)| !v.is_object() && !v.is_array())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            overlay(&mut out, &Value::Object(scalars), sel);
         }
         if let Some(Value::Object(base)) = base {
             for (key, value) in base {
@@ -966,8 +992,14 @@ pub(crate) fn name_written(
     bundle: &Bundle,
     op: &mb_mcm::Operation,
     sel: &Selection,
+    args: &Map<String, Value>,
     body: &mut Value,
 ) {
+    // An update names its record by id: nothing new is written.
+    let names_one = |args: &Map<String, Value>| args.contains_key("id");
+    if names_one(args) || args.values().filter_map(Value::as_object).any(names_one) {
+        return;
+    }
     let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
         return;
     };
