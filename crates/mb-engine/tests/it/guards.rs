@@ -736,6 +736,12 @@ async fn a_chain_waits_at_most_the_generation_timeout() {
         elapsed >= Duration::from_secs(20) && elapsed < Duration::from_secs(21),
         "took {elapsed:?}, expected the 20 s generation timeout"
     );
+    // The reason names the setting to raise.
+    let reason = response.fallback_reason.unwrap_or_default();
+    assert!(
+        reason.starts_with("LLM request timed out") && reason.contains("limits.generation_timeout"),
+        "{reason}"
+    );
 }
 
 /// Answers each call from its script entry: after its delay, with its body.
