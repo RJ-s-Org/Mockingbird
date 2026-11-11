@@ -425,6 +425,73 @@ pub(super) fn input_value(v: &InputValueDefinition) -> InputValue {
     out
 }
 
+/// The scalar fields each object type is looked up by: for every field
+/// returning one object (not a list) of a type, or of a union's or an
+/// interface's member types, each of its arguments that names a scalar or
+/// enum field of that type (`Repository.issue(number:)` → `Issue.number`).
+fn lookup_keys(sdl: &Sdl) -> super::select::LookupKeys {
+    let fields_of = |name: &str| match sdl.types.get(name).map(|d| &d.kind) {
+        Some(Kind::Object { fields, .. } | Kind::Interface { fields, .. }) => Some(fields),
+        _ => None,
+    };
+    let leaf = |name: &str| {
+        BUILTIN_SCALARS.contains(&name)
+            || matches!(
+                sdl.types.get(name).map(|d| &d.kind),
+                Some(Kind::Scalar | Kind::Enum { .. })
+            )
+    };
+    let named = |ty: &Type| match &ty.base {
+        BaseType::Named(n) => Some(n.to_string()),
+        BaseType::List(_) => None,
+    };
+    let targets = |name: &str| -> Vec<String> {
+        match sdl.types.get(name).map(|d| &d.kind) {
+            Some(Kind::Object { .. }) => vec![name.to_string()],
+            Some(Kind::Union { members }) => members.clone(),
+            Some(Kind::Interface { .. }) => sdl
+                .types
+                .iter()
+                .filter(|(_, d)| {
+                    matches!(&d.kind, Kind::Object { implements, .. } if implements.iter().any(|i| i == name))
+                })
+                .map(|(n, _)| n.clone())
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let mut out = super::select::LookupKeys::new();
+    for def in sdl.types.values() {
+        let (Kind::Object { fields, .. } | Kind::Interface { fields, .. }) = &def.kind else {
+            continue;
+        };
+        for f in fields {
+            let Some(returned) = named(&f.ty.node) else {
+                continue;
+            };
+            for target in targets(&returned) {
+                let Some(target_fields) = fields_of(&target) else {
+                    continue;
+                };
+                for arg in &f.arguments {
+                    let arg = arg.node.name.node.as_str();
+                    let scalar = target_fields.iter().any(|tf| {
+                        tf.name.node == arg
+                            && tf.arguments.is_empty()
+                            && named(&tf.ty.node).is_some_and(|n| leaf(&n))
+                    });
+                    if scalar {
+                        out.entry(target.clone())
+                            .or_default()
+                            .insert(arg.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// A dynamic schema answering `rt.bundle`'s queries, mutations and
 /// subscriptions, with
 /// the depth, complexity and introspection settings of `rt.protocols`, and
@@ -461,6 +528,7 @@ pub(crate) fn build_schema(rt: &Arc<MockRuntime>) -> Result<Served, GraphqlError
         }
     }
 
+    rt.narrowed().set_lookup_keys(lookup_keys(&sdl));
     let adjusted = implementation_types(&sdl)?;
     let mut builder = Schema::build(query, mutation.as_deref(), subscription.as_deref());
     for (name, def) in &sdl.types {

@@ -41,6 +41,7 @@ use crate::{DataPlaneAuthMode, MockRuntime, ScenarioRuntime, call};
 mod batch;
 mod directives;
 mod ledger;
+mod nested;
 mod resolve;
 mod schema;
 mod select;

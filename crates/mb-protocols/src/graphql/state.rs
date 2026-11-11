@@ -71,6 +71,34 @@ pub(crate) fn objects(
     walk.found.into_iter().map(|(r, _)| r).collect()
 }
 
+/// The scalar arguments a query's own object was read by that its type
+/// declares (`repository(owner:, name:)` → `name`), so that a later read by
+/// the same arguments finds it.
+pub(crate) fn read_args(
+    bundle: &Bundle,
+    op: &Operation,
+    args: &Map<String, Value>,
+) -> Map<String, Value> {
+    scalar_args(args)
+        .into_iter()
+        .filter(|(name, _)| declares_scalar(bundle, op, name))
+        .collect()
+}
+
+/// Whether the object type `op` answers declares `name` as a scalar
+/// (`Repository.name`, not `Repository.owner`).
+fn declares_scalar(bundle: &Bundle, op: &Operation, name: &str) -> bool {
+    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return false;
+    };
+    let Some(def) = super::nested::def_of(bundle, schema) else {
+        return false;
+    };
+    def.get("properties")
+        .and_then(|p| p.get(name))
+        .is_some_and(|p| super::nested::is_scalar(p, &bundle.defs))
+}
+
 /// What an update or a delete mutation names by its `id` argument: the
 /// type the record is stored under and its id.
 #[derive(Debug, PartialEq)]
@@ -300,7 +328,7 @@ fn scalars(data: &Value) -> Map<String, Value> {
 /// The object type `schema` refers to (through a nullable `anyOf`, and
 /// for an interface or union the member `obj`'s `__typename` names),
 /// with its definition.
-fn object_type<'a>(
+pub(super) fn object_type<'a>(
     bundle: &'a Bundle,
     schema: &Value,
     obj: &Map<String, Value>,
@@ -328,7 +356,7 @@ fn object_type<'a>(
 }
 
 /// The item schema of a list schema (nullable or not).
-fn list_item(schema: &Value) -> Option<&Value> {
+pub(super) fn list_item(schema: &Value) -> Option<&Value> {
     if let Some(items) = schema.get("items") {
         return Some(items);
     }
@@ -339,7 +367,7 @@ fn list_item(schema: &Value) -> Option<&Value> {
         .find_map(|b| b.get("items"))
 }
 
-fn def_name(schema: &Value) -> Option<&str> {
+pub(super) fn def_name(schema: &Value) -> Option<&str> {
     schema.get("$ref")?.as_str()?.strip_prefix("#/$defs/")
 }
 

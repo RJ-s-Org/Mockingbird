@@ -283,6 +283,21 @@ pub(crate) async fn stored(
         .await
 }
 
+/// The resources of type `t` the session holds, most recent first, at most
+/// `limit`.
+#[cfg(feature = "graphql")]
+pub(crate) async fn stored_of_type(
+    rt: &MockRuntime,
+    session: &SessionKey,
+    t: &str,
+    limit: usize,
+) -> Vec<StoredResource> {
+    let mut state = StateAccess::new(rt);
+    async { state.list(session, t, limit).await }
+        .instrument(state_span())
+        .await
+}
+
 /// Removes `gone`, a resource the session holds, from it, as `op`'s delete
 /// `call` asked, and, with `marks`, leaves the marker a REST delete leaves (see
 /// [`deleted`]), so that a later read of it is not generated back. Keeps the
