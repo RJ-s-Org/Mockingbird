@@ -528,3 +528,45 @@ fn introspection_keeps_custom_executable_directives() {
     // The rendered SDL compiles the same way.
     assert_eq!(compile(sdl.as_bytes()).unwrap().operations, b.operations);
 }
+
+/// Custom scalars holding dates and times import as formatted strings, by
+/// name or by a description naming ISO 8601; an epoch-seconds scalar and an
+/// unrelated one stay untyped.
+#[test]
+fn date_and_time_scalars_import_as_formatted_strings() {
+    let sdl = r#"
+        scalar DateTime
+        scalar Date
+        scalar Time
+        scalar ISO8601DateTime
+        "An ISO-8601 encoded date string."
+        scalar GitTimestamp
+        "Seconds since the Unix epoch."
+        scalar Timestamp
+        "When something happened, as an ISO 8601 date."
+        scalar When
+        scalar Url
+        scalar Update
+        "An ISO 8601 date-time with milliseconds precision."
+        scalar Precise
+        type Query { a: DateTime b: Date c: Time d: ISO8601DateTime e: GitTimestamp f: Timestamp g: When h: Url i: Update j: Precise }
+    "#;
+    let b = mb_import::compile(sdl.as_bytes()).unwrap();
+    let format = |name: &str| {
+        b.defs[name]
+            .get("format")
+            .and_then(|f| f.as_str())
+            .map(str::to_string)
+    };
+    assert_eq!(format("DateTime").as_deref(), Some("date-time"));
+    assert_eq!(format("Date").as_deref(), Some("date"));
+    assert_eq!(format("Time"), None);
+    assert_eq!(format("Update"), None);
+    assert_eq!(format("Precise"), Some("date-time".to_string()));
+    assert_eq!(format("ISO8601DateTime").as_deref(), Some("date-time"));
+    assert_eq!(format("GitTimestamp").as_deref(), Some("date-time"));
+    assert_eq!(format("Timestamp"), None);
+    assert_eq!(format("When").as_deref(), Some("date"));
+    assert_eq!(format("Url"), None);
+    assert_eq!(b.defs["DateTime"]["type"], "string");
+}
