@@ -2060,17 +2060,17 @@ impl McpServer {
     /// as a URL on the admin URL's host.
     async fn reported_data_plane(&self) -> Option<String> {
         let admin = reqwest::Url::parse(&self.admin_url).ok()?;
-        let body: Value = reqwest::Client::builder()
+        let mut req = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .ok()?
-            .get(admin.join("/readyz").ok()?)
-            .send()
-            .await
-            .ok()?
-            .json()
-            .await
-            .ok()?;
+            .get(admin.join("/readyz").ok()?);
+        // With auth on, `/readyz` reports the data plane to callers it
+        // authenticates only.
+        if let Some(token) = &self.token {
+            req = req.bearer_auth(token);
+        }
+        let body: Value = req.send().await.ok()?.json().await.ok()?;
         let port = body["data_plane"]["port"].as_u64()?;
         let scheme = if body["data_plane"]["tls"].as_bool() == Some(true) {
             "https"
