@@ -242,6 +242,8 @@ impl<'p> Eval<'p, '_, '_> {
                 if let (Func::Split, Value::Array(items)) = (func, &v) {
                     self.steps_n(u64::try_from(items.len()).unwrap_or(u64::MAX), pos)?;
                 }
+                // Charged for what it built too: `replace` pays for its output twice
+                // (estimated before, actual after), which only tightens its budget.
                 self.charge(&v, pos)?;
                 Ok(v)
             }

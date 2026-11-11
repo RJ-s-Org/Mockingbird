@@ -55,6 +55,7 @@ components:
         status: {type: string}
         category: {type: string}
         rank: {type: integer}
+        tag: {description: "any kind of value"}
 "##;
 
 /// One sort expression for `-price`, `price:desc`, `price:asc`, `price` and lists of
@@ -286,4 +287,123 @@ async fn a_where_failing_on_one_record_drops_it_and_is_noted_once() {
         failed[0]["pointer"],
         json!("/operations/listProducts/list/where")
     );
+}
+
+#[tokio::test]
+async fn a_sort_over_mixed_kinds_answers() {
+    // `tag` holds numbers and numeric strings: sorting by it must not panic.
+    let h = support::described(
+        SHOP,
+        world(json!({"sort": {"param": "sort", "by": SORT_BY}})),
+        Vec::new(),
+    );
+    let records: Vec<Value> = (0..40u64)
+        .map(|i| {
+            let r = (i * 7919 + 31) % 97;
+            let mut p = product(&format!("q{i}"), "n", Value::Null, "active", "c");
+            p["tag"] = if r % 2 == 0 {
+                json!(r)
+            } else {
+                json!(r.to_string())
+            };
+            p
+        })
+        .collect();
+    h.hold("products", &records).await;
+    let body = get(&h, "/products?sort=tag").await;
+    let ranks: Vec<&Value> = body["products"]
+        .as_array()
+        .map(|items| items.iter().map(|i| &i["tag"]).collect())
+        .unwrap_or_default();
+    assert_eq!(ranks.len(), 40, "{body}");
+    // Numbers first, in order, then the strings.
+    let numbers = ranks.iter().take_while(|r| r.is_number()).count();
+    assert!(ranks[numbers..].iter().all(|r| r.is_string()), "{body}");
+    assert!(
+        ranks[..numbers]
+            .windows(2)
+            .all(|w| w[0].as_u64() <= w[1].as_u64()),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn items_equal_on_the_sort_keep_the_described_order() {
+    let h = support::described(SHOP, world(default_list()), Vec::new());
+    let mut held = six();
+    held.reverse();
+    h.hold("products", &held).await;
+    // Within a category, by name, the described order.
+    let body = get(&h, "/products?sort=category").await;
+    assert_eq!(ids(&body), vec!["p3", "p6", "p1", "p4"], "{body}");
+    let body = get(&h, "/products?sort=-category").await;
+    assert_eq!(ids(&body), vec!["p1", "p4", "p3", "p6"], "{body}");
+}
+
+const CATALOG: &str = r##"
+openapi: 3.0.0
+info: {title: Catalog, version: "1"}
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/Summary"}}
+  /items/{itemId}:
+    get:
+      operationId: getItem
+      parameters: [{name: itemId, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+components:
+  schemas:
+    Summary:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        name: {type: string}
+    Item:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        hidden: {type: boolean}
+"##;
+
+#[tokio::test]
+async fn where_reads_the_whole_stored_record() {
+    // `hidden` is on the stored record, not on the list's summary items.
+    let world = json!({"operations": {"listItems": {
+        "kind": "list",
+        "type": "items",
+        "list": {"where": "it.hidden != true"}
+    }}});
+    let h = support::described(CATALOG, world, Vec::new());
+    h.hold(
+        "items",
+        &[
+            json!({"id": "a", "name": "A", "hidden": false}),
+            json!({"id": "b", "name": "B", "hidden": true}),
+            json!({"id": "c", "name": "C"}),
+        ],
+    )
+    .await;
+    let (status, _, body) = h.send("GET", "/items", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ids: Vec<&str> = body["items"]
+        .as_array()
+        .map(|items| items.iter().filter_map(|i| i["id"].as_str()).collect())
+        .unwrap_or_default();
+    assert_eq!(ids, vec!["a", "c"], "{body}");
+    assert!(last_request(&h).get("expr_failed").is_none());
+    assert!(h.provider.requests().is_empty());
 }

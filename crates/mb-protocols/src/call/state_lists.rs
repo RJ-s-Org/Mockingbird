@@ -671,9 +671,15 @@ pub(super) async fn page(
     let items_at = (&mut items[..], Some(&shape.items));
     computed::fill_page(state, (plan, call), t, items_at, Some(&held)).await;
     match (sort, q) {
-        (Some(keys), _) => {
-            let keys: Vec<(&str, bool)> =
+        (Some(keys), q) => {
+            let mut keys: Vec<(&str, bool)> =
                 keys.iter().map(|k| (k.member.as_str(), k.desc)).collect();
+            // Items equal on every sort key keep the described order.
+            if let Some((member, desc)) = q.and_then(|q| q.order.as_ref())
+                && !keys.iter().any(|(m, _)| *m == member.as_str())
+            {
+                keys.push((member.as_str(), *desc));
+            }
             list_query::sort_by(&mut items, &keys);
         }
         (None, Some(q)) => list_query::sort(q, &mut items),
