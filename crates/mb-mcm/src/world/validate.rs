@@ -527,6 +527,21 @@ impl<'a> Ctx<'a> {
         false
     }
 
+    /// Whether a create of type `t` answers `member` beside its record, where the
+    /// record itself does not declare it: a value the server issues for the record
+    /// (Plaid's `access_token` for an Item), which `identity.alternates` may name.
+    fn issued_member(&self, t: &str, member: &str) -> bool {
+        let declared = |schema: Option<&Value>| {
+            schema.is_some_and(|s| dotted_member(self.bundle, s, member).is_some())
+        };
+        !declared(self.record_schema(t))
+            && self
+                .ops_of(t)
+                .into_iter()
+                .filter(|o| self.op_kind(o) == Some(OpKind::Create))
+                .any(|o| declared(self.answer_record(o)))
+    }
+
     fn check_pattern(&mut self, pattern: &str, path: &Path) -> bool {
         let n = pattern.matches("{id}").count();
         if n == 1 {
@@ -1022,7 +1037,9 @@ impl<'a> Ctx<'a> {
                 let kept: Vec<String> = alts
                     .iter()
                     .enumerate()
-                    .filter(|(i, m)| self.check_member(record, ty, m, &ap.join(i)))
+                    .filter(|(i, m)| {
+                        self.issued_member(name, m) || self.check_member(record, ty, m, &ap.join(i))
+                    })
                     .map(|(_, m)| m.clone())
                     .collect();
                 // Every alternate refused: dropped, never read as `[]`

@@ -563,6 +563,27 @@ pub(crate) async fn prepare<'a>(
             nothing_held(rt, plan, call, response_schema, &detail).await,
         ));
     }
+    // A value the server issues for a record ([`exec::issued_aliases`], Plaid's
+    // `access_token`) that names no held record was never issued: whatever
+    // `unknown_ids` says, no record answers to it.
+    if plan.forced_status.is_none()
+        && target.is_none()
+        && state.available()
+        && let Some(t) = resource_type
+        && let Some(member) = rt
+            .described()
+            .op(&op.id)
+            .and_then(|d| d.target.as_ref())
+            .and_then(|target| target.member.as_deref())
+        && let Some(id) = target_id.as_deref()
+        && exec::issued_aliases(rt, t).iter().any(|a| a == member)
+    {
+        let detail = format!("no {t} has {member} {id} in session {}", session.session);
+        state.touch(session).instrument(state_span()).await;
+        return Prepared::Answered(Box::new(
+            nothing_held(rt, plan, call, response_schema, &detail).await,
+        ));
+    }
     // Whatever `unknown_ids` says: this one is known to be gone. A record found by
     // another member than its key (`/issues/{issue_iid}`) is not what the path named
     // when that was deleted: another issue can share the `iid`.
@@ -858,9 +879,21 @@ fn serve_held(
     kept: Option<&Map<String, Value>>,
     response_schema: Option<&Value>,
 ) -> Option<GeneratedResponse> {
+    // What the server issued for the record is no member of it: a read never shows it.
+    let issued = exec::issued_aliases(rt, &stored.resource_type);
+    let shown;
+    let data = match &stored.data {
+        Value::Object(members) if issued.iter().any(|a| members.contains_key(a)) => {
+            let mut members = members.clone();
+            members.retain(|name, _| !issued.contains(name));
+            shown = Value::Object(members);
+            &shown
+        }
+        data => data,
+    };
     let answer = rt
         .engine
-        .held_answer(&rt.bundle, op, &stored.data, kept, response_schema)?;
+        .held_answer(&rt.bundle, op, data, kept, response_schema)?;
     rt.engine
         .serve_stored(&rt.bundle, op, &answer, response_schema)
 }
