@@ -10,7 +10,7 @@ use axum::http::Request;
 use mb_engine::{Engine, EngineConfig};
 use mb_import::compile;
 use mb_llm::{Provider, ScriptedProvider};
-use mb_protocols::{MockRuntime, graphql, http_rest};
+use mb_protocols::{MockRuntime, SharedTypes, graphql, http_rest};
 use mb_state::{MemoryStore, StateStore};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -431,4 +431,237 @@ components:
     let router = http_rest::router(Arc::new(rt.with_world(&world, &world, 1)));
     let read = rest(&router, "GET", "/repos/fernwood/trellis/issues/7", None).await;
     assert_ne!(read["title"], "Another repository's", "{read}");
+}
+
+const PULLS: &str = r##"
+openapi: 3.0.3
+info: {title: pulls, version: "1"}
+paths:
+  /repos/{owner}/{repo}/pulls:
+    post:
+      operationId: createPull
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [title], properties: {title: {type: string}}}
+      responses:
+        "201":
+          description: created
+          content: {application/json: {schema: {$ref: "#/components/schemas/pull-request"}}}
+  /repos/{owner}/{repo}/pulls/{pull_number}:
+    get:
+      operationId: getPull
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+        - {name: pull_number, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200":
+          description: the pull request
+          content: {application/json: {schema: {$ref: "#/components/schemas/pull-request"}}}
+        "404": {description: missing}
+components:
+  schemas:
+    pull-request:
+      type: object
+      required: [id, node_id, number, title, state]
+      properties:
+        id: {type: integer}
+        node_id: {type: string}
+        number: {type: integer}
+        title: {type: string}
+        state: {type: string, enum: [open, closed]}
+"##;
+
+const PULLS_SDL: &str = r#"
+enum PullRequestState { OPEN CLOSED MERGED }
+type PullRequest { id: ID! number: Int! title: String! state: PullRequestState! }
+type Query { pullRequestByNumber(number: Int!): PullRequest }
+type Mutation { createPullRequest(title: String!): PullRequest }
+"#;
+
+/// [`runtime`] joined to `types`, the record types of its `shares` group, with
+/// `world` when given.
+fn joined(
+    (name, contract): (&str, &str),
+    script: Vec<Value>,
+    state: &Arc<dyn StateStore>,
+    types: &SharedTypes,
+    world: Option<&mb_mcm::world::World>,
+) -> Arc<MockRuntime> {
+    let mut rt = Arc::try_unwrap(runtime(name, contract, script, Arc::clone(state)))
+        .ok()
+        .unwrap();
+    if let Some(world) = world {
+        rt = rt.with_world(world, world, 1);
+    }
+    rt.shared_types = types.clone();
+    rt.shared_types.join(&rt);
+    Arc::new(rt)
+}
+
+fn pull_request(number: u64, title: &str) -> Value {
+    json!({"__typename": "PullRequest", "id": format!("PR_{number}"), "number": number,
+           "title": title, "state": "OPEN"})
+}
+
+/// With no world, REST `pulls` (answering `pull-request`s, by `number`) and GraphQL
+/// `PullRequest` (with a `number` too) are one type: a REST read finds the pull
+/// request a GraphQL mutation created, its `id` as REST's `node_id`, and back.
+#[tokio::test]
+async fn rest_collections_and_graphql_types_of_one_record_are_inferred_the_same() {
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let types = SharedTypes::default();
+    let gh = joined(
+        ("github-graphql", PULLS_SDL),
+        vec![
+            pull_request(7007, "Over GraphQL"),
+            pull_request(99, "Made up"),
+        ],
+        &state,
+        &types,
+        None,
+    );
+    let gql_router = graphql::try_router(gh).unwrap();
+    let rest_rt = joined(
+        ("github-rest", PULLS),
+        vec![
+            json!({"id": 8, "node_id": "PR_8", "number": 8, "title": "Over REST", "state": "open"}),
+            json!({"id": 7, "node_id": "PR_7", "number": 7, "title": "Made up", "state": "open"}),
+        ],
+        &state,
+        &types,
+        None,
+    );
+    let rest_router = http_rest::router(rest_rt);
+
+    gql(
+        &gql_router,
+        r#"mutation { createPullRequest(title: "Over GraphQL") { id number } }"#,
+        true,
+    )
+    .await;
+    let read = rest(
+        &rest_router,
+        "GET",
+        "/repos/fernwood/trellis/pulls/7007",
+        None,
+    )
+    .await;
+    assert_eq!(read["title"], "Over GraphQL", "{read}");
+    assert_eq!(read["state"], "open", "{read}");
+    assert_eq!(read["node_id"], "PR_7007", "{read}");
+
+    let made = rest(
+        &rest_router,
+        "POST",
+        "/repos/fernwood/trellis/pulls",
+        Some(json!({"title": "Over REST"})),
+    )
+    .await;
+    let number = made["number"].as_u64().unwrap();
+    let back = gql(
+        &gql_router,
+        &format!("{{ pullRequestByNumber(number: {number}) {{ number title state }} }}"),
+        false,
+    )
+    .await;
+    assert_eq!(back["pullRequestByNumber"]["title"], "Over REST", "{back}");
+    assert_eq!(back["pullRequestByNumber"]["state"], "OPEN", "{back}");
+}
+
+/// The world's `same_as` wins over what the contracts suggest: REST `pulls` said
+/// to be another type is not read as GraphQL's `PullRequest`.
+#[tokio::test]
+async fn a_world_s_same_as_wins_over_an_inferred_type() {
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let types = SharedTypes::default();
+    let gh = joined(
+        ("github-graphql", PULLS_SDL),
+        vec![pull_request(7007, "Over GraphQL")],
+        &state,
+        &types,
+        None,
+    );
+    let gql_router = graphql::try_router(gh).unwrap();
+    let world = serde_json::from_value::<mb_mcm::world::World>(
+        json!({"version": 1, "types": {"pulls": {"same_as": ["changeset"]}}}),
+    )
+    .unwrap();
+    let rest_rt = joined(
+        ("github-rest", PULLS),
+        vec![
+            json!({"id": 1, "node_id": "PR_1", "number": 7007, "title": "Made up", "state": "open"}),
+        ],
+        &state,
+        &types,
+        Some(&world),
+    );
+    let rest_router = http_rest::router(rest_rt);
+
+    gql(
+        &gql_router,
+        r#"mutation { createPullRequest(title: "Over GraphQL") { id number } }"#,
+        true,
+    )
+    .await;
+    let read = rest(
+        &rest_router,
+        "GET",
+        "/repos/fernwood/trellis/pulls/7007",
+        None,
+    )
+    .await;
+    assert_ne!(read["title"], "Over GraphQL", "{read}");
+}
+
+/// Mocks that do not `share` are not linked, whatever their types: GraphQL's
+/// pull request is not REST's.
+#[tokio::test]
+async fn mocks_that_share_nothing_infer_nothing() {
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let types = SharedTypes::default();
+    let unshared = |rt: Arc<MockRuntime>| {
+        let mut rt = Arc::try_unwrap(rt).ok().unwrap();
+        rt.shares = None;
+        rt.shared_types.join(&rt);
+        Arc::new(rt)
+    };
+    let gh = unshared(joined(
+        ("github-graphql", PULLS_SDL),
+        vec![pull_request(7007, "Over GraphQL")],
+        &state,
+        &types,
+        None,
+    ));
+    let gql_router = graphql::try_router(gh).unwrap();
+    let rest_rt = unshared(joined(
+        ("github-rest", PULLS),
+        vec![
+            json!({"id": 1, "node_id": "PR_1", "number": 7007, "title": "Made up", "state": "open"}),
+        ],
+        &state,
+        &types,
+        None,
+    ));
+    let rest_router = http_rest::router(rest_rt);
+
+    gql(
+        &gql_router,
+        r#"mutation { createPullRequest(title: "Over GraphQL") { id number } }"#,
+        true,
+    )
+    .await;
+    let read = rest(
+        &rest_router,
+        "GET",
+        "/repos/fernwood/trellis/pulls/7007",
+        None,
+    )
+    .await;
+    assert_ne!(read["title"], "Over GraphQL", "{read}");
 }
