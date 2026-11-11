@@ -150,6 +150,91 @@ pub struct JointPart<'a> {
     pub call: &'a OperationCall,
     /// The state the field's answer must stay consistent with.
     pub ctx: GenerationContext<'a>,
+    /// Parts with the same group look up one thing under different types
+    /// (GitHub's `user(login: "vercel")` and `organization(login: "vercel")`):
+    /// exactly one of them is found. The protocol decides it from the schema.
+    pub lookup_group: Option<usize>,
+}
+
+/// The parts of each lookup group (see [`JointPart::lookup_group`]) with two
+/// or more members, in the parts' order.
+pub(crate) fn lookup_groups(parts: &[JointPart<'_>]) -> Vec<Vec<usize>> {
+    let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        let Some(g) = part.lookup_group else {
+            continue;
+        };
+        match groups.iter_mut().find(|(id, _)| *id == g) {
+            Some((_, members)) => members.push(i),
+            None => groups.push((g, vec![i])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(_, members)| members)
+        .filter(|members| members.len() > 1)
+        .collect()
+}
+
+/// The joint answer's schema with the rule a lookup group keeps, checked
+/// (and repaired) but not sent to the provider: some structured-output
+/// modes refuse an `anyOf` at the root. Every part of a group may be null,
+/// so `{}` was a valid answer finding none of them, and models gave it
+/// (`user` and `organization` both null). The query names what it looks
+/// up, so one of them is found.
+fn joint_checks(parts: &[JointPart<'_>], may_be_null: &[bool], combined: &Value) -> Value {
+    let found = |key: &str| serde_json::json!({"required": [key], "properties": {key: {"not": {"type": "null"}}}});
+    let rules: Vec<Value> = lookup_groups(parts)
+        .into_iter()
+        .filter(|members| members.iter().all(|&i| may_be_null[i]))
+        .map(|members| {
+            serde_json::json!({"anyOf": members.iter().map(|&i| found(parts[i].key)).collect::<Vec<_>>()})
+        })
+        .collect();
+    let mut checked = combined.clone();
+    if !rules.is_empty() {
+        checked["allOf"] = Value::Array(rules);
+    }
+    checked
+}
+
+/// Keeps one found part per lookup group and makes the others null: models,
+/// and parts generated on their own after a failed joint answer, often find
+/// all of them, which clients read as an ambiguous answer. The part kept is
+/// one answered from session state or a scenario, else the first found in
+/// the query.
+fn one_per_lookup(
+    parts: &[JointPart<'_>],
+    may_be_null: &[bool],
+    results: &mut [Result<GeneratedResponse, EngineError>],
+) {
+    let found = |r: &Result<GeneratedResponse, EngineError>| {
+        r.as_ref().is_ok_and(|g| {
+            (200..300).contains(&g.status) && g.body.as_ref().is_some_and(|b| !b.is_null())
+        })
+    };
+    for members in lookup_groups(parts) {
+        let held =
+            |i: &&usize| parts[**i].ctx.target.is_some() || parts[**i].ctx.scenario.is_some();
+        let keep = members
+            .iter()
+            .filter(|i| found(&results[**i]))
+            .find(held)
+            .or_else(|| members.iter().find(|i| found(&results[**i])))
+            .copied();
+        let Some(keep) = keep else {
+            continue;
+        };
+        for &i in &members {
+            if i != keep
+                && may_be_null[i]
+                && !held(&&i)
+                && let Ok(g) = &mut results[i]
+            {
+                g.body = Some(Value::Null);
+            }
+        }
+    }
 }
 
 /// State the response must stay consistent with.
@@ -1142,16 +1227,20 @@ impl Engine {
     }
 
     /// Answers every part with one LLM call: one object keyed by the parts'
-    /// keys (a nullable part may be left out and reads as null), validated (and repaired) as a whole, then split and finished per
+    /// keys (a nullable part may be left out and reads as null, but not every
+    /// part of a lookup group), validated (and repaired) as a whole,
+    /// then split and finished per
     /// part. The call's usage is reported on the first part. Without a
     /// provider, for a part with a forced status or no schema, or when the
-    /// joint answer stays invalid, every part is generated on its own.
+    /// joint answer stays invalid, every part is generated on its own. Each
+    /// lookup group ([`JointPart::lookup_group`]) keeps one found part.
     pub async fn generate_joint(
         &self,
         bundle: &Bundle,
         parts: &[JointPart<'_>],
     ) -> Vec<Result<GeneratedResponse, EngineError>> {
-        match self.try_joint(bundle, parts).await {
+        let may_be_null: Vec<bool> = parts.iter().map(|p| self.may_be_null(bundle, p)).collect();
+        let mut results = match self.try_joint(bundle, parts, &may_be_null).await {
             Some(responses) => responses.into_iter().map(Ok).collect(),
             None => {
                 futures::future::join_all(
@@ -1161,13 +1250,32 @@ impl Engine {
                 )
                 .await
             }
-        }
+        };
+        one_per_lookup(parts, &may_be_null, &mut results);
+        results
+    }
+
+    /// Whether `part`'s answer may be null, by the schema [`Self::try_joint`]
+    /// validates it with.
+    fn may_be_null(&self, bundle: &Bundle, part: &JointPart<'_>) -> bool {
+        let Some(variant) = part.op.success_output() else {
+            return false;
+        };
+        let validator = match part.ctx.response_schema {
+            Some(s) => self.schema_validator(bundle, s).ok(),
+            None => variant.schema.as_ref().and_then(|schema| {
+                self.validator(bundle, part.op, success_status(variant.status), schema)
+                    .ok()
+            }),
+        };
+        validator.is_some_and(|v| v.is_valid(&Value::Null))
     }
 
     async fn try_joint(
         &self,
         bundle: &Bundle,
         parts: &[JointPart<'_>],
+        may_be_null: &[bool],
     ) -> Option<Vec<GeneratedResponse>> {
         let provider = self.provider.as_ref()?;
         let mut shapes = Vec::with_capacity(parts.len());
@@ -1193,8 +1301,8 @@ impl Engine {
         // fields they mean as null.
         let keys: Vec<Value> = parts
             .iter()
-            .zip(&shapes)
-            .filter(|(_, (_, _, validator))| !validator.is_valid(&Value::Null))
+            .zip(may_be_null)
+            .filter(|(_, null)| !**null)
             .map(|(p, _)| Value::from(p.key))
             .collect();
         let combined = serde_json::json!({
@@ -1202,7 +1310,9 @@ impl Engine {
             "properties": properties,
             "required": keys,
         });
-        let validator = self.schema_validator(bundle, &combined).ok()?;
+        let validator = self
+            .schema_validator(bundle, &joint_checks(parts, may_be_null, &combined))
+            .ok()?;
         let prompt_schema = compact::response_prompt_schema(bundle, &combined, &HashSet::new());
         let messages = tracing::info_span!("mb.prompt").in_scope(|| {
             prompt::build_joint_messages(

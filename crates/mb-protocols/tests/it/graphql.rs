@@ -3278,3 +3278,100 @@ async fn a_create_with_child_lines_in_its_input_keeps_them() {
         read.body
     );
 }
+
+const OWNERS: &str = r#"
+interface RepositoryOwner { login: String! }
+type User implements RepositoryOwner { login: String! name: String }
+type Organization implements RepositoryOwner { login: String! name: String }
+type Book { id: ID! title: String }
+type Author { id: ID! name: String }
+type Query {
+  user(login: String!): User
+  organization(login: String!): Organization
+  book(id: ID!): Book
+  author(id: ID!): Author
+}
+"#;
+
+/// A runtime of [`OWNERS`] answered by `script`.
+fn owners(script: Vec<Value>) -> (Arc<ScriptedProvider>, MockRuntime) {
+    let provider = scripted(script);
+    let rt = MockRuntime::new(
+        "owners",
+        Arc::new(compile(OWNERS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    (provider, rt)
+}
+
+/// `user(login:)` and `organization(login:)` with one login look up one
+/// thing (both types are a `RepositoryOwner` with a `login`): exactly one is
+/// found, the first in the query, whichever the model answered.
+#[tokio::test]
+async fn roots_looking_up_one_thing_find_exactly_one() {
+    let owner = |t: &str| json!({"__typename": t, "login": "vercel"});
+    let both = json!({"user": owner("User"), "organization": owner("Organization")});
+    for (q, kept, nulled) in [
+        (
+            r#"{ user(login: "vercel") { login } organization(login: "vercel") { login } }"#,
+            "user",
+            "organization",
+        ),
+        (
+            r#"{ organization(login: "vercel") { login } user(login: "vercel") { login } }"#,
+            "organization",
+            "user",
+        ),
+    ] {
+        let (provider, rt) = owners(vec![both.clone()]);
+        let r = query(&serve(rt).await, q).await;
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body["data"][kept]["login"], "vercel", "{}", r.body);
+        assert_eq!(r.body["data"][nulled], Value::Null, "{}", r.body);
+        let system = &provider.requests()[0].messages[0].content;
+        assert!(system.contains("look up the same thing"), "{system}");
+    }
+
+    // An answer finding neither is repaired.
+    let (provider, rt) = owners(vec![json!({}), both.clone()]);
+    let r = query(
+        &serve(rt).await,
+        r#"{ user(login: "vercel") { login } organization(login: "vercel") { login } }"#,
+    )
+    .await;
+    assert_eq!(provider.requests().len(), 2, "one repair call");
+    assert_eq!(r.body["data"]["user"]["login"], "vercel", "{}", r.body);
+}
+
+/// Not one lookup: two aliases of one field, and two types that share only
+/// an `id` argument. Every field is answered as found.
+#[tokio::test]
+async fn other_roots_with_equal_arguments_are_all_kept() {
+    let (provider, rt) = owners(vec![json!({
+        "book": {"__typename": "Book", "id": "1", "title": "T"},
+        "author": {"__typename": "Author", "id": "1", "name": "N"},
+    })]);
+    let r = query(
+        &serve(rt).await,
+        r#"{ book(id: "1") { title } author(id: "1") { name } }"#,
+    )
+    .await;
+    assert_eq!(r.body["data"]["book"]["title"], "T", "{}", r.body);
+    assert_eq!(r.body["data"]["author"]["name"], "N", "{}", r.body);
+    let system = &provider.requests()[0].messages[0].content;
+    assert!(!system.contains("look up the same thing"), "{system}");
+
+    let owner = json!({"__typename": "User", "login": "v", "name": "V"});
+    let (_, rt) = owners(vec![json!({"a": owner, "b": owner})]);
+    let r = query(
+        &serve(rt).await,
+        r#"{ a: user(login: "v") { login } b: user(login: "v") { name } }"#,
+    )
+    .await;
+    assert_eq!(r.body["data"]["a"]["login"], "v", "{}", r.body);
+    assert_eq!(r.body["data"]["b"]["name"], "V", "{}", r.body);
+}

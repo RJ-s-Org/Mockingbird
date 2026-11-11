@@ -210,7 +210,11 @@ const MAX_NARROWED: usize = 256;
 /// dozen fields takes longer than finding it again. Held by a runtime,
 /// whose bundle is fixed, so the operation id is key enough.
 #[derive(Debug, Default)]
-pub(crate) struct NarrowCache(Mutex<Narrowed>, std::sync::OnceLock<LookupKeys>);
+pub(crate) struct NarrowCache(
+    Mutex<Narrowed>,
+    std::sync::OnceLock<LookupKeys>,
+    std::sync::OnceLock<super::schema::SharedLookups>,
+);
 
 /// Per object type, the scalar fields some field of the schema looks it up
 /// by: `Repository.issue(number:)` → `Issue: {number}`.
@@ -266,6 +270,13 @@ impl NarrowCache {
         self.1
             .get_or_init(|| super::schema::lookup_keys_of(bundle))
             .get(ty)
+    }
+
+    /// Which root fields of `bundle`'s schema look up one thing (see
+    /// [`super::schema::SharedLookups`]), found once per runtime.
+    pub(crate) fn shared_lookups(&self, bundle: &mb_mcm::Bundle) -> &super::schema::SharedLookups {
+        self.2
+            .get_or_init(|| super::schema::shared_lookups_of(bundle))
     }
 
     #[cfg(test)]

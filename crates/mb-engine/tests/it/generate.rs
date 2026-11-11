@@ -1332,12 +1332,14 @@ async fn joint_generation_answers_every_part_in_one_call() {
     .to_string())]);
     let parts = [
         JointPart {
+            lookup_group: None,
             key: "order",
             op: get,
             call: &call("getOrder"),
             ctx: ctx(),
         },
         JointPart {
+            lookup_group: None,
             key: "recent",
             op: list,
             call: &call("listOrders"),
@@ -1372,12 +1374,14 @@ async fn joint_generation_falls_back_to_separate_calls() {
     ]);
     let parts = [
         JointPart {
+            lookup_group: None,
             key: "order",
             op: get,
             call: &call("getOrder"),
             ctx: ctx(),
         },
         JointPart {
+            lookup_group: None,
             key: "recent",
             op: list,
             call: &call("listOrders"),
@@ -1442,12 +1446,14 @@ async fn joint_answer_may_omit_nullable_parts() {
     )]);
     let parts = [
         JointPart {
+            lookup_group: None,
             key: "order",
             op: get,
             call: &call("getOrder"),
             ctx: ctx(),
         },
         JointPart {
+            lookup_group: None,
             key: "maybe",
             op: get,
             call: &call("getOrder"),
@@ -1462,6 +1468,128 @@ async fn joint_answer_may_omit_nullable_parts() {
     assert_eq!(out[0].as_ref().unwrap().body, Some(valid_order_at_o1()));
     assert_eq!(out[1].as_ref().unwrap().body, Some(Value::Null));
     assert_eq!(out[1].as_ref().unwrap().source, Source::Llm);
+}
+
+/// Two nullable parts of one lookup group: an answer finding neither (`{}`,
+/// or both explicitly null) is repaired until one is found. Parts in no
+/// group may all be null.
+#[tokio::test]
+async fn a_lookup_group_answer_must_find_one_part() {
+    let bundle = orders();
+    let get = bundle.operation("getOrder").unwrap();
+    let nullable = json!({"anyOf": [{"type": "object"}, {"type": "null"}]});
+    let get_call = call("getOrder");
+    let part = |key, lookup_group| JointPart {
+        lookup_group,
+        key,
+        op: get,
+        call: &get_call,
+        ctx: GenerationContext {
+            response_schema: Some(&nullable),
+            ..ctx()
+        },
+    };
+    for empty in [json!({}), json!({"user": null, "org": null})] {
+        let (provider, engine) = scripted(vec![
+            Ok(empty.to_string()),
+            Ok(json!({"user": valid_order_at_o1(), "org": null}).to_string()),
+        ]);
+        let out = engine
+            .generate_joint(&bundle, &[part("user", Some(0)), part("org", Some(0))])
+            .await;
+        assert_eq!(provider.requests().len(), 2, "{empty}: one repair call");
+        assert_eq!(out[0].as_ref().unwrap().body, Some(valid_order_at_o1()));
+        assert_eq!(out[1].as_ref().unwrap().body, Some(Value::Null));
+        let system = &provider.requests()[0].messages[0].content;
+        assert!(
+            !system.contains("\"not\""),
+            "the rule is not sent: {system}"
+        );
+        assert!(
+            system.contains("Fields `user`, `org` look up the same thing"),
+            "{system}"
+        );
+    }
+
+    let (provider, engine) = scripted(vec![Ok(json!({}).to_string())]);
+    let out = engine
+        .generate_joint(&bundle, &[part("a", None), part("b", None)])
+        .await;
+    assert_eq!(provider.requests().len(), 1, "no group, no rule");
+    assert!(
+        out.iter()
+            .all(|r| r.as_ref().unwrap().body == Some(Value::Null))
+    );
+    let system = &provider.requests()[0].messages[0].content;
+    assert!(!system.contains("look up the same thing"), "{system}");
+}
+
+/// Of a lookup group's parts all found, only one is kept, without a repair
+/// call: the one answered from session state, else the first. Parts in no
+/// group are all kept.
+#[tokio::test]
+async fn a_lookup_group_keeps_one_found_part() {
+    let bundle = orders();
+    let get = bundle.operation("getOrder").unwrap();
+    let nullable = json!({"anyOf": [{"type": "object"}, {"type": "null"}]});
+    let both = json!({"user": valid_order_at_o1(), "org": valid_order_at_o1()});
+    let get_call = call("getOrder");
+    let target = StoredResource {
+        resource_type: "order".into(),
+        id: "o1".into(),
+        data: valid_order_at_o1(),
+    };
+    let part = |key, lookup_group, target| JointPart {
+        lookup_group,
+        key,
+        op: get,
+        call: &get_call,
+        ctx: GenerationContext {
+            response_schema: Some(&nullable),
+            target,
+            ..ctx()
+        },
+    };
+
+    let (provider, engine) = scripted(vec![Ok(both.to_string())]);
+    let out = engine
+        .generate_joint(
+            &bundle,
+            &[part("user", Some(0), None), part("org", Some(0), None)],
+        )
+        .await;
+    assert_eq!(provider.requests().len(), 1, "no repair call");
+    assert_eq!(out[0].as_ref().unwrap().body, Some(valid_order_at_o1()));
+    assert_eq!(out[1].as_ref().unwrap().body, Some(Value::Null));
+
+    let (_, engine) = scripted(vec![Ok(both.to_string())]);
+    let out = engine
+        .generate_joint(
+            &bundle,
+            &[
+                part("user", Some(0), None),
+                part("org", Some(0), Some(&target)),
+            ],
+        )
+        .await;
+    assert_eq!(
+        out[0].as_ref().unwrap().body,
+        Some(Value::Null),
+        "state wins"
+    );
+    assert_ne!(out[1].as_ref().unwrap().body, Some(Value::Null));
+
+    let (_, engine) = scripted(vec![Ok(both.to_string())]);
+    let out = engine
+        .generate_joint(
+            &bundle,
+            &[part("user", None, None), part("org", None, None)],
+        )
+        .await;
+    assert!(
+        out.iter()
+            .all(|r| r.as_ref().unwrap().body != Some(Value::Null))
+    );
 }
 
 /// A `null` the schema does not allow is patched locally instead of costing
@@ -2391,12 +2519,14 @@ fn a_joint_prompt_shows_the_api_description_once() {
     let (a, b) = (call("getOrder"), call("listOrders"));
     let parts = [
         JointPart {
+            lookup_group: None,
             key: "order",
             op: get,
             call: &a,
             ctx: ctx(),
         },
         JointPart {
+            lookup_group: None,
             key: "recent",
             op: list,
             call: &b,

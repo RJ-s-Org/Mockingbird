@@ -136,6 +136,15 @@ The count is capped at `protocols.stream.max_items` (50). A scenario's `stream_i
 
 SSE streams and GraphQL subscriptions stay open after the generated items: they go on to deliver resources of the operation's type that are created or changed in the same session, until the client disconnects. A gRPC server stream completes after its last item. Generated stream items are never written to session state.
 
+## GraphQL root fields that look up one thing
+
+The root fields of one query are generated together, in one call. Two root fields called with the same arguments look up one thing under different types when they return two object types implementing one interface that has a field for every argument: GitHub's `user(login: "vercel")` and `organization(login: "vercel")` are both a `RepositoryOwner` with a `login`. Exactly one of such fields is found:
+
+- an answer finding none of them (`{}`, or every one `null`) is repaired;
+- of several found, the one answered from session state or a scenario is kept, else the first in the query, and the others answer `null`.
+
+Fields that share only an argument value (`book(id: 1)` and `author(id: 1)`), aliases of one field, and fields returning an interface or a union are answered on their own.
+
 ## Override mapping per protocol
 
 The override headers work on every protocol: gRPC reads them as lowercased metadata (`x-mockingbird-session`, `x-mockingbird-status`, …), and GraphQL reads them from the HTTP request (or from the `connection_init` payload of a subscription). A forced status is reported natively.
