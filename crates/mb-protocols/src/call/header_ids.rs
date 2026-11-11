@@ -12,8 +12,8 @@ use mb_engine::headers::IdentityHeaderKind;
 use mb_engine::{Faker, GeneratedResponse, OperationCall, SchemaValidator};
 use mb_mcm::{Binding, Operation};
 use mb_state::SessionKey;
-use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::{RngExt, SeedableRng};
 use serde_json::{Map, Value, json};
 
 use super::{StateAccess, id_string, records, request_values, type_members};
@@ -153,6 +153,10 @@ pub(super) async fn mint(
     let checks = IdChecks::new(rt, held.as_ref(), &header.schema, !location)?;
     let carried = request_values(op, call);
     let seed = MintSeed::new(rt, session, call);
+    let shape = match record_id_shape(rt, t, field) {
+        Some(shape) => Some(shape),
+        None => session_id_shape(state, session, t, field).await,
+    };
     for _ in 0..ATTEMPTS {
         let Some(id) = draw(
             rt,
@@ -160,7 +164,7 @@ pub(super) async fn mint(
             (held.as_ref(), declared.as_ref()),
             &header.schema,
             string_identity,
-            &checks,
+            (&checks, shape.as_ref()),
         ) else {
             continue;
         };
@@ -457,17 +461,29 @@ fn draw(
     (strict, declared): (Option<&Value>, Option<&Value>),
     header: &Value,
     string_identity: bool,
-    checks: &IdChecks,
+    (checks, shape): (&IdChecks, Option<&IdShape>),
 ) -> Option<Value> {
     let string = json!({"type": "string"});
     // The strictest first: what every read declares together, when that is more.
     let strict = strict.filter(|s| Some(*s) != declared);
     let schemas = [strict, declared, Some(header), Some(&string)];
     let (mut rng, faker) = seed.draws(rt, (t, field));
-    schemas
+    // A shape the ids show goes first where the identity declares no form of its own.
+    let shaped = shape
+        .filter(|_| {
+            [strict, declared]
+                .into_iter()
+                .flatten()
+                .all(|s| !formed(rt, s))
+        })
+        .map(|shape| Value::String(shape.draw(&mut rng)));
+    let faked = schemas
         .into_iter()
         .flatten()
-        .map(|schema| faker.fake(&rt.bundle().with_defs(schema), &mut rng))
+        .map(|schema| faker.fake(&rt.bundle().with_defs(schema), &mut rng));
+    shaped
+        .into_iter()
+        .chain(faked)
         .filter_map(|v| {
             let text = id_string(&v).filter(|s| !s.is_empty())?;
             let held = match (&v, string_identity) {
@@ -483,12 +499,14 @@ fn draw(
 /// header to serve it in: as the type's records declare their identity `field` (a
 /// plain string where they do not), in the type's identity pattern where it has one.
 /// `None` when the draw is not one the records hold (a pattern past the member's
-/// `maxLength`). Whether the session holds it already is the caller's to check.
+/// `maxLength`). Where the identity declares no form, the id takes `shape` when given
+/// ([`record_id_shape`], else [`session_id_shape`]). Whether the session holds it
+/// already is the caller's to check.
 pub(super) fn draw_record_id(
     rt: &MockRuntime,
     seed: MintSeed<'_>,
-    t: &str,
-    field: &str,
+    (t, field): (&str, &str),
+    shape: Option<&IdShape>,
 ) -> Option<Value> {
     let (declared, held) = record_id_schema(rt, t, field);
     let string = json!({"type": "string"});
@@ -504,7 +522,7 @@ pub(super) fn draw_record_id(
         (held.as_ref(), declared.as_ref()),
         &string,
         string_identity,
-        &checks,
+        (&checks, shape),
     )?;
     match id_string(&id).and_then(|text| records::in_pattern(rt, t, &text)) {
         Some(formed) => {
@@ -517,7 +535,8 @@ pub(super) fn draw_record_id(
 
 /// An id for a nested item whose identity member's schema is `declared` (a line item's
 /// `id`), drawn as [`draw_record_id`] draws one: as declared, else a plain string, and
-/// valid as declared. `None` when no draw is. Seeded as type `t`'s member `field`.
+/// valid as declared, in the shape its examples show when it declares no form. `None`
+/// when no draw is. Seeded as type `t`'s member `field`.
 pub(super) fn draw_id_as(
     rt: &MockRuntime,
     (seed, t, field): (MintSeed<'_>, &str, &str),
@@ -526,14 +545,184 @@ pub(super) fn draw_id_as(
     let string = json!({"type": "string"});
     let string_identity = declared.get("type").and_then(Value::as_str) == Some("string");
     let checks = IdChecks::new(rt, Some(declared), &string, false)?;
+    let shape = IdShape::of(&examples(rt, declared, None));
     draw(
         rt,
         (seed, t, field),
         (None, Some(declared)),
         &string,
         string_identity,
-        &checks,
+        (&checks, shape.as_ref()),
     )
+}
+
+/// The shape of the ids a contract shows: a literal prefix (`pi_`) and the characters
+/// and length of the rest (24 letters and digits).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct IdShape {
+    prefix: String,
+    alphabet: Vec<u8>,
+    len: usize,
+}
+
+impl IdShape {
+    /// The shape `ids` share: their common prefix up to its last `_` or `-`, of letters
+    /// and those separators, and a rest of letters and digits, as long as the longest
+    /// (longer where so few draws of it could be told apart). `None` when they share no
+    /// such prefix or one's rest is other.
+    pub(super) fn of(ids: &[String]) -> Option<Self> {
+        let first = ids.first()?;
+        let common = ids.iter().fold(first.len(), |n, id| {
+            first
+                .bytes()
+                .zip(id.bytes())
+                .take(n)
+                .take_while(|(a, b)| a == b)
+                .count()
+        });
+        let cut = first.get(..common)?.rfind(['_', '-'])? + 1;
+        let prefix = first.get(..cut)?;
+        let lettered = prefix.starts_with(|c: char| c.is_ascii_alphabetic())
+            && prefix
+                .chars()
+                .all(|c| c.is_ascii_alphabetic() || matches!(c, '_' | '-'));
+        if !lettered {
+            return None;
+        }
+        let rests: Vec<&str> = ids.iter().filter_map(|id| id.get(cut..)).collect();
+        if rests.len() < ids.len()
+            || rests
+                .iter()
+                .any(|r| r.is_empty() || !r.bytes().all(|b| b.is_ascii_alphanumeric()))
+        {
+            return None;
+        }
+        let holds = |class: fn(&u8) -> bool| rests.iter().any(|r| r.as_bytes().iter().any(class));
+        let alphabet: Vec<u8> = [
+            (holds(u8::is_ascii_digit), b'0'..=b'9'),
+            (holds(u8::is_ascii_lowercase), b'a'..=b'z'),
+            (holds(u8::is_ascii_uppercase), b'A'..=b'Z'),
+        ]
+        .into_iter()
+        .filter(|(held, _)| *held)
+        .flat_map(|(_, range)| range)
+        .collect();
+        let mut len = rests.iter().map(|r| r.len()).max()?;
+        // At least a billion draws, so a session's ids stay its own.
+        while (alphabet.len() as f64).powi(i32::try_from(len).unwrap_or(i32::MAX)) < 1e9 {
+            len += 1;
+        }
+        Some(Self {
+            prefix: prefix.to_string(),
+            alphabet,
+            len,
+        })
+    }
+
+    /// An id of this shape, drawn from `rng`.
+    fn draw(&self, rng: &mut StdRng) -> String {
+        let rest: String = (0..self.len)
+            .filter_map(|_| {
+                let i = rng.random_range(0..self.alphabet.len());
+                self.alphabet.get(i).map(|&b| char::from(b))
+            })
+            .collect();
+        format!("{}{rest}", self.prefix)
+    }
+}
+
+/// The text examples `schema` gives of itself (`example`, `examples`), or, with a
+/// `field`, of its member `field` in its examples of the whole.
+fn examples(rt: &MockRuntime, schema: &Value, field: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in super::schema_parts(rt.bundle(), Some(schema)).0 {
+        let given = part.get("example").into_iter().chain(
+            part.get("examples")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        );
+        for example in given {
+            let held = match field {
+                Some(field) => mb_mcm::member_at(example, field),
+                None => Some(example),
+            };
+            if let Some(text) = held.and_then(Value::as_str) {
+                out.push(text.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// The shape type `t`'s identity `field` shows in the contract's examples: of the
+/// member as its records and reads declare it, else of the member in examples of the
+/// records themselves.
+pub(super) fn record_id_shape(rt: &MockRuntime, t: &str, field: &str) -> Option<IdShape> {
+    let bundle = rt.bundle();
+    let index = rt.index();
+    let read = index
+        .detail_reads
+        .get(t)
+        .and_then(|i| bundle.operations.get(*i)?.success_output()?.schema.clone());
+    let records: Vec<Value> = index
+        .record_schemas
+        .get(t)
+        .cloned()
+        .into_iter()
+        .chain(read)
+        .chain(super::exec::read_schemas(rt, t))
+        .collect();
+    let of_member: Vec<String> = records
+        .iter()
+        .filter_map(|r| property_schema(bundle, r, field))
+        .flat_map(|member| examples(rt, &member, None))
+        .collect();
+    let ids = match of_member.is_empty() {
+        false => of_member,
+        true => records
+            .iter()
+            .flat_map(|r| examples(rt, r, Some(field)))
+            .collect(),
+    };
+    IdShape::of(&ids)
+}
+
+/// The shape of the ids the session holds type `t`'s records under (the model's, or
+/// ones it was given), bare of the type's identity pattern.
+pub(super) async fn session_id_shape(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    t: &str,
+    field: &str,
+) -> Option<IdShape> {
+    let pattern = records::pattern(state.rt, t).map(str::to_string);
+    let ids: Vec<String> = state
+        .list(session, t, super::MAX_SCAN)
+        .await
+        .iter()
+        .filter_map(|r| mb_mcm::member_at(&r.data, field).and_then(id_string))
+        .map(
+            |id| match pattern.as_deref().and_then(|p| records::bare_id(p, &id)) {
+                Some(bare) => bare,
+                None => id,
+            },
+        )
+        .collect();
+    IdShape::of(&ids)
+}
+
+/// Whether `schema` declares a form of its own: a `pattern`, `format`, `enum` or
+/// `const`.
+fn formed(rt: &MockRuntime, schema: &Value) -> bool {
+    super::schema_parts(rt.bundle(), Some(schema))
+        .0
+        .iter()
+        .any(|p| {
+            ["pattern", "format", "enum", "const"]
+                .iter()
+                .any(|k| p.get(k).is_some())
+        })
 }
 
 /// Whether `id` can stand in a URL path segment as it is.

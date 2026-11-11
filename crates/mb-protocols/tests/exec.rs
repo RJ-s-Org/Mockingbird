@@ -2222,6 +2222,109 @@ async fn a_create_naming_every_member_makes_no_llm_call() {
     assert!(h.provider.requests().is_empty());
 }
 
+/// Intents show their id's shape only in an example; notes show none.
+const SHAPED_IDS: &str = r##"
+openapi: 3.1.0
+info: {title: Shaped, version: "1"}
+paths:
+  /intents:
+    post:
+      operationId: createIntent
+      requestBody: {content: {application/json: {schema: {type: object, properties: {amount: {type: integer}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Intent"}}}}}
+  /intents/{intent}:
+    get:
+      operationId: getIntent
+      parameters: [{name: intent, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Intent"}}}}}
+  /notes:
+    post:
+      operationId: createNote
+      requestBody: {content: {application/json: {schema: {type: object, properties: {text: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}}
+  /notes/{id}:
+    get:
+      operationId: getNote
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}}
+components:
+  schemas:
+    Intent:
+      type: object
+      required: [id, amount]
+      properties:
+        id: {type: string, maxLength: 5000, examples: [pi_3MtwBwLkdIwHu7ix28a3tqPa]}
+        amount: {type: integer}
+    Note:
+      type: object
+      required: [id, text]
+      properties: {id: {type: string}, text: {type: string}}
+"##;
+
+/// A minted id takes the shape the contract's example of it shows (its prefix, then
+/// as many letters and digits), each its own; with no example it is drawn as before.
+#[tokio::test]
+async fn a_minted_id_takes_the_shape_of_the_contract_s_example() {
+    let (_capture, _guard) = Capture::install();
+    let h = support::harness(SHAPED_IDS, vec![], &HarnessOptions::default(), |rt| rt);
+    let mut ids = Vec::new();
+    for amount in 0..20 {
+        let (status, headers, body) = h
+            .send("POST", "/intents", Some(json!({"amount": amount})), &[])
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(source(&headers), "state", "{body}");
+        let id = body["id"].as_str().unwrap().to_owned();
+        let rest = id.strip_prefix("pi_").unwrap_or_default();
+        assert!(
+            rest.len() == 24 && rest.bytes().all(|b| b.is_ascii_alphanumeric()),
+            "{id}"
+        );
+        let (status, _, read) = h.send("GET", &format!("/intents/{id}"), None, &[]).await;
+        assert_eq!((status, read), (StatusCode::OK, body));
+        ids.push(id);
+    }
+    let mut distinct = ids.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(distinct.len(), ids.len(), "{ids:?}");
+    let (status, _, note) = h
+        .send("POST", "/notes", Some(json!({"text": "a"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{note}");
+    let id = note["id"].as_str().unwrap();
+    assert!(!id.is_empty() && !id.contains('_'), "{id}");
+}
+
+/// With no example, a minted id takes the shape of the ids the session's records hold
+/// already: the model's, here.
+#[tokio::test]
+async fn a_minted_id_takes_the_shape_of_the_session_s_ids() {
+    let (_capture, _guard) = Capture::install();
+    let model = json!({"id": "nt_Ab12Cd34Ef56Gh78", "text": "a"});
+    let h = support::harness(
+        SHAPED_IDS,
+        vec![model.clone()],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let (status, _, body) = h
+        .send("POST", "/notes", Some(json!({"text": "a"})), SEEDED)
+        .await;
+    assert_eq!((status, body), (StatusCode::CREATED, model));
+    let (status, headers, note) = h
+        .send("POST", "/notes", Some(json!({"text": "b"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{note}");
+    assert_eq!(source(&headers), "state", "{note}");
+    let id = note["id"].as_str().unwrap();
+    let rest = id.strip_prefix("nt_").unwrap_or_default();
+    assert!(
+        rest.len() == 16 && rest.bytes().all(|b| b.is_ascii_alphanumeric()),
+        "{id}"
+    );
+}
+
 #[tokio::test]
 async fn two_creates_mint_two_ids_and_a_client_chosen_id_is_kept() {
     let (_capture, _guard) = Capture::install();

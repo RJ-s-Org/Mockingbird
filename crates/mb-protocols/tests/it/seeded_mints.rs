@@ -210,6 +210,85 @@ async fn sessions_starting_in_either_order_mint_the_same_ids() {
     assert_ne!(first_a, first_b);
 }
 
+/// Charges answer their id only in a header; their records show its shape in an example.
+const CHARGES: &str = r##"
+openapi: 3.1.0
+info: {title: Charges, version: "1"}
+paths:
+  /charges:
+    post:
+      operationId: createCharge
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}
+      responses:
+        "201":
+          description: created
+          headers:
+            Charge-Id: {schema: {type: string}}
+  /charges/{charge}:
+    get:
+      operationId: getCharge
+      parameters: [{name: charge, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Charge"}}}}
+components:
+  schemas:
+    Charge:
+      type: object
+      properties:
+        id: {type: string, examples: [ch_3MtwBwLkdIwHu7ix28a3tqPa]}
+        name: {type: string}
+"##;
+
+/// The ids `n` charges are minted in `session` of a fresh runtime seeded by `seed`.
+async fn charges(seed: u64, session: &str, n: usize) -> Vec<String> {
+    let rt = MockRuntime::new(
+        "charges",
+        Arc::new(compile(CHARGES.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default()).with_faker_seed(seed)),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    let router = http_rest::router(Arc::new(rt));
+    let mut ids = Vec::with_capacity(n);
+    for i in 0..n {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/charges")
+            .header("content-type", "application/json")
+            .header("x-mockingbird-session", session)
+            .body(Body::from(json!({"name": format!("c{i}")}).to_string()))
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let id = resp
+            .headers()
+            .get("charge-id")
+            .and_then(|v| v.to_str().ok());
+        ids.push(id.unwrap_or_default().to_string());
+    }
+    ids
+}
+
+/// An id minted in the shape the contract's example shows stays seeded and unique.
+#[tokio::test]
+async fn ids_minted_in_an_example_s_shape_repeat_with_the_seed_and_stay_unique() {
+    let ids = charges(1, "s1", 200).await;
+    assert!(
+        ids.iter()
+            .all(|id| id.strip_prefix("ch_").is_some_and(|rest| {
+                rest.len() == 24 && rest.bytes().all(|b| b.is_ascii_alphanumeric())
+            })),
+        "{ids:?}"
+    );
+    let mut held = ids.clone();
+    held.sort();
+    held.dedup();
+    assert_eq!(held.len(), ids.len(), "a session was minted one id twice");
+    assert_eq!(charges(1, "run2-s1", 200).await, ids);
+    assert_ne!(charges(2, "s1", 200).await, ids);
+}
+
 /// Users paged by a token the mock mints for the rest of a page cut short.
 const PAGES: &str = r##"
 openapi: 3.1.0
