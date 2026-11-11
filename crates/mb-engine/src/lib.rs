@@ -249,6 +249,9 @@ pub enum Source {
     /// The request failed validation: the contract's error shape (or a
     /// problem) answered it, without the LLM.
     Rejected,
+    /// The contract's declared example of a response in a non-JSON media type
+    /// (Slack's literal `ok`), which the LLM never writes: a normal answer.
+    Example,
 }
 
 impl Source {
@@ -265,7 +268,7 @@ impl Source {
 
     fn rank(self) -> u8 {
         match self {
-            Source::Llm | Source::State | Source::Cache | Source::Rejected => 0,
+            Source::Llm | Source::State | Source::Cache | Source::Rejected | Source::Example => 0,
             Source::Patched => 1,
             Source::Repaired => 2,
             Source::Fallback => 3,
@@ -284,6 +287,7 @@ impl Source {
             Source::State => "state",
             Source::Cache => "cache",
             Source::Rejected => "rejected",
+            Source::Example => "example",
         }
     }
 }
@@ -513,11 +517,11 @@ pub const OFFLINE_REASON: &str = "no LLM is configured for this mock (offline)";
 /// `if`/`then`/`else`; such schemas rely on its retries and can end here.
 pub const FAKER_INVALID_REASON: &str = "faker output does not validate against the schema";
 
-/// The fallback reason of a REST answer in a non-JSON media type (`text/*`,
-/// a declared example of any media type, an empty binary body), which the
-/// LLM never writes.
+/// The fallback reason of a REST answer in a non-JSON media type (`text/*`, an
+/// empty binary body) with no declared example, which the LLM never writes. A
+/// declared example is source [`Source::Example`], not a fallback.
 pub const NON_JSON_MEDIA_REASON: &str =
-    "the response media type is not JSON: answered from the declared example or the faker";
+    "the response media type is not JSON: answered by the faker";
 
 /// Counter of faker answers that matched no schema-valid draw.
 pub const FAKER_INVALID_METRIC: &str = "mb_faker_invalid_total";
@@ -2219,7 +2223,25 @@ impl Engine {
         answer: media::MediaAnswer<'_>,
     ) -> GeneratedResponse {
         let (body, faker_note) = match answer {
-            media::MediaAnswer::Example(example) => (Some(example.clone()), None),
+            // The declared example is the contract's own answer, not a fallback.
+            media::MediaAnswer::Example(example) => {
+                return GeneratedResponse {
+                    status,
+                    content_type: variant.content_type.clone(),
+                    body: Some(example.clone()),
+                    source: Source::Example,
+                    usage: Usage::default(),
+                    fallback_reason: None,
+                    effects: Vec::new(),
+                    effect_outcomes: Vec::new(),
+                    dropped_effects: 0,
+                    new_record: false,
+                    patched: None,
+                    headers: Vec::new(),
+                    world_gaps: Vec::new(),
+                    exec_notes: serde_json::Map::new(),
+                };
+            }
             media::MediaAnswer::Empty => (None, None),
             media::MediaAnswer::Fake(schema) => {
                 let validator = self.validator(bundle, op, status, schema).ok();
