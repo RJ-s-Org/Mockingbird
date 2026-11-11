@@ -736,3 +736,99 @@ async fn a_chain_waits_at_most_the_generation_timeout() {
         "took {elapsed:?}, expected the 20 s generation timeout"
     );
 }
+
+/// Answers each call from its script entry: after its delay, with its body.
+struct PacedProvider {
+    script: Vec<(Duration, String)>,
+    calls: AtomicU64,
+}
+
+#[async_trait]
+impl Provider for PacedProvider {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            json_schema: true,
+            json_mode: true,
+        }
+    }
+
+    async fn complete(&self, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        let index = usize::try_from(n).unwrap_or(usize::MAX);
+        let Some((delay, body)) = self.script.get(index).cloned() else {
+            return Err(LlmError::Transport("script exhausted".into()));
+        };
+        tokio::time::sleep(delay).await;
+        Ok(ChatResponse {
+            content: body,
+            usage: Usage::default(),
+        })
+    }
+}
+
+fn hedging_engine(script: Vec<(Duration, String)>) -> (Arc<PacedProvider>, Engine) {
+    let provider = Arc::new(PacedProvider {
+        script,
+        calls: AtomicU64::new(0),
+    });
+    let config = EngineConfig {
+        timeout: Duration::from_secs(60),
+        hedge_after: Some(Duration::from_secs(2)),
+        ..EngineConfig::default()
+    };
+    let dyn_provider: Arc<dyn Provider> = provider.clone();
+    (provider, Engine::new(Some(dyn_provider), config))
+}
+
+/// A call still unanswered after `hedge_after` is sent once more, and the first
+/// answer that passes is served.
+#[tokio::test(start_paused = true)]
+async fn a_slow_call_is_hedged_and_the_faster_answer_served() {
+    let bundle = bundle();
+    let (provider, engine) = hedging_engine(vec![
+        (Duration::from_secs(30), contact("slow@example.com")),
+        (Duration::from_secs(1), contact("fast@example.com")),
+    ]);
+    let started = tokio::time::Instant::now();
+    let response = generate(&engine, &bundle).await;
+    let elapsed = started.elapsed();
+    assert_eq!(response.source, Source::Llm);
+    assert_eq!(
+        response.body.as_ref().and_then(|b| b["email"].as_str()),
+        Some("fast@example.com")
+    );
+    assert!(
+        elapsed >= Duration::from_secs(3) && elapsed < Duration::from_secs(4),
+        "took {elapsed:?}: 2 s before the hedge, 1 s for its answer"
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+}
+
+/// An answer that does not pass its check sends the hedge at once, and the
+/// hedge's valid answer is served without a repair round.
+#[tokio::test(start_paused = true)]
+async fn an_invalid_answer_is_hedged_at_once() {
+    let bundle = bundle();
+    let (provider, engine) = hedging_engine(vec![
+        (Duration::from_millis(100), "{\"nope\": true".to_string()),
+        (Duration::from_millis(100), contact("second@example.com")),
+    ]);
+    let started = tokio::time::Instant::now();
+    let response = generate(&engine, &bundle).await;
+    assert_eq!(
+        response.source,
+        Source::Llm,
+        "{:?}",
+        response.fallback_reason
+    );
+    assert_eq!(
+        response.body.as_ref().and_then(|b| b["email"].as_str()),
+        Some("second@example.com")
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+}

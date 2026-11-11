@@ -290,6 +290,7 @@ async fn bare_engine(
         stream: deps.stream.clone(),
         output_budget: deps.limits.output_budget_tokens,
         generation_timeout: Some(deps.limits.generation_timeout),
+        hedge_after: Some(deps.limits.hedge_after),
         ..EngineConfig::default()
     };
     let provider = match profile {
