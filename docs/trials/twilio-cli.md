@@ -74,6 +74,40 @@ Run 1 was on `main`. Run 2 was the same mock on a binary with #469.
 | phone number create, update `--sms-url`, list shows the update | ✓ (update by model, 3.4 s) | ✓ (update from state, 20 ms) |
 | Verify: service create/update/fetch/list/remove, verification start/fetch/check, 404 after remove | ✗ 0/9, sent to the real `verify.twilio.com` | ✗ 0/9 |
 
+## Rerun on 2026-11-11: after the fixes
+
+The rerun used `main` plus #483 and #484 (both merged since); the marketplace skills already included #479. A fresh agent got the same prompt in a clean copy of the app.
+
+**Build.** 217 s, 37 turns, $1.88 of Claude Code usage. The agent loaded `mockingbird` and `mockingbird-world`, ran `doctor`, then `list_examples {category: messaging}` and `init_example twilio`. That gave it the example's **hand-written subset**: Messages, Calls and Lookups v2, with no IncomingPhoneNumbers. It then wrote world overlays and self-tested.
+
+**What it still missed.** It never loaded `mockingbird-mock-api`, the skill where #479 put the coverage, `unknown_ids` and hand-back guidance. The catalog path (`init_example`) doesn't route through that skill. As a result:
+- Verify wasn't mocked;
+- `unknown_ids` stayed `generate`;
+- the run instructions are still an `eval` of `mockingbird proxy env`.
+
+**Flows: 8 of 21.**
+- 8 of the 9 Messages checks pass, every one answered from state: create 24 ms, update 6 ms, no model call.
+- The ninth, the unknown-SID read, is generated (2.6 s, F3 again).
+- Phone numbers (3) aren't mocked by this agent's subset (404 from the mock).
+- Verify (9) still reaches the real API.
+
+| # | Measure | First run | Rerun |
+| --- | --- | --- | --- |
+| 1 | Flows | 11/21 | 8/21 (a smaller contract) |
+| 2 | Consistency | 8/8 | 8/8 of what's mocked |
+| 3 | Agent build | 195 s | 217 s |
+| 4 | State latency | p50 8–20 ms | p50 7.5 ms (8 calls) |
+| 5 | Model latency | 4–5 of 12 calls, p50 2.7–3.2 s | 1 of 12 calls (the unknown SID), 2.6 s |
+| 6 | Model spend | $0.0006–0.0008 | about $0.0002 (3.8k prompt / 0.3k completion) |
+| 7 | Errors | deleted 404, unknown 200 | the same |
+
+**Fix in this PR.** The main `mockingbird` skill, which every agent loads, now ends "the whole job" with a hand-back checklist that applies to a catalog example as much as to an import:
+- check coverage, using `init_example {full: true}` where the example has a full spec, and `mockingbird verify --no-unmapped --no-unmatched`;
+- set `unknown_ids: 404` unless the app reads ids it didn't create;
+- give the user `mockingbird run -c <config> -- <command>`.
+
+The MCP server's instructions say the same in one sentence.
+
 ## Files
 
 These are outside the repo, in `mockingbird-trials/twilio/`:
@@ -82,4 +116,5 @@ These are outside the repo, in `mockingbird-trials/twilio/`:
 - `trial/agent.jsonl`: the agent's transcript;
 - `trial/flows.py`: the checks;
 - `trial/run{1,2}.txt` and `trial/run{1,2}-requests.jsonl`: the runs and their request logs (cumulative: ids 1–16 are the agent's self-test, 17–28 run 1, 29–40 run 2);
-- `trial/run1-report.json`: `mockingbird report` after run 1.
+- `trial/run1-report.json`: `mockingbird report` after run 1;
+- `app2/` and `trial2/`: the rerun's app copy (with the agent's `mock/` folder), transcript, flows and request log.
