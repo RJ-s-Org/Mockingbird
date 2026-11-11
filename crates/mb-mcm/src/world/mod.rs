@@ -35,8 +35,8 @@ mod validate;
 
 pub use apply::{apply, record_at};
 pub use compiled::{
-    ComputedEntry, EffectEntry, Expressions, MAX_DERIVED_CHILD_TYPES, OpExpressions, RefuseEntry,
-    SetEntry, SetValue, TextValue, TypeExpressions, changes_as_set,
+    ComputedEntry, EffectEntry, Expressions, ListSort, ListWhere, MAX_DERIVED_CHILD_TYPES,
+    OpExpressions, RefuseEntry, SetEntry, SetValue, TextValue, TypeExpressions, changes_as_set,
 };
 pub use effective::{effective, effective_validated};
 pub use tier0::{record_pointer, tier0};
@@ -330,6 +330,10 @@ pub struct OpDesc {
     /// How a list pages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paging: Option<PagingDesc>,
+    /// A list's default item filter and its sort parameter, as
+    /// [expressions](expr).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list: Option<ListDesc>,
     /// The request parameters (or body pointers) that ask nothing of a list's
     /// items, e.g. an API version or a detail level.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -814,6 +818,36 @@ pub struct OrderDesc {
     pub extra: Extra,
 }
 
+/// A list's [expressions](expr): the items it holds by default, and how a sort
+/// parameter orders them.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct ListDesc {
+    /// The default item filter: only the records it is `true` for (`it` bound to
+    /// each record as stored) are listed, before paging, scope, filters and order.
+    #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+    pub r#where: Option<String>,
+    /// The sort parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<ListSortDesc>,
+    /// Unknown keys.
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// A list's sort parameter: when the request sends `param`, `by` (with `value`
+/// bound to the parameter as sent) gives the members to order by, `[{member,
+/// desc?}]`, in turn.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct ListSortDesc {
+    /// The request parameter.
+    pub param: String,
+    /// The expression giving `[{member, desc?}]`.
+    pub by: String,
+    /// Unknown keys.
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
 /// How a list pages.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PagingDesc {
@@ -1071,6 +1105,12 @@ fn overlay_answer(b: &mut AnswerDesc, t: &AnswerDesc) {
     merge_extra(&mut b.extra, &t.extra);
 }
 
+fn overlay_list(b: &mut ListDesc, t: &ListDesc) {
+    set(&mut b.r#where, &t.r#where);
+    set(&mut b.sort, &t.sort);
+    merge_extra(&mut b.extra, &t.extra);
+}
+
 fn overlay_type(mut b: TypeDesc, t: &TypeDesc) -> TypeDesc {
     merge_sub(&mut b.identity, &t.identity, overlay_identity);
     set(&mut b.parent, &t.parent);
@@ -1103,6 +1143,7 @@ fn overlay_op(mut b: OpDesc, t: &OpDesc) -> OpDesc {
     set_vec(&mut b.filters, &t.filters);
     set(&mut b.order, &t.order);
     set(&mut b.paging, &t.paging);
+    merge_sub(&mut b.list, &t.list, overlay_list);
     set_vec(&mut b.ignores, &t.ignores);
     set(&mut b.idempotency, &t.idempotency);
     set(&mut b.not_found, &t.not_found);

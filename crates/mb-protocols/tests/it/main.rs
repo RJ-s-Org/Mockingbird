@@ -81,6 +81,7 @@ mod world;
 mod world_computed_effects;
 mod world_expressions;
 mod world_gaps;
+mod world_list_exprs;
 mod world_lists;
 mod write_memory;
 mod writes_stick;

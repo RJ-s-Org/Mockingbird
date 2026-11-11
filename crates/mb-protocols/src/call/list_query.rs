@@ -943,14 +943,45 @@ pub(super) fn keeps_answered(
     keeps_from(q, item, heuristic, Source::Answered)
 }
 
-/// How `a` and `b` order under `member`, both holding it: numbers by value, date-times
-/// by time, text by text.
+/// Where a value of its kind sorts among values of other kinds: booleans, then
+/// numbers, then RFC 3339 date-times, then other text, then everything else.
+fn kind_rank(v: &Value) -> u8 {
+    match v {
+        Value::Bool(_) => 0,
+        Value::Number(_) => 1,
+        Value::String(s) if DateTime::parse_from_rfc3339(s.trim()).is_ok() => 2,
+        Value::String(_) => 3,
+        _ => 4,
+    }
+}
+
+/// How held values `x` and `y` order: by kind first ([`kind_rank`]), then within it,
+/// booleans false first, numbers by value, date-times by instant, text by text, and
+/// arrays and objects as equal. A total order whatever the values' kinds.
+fn order_values(x: &Value, y: &Value) -> Ordering {
+    kind_rank(x).cmp(&kind_rank(y)).then_with(|| match (x, y) {
+        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        (Value::Number(a), Value::Number(b)) => match (a.as_f64(), b.as_f64()) {
+            (Some(a), Some(b)) => a.total_cmp(&b),
+            _ => Ordering::Equal,
+        },
+        (Value::String(s), Value::String(t)) => {
+            match (
+                DateTime::parse_from_rfc3339(s.trim()),
+                DateTime::parse_from_rfc3339(t.trim()),
+            ) {
+                (Ok(a), Ok(b)) => a.cmp(&b),
+                _ => s.cmp(t),
+            }
+        }
+        _ => Ordering::Equal,
+    })
+}
+
+/// How `a` and `b` order under `member`, both holding it ([`order_values`]).
 fn order_of(member: &str, a: &Value, b: &Value) -> Ordering {
     match (mb_mcm::member_at(a, member), mb_mcm::member_at(b, member)) {
-        (Some(x), Some(y)) => compare(x, y).unwrap_or_else(|| match (x.as_str(), y.as_str()) {
-            (Some(s), Some(t)) => s.cmp(t),
-            _ => Ordering::Equal,
-        }),
+        (Some(x), Some(y)) => order_values(x, y),
         _ => Ordering::Equal,
     }
 }
@@ -961,13 +992,28 @@ pub(super) fn sort(q: &ListQuery, items: &mut [Value]) {
     let Some((member, descending)) = &q.order else {
         return;
     };
-    let held = |v: &Value| mb_mcm::member_at(v, member).is_some_and(|h| !h.is_null());
-    items.sort_by(|a, b| match (held(a), held(b)) {
-        (true, true) if *descending => order_of(member, b, a),
-        (true, true) => order_of(member, a, b),
-        (true, false) => Ordering::Less,
-        (false, true) => Ordering::Greater,
-        (false, false) => Ordering::Equal,
+    sort_by(items, &[(member.as_str(), *descending)]);
+}
+
+/// Sorts `items` by `keys`, each a member and whether largest first, in turn: as the
+/// described order sorts, items not holding a member (or holding `null`) going last
+/// either way, and items that compare equal on every key keeping their order. Values of
+/// different kinds order by kind, so any mix of values sorts without a panic.
+pub(super) fn sort_by(items: &mut [Value], keys: &[(&str, bool)]) {
+    let held = |v: &Value, member: &str| mb_mcm::member_at(v, member).is_some_and(|h| !h.is_null());
+    items.sort_by(|a, b| {
+        keys.iter()
+            .map(
+                |&(member, descending)| match (held(a, member), held(b, member)) {
+                    (true, true) if descending => order_of(member, b, a),
+                    (true, true) => order_of(member, a, b),
+                    (true, false) => Ordering::Less,
+                    (false, true) => Ordering::Greater,
+                    (false, false) => Ordering::Equal,
+                },
+            )
+            .find(|o| o.is_ne())
+            .unwrap_or(Ordering::Equal)
     });
 }
 
@@ -1161,5 +1207,64 @@ mod tests {
         let (cut, next) = page(&q, &items);
         assert_eq!(cut, [json!({"at": 1}), json!({})]);
         assert_eq!(next, None);
+    }
+
+    /// Ids of `items`, in order.
+    fn ids_of(items: &[Value]) -> Vec<&str> {
+        items.iter().filter_map(|i| i["id"].as_str()).collect()
+    }
+
+    #[test]
+    fn a_sort_over_mixed_kinds_is_a_total_order() {
+        // Numbers and numeric strings mixed: a comparison treating different kinds as
+        // equal is not a total order, and `sort_by` panics on one.
+        for n in 2..80u64 {
+            let mut items: Vec<Value> = (0..n)
+                .map(|i| {
+                    let r = (i * 7919 + n * 31) % 97;
+                    match r % 4 {
+                        0 => json!({"id": i.to_string(), "p": r}),
+                        1 => json!({"id": i.to_string(), "p": r.to_string()}),
+                        2 => json!({"id": i.to_string(), "p": format!("2026-01-{:02}T00:00:00Z", r % 28 + 1)}),
+                        _ => json!({"id": i.to_string(), "p": r % 3 == 0}),
+                    }
+                })
+                .collect();
+            sort_by(&mut items, &[("p", false)]);
+            let ranks: Vec<u8> = items.iter().map(|i| kind_rank(&i["p"])).collect();
+            assert!(ranks.windows(2).all(|w| w[0] <= w[1]), "{ranks:?}");
+            sort_by(&mut items, &[("p", true)]);
+        }
+        let mut items = vec![
+            json!({"id": "text", "p": "b"}),
+            json!({"id": "num", "p": 2}),
+            json!({"id": "none"}),
+            json!({"id": "flag", "p": true}),
+            json!({"id": "numtext", "p": "1"}),
+            json!({"id": "obj", "p": {}}),
+        ];
+        sort_by(&mut items, &[("p", false)]);
+        assert_eq!(
+            ids_of(&items),
+            ["flag", "num", "numtext", "text", "obj", "none"]
+        );
+    }
+
+    #[test]
+    fn date_times_sort_by_instant_across_offsets() {
+        let mut items = vec![
+            // 10:00 UTC
+            json!({"id": "a", "at": "2026-03-01T12:00:00+02:00"}),
+            // 09:00 UTC
+            json!({"id": "b", "at": "2026-03-01T09:00:00Z"}),
+            // 11:00 UTC
+            json!({"id": "c", "at": "2026-03-01T06:00:00-05:00"}),
+            // 10:00 UTC, the same instant as `a`: stable after it.
+            json!({"id": "d", "at": "2026-03-01T10:00:00Z"}),
+        ];
+        sort_by(&mut items, &[("at", false)]);
+        assert_eq!(ids_of(&items), ["b", "a", "d", "c"]);
+        sort_by(&mut items, &[("at", true)]);
+        assert_eq!(ids_of(&items), ["c", "a", "d", "b"]);
     }
 }

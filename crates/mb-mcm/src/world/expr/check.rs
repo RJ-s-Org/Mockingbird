@@ -59,6 +59,7 @@ impl<'a> Walker<'a> {
                 match name.as_str() {
                     "record" => Some((Root::Record, Vec::new())),
                     "it" => Some((Root::It, Vec::new())),
+                    "value" => Some((Root::Value, Vec::new())),
                     _ => None,
                 }
             }
@@ -199,4 +200,22 @@ impl<'a> Walker<'a> {
 
 fn is_name(n: &Node, name: &str) -> bool {
     matches!(&n.kind, Kind::Ident(s) if s == name)
+}
+
+/// Calls `found` with each string literal a map literal under `n` gives `key`, and
+/// its offset.
+pub(super) fn map_literals(n: &Node, key: &str, found: &mut dyn FnMut(&str, usize)) {
+    if let Kind::Map(entries) = &n.kind {
+        for (k, v) in entries {
+            if let (Kind::Lit(Value::String(k)), Kind::Lit(Value::String(text))) =
+                (&k.kind, &v.kind)
+                && k == key
+            {
+                found(text, v.pos);
+            }
+        }
+    }
+    for c in n.children() {
+        map_literals(c, key, found);
+    }
 }

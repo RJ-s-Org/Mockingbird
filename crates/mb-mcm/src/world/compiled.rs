@@ -1,5 +1,6 @@
 //! The expressions of an effective world, compiled once: each operation's `set`
-//! (with its `changes` rewritten as `set` entries), `refuse` and `effects`, and each
+//! (with its `changes` rewritten as `set` entries), `refuse`, `effects` and `list`
+//! (`where` and `sort.by`), and each
 //! type's `computed` members (with its `derived` members rewritten as `computed`
 //! entries).
 //!
@@ -101,6 +102,10 @@ pub struct OpExpressions {
     pub refuse: Vec<RefuseEntry>,
     /// Its effects, in order.
     pub effects: Vec<EffectEntry>,
+    /// A list's default item filter (`list.where`), `it` bound to each record.
+    pub list_where: Option<ListWhere>,
+    /// A list's sort parameter (`list.sort`).
+    pub list_sort: Option<ListSort>,
     /// The resource types its expressions read records of (`held`, `count`,
     /// `exists`).
     pub types: Vec<String>,
@@ -108,6 +113,27 @@ pub struct OpExpressions {
     pub reads_held: bool,
     /// Whether an expression of it calls `seq`.
     pub reads_seq: bool,
+}
+
+/// A list's default item filter.
+#[derive(Debug)]
+pub struct ListWhere {
+    /// Where it is in the world (`/operations/<op>/list/where`).
+    pub pointer: String,
+    /// The condition.
+    pub program: Program,
+}
+
+/// A list's sort parameter.
+#[derive(Debug)]
+pub struct ListSort {
+    /// Where `by` is in the world (`/operations/<op>/list/sort/by`).
+    pub pointer: String,
+    /// The request parameter.
+    pub param: String,
+    /// The members to order by, `[{member, desc?}]`, with `value` bound to the
+    /// parameter as sent.
+    pub by: Program,
 }
 
 /// One member an operation sets.
@@ -175,7 +201,9 @@ impl Expressions {
                 let compiled = OpExpressions::compile(id, d);
                 (!compiled.set.is_empty()
                     || !compiled.refuse.is_empty()
-                    || !compiled.effects.is_empty())
+                    || !compiled.effects.is_empty()
+                    || compiled.list_where.is_some()
+                    || compiled.list_sort.is_some())
                 .then(|| (id.clone(), compiled))
             })
             .collect();
@@ -404,10 +432,27 @@ impl OpExpressions {
                 })
             })
             .collect();
+        let list = d.list.as_ref();
+        let list_where = list
+            .and_then(|l| l.r#where.as_deref())
+            .and_then(|w| Program::compile(w).ok())
+            .map(|program| ListWhere {
+                pointer: format!("{base}/list/where"),
+                program,
+            });
+        let list_sort = list.and_then(|l| l.sort.as_ref()).and_then(|s| {
+            Some(ListSort {
+                pointer: format!("{base}/list/sort/by"),
+                param: s.param.clone(),
+                by: Program::compile(&s.by).ok()?,
+            })
+        });
         let mut out = Self {
             set: set.into_values().collect(),
             refuse,
             effects,
+            list_where,
+            list_sort,
             types: Vec::new(),
             reads_held: false,
             reads_seq: false,
@@ -440,7 +485,12 @@ impl OpExpressions {
                 .chain(e.when.iter())
                 .chain(e.set.iter().map(|(_, _, p)| p))
         });
-        set.chain(refuse).chain(effects)
+        let list = self
+            .list_where
+            .iter()
+            .map(|w| &w.program)
+            .chain(self.list_sort.iter().map(|s| &s.by));
+        set.chain(refuse).chain(effects).chain(list)
     }
 
     /// Whether an expression of the operation calls a session function (`held`,
@@ -626,6 +676,7 @@ mod tests {
             record: &null,
             now: &null,
             it: None,
+            value: None,
         };
         let values: Vec<Value> = orders
             .computed

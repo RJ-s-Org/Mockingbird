@@ -18,10 +18,10 @@ use super::expr::{MemberRef, Program, Root, Segment};
 use super::{
     AnswerDesc, ChangeDesc, ConcurrencyDesc, DerivedDesc, EffectDesc, EffectOp, Extra, FieldsDesc,
     FilterDesc, FilterGrammar, HeaderRef, IdentityDesc, IdentityHeader, InstructionDesc,
-    InstructionsDesc, LifecycleDesc, LongRunning, MAX_BYTES, MAX_DEPTH, MAX_EFFECTS, OpDesc,
-    OpKind, OrderDesc, PagingDesc, ParamValue, ParentDesc, Pointer, QueueDesc, QueueEffect,
-    RecordsAt, RefuseDesc, RequeueDesc, ScopeDesc, ScopeKind, SoftDelete, TargetDesc, TextDesc,
-    TypeDesc, UniqueDesc, VERSION, World,
+    InstructionsDesc, LifecycleDesc, ListDesc, ListSortDesc, LongRunning, MAX_BYTES, MAX_DEPTH,
+    MAX_EFFECTS, OpDesc, OpKind, OrderDesc, PagingDesc, ParamValue, ParentDesc, Pointer, QueueDesc,
+    QueueEffect, RecordsAt, RefuseDesc, RequeueDesc, ScopeDesc, ScopeKind, SoftDelete, TargetDesc,
+    TextDesc, TypeDesc, UniqueDesc, VERSION, World,
 };
 use crate::{Binding, Bundle, Operation, RecordAt, StatusSelector};
 
@@ -299,6 +299,10 @@ struct Scope<'a, 's> {
     it: Result<&'s str, &'static str>,
     /// Whether it is a computed member, which calls no `seq` or `mint`.
     computed: bool,
+    /// Why `record` is not bound, where it is not (a list has no target).
+    no_record: Option<&'static str>,
+    /// Whether `value` is bound (a list's `sort.by`).
+    value: bool,
 }
 
 impl<'a, 's> Scope<'a, 's> {
@@ -309,6 +313,8 @@ impl<'a, 's> Scope<'a, 's> {
             record,
             it: Err("`it` is bound only inside count(), exists(), sum() and the list macros"),
             computed: false,
+            no_record: None,
+            value: false,
         }
     }
 
@@ -1684,6 +1690,10 @@ impl<'a> Ctx<'a> {
             }
         }
 
+        if let Some(l) = &d.list {
+            out.list = self.list(op, (record, ty), l, &path.join("list"));
+        }
+
         if let Some(pg) = &d.paging {
             let p = path.join("paging");
             self.unknown(&p, &pg.extra);
@@ -1784,6 +1794,87 @@ impl<'a> Ctx<'a> {
             out.queue = self.queue(op, (d, named), q, &path.join("queue"));
         }
         out
+    }
+
+    /// A list's `list`: on a list operation only; `where` an expression reading
+    /// `it`, a record of the list's type, and the request (`record` is not bound);
+    /// `sort.param` a declared parameter and `sort.by` an expression reading the
+    /// request and `value`, each `member` it gives as a literal a member of the
+    /// type's records. Each part is refused alone.
+    fn list(
+        &mut self,
+        op: &'a Operation,
+        (record, ty): (Option<&'a Value>, Option<&str>),
+        l: &ListDesc,
+        path: &Path,
+    ) -> Option<ListDesc> {
+        self.unknown(path, &l.extra);
+        if self.op_kind(op) != Some(OpKind::List) {
+            self.refuse(
+                path,
+                RefusalCode::Invalid,
+                "`list` applies to a list operation".to_string(),
+            );
+            return None;
+        }
+        const NO_RECORD: &str = "a list has no target: `record` is not bound in `list`";
+        let mut out = ListDesc::default();
+        if let Some(w) = &l.r#where {
+            let scope = Scope {
+                it: ty.ok_or("`it` is a listed record, but the operation has no resource type"),
+                no_record: Some(NO_RECORD),
+                ..Scope::of_op(op, (record, ty))
+            };
+            if self.check_expression(&scope, w, &path.join("where")) {
+                out.r#where = Some(w.clone());
+            }
+        }
+        if let Some(s) = &l.sort {
+            let sp = path.join("sort");
+            self.unknown(&sp, &s.extra);
+            let mut ok = self.check_param(op, &s.param, &sp.join("param"));
+            let scope = Scope {
+                it: Err("`it` is not bound in `sort.by`: it reads the request and `value`"),
+                no_record: Some(NO_RECORD),
+                value: true,
+                ..Scope::of_op(op, (record, ty))
+            };
+            let bp = sp.join("by");
+            if self.check_expression(&scope, &s.by, &bp) {
+                let literals = Program::compile(&s.by)
+                    .map(|p| p.map_literals("member"))
+                    .unwrap_or_default();
+                for (member, pos) in literals {
+                    let problem = match (ty, record) {
+                        (None, _) => Some(format!(
+                            "{pos}: `{member}` names a member, but the operation has no resource type"
+                        )),
+                        (Some(t), None) => Some(format!(
+                            "{pos}: type `{t}` has no record schema to find `{member}` in"
+                        )),
+                        (Some(t), Some(record)) => dotted_member(self.bundle, record, &member)
+                            .is_none()
+                            .then(|| {
+                                format!("{pos}: `{member}` is not a member of a `{t}` record")
+                            }),
+                    };
+                    if let Some(problem) = problem {
+                        self.refuse(&bp, RefusalCode::Unresolved, problem);
+                        ok = false;
+                    }
+                }
+            } else {
+                ok = false;
+            }
+            if ok {
+                out.sort = Some(ListSortDesc {
+                    param: s.param.clone(),
+                    by: s.by.clone(),
+                    extra: Extra::new(),
+                });
+            }
+        }
+        (out.r#where.is_some() || out.sort.is_some()).then_some(out)
     }
 
     /// A `refuse` entry: its `when` (and a `code` or `message` expression) compiles and
@@ -1925,6 +2016,9 @@ impl<'a> Ctx<'a> {
                 };
                 (!declared).then(|| format!("operation `{}` declares no {place} `{name}`", op.id))
             }
+            Root::Value if scope.value => None,
+            Root::Value => Some("`value` is bound only in a list's `sort.by`".to_string()),
+            Root::Record if scope.no_record.is_some() => scope.no_record.map(str::to_string),
             Root::Record => match (record, ty) {
                 (_, None) => Some(format!(
                     "`{m}` reads the target, but operation `{}` has no resource type",
@@ -1960,6 +2054,8 @@ impl<'a> Ctx<'a> {
             record: (record, Some(name)),
             it: Err("`it` is not bound in a computed member: read the record as `record`"),
             computed: true,
+            no_record: None,
+            value: false,
         };
         let identity = self
             .world
@@ -2797,6 +2893,125 @@ mod tests {
         );
         assert_eq!(v.applied.operations["addMember"].refuse.len(), 1);
         assert_eq!(v.applied.operations["addMember"].refuse[0].status, 409);
+    }
+
+    /// [`members`] with a list of members, taking `status`, `sort` and `order`.
+    fn listed_members() -> Bundle {
+        let mut b = members();
+        let member = json!({"type": "object", "properties": {
+            "id": {"type": "string"}, "email": {"type": "string"},
+            "meta": {"type": "object", "properties": {"source": {"type": "string"}}}
+        }});
+        let mut list = bundle(&[(
+            "listMembers",
+            "GET",
+            "/members",
+            json!({"type": "array", "items": member}),
+        )]);
+        b.operations.append(&mut list.operations);
+        typed(&mut b, "listMembers", "members", None, "id");
+        op(&mut b, "listMembers").input.query = Some(json!({"type": "object", "properties": {
+            "status": {"type": "string"}, "sort": {"type": "string"}, "order": {"type": "object"}
+        }}));
+        b
+    }
+
+    #[test]
+    fn list_where_and_sort_keep_expressions_over_the_items_and_the_request() {
+        let b = listed_members();
+        let w = world(
+            json!({"operations": {"listMembers": {"kind": "list", "list": {
+                "where": "has(request.query.status) || it.meta.source != 'import'",
+                "sort": {"param": "sort", "by": "value.split(',').map(p, {'member': p.startsWith('-') ? p.substring(1) : p, 'desc': p.startsWith('-')})"}
+            }}}}),
+        );
+        let v = validate(&w, &b);
+        assert!(v.refused.is_empty(), "{:?}", v.refused);
+        assert_eq!(v.applied, w);
+        // Literal members, and a deep object parameter's members.
+        let w = world(
+            json!({"operations": {"listMembers": {"kind": "list", "list": {
+                "sort": {"param": "order", "by": "[{'member': 'meta.source', 'desc': request.query.order['0'].dir == 'desc'}, {'member': 'email'}]"}
+            }}}}),
+        );
+        let v = validate(&w, &b);
+        assert!(v.refused.is_empty(), "{:?}", v.refused);
+    }
+
+    #[test]
+    fn list_expressions_are_refused_where_they_read_what_is_not_there() {
+        let b = listed_members();
+        let w = world(json!({"operations": {
+            "listMembers": {"kind": "list", "list": {
+                "where": "it.age > 1 &&\n record.id == 'x' && value == 1",
+                "sort": {"param": "sortBy", "by": "[{'member': 'email'}]"}
+            }},
+            "addMember": {"list": {"where": "true"}}
+        }}));
+        let v = validate(&w, &b);
+        refused_with(
+            &v,
+            "/operations/listMembers/list/where",
+            "line 1, column 4: `it.age` is not a member of a `members` record",
+        );
+        refused_with(
+            &v,
+            "/operations/listMembers/list/where",
+            "line 2, column 9: a list has no target",
+        );
+        refused_with(
+            &v,
+            "/operations/listMembers/list/where",
+            "`value` is bound only in a list's `sort.by`",
+        );
+        refused_with(
+            &v,
+            "/operations/listMembers/list/sort/param",
+            "declares no parameter `sortBy`",
+        );
+        refused_with(
+            &v,
+            "/operations/addMember/list",
+            "`list` applies to a list operation",
+        );
+        assert!(
+            !v.applied.operations.contains_key("addMember")
+                || v.applied.operations["addMember"].list.is_none()
+        );
+        assert!(v.applied.operations["listMembers"].list.is_none());
+
+        let w = world(
+            json!({"operations": {"listMembers": {"kind": "list", "list": {
+                "where": "it.status ==",
+                "sort": {"param": "sort", "by": "[{'member': 'email'},\n {'member': 'nickname', 'desc': it.x}]"}
+            }}}}),
+        );
+        let v = validate(&w, &b);
+        refused_with(
+            &v,
+            "/operations/listMembers/list/where",
+            "does not compile: line 1, column",
+        );
+        refused_with(
+            &v,
+            "/operations/listMembers/list/sort/by",
+            "`it` is not bound in `sort.by`",
+        );
+        // A literal member the records do not have, at its line and column.
+        let w = world(
+            json!({"operations": {"listMembers": {"kind": "list", "list": {
+                "sort": {"param": "sort", "by": "[{'member': 'email'},\n {'member': 'nickname'}]"}
+            }}}}),
+        );
+        let v = validate(&w, &b);
+        assert_eq!(
+            refusals(&v),
+            vec![(
+                "/operations/listMembers/list/sort/by",
+                "line 2, column 13: `nickname` is not a member of a `members` record"
+            )]
+        );
+        assert!(v.applied.operations["listMembers"].list.is_none());
     }
 
     /// Every refusal of `v`, as `(path, message)`.

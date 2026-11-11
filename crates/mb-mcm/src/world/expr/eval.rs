@@ -141,6 +141,10 @@ impl<'p> Eval<'p, '_, '_> {
                 .bindings
                 .it
                 .ok_or_else(|| Fail::new(pos, "'it' is not bound here")),
+            "value" => self
+                .bindings
+                .value
+                .ok_or_else(|| Fail::new(pos, "'value' is not bound here")),
             _ => Err(Fail::new(pos, format!("unknown name '{name}'"))),
         }
     }
@@ -232,7 +236,14 @@ impl<'p> Eval<'p, '_, '_> {
                 for a in args {
                     vals.push(self.eval(a)?);
                 }
+                self.steps_n(funcs::output_bytes(*func, &vals) / BYTES_PER_STEP, pos)?;
                 let v = funcs::call(*func, &vals, re.as_deref(), self.host, pos)?;
+                // One step per item `split` built, besides its size.
+                if let (Func::Split, Value::Array(items)) = (func, &v) {
+                    self.steps_n(u64::try_from(items.len()).unwrap_or(u64::MAX), pos)?;
+                }
+                // Charged for what it built too: `replace` pays for its output twice
+                // (estimated before, actual after), which only tightens its budget.
                 self.charge(&v, pos)?;
                 Ok(v)
             }

@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::eval::{Num, double, type_name};
 use super::parse::Func;
-use super::{Decimal, Fail, Host, compile_regex};
+use super::{Decimal, Fail, Host, MAX_SPLIT_ITEMS, compile_regex};
 
 pub(super) fn call(
     func: Func,
@@ -137,6 +137,52 @@ pub(super) fn call(
             }
             Value::String(sum.text())
         }
+        Func::Trim => Value::String(string(0)?.trim().to_string()),
+        Func::Split => {
+            let (s, sep) = (string(0)?, string(1)?);
+            let parts: Vec<&str> = if sep.is_empty() {
+                // Each character, as CEL's split on an empty separator gives.
+                s.char_indices()
+                    .map(|(i, c)| s.get(i..i + c.len_utf8()).unwrap_or_default())
+                    .take(MAX_SPLIT_ITEMS + 1)
+                    .collect()
+            } else {
+                s.split(sep).take(MAX_SPLIT_ITEMS + 1).collect()
+            };
+            if parts.len() > MAX_SPLIT_ITEMS {
+                return Err(Fail::new(
+                    pos,
+                    format!("split() gives more than {MAX_SPLIT_ITEMS} items"),
+                ));
+            }
+            Value::Array(parts.into_iter().map(Value::from).collect())
+        }
+        Func::Substring => {
+            let s = string(0)?;
+            let index = |i: usize| -> Result<Option<i64>, Fail> {
+                match args.get(i) {
+                    None => Ok(None),
+                    Some(v) => match Num::of(v) {
+                        Some(Num::I(n)) => Ok(Some(n)),
+                        _ => Err(Fail::new(
+                            pos,
+                            format!("substring() needs an int index, got {}", type_name(v)),
+                        )),
+                    },
+                }
+            };
+            let len = s.chars().count();
+            let clamp = |n: i64| usize::try_from(n.max(0)).map_or(len, |n| n.min(len));
+            let start = index(1)?.map_or(0, clamp);
+            let end = index(2)?.map_or(len, clamp);
+            Value::String(
+                s.chars()
+                    .skip(start)
+                    .take(end.saturating_sub(start))
+                    .collect(),
+            )
+        }
+        Func::Replace => Value::String(string(0)?.replace(string(1)?, string(2)?)),
         Func::Mint => {
             let pattern = string(0)?;
             Value::String(host.mint(pattern).ok_or_else(|| {
@@ -144,6 +190,27 @@ pub(super) fn call(
             })?)
         }
     })
+}
+
+/// The bytes `func` would build from `args`, where it can build far more than it reads
+/// (`replace`), so that it is charged before the value is made.
+pub(super) fn output_bytes(func: Func, args: &[Value]) -> u64 {
+    let text = |i: usize| args.get(i).and_then(Value::as_str);
+    match (func, text(0), text(1), text(2)) {
+        (Func::Replace, Some(s), Some(from), Some(to)) => {
+            let hits = if from.is_empty() {
+                s.chars().count().saturating_add(1)
+            } else {
+                s.matches(from).count()
+            };
+            let hits = u64::try_from(hits).unwrap_or(u64::MAX);
+            let to = u64::try_from(to.len()).unwrap_or(u64::MAX);
+            u64::try_from(s.len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(hits.saturating_mul(to))
+        }
+        _ => 0,
+    }
 }
 
 /// Lowercase hex.

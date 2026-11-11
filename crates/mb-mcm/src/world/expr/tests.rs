@@ -74,6 +74,7 @@ fn run_with(src: &str, record: &Value, it: Option<&Value>) -> Result<Value, Stri
         record,
         now: &json!("2026-11-10T00:00:00Z"),
         it,
+        value: None,
     };
     p.eval(&b, &mut Fake::new())
         .map_err(|e| format!("eval: {e}"))
@@ -359,6 +360,135 @@ fn string_functions() {
 }
 
 #[test]
+fn split_substring_trim_replace() {
+    // split: a list of text, globally and as a method; an empty separator gives each
+    // character.
+    assert_eq!(ok("split('a,b,,c', ',')"), json!(["a", "b", "", "c"]));
+    assert_eq!(ok("'-price'.split(',')"), json!(["-price"]));
+    assert_eq!(ok("'héy'.split('')"), json!(["h", "é", "y"]));
+    assert_eq!(ok("''.split(',')"), json!([""]));
+    assert_eq!(
+        ok("'a:asc,b:desc'.split(',').map(p, p.split(':')[0])"),
+        json!(["a", "b"])
+    );
+    assert!(eval_err("split(1, ',')").contains("split() needs a string, got int"));
+    // substring: by characters, clamped, never a panic.
+    assert_eq!(ok("substring('-price', 1)"), json!("price"));
+    assert_eq!(ok("'héllo'.substring(1, 3)"), json!("él"));
+    assert_eq!(ok("'abc'.substring(-5, 99)"), json!("abc"));
+    assert_eq!(ok("'abc'.substring(2, 1)"), json!(""));
+    assert_eq!(ok("'abc'.substring(9)"), json!(""));
+    assert_eq!(ok("'abc'.substring(1, 2.0)"), json!("b"));
+    assert!(eval_err("'abc'.substring('1')").contains("substring() needs an int index"));
+    assert!(eval_err("'abc'.substring(1.5)").contains("substring() needs an int index"));
+    // trim
+    assert_eq!(ok("trim('  a b \\n')"), json!("a b"));
+    assert_eq!(ok("' x '.trim()"), json!("x"));
+    // replace: every occurrence; an empty `from` goes between every character.
+    assert_eq!(ok("replace('a-b-c', '-', '_')"), json!("a_b_c"));
+    assert_eq!(ok("'Name DESC'.replace(' DESC', '')"), json!("Name"));
+    assert_eq!(ok("'ab'.replace('', '.')"), json!(".a.b."));
+    // Arity, globally and as a method.
+    assert!(
+        compile_err("substring('a')")
+            .message
+            .contains("substring() takes 2 to 3 arguments, got 1")
+    );
+    assert!(
+        compile_err("'a'.substring()")
+            .message
+            .contains("substring() as a method takes 1 to 2 arguments, got 0")
+    );
+    assert!(
+        compile_err("'a'.replace('a')")
+            .message
+            .contains("replace() as a method takes 2 arguments, got 1")
+    );
+    assert!(
+        compile_err("trim()")
+            .message
+            .contains("trim() takes 1 argument, got 0")
+    );
+}
+
+#[test]
+fn split_and_replace_are_charged() {
+    // split caps its items.
+    let e = eval_body(
+        "split(request.body.s, ',')",
+        json!({"s": ",".repeat(MAX_SPLIT_ITEMS)}),
+    )
+    .unwrap_err();
+    assert!(e.message.contains("more than 1000 items"), "{e}");
+    assert_eq!(
+        eval_body(
+            "size(split(request.body.s, ','))",
+            json!({"s": ",".repeat(999)})
+        ),
+        Ok(json!(1000))
+    );
+    // replace is charged for what it would build, before it builds it.
+    let e = eval_body(
+        "replace(request.body.s, 'a', request.body.big)",
+        json!({"s": "a".repeat(4096), "big": "b".repeat(4096)}),
+    )
+    .unwrap_err();
+    assert!(e.message.contains("budget"), "{e}");
+    let e = eval_body(
+        "replace(request.body.s, '', request.body.big)",
+        json!({"s": "a".repeat(4096), "big": "b".repeat(4096)}),
+    )
+    .unwrap_err();
+    assert!(e.message.contains("budget"), "{e}");
+    // Repeated small splits run into the step budget.
+    let e = eval_body(
+        "request.body.items.map(x, split(request.body.s, ','))",
+        json!({"items": vec![0; 200], "s": ",".repeat(900)}),
+    )
+    .unwrap_err();
+    assert!(e.message.contains("budget"), "{e}");
+}
+
+#[test]
+fn value_is_bound_where_a_key_binds_it() {
+    let p = Program::compile("value.startsWith('-') ? value.substring(1) : value").unwrap();
+    let (req, n, v) = (request(), Value::Null, json!("-price"));
+    let b = Bindings {
+        request: &req,
+        record: &n,
+        now: &n,
+        it: None,
+        value: Some(&v),
+    };
+    assert_eq!(p.eval(&b, &mut Fake::new()), Ok(json!("price")));
+    assert!(
+        run("value")
+            .unwrap_err()
+            .contains("'value' is not bound here"),
+        "unbound value is an evaluation error"
+    );
+    let refs = Program::compile("value.a").unwrap().check();
+    assert_eq!(refs.members[0].root, Root::Value);
+    assert_eq!(refs.members[0].to_string(), "value.a");
+    // A macro variable may shadow it.
+    assert_eq!(ok("[1, 2].map(value, value * 2)"), json!([2, 4]));
+}
+
+#[test]
+fn map_literals_list_the_literal_values_of_a_key() {
+    let p = Program::compile(
+        "value == 'x' ? [{'member': 'price', 'desc': true}] : [{'member': value}, {'member':\n 'a.b'}]",
+    )
+    .unwrap();
+    let found: Vec<(String, usize, usize)> = p
+        .map_literals("member")
+        .into_iter()
+        .map(|(m, pos)| (m, pos.line, pos.column))
+        .collect();
+    assert_eq!(found, vec![("price".into(), 1, 28), ("a.b".into(), 2, 2)]);
+}
+
+#[test]
 fn hashes() {
     assert_eq!(ok("md5('')"), json!("d41d8cd98f00b204e9800998ecf8427e"));
     assert_eq!(ok("md5('abc')"), json!("900150983cd24fb0d6963f7d28e17f72"));
@@ -438,6 +568,7 @@ fn seq_state_lives_in_the_host() {
         record: &rec,
         now: &now,
         it: None,
+        value: None,
     };
     for want in 1..=3 {
         assert_eq!(p.eval(&b, &mut host), Ok(json!(want)));
@@ -659,6 +790,7 @@ fn syntax_errors_and_positions() {
         record: &n,
         now: &n,
         it: None,
+        value: None,
     };
     let e = p.eval(&b, &mut Fake::new()).unwrap_err();
     assert_eq!((e.pos.line, e.pos.column), (2, 14), "{e}");
@@ -741,6 +873,7 @@ fn step_cap() {
         record: &n,
         now: &n,
         it: None,
+        value: None,
     };
     let p = Program::compile("count('Big', it.n > 3)").unwrap();
     let e = p.eval(&b, &mut f).unwrap_err();
@@ -779,6 +912,7 @@ fn eval_body(src: &str, body: Value) -> Result<Value, EvalError> {
         record: &n,
         now: &n,
         it: None,
+        value: None,
     };
     Program::compile(src).unwrap().eval(&b, &mut Fake::new())
 }
@@ -923,6 +1057,7 @@ fn program_is_send_sync_and_reusable() {
                     record: &n,
                     now: &n,
                     it: None,
+                    value: None,
                 };
                 p.eval(&b, &mut Fake::new())
             })
@@ -1045,6 +1180,20 @@ fn malformed_inputs_are_errors() {
         "'a'.matches('(')",
         "mint()",
         "seq()",
+        "split()",
+        "split('a')",
+        "split('a', 1)",
+        "'a'.split()",
+        "substring()",
+        "substring('a', 1, 2, 3)",
+        "'a'.substring(-9223372036854775808)",
+        "'a'.substring(9223372036854775807, -9223372036854775808)",
+        "'é'.substring(0, 1)",
+        "trim(1)",
+        "replace('a', 'b')",
+        "'a'.replace('', '')",
+        "''.replace('', 'x')",
+        "replace(null, 'a', 'b')",
     ];
     for src in bad {
         let r = std::panic::catch_unwind(|| Program::compile(src));
@@ -1057,6 +1206,7 @@ fn malformed_inputs_are_errors() {
                     record: &n,
                     now: &n,
                     it: None,
+                    value: None,
                 };
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     p.eval(&b, &mut Fake::new())
@@ -1078,6 +1228,8 @@ fn fuzz_like_mutations_never_panic() {
         "request.body.lines.filter(l, l.qty > 1).map(l, {'p': l.price, 'k': [1, 2][0]})",
         "has(record.a.b) || 'x\\u00e9\\n'.matches('^[a-z]+$') && md5(string(seq('s'))) in ['a']",
         "held('PaymentIntent', request.body['payment_intent']).currency + mint('[0-9]{4}')",
+        "request.query.sort.split(',').map(p, {'member': trim(p).substring(1), 'desc': p.startsWith('-')})",
+        "replace(trim(request.body.name), ' ', '-').substring(0, -1) + split('a b', ' ')[1]",
     ];
     let (rq, n) = (request(), Value::Null);
     let b = Bindings {
@@ -1085,6 +1237,7 @@ fn fuzz_like_mutations_never_panic() {
         record: &n,
         now: &n,
         it: None,
+        value: None,
     };
     let mut compiled = 0;
     for seed in seeds {
