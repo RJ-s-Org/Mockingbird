@@ -27,6 +27,10 @@ const SOURCES: Record<string, SourceLabel> = {
   },
   state: { label: "Session state", hint: "Served from the session's stored resource, without the LLM." },
   cache: { label: "Cache", hint: "A repeat of an earlier answer in the same session." },
+  example: {
+    label: "Declared example",
+    hint: "The contract's declared example of a response that is not JSON (plain text, for example).",
+  },
   // The server's `not_generated`, and the names older servers used for it.
   not_generated: NOT_GENERATED,
   none: NOT_GENERATED,

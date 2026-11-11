@@ -3626,11 +3626,9 @@ async fn non_json_text_responses_come_from_the_example_or_the_faker() {
         .unwrap();
     assert_eq!(out.content_type.as_deref(), Some("text/csv"));
     assert_eq!(out.body, Some(json!("a,b\n1,2\n")));
-    assert_eq!(out.source, Source::Fallback);
-    assert_eq!(
-        out.fallback_reason.as_deref(),
-        Some(mb_engine::NON_JSON_MEDIA_REASON)
-    );
+    // The declared example is the contract's own answer: not a fallback.
+    assert_eq!(out.source, Source::Example);
+    assert_eq!(out.fallback_reason, None);
 
     let text = bundle.operation("getText").unwrap();
     let out = engine
