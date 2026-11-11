@@ -25,7 +25,7 @@
 use mb_mcm::Operation;
 use serde_json::Value;
 
-use super::entities::entity_fits;
+use super::entities::added_violation;
 use crate::MockRuntime;
 
 /// What makes a record of a type soft-deleted, for a list or a unique check to leave it
@@ -152,8 +152,9 @@ pub(super) fn forced(rt: &MockRuntime, t: &str, query: &serde_json::Map<String, 
         .is_some_and(|u| sends(query, &u.param, &u.value))
 }
 
-/// Sets `member` of `record` to `value`, unless that leaves a record type `t`'s schema
-/// refuses; answers whether it set it.
+/// Sets `member` of `record` to `value`, unless that adds a violation of type `t`'s
+/// schema (a partial record, stored without members its schema requires, still takes
+/// a state that fits); answers whether it set it.
 fn set_state(rt: &MockRuntime, t: &str, record: &mut Value, member: &str, value: Value) -> bool {
     if !record.is_object() {
         return false;
@@ -162,7 +163,7 @@ fn set_state(rt: &MockRuntime, t: &str, record: &mut Value, member: &str, value:
     if !mb_mcm::set_member_at(record, member, value) {
         return false;
     }
-    if !entity_fits(rt, t, record) {
+    if added_violation(rt, t, &before, record).is_some() {
         tracing::info!(
             mock = %rt.name,
             r#type = %t,
@@ -182,9 +183,72 @@ pub(super) fn not_found(rt: &MockRuntime, op: &Operation) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use mb_engine::{Engine, EngineConfig};
+    use mb_state::{MemoryStore, StateStore};
     use serde_json::json;
 
     use super::*;
+
+    /// Items read as `{id, name, created, status}` (`id`, `name` and `created`
+    /// required, at most four members), whose world gives them a lifecycle.
+    const CONTRACT: &str = r##"
+openapi: 3.0.0
+info: {title: Items, version: "1"}
+paths:
+  /items/{id}:
+    get:
+      operationId: getItem
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+components:
+  schemas:
+    Item:
+      type: object
+      required: [id, name, created]
+      maxProperties: 4
+      properties:
+        id: {type: string}
+        name: {type: string}
+        created: {type: string}
+        status: {type: string, enum: [LIVE, GONE]}
+        rank: {type: integer}
+"##;
+
+    fn runtime() -> MockRuntime {
+        let bundle = mb_import::compile(CONTRACT.as_bytes()).unwrap();
+        let doc: mb_mcm::world::World = serde_json::from_value(json!({
+            "types": {"items": {"lifecycle": {"member": "status", "states": ["LIVE", "GONE"], "initial": "LIVE"}}}
+        }))
+        .unwrap();
+        let base = mb_mcm::world::tier0(&bundle);
+        let (world, refused) = mb_mcm::world::effective(&bundle, &base, &doc);
+        assert!(refused.is_empty(), "{refused:?}");
+        let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+        let engine = Arc::new(Engine::new(None, EngineConfig::default()));
+        MockRuntime::new("items", Arc::new(bundle), engine, state).with_world(&base, &world, 1)
+    }
+
+    #[test]
+    fn a_partial_record_still_starts_in_the_initial_state() {
+        let rt = runtime();
+        // Created without `created`, which the read requires.
+        let mut record = json!({"id": "i1", "name": "a"});
+        initial(&rt, "items", &mut record, None);
+        assert_eq!(record, json!({"id": "i1", "name": "a", "status": "LIVE"}));
+    }
+
+    #[test]
+    fn a_state_adding_a_violation_is_not_set() {
+        let rt = runtime();
+        // Four members already: a fifth passes the read's `maxProperties`.
+        let held = json!({"id": "i1", "name": "a", "rank": 1, "note": "x"});
+        let mut record = held.clone();
+        initial(&rt, "items", &mut record, None);
+        assert_eq!(record, held);
+    }
 
     #[test]
     fn an_exclusion_matches_its_state_and_is_lifted_by_its_parameter() {

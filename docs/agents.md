@@ -2,7 +2,7 @@
 
 Every Mockingbird capability is available to coding agents: installing it, connecting an LLM, running a server, and the whole Admin API. Agents reach it three ways, all from the same binary:
 
-- **MCP server**: `mockingbird mcp` exposes 48 tools (stdio, or streamable HTTP for remote agents such as ChatGPT).
+- **MCP server**: `mockingbird mcp` exposes 49 tools (stdio, or streamable HTTP for remote agents such as ChatGPT).
 - **Skills**: six `SKILL.md` guides in [`plugins/mockingbird/skills`](../plugins/mockingbird/skills) tell an agent when and how to use them.
 - **CLI**: every onboarding and lifecycle command prints JSON (`init`, `llm`, `server`, `doctor`, `agent`), and the Admin API client commands already do.
 
@@ -62,6 +62,7 @@ Ask in plain words: "mock the API in openapi.yaml", "use OpenRouter for Mockingb
 | Server | `start_server` (`proxy: true` also starts the HTTP(S) proxy), `server_status`, `server_logs`, `stop_server`, `proxy_env` | `server start/status/logs/stop`, `proxy env`, `run -- <command>` |
 | Mocks | `list_mocks`, `get_mock`, `create_mock`, `update_mock`, `delete_mock`, `import_contract`, `list_contract_versions`, `activate_contract_version` | `mocks list/get/create/update/delete`, `import`, `contracts list/activate` |
 | Drafts | `get_draft`, `edit_draft`, `approve_draft` | `import --approve`, `drafts approve` |
+| Contract fixes | `edit_contract` (merge-patch the active OpenAPI contract, activated as a new version) | `import <edited file> --as <mock> --activate` |
 | World descriptions ([guide](world.md); the `mockingbird-world` skill) | `get_world`, `get_world_schema`, `put_world`, `patch_world`, `list_world_revisions`, `get_world_revision`, `restore_world_revision`, `diff_world` | `world show/put/patch/revisions/revision/restore/diff`, `world schema` |
 | Behaviour | `list_scenarios`, `put_scenario`, `delete_scenario`, `list_llm_profiles`, `put_llm_profile`, `delete_llm_profile` | `scenarios …`, `profiles …` |
 | Traffic and state | `call_mock`, `list_requests` (summaries; `include_bodies` for bodies), `get_request`, `list_sessions`, `export_session`, `seed_session`, `reset_session` | `sessions …`, `export-fixtures`, `seed-fixtures` |

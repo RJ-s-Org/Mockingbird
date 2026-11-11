@@ -3,7 +3,7 @@
   "title": "TMDB",
   "category": "media",
   "protocol": "openapi",
-  "summary": "The Movie Database API v3: movie details and credits, popular, search, discover, genres, TV series, people and configuration, with placeholder posters for image.tmdb.org and rate-limit, not-found, invalid-key and outage scenarios.",
+  "summary": "The Movie Database API v3: movie details, credits and lists, recommendations, search, discover, trending, genres, TV series and seasons, people and configuration, with placeholder posters for image.tmdb.org and rate-limit, not-found, invalid-key and outage scenarios.",
   "contracts": [
     "tmdb.openapi.yaml"
   ],

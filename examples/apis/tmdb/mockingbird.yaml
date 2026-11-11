@@ -1,6 +1,6 @@
-# TMDB (The Movie Database) API v3: movie details and credits, popular, search,
-# discover, genres, TV series, people and configuration, plus placeholder posters
-# for image.tmdb.org.
+# TMDB (The Movie Database) API v3: movie details, credits and lists,
+# recommendations, search, discover, trending, genres, TV series and seasons, people
+# and configuration, plus placeholder posters for image.tmdb.org.
 #   mockingbird serve -c mockingbird.yaml --offline
 #   curl -s 'localhost:8080/3/movie/550?api_key=tmdb_test_123' -H 'Host: api.themoviedb.org'
 # Contract: tmdb.openapi.yaml, a hand-written subset (see its header); TMDB's
@@ -20,9 +20,9 @@ mocks:
       titles, original titles, years, runtimes, genres and overviews (movie 550 is
       Fight Club, 27205 Inception, 603 The Matrix; tv 1396 is Breaking Bad; person
       287 is Brad Pitt). Translate titles and overviews when `language` is not
-      en-US. Image paths look like TMDB's: "/" + 27 alphanumerics + ".jpg". Lists
-      return 20 results per page with consistent page, total_pages and
-      total_results; search results match the query. Dates are YYYY-MM-DD,
+      English (en or en-US). Image paths look like TMDB's: "/" + 27
+      alphanumerics + ".jpg". Lists return 20 results per page with consistent
+      page, total_pages and total_results; search results match the query. Dates are YYYY-MM-DD,
       vote_average is 0-10 with one or three decimals, imdb_id is "tt" + 7 digits.
     scenarios:
       rate-limited:
@@ -33,7 +33,15 @@ mocks:
           status_message: Your request count (41) is over the allowed limit of (40).
       not-found:
         status: 404
-        operations: [movie-details, movie-credits, tv-series-details, person-details]
+        operations:
+          - movie-details
+          - movie-credits
+          - movie-recommendations
+          - tv-series-details
+          - tv-series-recommendations
+          - tv-season-details
+          - person-details
+          - person-combined-credits
         set:
           success: false
           status_code: 34

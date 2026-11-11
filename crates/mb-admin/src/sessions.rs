@@ -75,7 +75,8 @@ pub struct SessionPath {
 /// mock, 400 for a malformed session id.
 async fn key(st: &AdminState, ws: &str, path: SessionPath) -> ApiResult<SessionKey> {
     let SessionPath { mock, session } = path;
-    st.mock(ws, &mock).await?;
+    // Mocks of one API that share their sessions keep them under the group.
+    let mock = st.mock(ws, &mock).await?.behavior.shares.unwrap_or(mock);
     if !valid_identifier(&session) {
         return Err(Problem::bad_request(
             "session ids are 1-128 characters of [A-Za-z0-9._-]",
@@ -108,8 +109,13 @@ pub async fn list(
     Path(MockPath { mock }): Path<MockPath>,
 ) -> ApiResult<Json<Vec<SessionInfoView>>> {
     access.require(Permission::Read)?;
-    st.mock(&access.ws, &mock).await?;
-    let sessions = st.state.sessions(&access.ws, &mock).await?;
+    let held = st
+        .mock(&access.ws, &mock)
+        .await?
+        .behavior
+        .shares
+        .unwrap_or(mock);
+    let sessions = st.state.sessions(&access.ws, &held).await?;
     Ok(Json(sessions.into_iter().map(Into::into).collect()))
 }
 

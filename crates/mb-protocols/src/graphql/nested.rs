@@ -212,9 +212,37 @@ pub(crate) async fn from_state(
     collect(&rt.bundle, schema, sel, 0, &mut types);
     let mut held = HashMap::new();
     for t in types {
-        let records = call::stored_of_type(rt, session, &t.to_lowercase(), MAX_HELD).await;
+        let own = t.to_lowercase();
+        let mut records = call::stored_of_type(rt, session, &own, MAX_HELD).await;
+        // What the mock this one shares stored, in this type's shape.
+        let props = rt
+            .bundle
+            .defs
+            .get(&t)
+            .and_then(|d| d.get("properties"))
+            .and_then(Value::as_object);
+        if let Some(props) = props {
+            for other in call::shared::equivalents(rt, &own) {
+                for record in call::stored_of_type(rt, session, &other, MAX_HELD).await {
+                    records.push(StoredResource {
+                        resource_type: own.clone(),
+                        data: call::shared::reshape(props, &rt.bundle.defs, &record.data),
+                        id: record.id,
+                    });
+                }
+            }
+        }
         if !records.is_empty() {
             held.insert(t, records);
+        }
+    }
+    // Which of several matching records a lookup takes must not depend on
+    // what the query selects: count who refers to them across every type
+    // whose members name a held type.
+    let mut referred = Vec::new();
+    for t in referring_types(&rt.bundle, &held) {
+        for record in call::stored_of_type(rt, session, &t.to_lowercase(), MAX_HELD).await {
+            referred.extend(refs(&record).into_iter().map(str::to_string));
         }
     }
     let mut walk = Walk {
@@ -222,6 +250,7 @@ pub(crate) async fn from_state(
         narrowed: rt.narrowed(),
         superseded: Vec::new(),
         held,
+        referred,
     };
     // A root selection carries no arguments of its own.
     let sel = Selection {
@@ -232,6 +261,25 @@ pub(crate) async fn from_state(
     for (t, id) in walk.superseded {
         call::forget_stored(rt, session, &t, &id).await;
     }
+}
+
+/// The object types (not lists) with a member naming one of `held`'s types:
+/// `Issue` for `Repository` (`Issue.repository`).
+fn referring_types(bundle: &Bundle, held: &HashMap<String, Vec<StoredResource>>) -> Vec<String> {
+    bundle
+        .defs
+        .iter()
+        .filter(|(_, def)| {
+            def.get("properties")
+                .and_then(Value::as_object)
+                .is_some_and(|props| {
+                    props.values().any(|p| {
+                        list_item(p).is_none() && def_ref(p).is_some_and(|n| held.contains_key(n))
+                    })
+                })
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 /// The keyed types `sel` reaches below `schema`.
@@ -284,6 +332,9 @@ struct Walk<'a> {
     superseded: Vec<(String, String)>,
     /// By definition name, most recent first.
     held: HashMap<String, Vec<StoredResource>>,
+    /// The ids the session's records of types that refer to a held type
+    /// (`Issue.repository`) refer to, whether or not the query selects them.
+    referred: Vec<String>,
 }
 
 impl Walk<'_> {
@@ -506,6 +557,10 @@ impl Walk<'_> {
         parent: Option<&Parent>,
         generated: Option<&str>,
     ) -> Option<(String, StoredResource)> {
+        // Of several records the arguments name (one the session uses and a
+        // copy written since, by a record pool or a model's answer), the one
+        // the most held records refer to; the most recent among equals.
+        let mut best: Option<(usize, &String, &StoredResource)> = None;
         for ty in types {
             for record in self.held.get(ty).into_iter().flatten() {
                 if generated == Some(record.id.as_str()) {
@@ -517,11 +572,19 @@ impl Walk<'_> {
                 if let (true, compared) = matches(args, record)
                     && compared > 0
                 {
-                    return Some((ty.clone(), record.clone()));
+                    let referred = self.referrers(&record.id);
+                    if best.is_none_or(|(n, _, _)| referred > n) {
+                        best = Some((referred, ty, record));
+                    }
                 }
             }
         }
-        None
+        best.map(|(_, ty, record)| (ty.clone(), record.clone()))
+    }
+
+    /// How many of the session's records refer to the record `id`.
+    fn referrers(&self, id: &str) -> usize {
+        self.referred.iter().filter(|r| *r == id).count()
     }
 
     /// Whether `record` refers to `parent`, or to no record of its type.

@@ -64,6 +64,7 @@ mod reporting;
 mod reused_ids;
 mod runs;
 mod session_memory;
+pub(crate) mod shared;
 mod side_writes;
 mod state_access;
 mod state_lists;

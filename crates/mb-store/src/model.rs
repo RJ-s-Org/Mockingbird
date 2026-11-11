@@ -374,6 +374,10 @@ pub struct MockBehavior {
     /// LLM fallbacks are random.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub faker_seed: Option<u64>,
+    /// The name mocks of one API share their session records under (REST
+    /// and GraphQL over one store): sessions are kept under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shares: Option<String>,
 }
 
 /// A mock's path rewrite: `strip_prefix` is removed from the path below the

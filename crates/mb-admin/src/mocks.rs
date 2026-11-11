@@ -639,6 +639,7 @@ pub async fn create(
                     path_rewrite: body.path_rewrite,
                     graphql_path: None,
                     faker_seed: body.faker_seed,
+                    shares: None,
                 },
                 hosts: body.hosts,
                 webhooks: body.webhooks,

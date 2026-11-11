@@ -75,3 +75,22 @@
 - example-contract coverage (H6)
 
 The proxy and path mapping, and state-first reads (p50 1 ms), carried over cleanly.
+
+## Rerun after H6 and H7 (#442, #443)
+
+The same app and method, on a binary with #442 (list typing by item schema, filters on list-item members) and #443 (the fuller `tmdb` example). The store was fresh.
+
+- **Build.** `examples init tmdb` now gives the 27 operations and accepts `language=en`. The agent's work was:
+  - the proxy mapping in `mockingbird.yaml`
+  - a world description of paging and `ignores` for the lists, plus a `with_genres` filter on `genre_ids`, which is now accepted
+
+  The agent hand-wrote no operations and retyped no lists: import types all list operations as `movie`, `tv` or `person`. 4 gaps remain, the sort and year parameters (from 19).
+- **Movie list → detail holds.** The popular list holds Inception 27205, Avatar 19995, The Matrix 603 and Titanic 597, and each detail read answers the same movie. In the holdout, listed movies had genre ids and opened as "Comedy" (H1/H2).
+- **e2e through the mock, 3 of 4.**
+  - On the cold store, the catalogue test missed its 5 s title wait while `/movie` fetched three lists the model hadn't generated yet.
+  - With the store warm, 3 pass.
+  - The language test still fails, on H3/H4: the model answers TV 549 as "Breaking Bad", and a `fr-FR` read needs a per-language record.
+- `/tv/1399` once took 10.5 s from the model. The app cached its own failure for that route, though the mock answered 200.
+- 0 fallbacks, 0 errors. Sources: 25 `llm`, 21 `cache`, 4 `state`, 3 `patched`.
+
+H1/H2 no longer show on the movie lists, because the lists now store movie records. The genre lists are still typed `movie` and `tv` by their path (`/genre/movie/list`), so genres can still be stored as movie records; that stays with H2.

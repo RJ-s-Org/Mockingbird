@@ -119,6 +119,12 @@ pub struct TypeDesc {
     /// stored, keyed by member path, each the [expression](expr) its value is.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub computed: BTreeMap<String, String>,
+    /// The names this type goes by in the mocks whose records this one's
+    /// mock shares, where they differ beyond case and plural (REST `pulls`
+    /// beside GraphQL `pullrequest`). They name another contract's types, so
+    /// only their form is checked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub same_as: Vec<String>,
     /// Unknown keys.
     #[serde(flatten)]
     pub extra: Extra,

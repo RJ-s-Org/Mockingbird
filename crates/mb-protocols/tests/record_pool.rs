@@ -322,3 +322,52 @@ async fn a_session_that_wrote_the_type_first_lists_its_own_records() {
     assert_eq!(listed, json!([widget(9)]));
     assert_eq!(pool_note(&h), None);
 }
+
+#[tokio::test]
+async fn a_list_whose_items_are_another_type_never_shapes_the_pool() {
+    // `/widget-kinds` lists kinds (ids from an enum) but is typed as widgets. The pool's
+    // widgets are written from the read by id's schema, so no record takes a kind's id;
+    // none reads as a kind either, so the type is left unpooled instead of corrupted.
+    let contract = WIDGETS.replace(
+        "  /widgets/{id}:",
+        "  /widget-kinds:\n    get:\n      operationId: listKinds\n      responses:\n        \"200\": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: \"#/components/schemas/Kind\"}}}}}\n  /widgets/{id}:",
+    ) + "    Kind:\n      type: object\n      required: [id, name]\n      properties:\n        id: {type: string, enum: [k1, k2, k3]}\n        name: {type: string}\n";
+    let mut w = world();
+    w["operations"]["listKinds"] = json!({"kind": "list", "type": "widgets"});
+    let batch = json!({"records": (1..=5).map(widget).collect::<Vec<_>>()});
+    let h = support::described(&contract, w, vec![batch, widget(9)]);
+    mb_protocols::fill_record_pool(Arc::downgrade(&h.rt), 60_000).await;
+    assert_eq!(h.rt.pool.sizes().get("widgets").copied().unwrap_or(0), 0);
+    // The model was asked for widgets alone: the kinds' id enum never reached it.
+    let asked = format!("{:?}", h.provider.requests());
+    assert!(
+        !asked.contains("k2"),
+        "the pool call carried the kinds' enum"
+    );
+}
+
+#[tokio::test]
+async fn a_type_whose_lists_show_a_summary_of_its_record_is_still_pooled() {
+    // The read by id answers the whole widget; the list shows a summary of it.
+    let contract = WIDGETS
+        .replace(
+            "schema: {type: array, items: {$ref: \"#/components/schemas/Widget\"}}",
+            "schema: {type: array, items: {$ref: \"#/components/schemas/WidgetSummary\"}}",
+        )
+        .replace(
+            "      required: [id, name]\n      properties:\n        id: {type: string}\n        name: {type: string}\n",
+            "      required: [id, name, description]\n      properties:\n        id: {type: string}\n        name: {type: string}\n        description: {type: string}\n    WidgetSummary:\n      type: object\n      additionalProperties: false\n      required: [id, name]\n      properties:\n        id: {type: string}\n        name: {type: string}\n",
+        );
+    let full = |i: usize| json!({"id": format!("w{i}"), "name": format!("Widget {i}"), "description": format!("The {i}th")});
+    let batch = json!({"records": (1..=5).map(full).collect::<Vec<_>>()});
+    let h = support::described(&contract, world(), vec![batch]);
+    mb_protocols::fill_record_pool(Arc::downgrade(&h.rt), 60_000).await;
+    assert_eq!(h.rt.pool.sizes().get("widgets"), Some(&5));
+    let (_, headers, listed) = h.send("GET", "/widgets", None, &[]).await;
+    assert_eq!(headers["x-mockingbird-source"], "state", "{listed}");
+    assert_eq!(listed.as_array().unwrap().len(), 5, "{listed}");
+    assert!(
+        listed[0].get("description").is_none(),
+        "a summary: {listed}"
+    );
+}

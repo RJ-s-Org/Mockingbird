@@ -1052,6 +1052,17 @@ impl<'a> Ctx<'a> {
         let record = self.record_schema(name);
         let ty = Some(name);
         let mut out = TypeDesc::default();
+        for (i, other) in t.same_as.iter().enumerate() {
+            if other.trim().is_empty() {
+                self.refuse(
+                    &path.join("same_as").join(i),
+                    RefusalCode::Invalid,
+                    "a type name may not be empty".to_string(),
+                );
+            } else {
+                out.same_as.push(other.clone());
+            }
+        }
 
         if let Some(id) = &t.identity {
             let p = path.join("identity");
@@ -1719,10 +1730,13 @@ impl<'a> Ctx<'a> {
                 }
                 _ => self.check_param(op, &f.param, &p.join("param")),
             };
-            let member = f
-                .member
-                .as_ref()
-                .is_none_or(|m| self.check_member(record, ty, m, &p.join("member")));
+            // A filter applies to the listed items, so a member they hold and the
+            // record lacks (TMDB's `genre_ids` beside the detail's `genres`) is one.
+            let member = f.member.as_ref().is_none_or(|m| {
+                listed_items(self.bundle, answer)
+                    .any(|item| dotted_member(self.bundle, item, m).is_some())
+                    || self.check_member(record, ty, m, &p.join("member"))
+            });
             let prefix = f
                 .member_prefix
                 .as_ref()
@@ -2480,6 +2494,22 @@ fn items<'a>(b: &'a Bundle, schema: &'a Value) -> Option<&'a Value> {
         branches(schema).find_map(|s| walk(b, s, seen, depth + 1))
     }
     walk(b, schema, &mut Seen::new(), 0)
+}
+
+/// The item schemas a list answer holds: its own items when it is an array, else
+/// those of each of its array members (`results` of `{page, results}`).
+fn listed_items<'a>(b: &'a Bundle, answer: Option<&'a Value>) -> impl Iterator<Item = &'a Value> {
+    let answer = answer.map(|a| b.resolve(a));
+    let own = answer.filter(|a| is_array(b, a)).and_then(|a| items(b, a));
+    let members = answer
+        .filter(|a| !is_array(b, a))
+        .and_then(|a| a.get("properties"))
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|props| props.values())
+        .filter(move |s| is_array(b, s))
+        .filter_map(move |s| items(b, s));
+    own.into_iter().chain(members)
 }
 
 /// Whether `schema` describes an array, through `$ref`s and branches.
@@ -3478,6 +3508,57 @@ mod tests {
         assert_eq!(v.applied, w);
     }
 
+    /// TMDB's discover: list items hold `genre_ids`, the record read by path
+    /// `genres`. A filter applies to the listed items, so it may name theirs.
+    #[test]
+    fn validate_keeps_a_filter_on_a_member_the_listed_items_hold_and_the_record_lacks() {
+        let mut b = bundle(&[
+            (
+                "GetMovie",
+                "GET",
+                "/movie/{id}",
+                json!({"type": "object", "properties": {
+                    "id": {"type": "integer"},
+                    "genres": {"type": "array", "items": {"type": "object"}}
+                }}),
+            ),
+            (
+                "Discover",
+                "GET",
+                "/discover/movie",
+                json!({"type": "object", "properties": {
+                    "page": {"type": "integer"},
+                    "results": {"type": "array", "items": {"type": "object", "properties": {
+                        "id": {"type": "integer"},
+                        "genre_ids": {"type": "array", "items": {"type": "integer"}}
+                    }}}
+                }}),
+            ),
+        ]);
+        typed(&mut b, "GetMovie", "movie", Some("id"), "id");
+        typed(&mut b, "Discover", "movie", None, "id");
+        op(&mut b, "Discover").input.query = Some(json!({"type": "object", "properties": {
+            "with_genres": {"type": "string"}
+        }}));
+        let filters = |member: &str| {
+            world(json!({"operations": {"Discover": {"filters": [
+                {"param": "with_genres", "member": member, "kind": "contains"}
+            ]}}}))
+        };
+        let v = validate(&filters("genre_ids"), &b);
+        assert_eq!(v.refused, vec![]);
+        assert_eq!(v.applied.operations["Discover"].filters.len(), 1);
+        // A member neither the items nor the record hold is still refused.
+        let v = validate(&filters("keywords"), &b);
+        assert_eq!(
+            paths(&v),
+            vec![(
+                "/operations/Discover/filters/0/member",
+                RefusalCode::Unresolved
+            )]
+        );
+    }
+
     #[test]
     fn validate_refuses_a_member_less_filter_on_the_listed_with_parameter() {
         let b = folders();
@@ -3689,6 +3770,20 @@ mod tests {
         let w = world(json!({"operations": {"listAccounts": {"type": "acount"}}}));
         let v = validate(&w, &b);
         refused_with(&v, "/operations/listAccounts/type", "`acount`");
+    }
+
+    #[test]
+    fn validate_refuses_an_empty_same_as_name() {
+        let w = world(json!({"types": {"folder": {"same_as": ["folders-v2", " "]}}}));
+        let v = validate(&w, &folders());
+        assert_eq!(
+            paths(&v),
+            vec![("/types/folder/same_as/1", RefusalCode::Invalid)]
+        );
+        assert_eq!(
+            v.applied.types["folder"].same_as,
+            vec!["folders-v2".to_string()]
+        );
     }
 
     #[test]

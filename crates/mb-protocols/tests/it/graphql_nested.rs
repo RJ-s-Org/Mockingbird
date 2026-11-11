@@ -65,6 +65,15 @@ async fn serve(script: Vec<Value>) -> String {
 }
 
 async fn serve_sdl(sdl: &str, script: Vec<Value>) -> String {
+    serve_on(
+        sdl,
+        script,
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    )
+    .await
+}
+
+async fn serve_on(sdl: &str, script: Vec<Value>, state: Arc<dyn mb_state::StateStore>) -> String {
     let provider = Arc::new(ScriptedProvider::new(
         script.into_iter().map(|v| Ok(v.to_string())).collect(),
     ));
@@ -75,7 +84,7 @@ async fn serve_sdl(sdl: &str, script: Vec<Value>) -> String {
             Some(provider as Arc<dyn Provider>),
             EngineConfig::default(),
         )),
-        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+        state,
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -364,6 +373,56 @@ async fn items_listed_without_ids_are_stored_by_their_lookup_keys() {
     )
     .await;
     assert_eq!(one["repository"]["issue"]["title"], "Two", "{one}");
+}
+
+/// Of two stored records the arguments name, the one other records refer
+/// to answers: a copy written later (a record pool's, a model's) does not
+/// take its place.
+#[tokio::test]
+async fn the_record_others_refer_to_wins_a_lookup() {
+    use mb_state::{SessionKey, StateStore, StoredResource};
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let session = SessionKey {
+        workspace: "default".into(),
+        mock: "gh".into(),
+        session: "s1".into(),
+    };
+    let held = |t: &str, id: &str, data: Value| StoredResource {
+        resource_type: t.into(),
+        id: id.into(),
+        data,
+    };
+    for record in [
+        held("repository", "R_1", json!({"id": "R_1", "name": "r"})),
+        held(
+            "issue",
+            "I_1",
+            json!({"id": "I_1", "number": 1, "title": "Kept", "repository": {"id": "R_1"}}),
+        ),
+        held("repository", "R_2", json!({"id": "R_2", "name": "r"})),
+    ] {
+        state.upsert(&session, record).await.unwrap();
+    }
+    let base = serve_on(
+        SDL,
+        vec![
+            json!({"__typename": "Repository", "id": "R_y"}),
+            json!({"__typename": "Repository", "id": "R_x", "issues": {
+                "__typename": "IssueConnection", "totalCount": 0, "nodes": []}}),
+        ],
+        state,
+    )
+    .await;
+    // Whether or not the query selects the records that refer to it.
+    let bare = gql(&base, r#"{ repository(owner: "o", name: "r") { id } }"#).await;
+    assert_eq!(bare["repository"]["id"], "R_1", "{bare}");
+    let read = gql(
+        &base,
+        r#"{ repository(owner: "o", name: "r") { id issues(first: 5) { nodes { id title } } } }"#,
+    )
+    .await;
+    assert_eq!(read["repository"]["id"], "R_1", "{read}");
+    assert_eq!(read["repository"]["issues"]["nodes"][0]["title"], "Kept");
 }
 
 const SHOP: &str = r#"

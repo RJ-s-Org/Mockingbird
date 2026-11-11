@@ -1589,9 +1589,14 @@ fn is_scalar_schema(schema: &Value) -> bool {
 /// under which the path decides who is listed, and two types serving the items.
 ///
 /// Any other list read takes the type whose `GET` by path serves exactly what every
-/// listed array holds, the same schema and not a shorter or longer form of it: Notion's
+/// listed array holds: Notion's
 /// `POST /data_sources/{id}/query` lists pages, and Jira's `GET /search/jql` issues,
 /// whatever other routes its own type has.
+///
+/// A list whose items are no type's exact record, and whose own type has no `GET` by
+/// path, takes the type whose record they are a form of ([`summarized`]): TMDB's
+/// `/movie/popular` lists `movie` summaries, which go under that type's records, so a
+/// listed movie's detail read is that record.
 ///
 /// A create then takes the type that reads exactly what it stores ([`created_type`]).
 fn apply_lookups(operations: &mut [Operation], hints: &[ResourceHint], defs: &Map<String, Value>) {
@@ -1634,6 +1639,10 @@ fn apply_lookups(operations: &mut [Operation], hints: &[ResourceHint], defs: &Ma
         .filter(|read| serves(read))
         .map(|read| read.resource_type.clone());
         let Some(found) = types.next() else {
+            drop(types);
+            if let Some(found) = summarized(op, &items, operations, defs) {
+                operations[index].resource_type = Some(found);
+            }
             continue;
         };
         let one_type = types.all(|other| other == found);
@@ -1653,6 +1662,79 @@ fn apply_lookups(operations: &mut [Operation], hints: &[ResourceHint], defs: &Ma
             op.identity = Some(identity);
         }
     }
+}
+
+/// The type whose records a list of another form of them lists (shorter or longer),
+/// when the list's own type has no `GET` by path: TMDB's `GET /movie/popular` lists the movies
+/// `GET /movie/{movie_id}` serves, each item a summary (`genre_ids` where the record
+/// has `genres`). An item is a form of a read's record when it has the record's key,
+/// with the same schema, and at least half its other members (and at least one) are
+/// the record's, with the same schemas. The read sharing the most members wins; a tie, or two lists of
+/// different items, gives none. Nothing here reads names.
+fn summarized(
+    op: &Operation,
+    items: &[Value],
+    operations: &[Operation],
+    defs: &Map<String, Value>,
+) -> Option<String> {
+    let reads = || {
+        gets(operations, |route| {
+            route.last().is_some_and(|last| is_param(last))
+        })
+    };
+    if op.resource_type.is_none() || reads().any(|read| read.resource_type == op.resource_type) {
+        return None;
+    }
+    fn schema_of<'a>(
+        props: &'a Map<String, Value>,
+        name: &str,
+        defs: &'a Map<String, Value>,
+    ) -> Option<&'a Value> {
+        props.get(name).map(|s| resolve(s, defs).unwrap_or(s))
+    }
+    let shared = |item: &Value, read: &Operation| -> Option<usize> {
+        let key = read.identity.as_ref()?.field.as_str();
+        let record = record_served(read, defs)?;
+        let (item, record) = (
+            schema_properties(Some(item), defs)?,
+            schema_properties(Some(&record), defs)?,
+        );
+        if schema_of(&item, key, defs).is_none()
+            || schema_of(&item, key, defs) != schema_of(&record, key, defs)
+        {
+            return None;
+        }
+        let same = item
+            .keys()
+            .filter(|name| *name != key)
+            .filter(|name| schema_of(&record, name, defs) == schema_of(&item, name, defs))
+            .count();
+        (same > 0 && same * 2 >= item.len() - 1).then_some(same)
+    };
+    let mut found: Option<String> = None;
+    for item in items {
+        let mut best: Option<(usize, Option<&String>)> = None;
+        let mut tied = false;
+        for read in reads() {
+            let Some(n) = shared(item, read) else {
+                continue;
+            };
+            match best {
+                Some((m, t)) if n == m && t != read.resource_type.as_ref() => tied = true,
+                Some((m, _)) if n <= m => {}
+                _ => {
+                    best = Some((n, read.resource_type.as_ref()));
+                    tied = false;
+                }
+            }
+        }
+        let t = best.filter(|_| !tied)?.1?;
+        if found.as_ref().is_some_and(|f| f != t) {
+            return None;
+        }
+        found = Some(t.clone());
+    }
+    found
 }
 
 /// The type and identity of a create with no identity of its own whose answer is

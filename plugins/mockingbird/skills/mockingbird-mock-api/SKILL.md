@@ -80,6 +80,7 @@ Mocks of AsyncAPI contracts publish generated messages to Kafka, AMQP, MQTT or W
 ## Troubleshooting
 
 - 404 from the data plane: wrong prefix. `get_mock` shows `route_prefix`; with one contract and no config it is `/`.
+- 400 on a request the real API accepts (`X-Mockingbird-Validation` names the member: a field required that the API does not require, `null` or a number refused where it takes one): the contract is stricter than the API, often after a documentation import. `edit_contract {mock, operation, patch}` merge-patches that operation of the active contract (`{"requestBody": {"content": {"application/json": {"schema": {"required": []}}}}}`) and activates the result as a new version; review its world gaps as after any import. A mock declared in `mockingbird.yaml` takes the edit in its contract file instead.
 - `fallback` everywhere: the LLM fails or is slower than the profile timeout; run `test_llm`, check `server_logs`, or accept faker data.
 - 409 on a write: the resource comes from `mockingbird.yaml`; edit the file.
 - 422 `Scenario status not declared`: add the status to the contract or pick a declared one.

@@ -45,7 +45,7 @@ When the `mockingbird` MCP server is connected, prefer its tools over shell comm
 
 - Setup and lifecycle: `doctor`, `list_llm_providers`, `init_config`, `configure_llm`, `test_llm`, `validate_contract`, `start_server`, `server_status`, `server_logs`, `stop_server`, `proxy_env`
 - Mocks: `list_mocks`, `get_mock`, `create_mock`, `update_mock`, `delete_mock`, `import_contract`, `list_contract_versions`, `activate_contract_version`
-- Drafts (imported documentation, HAR, Postman): `get_draft`, `edit_draft`, `approve_draft`
+- Drafts (imported documentation, HAR, Postman): `get_draft`, `edit_draft`, `approve_draft`; an active contract stricter than the real API: `edit_contract`
 - World descriptions (how a contract version behaves as a world, with its gaps): `get_world`, `get_world_schema`, `put_world`, `patch_world`, `list_world_revisions`, `get_world_revision`, `restore_world_revision`, `diff_world`
 - Behaviour: `list_scenarios`, `put_scenario`, `delete_scenario`, `list_llm_profiles`, `put_llm_profile`, `delete_llm_profile`
 - State and traffic: `call_mock`, `list_requests`, `get_request`, `list_sessions`, `export_session`, `seed_session`, `reset_session`

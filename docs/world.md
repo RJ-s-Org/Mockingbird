@@ -111,6 +111,7 @@ YAML or JSON, `version: 1`. Every key is optional; an absent key falls back to t
 | `lifecycle` | `{member, states?, initial?, soft_delete?}` | The status member and its states; `soft_delete: {state, listed_with?: {param, value}, unless?: {param, value}}` for a delete that only moves the record to a state, the list parameter that still shows it, and the delete's query parameter that removes it instead (`unless: {param: force, value: true}`). |
 | `unique` | `[{members, scope?, conflict?}]` | Member sets that must be unique, optionally within a member's scope, with the declared conflict status. |
 | `concurrency` | `{member?, header?, conflict?}` | The body member and/or header holding the version or ETag, and the declared conflict status. |
+| `same_as` | `[<type name>]` | The names this type goes by in the other mocks of a `shares` group, where they differ beyond case and a plural `s` (REST `pulls` beside GraphQL `pullrequest`). They name another contract's stored types as written (`check-runs`, not `checkruns`), so only their form is checked. |
 | `computed` | `{<member>: <expression>}` | Members computed whenever a record of the type is answered (a read, a list, a write's answer), each the value of an [expression](#expressions) over the record, and never stored: `line_count: "count('lines', it.order_id == record.id)"`. `derived` (`{kind: count, of}` or `{kind: sum, of, member, where?}`), which `computed` replaces, still loads ([below](#expressions)). |
 
 **Operations** (`operations.<operation id>`):

@@ -3208,3 +3208,73 @@ async fn an_effects_stub_stands_over_the_answer_as_the_record_it_names() {
         read.body
     );
 }
+
+const CART_CREATE_LINES: &str = r#"
+type ProductVariant { id: ID! title: String! }
+type CartLine { id: ID! quantity: Int! merchandise: ProductVariant! }
+type CartLineEdge { node: CartLine! }
+type CartLineConnection { edges: [CartLineEdge!]! }
+type Cart { id: ID! totalQuantity: Int! lines(first: Int): CartLineConnection! }
+type CartCreatePayload { cart: Cart }
+input CartLineInput { merchandiseId: ID! quantity: Int }
+input CartInput { lines: [CartLineInput!] }
+type Query { cart(id: ID!): Cart }
+type Mutation { cartCreate(input: CartInput): CartCreatePayload }
+"#;
+
+/// A create whose input carries child records in another shape than the record holds
+/// them (input lines naming variants, a connection of lines) is not filled blind: it is
+/// generated knowing the request, and stored as answered.
+#[tokio::test]
+async fn a_create_with_child_lines_in_its_input_keeps_them() {
+    let variant = "gid://shopify/ProductVariant/42";
+    let provider = scripted(vec![json!({
+        "__typename": "CartCreatePayload",
+        "cart": {"__typename": "Cart", "id": "gid://shopify/Cart/c1", "totalQuantity": 2, "lines": {
+            "__typename": "CartLineConnection", "edges": [{"__typename": "CartLineEdge", "node": {
+                "__typename": "CartLine", "id": "gid://shopify/CartLine/1", "quantity": 2,
+                "merchandise": {"__typename": "ProductVariant", "id": variant, "title": "M"}}}]}},
+    })]);
+    let base = serve(MockRuntime::new(
+        "shop",
+        Arc::new(compile(CART_CREATE_LINES.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    ))
+    .await;
+    let session = [("x-mockingbird-session", "s1")];
+    let q =
+        "{ id totalQuantity lines(first: 5) { edges { node { quantity merchandise { id } } } } }";
+    let created = post(
+        &base,
+        json!({
+            "query": format!("mutation($l: [CartLineInput!]) {{ cartCreate(input: {{lines: $l}}) {{ cart {q} }} }}"),
+            "variables": {"l": [{"merchandiseId": variant, "quantity": 2}]},
+        }),
+        &session,
+    )
+    .await;
+    let cart = &created.body["data"]["cartCreate"]["cart"];
+    let line = &cart["lines"]["edges"][0]["node"];
+    assert_eq!(line["quantity"], 2, "{}", created.body);
+    assert_eq!(line["merchandise"]["id"], variant, "{}", created.body);
+    let read = post(
+        &base,
+        json!({"query": format!("query($c: ID!) {{ cart(id: $c) {q} }}"), "variables": {"c": cart["id"]}}),
+        &session,
+    )
+    .await;
+    assert_eq!(
+        read.headers["x-mockingbird-source"], "state",
+        "{}",
+        read.body
+    );
+    assert_eq!(
+        read.body["data"]["cart"]["lines"], cart["lines"],
+        "{}",
+        read.body
+    );
+}

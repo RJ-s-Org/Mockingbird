@@ -29,7 +29,7 @@ The three earlier trials, re-run unmodified on the same build:
 | App | Stack | Result | Calls | Sources | Latency (generated) | Then (2026-10-28 proxy trial) |
 | --- | --- | --- | --- | --- | --- | --- |
 | Stripe accept-a-payment, Node ([report](stripe-java.md#what-happened)) | Node, Express, stripe-node | 8/8 creates, 4/4 retrieves, 8/8 webhooks verified | 12 | 5 `llm`, 3 `repaired`, 4 `state` | creates 1.3–2.9 s, median 1.8 s | creates 3.2–7.6 s, median 3.7 s |
-| github-readme-stats | Node, Express, axios | 8/9 cards render; the torvalds/linux pin gets `user` and `organization` both null ("Something went wrong") | 10 | 9 `llm`, 1 `cache` | 0.6–11.1 s, median 1.4 s; `search/commits` 11.1 s | `search/commits` fell back after 60 s, twice |
+| [github-readme-stats](github-readme-stats.md) | Node, Express, axios | 8/9 cards render; the torvalds/linux pin gets `user` and `organization` both null ("Something went wrong") | 10 | 9 `llm`, 1 `cache` | 0.6–11.1 s, median 1.4 s; `search/commits` 11.1 s | `search/commits` fell back after 60 s, twice |
 | nuxt/movies | Nuxt 3 SSR, Node `fetch` | 6/6 pages (home, movie and TV lists, two details, home again) | 11 | 8 `llm`, 3 `repaired` | 3.7–28.1 s, median 9.7 s; cold home page 53 s | median 19.8 s |
 
 Every run passed `verify --no-fallbacks --no-unmapped` except `gh` (2 fallbacks). The bar missed three real failures: two Plaid routes that 404'd (a path the contract lacks is a 4xx, not an unmapped host), the invented Commerce cart, and the torvalds/linux pin card (a valid answer the app cannot use).
