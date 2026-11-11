@@ -1248,7 +1248,7 @@ impl McpServer {
     /// `MB_ADMIN_URL`; with `token` as its bearer token) and `workspace`.
     /// Over stdio without `admin_url` it is in project mode: it acts on the
     /// server of the project in its working folder (see
-    /// [`Self::target`]). Tools that touch this machine are exposed over
+    /// `target`). Tools that touch this machine are exposed over
     /// stdio, or over HTTP with `--allow-local-tools`.
     pub fn new(
         admin_url: Option<&str>,
