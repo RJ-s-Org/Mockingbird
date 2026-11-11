@@ -26,7 +26,8 @@
 //! with its id (or another one, or the faker's when there is none) under
 //! the record's members.
 
-use std::collections::{BTreeSet, HashMap};
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use mb_engine::faker::Faker;
 use mb_mcm::Bundle;
@@ -236,36 +237,52 @@ pub(crate) async fn from_state(
             held.insert(t, records);
         }
     }
-    // Which of several matching records a lookup takes must not depend on
-    // what the query selects: count who refers to them across every type
-    // whose members name a held type.
-    let mut referred = Vec::new();
-    for t in referring_types(&rt.bundle, &held) {
-        for record in call::stored_of_type(rt, session, &t.to_lowercase(), MAX_HELD).await {
-            referred.extend(refs(&record).into_iter().map(str::to_string));
-        }
-    }
     let mut walk = Walk {
         bundle: &rt.bundle,
         narrowed: rt.narrowed(),
         superseded: Vec::new(),
         held,
-        referred,
+        referred: None,
+        contested: RefCell::new(HashSet::new()),
     };
     // A root selection carries no arguments of its own.
     let sel = Selection {
         args,
         ..sel.clone()
     };
-    walk.field(schema, &sel, body, None, 0);
+    let mut first = body.clone();
+    walk.field(schema, &sel, &mut first, None, 0);
+    let contested = walk.contested.take();
+    if contested.is_empty() {
+        *body = first;
+    } else {
+        // A lookup named several records: which one answers must not depend on
+        // what the query selects, so count who refers to them across every type
+        // whose members name a contested type, and walk again.
+        let mut referred: HashMap<String, usize> = HashMap::new();
+        for t in referring_types(&rt.bundle, &contested) {
+            let records = match walk.held.get(&t) {
+                Some(records) => records.clone(),
+                None => call::stored_of_type(rt, session, &t.to_lowercase(), MAX_HELD).await,
+            };
+            for record in &records {
+                for id in refs(record) {
+                    *referred.entry(id.to_string()).or_default() += 1;
+                }
+            }
+        }
+        walk.referred = Some(referred);
+        walk.superseded.clear();
+        walk.field(schema, &sel, body, None, 0);
+    }
     for (t, id) in walk.superseded {
         call::forget_stored(rt, session, &t, &id).await;
     }
 }
 
-/// The object types (not lists) with a member naming one of `held`'s types:
-/// `Issue` for `Repository` (`Issue.repository`).
-fn referring_types(bundle: &Bundle, held: &HashMap<String, Vec<StoredResource>>) -> Vec<String> {
+/// The types with a single-object member naming one of `named`: `Issue` for
+/// `Repository` (`Issue.repository`).
+fn referring_types(bundle: &Bundle, named: &HashSet<String>) -> Vec<String> {
     bundle
         .defs
         .iter()
@@ -274,7 +291,7 @@ fn referring_types(bundle: &Bundle, held: &HashMap<String, Vec<StoredResource>>)
                 .and_then(Value::as_object)
                 .is_some_and(|props| {
                     props.values().any(|p| {
-                        list_item(p).is_none() && def_ref(p).is_some_and(|n| held.contains_key(n))
+                        list_item(p).is_none() && def_ref(p).is_some_and(|n| named.contains(n))
                     })
                 })
         })
@@ -332,9 +349,13 @@ struct Walk<'a> {
     superseded: Vec<(String, String)>,
     /// By definition name, most recent first.
     held: HashMap<String, Vec<StoredResource>>,
-    /// The ids the session's records of types that refer to a held type
-    /// (`Issue.repository`) refer to, whether or not the query selects them.
-    referred: Vec<String>,
+    /// How many of the session's records refer to each id, by the types that
+    /// can refer to a contested type (`Issue.repository`), whether or not the
+    /// query selects them; read only once a lookup is contested.
+    referred: Option<HashMap<String, usize>>,
+    /// The types of which a lookup named several records before `referred`
+    /// was read.
+    contested: RefCell<HashSet<String>>,
 }
 
 impl Walk<'_> {
@@ -561,6 +582,7 @@ impl Walk<'_> {
         // copy written since, by a record pool or a model's answer), the one
         // the most held records refer to; the most recent among equals.
         let mut best: Option<(usize, &String, &StoredResource)> = None;
+        let mut contested = Vec::new();
         for ty in types {
             for record in self.held.get(ty).into_iter().flatten() {
                 if generated == Some(record.id.as_str()) {
@@ -573,18 +595,30 @@ impl Walk<'_> {
                     && compared > 0
                 {
                     let referred = self.referrers(&record.id);
+                    if let Some((_, other, _)) = best
+                        && self.referred.is_none()
+                    {
+                        contested.extend([ty.clone(), other.clone()]);
+                    }
                     if best.is_none_or(|(n, _, _)| referred > n) {
                         best = Some((referred, ty, record));
                     }
                 }
             }
         }
-        best.map(|(_, ty, record)| (ty.clone(), record.clone()))
+        let found = best.map(|(_, ty, record)| (ty.clone(), record.clone()));
+        self.contested.borrow_mut().extend(contested);
+        found
     }
 
-    /// How many of the session's records refer to the record `id`.
+    /// How many of the session's records refer to the record `id` (none
+    /// before `referred` is read).
     fn referrers(&self, id: &str) -> usize {
-        self.referred.iter().filter(|r| *r == id).count()
+        self.referred
+            .as_ref()
+            .and_then(|r| r.get(id))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Whether `record` refers to `parent`, or to no record of its type.
