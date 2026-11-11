@@ -2964,3 +2964,75 @@ async fn a_read_by_another_member_than_the_key_keeps_the_id_and_finds_the_record
     assert_eq!(second.body["data"]["product"], *read);
     assert_eq!(provider.requests().len(), 1);
 }
+
+const VARIANTS: &str = r#"
+type ProductVariant { id: ID! title: String! product: Product }
+type Product { id: ID! handle: String! title: String! variants: [ProductVariant!]! }
+type Collection { id: ID! handle: String! products: [Product!]! }
+type Query { collection(handle: String): Collection product(handle: String): Product }
+"#;
+
+/// A generated record reusing another record's id, in the same answer or held by the
+/// session, gets a new id in the same shape; the same record shown twice keeps its id.
+#[tokio::test]
+async fn a_generated_record_reusing_another_records_id_gets_its_own() {
+    let reused = "gid://shopify/ProductVariant/44123456789013";
+    let variant =
+        |title: &str| json!({"__typename": "ProductVariant", "id": reused, "title": title});
+    let product = |id: &str, handle: &str, v: Value| json!({"__typename": "Product", "id": id, "handle": handle, "title": handle, "variants": [v]});
+    let provider = scripted(vec![
+        // One answer: two products whose variants share an id, and the first again.
+        json!({"__typename": "Collection", "id": "gid://shopify/Collection/1", "handle": "apparel", "products": [
+            product("gid://shopify/Product/1", "hoodie", variant("L")),
+            product("gid://shopify/Product/2", "tee", variant("M")),
+            product("gid://shopify/Product/1", "hoodie", variant("L")),
+        ]}),
+        // A later answer reusing the id the session now holds for the hoodie's L.
+        product("gid://shopify/Product/3", "cap", variant("One size")),
+    ]);
+    let base = serve(MockRuntime::new(
+        "shop",
+        Arc::new(compile(VARIANTS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    ))
+    .await;
+    let session = [("x-mockingbird-session", "s1")];
+    let listed = post(
+        &base,
+        json!({"query": r#"{ collection(handle: "apparel") { id handle products { id handle title variants { id title } } } }"#}),
+        &session,
+    )
+    .await;
+    let products = &listed.body["data"]["collection"]["products"];
+    let ids: Vec<&str> = (0..3)
+        .map(|i| products[i]["variants"][0]["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids[0], reused, "{}", listed.body);
+    assert_ne!(ids[1], reused, "{}", listed.body);
+    assert!(
+        ids[1].starts_with("gid://shopify/ProductVariant/"),
+        "{}",
+        ids[1]
+    );
+    assert_eq!(
+        ids[2], reused,
+        "the same record keeps its id: {}",
+        listed.body
+    );
+
+    let cap = post(
+        &base,
+        json!({"query": r#"{ product(handle: "cap") { id variants { id title } } }"#}),
+        &session,
+    )
+    .await;
+    let cap_variant = cap.body["data"]["product"]["variants"][0]["id"]
+        .as_str()
+        .unwrap();
+    assert_ne!(cap_variant, reused, "{}", cap.body);
+    assert_ne!(cap_variant, ids[1], "{}", cap.body);
+}
