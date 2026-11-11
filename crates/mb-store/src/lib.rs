@@ -311,6 +311,30 @@ pub trait ControlStore: Send + Sync {
             .map(RequestLogSummary::from)
             .collect())
     }
+    /// The distinct `operation_id`s of the mock's request log, in any
+    /// session, as stored (a GraphQL request that answered several root
+    /// fields stores their ids joined with `,`). The default pages through
+    /// [`Self::list_request_log_summaries`].
+    async fn request_log_operations(
+        &self,
+        mock_id: Uuid,
+    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        let mut out = std::collections::BTreeSet::new();
+        let mut f = RequestLogFilter {
+            limit: RequestLogFilter::MAX_LIMIT,
+            ..RequestLogFilter::default()
+        };
+        loop {
+            let page = self.list_request_log_summaries(mock_id, &f).await?;
+            out.extend(page.iter().filter_map(|e| e.operation_id.clone()));
+            match page.last() {
+                Some(last) if page.len() >= f.effective_limit() as usize => {
+                    f.before_id = Some(last.id);
+                }
+                _ => return Ok(out),
+            }
+        }
+    }
     /// The entry with `id`, of any mock.
     async fn get_request_log(&self, id: i64) -> Result<Option<RequestLogEntry>, StoreError>;
     /// Adds `tokens` to the mock's usage for `day` (UTC) and returns the new total.

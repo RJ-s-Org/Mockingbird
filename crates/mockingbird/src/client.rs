@@ -300,6 +300,11 @@ pub enum WorldCommand {
         /// type, and their gaps and refused entries (repeatable).
         #[arg(long = "type", value_name = "TYPE")]
         types: Vec<String>,
+        /// Show only what the mock's request log (any session) names: the
+        /// operations called, the types they touch, and their gaps and
+        /// refused entries. Run the app's flows against the mock first.
+        #[arg(long)]
+        called: bool,
         /// Print the Admin API's JSON answer instead.
         #[arg(long)]
         json: bool,
@@ -915,6 +920,7 @@ pub async fn run_workflow(
             version,
             operations,
             types,
+            called,
             ..
         }) => {
             let version = version_segment(version);
@@ -922,6 +928,7 @@ pub async fn run_workflow(
                 .into_iter()
                 .map(|o| ("operation", o))
                 .chain(types.into_iter().map(|t| ("type", t)))
+                .chain(called.then(|| ("called", "true".to_string())))
                 .collect();
             api_with(
                 admin_url,
@@ -1085,6 +1092,12 @@ pub fn world_text(view: &Value) -> String {
     );
     let gaps = list("gaps");
     let _ = writeln!(out, "\nGaps ({}):", gaps.len());
+    if let Some(n) = view["gaps_left_out"].as_u64().filter(|n| *n > 0) {
+        let _ = writeln!(
+            out,
+            "  ({n} more name no operation the app called nor a type it touched)"
+        );
+    }
     if gaps.is_empty() {
         let _ = writeln!(out, "  none");
     }
@@ -2099,6 +2112,20 @@ impl AdminClient {
 mod tests {
     use super::contract_media_type;
     use std::path::Path;
+
+    #[test]
+    fn world_text_counts_the_gaps_a_called_view_left_out() {
+        let view = serde_json::json!({
+            "version": 2, "revision": 0, "authors": {},
+            "gaps": [{"code": "no_target", "operation": "getOrder", "message": "m"}],
+            "gaps_left_out": 3,
+        });
+        let text = super::world_text(&view);
+        assert!(text.contains("Gaps (1):"), "{text}");
+        assert!(text.contains("(3 more name no operation"), "{text}");
+        let full = super::world_text(&serde_json::json!({"version": 2, "gaps": []}));
+        assert!(!full.contains("more name"), "{full}");
+    }
 
     #[test]
     fn admin_url_from_config_server_section() {

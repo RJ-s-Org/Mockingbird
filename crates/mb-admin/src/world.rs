@@ -682,6 +682,12 @@ pub struct WorldView {
     /// one line per kind. Absent when there is none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// With `called`: how many gaps were left out because they name neither
+    /// an operation of the request log nor a type those operations touch
+    /// (nor skip a route of one).
+    /// Absent without `called`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gaps_left_out: Option<usize>,
 }
 
 impl WorldView {
@@ -694,7 +700,83 @@ impl WorldView {
             refused: eff.refused,
             gaps: eff.gaps,
             warnings: Vec::new(),
+            gaps_left_out: None,
         }
+    }
+
+    /// What `called` narrows to, read before any narrowing: the operations of
+    /// `bundle` that `logged` (the request log's operation ids, a
+    /// GraphQL entry's ids joined with `,`) names, and the resource types
+    /// those operations touch (their described type, else the contract's,
+    /// and the type of each of their gaps).
+    fn called_scope(&self, bundle: &Bundle, logged: &BTreeSet<String>) -> Called {
+        let named: BTreeSet<&str> = logged
+            .iter()
+            .flat_map(|id| std::iter::once(id.as_str()).chain(id.split(',')))
+            .map(str::trim)
+            .collect();
+        let operations: BTreeSet<String> = bundle
+            .operations
+            .iter()
+            .filter(|op| named.contains(op.id.as_str()))
+            .map(|op| op.id.clone())
+            .collect();
+        let types = bundle
+            .operations
+            .iter()
+            .filter(|op| operations.contains(&op.id))
+            .filter_map(|op| {
+                self.world
+                    .operations
+                    .get(&op.id)
+                    .and_then(|d| d.r#type.clone())
+                    .or_else(|| op.resource_type.clone())
+            })
+            .chain(
+                self.gaps
+                    .iter()
+                    .filter(|g| g.operation.as_ref().is_some_and(|o| operations.contains(o)))
+                    .filter_map(|g| g.r#type.clone()),
+            )
+            .collect();
+        Called { operations, types }
+    }
+
+    /// Narrows the view to what the app called: the operations of
+    /// `called`, the types they touch, the gaps naming one of those
+    /// operations, naming no operation and one of those types, or skipping a
+    /// route of one of those types (a skipped route is never served, so the
+    /// log never names it), and the refused entries and authors about
+    /// either. Gaps and refusals about the description as a whole are kept,
+    /// as [`WorldView::narrow`] keeps them. The other gaps are dropped and
+    /// counted in [`WorldView::gaps_left_out`]; with no called operation a
+    /// warning says to run the app's flows first.
+    fn keep_called(&mut self, called: &Called) {
+        let Called { operations, types } = called;
+        if operations.is_empty() {
+            self.warnings.push(format!(
+                "the request log names no operation of contract version {}: run the app's flows against the mock first",
+                self.version
+            ));
+        }
+        let before = self.gaps.len();
+        self.gaps.retain(|g| match (&g.operation, &g.r#type) {
+            (Some(op), ty) => {
+                operations.contains(op)
+                    || (g.code == GapCode::SkippedRoute
+                        && ty.as_ref().is_some_and(|t| types.contains(t)))
+            }
+            (None, Some(t)) => types.contains(t),
+            (None, None) => true,
+        });
+        self.gaps_left_out = Some(before - self.gaps.len());
+        self.world
+            .operations
+            .retain(|id, _| operations.contains(id));
+        self.world.types.retain(|t, _| types.contains(t));
+        let keeps = |pointer: &str| keeps_pointer(pointer, operations, types).unwrap_or(true);
+        self.refused.retain(|r| keeps(&r.path));
+        self.authors.retain(|p, _| keeps(p));
     }
 
     /// Narrows the view to what `filter` names (nothing when it is empty):
@@ -763,45 +845,71 @@ impl WorldView {
                     || ty.as_ref().is_some_and(|t| types.contains(t))
             }
         });
-        // `None`: a pointer about the description as a whole.
-        let keeps = |pointer: &str| -> Option<bool> {
-            let mut parts = pointer.strip_prefix('/')?.splitn(3, '/');
-            let section = parts.next()?;
-            let name = parts.next()?.replace("~1", "/").replace("~0", "~");
-            match section {
-                "operations" => Some(ops.contains(&name)),
-                "types" => Some(types.contains(&name)),
-                _ => None,
-            }
-        };
-        self.refused.retain(|r| keeps(&r.path).unwrap_or(true));
-        self.authors.retain(|p, _| keeps(p).unwrap_or(true));
+        let keeps = |pointer: &str| keeps_pointer(pointer, &ops, types).unwrap_or(true);
+        self.refused.retain(|r| keeps(&r.path));
+        self.authors.retain(|p, _| keeps(p));
     }
 }
 
+/// Whether a narrowed view keeps the entry at `pointer`: one under
+/// `/operations/{op}` when `ops` has `op`, one under `/types/{t}` when
+/// `types` has `t`; `None` for a pointer about the description as a whole.
+fn keeps_pointer(pointer: &str, ops: &BTreeSet<String>, types: &BTreeSet<String>) -> Option<bool> {
+    let mut parts = pointer.strip_prefix('/')?.splitn(3, '/');
+    let section = parts.next()?;
+    let name = parts.next()?.replace("~1", "/").replace("~0", "~");
+    match section {
+        "operations" => Some(ops.contains(&name)),
+        "types" => Some(types.contains(&name)),
+        _ => None,
+    }
+}
+
+/// The operations a mock's request log names and the types they touch
+/// ([`WorldView::called`]).
+#[derive(Debug, Default)]
+struct Called {
+    operations: BTreeSet<String>,
+    types: BTreeSet<String>,
+}
+
 /// Which entries of a world view to answer: `?operation=<id>` and
-/// `?type=<resource type>`, each repeatable. With neither, all of them.
+/// `?type=<resource type>`, each repeatable, and `?called=true`. With none,
+/// all of them.
 #[derive(Debug, Default)]
 pub struct WorldFilter {
     /// Operation ids.
     pub operations: BTreeSet<String>,
     /// Resource types.
     pub types: BTreeSet<String>,
+    /// Only what the mock's request log names: the operations called and
+    /// the types they touch.
+    pub called: bool,
 }
 
 impl WorldFilter {
-    /// The filter a query's `operation` and `type` pairs give; other keys are
-    /// ignored.
-    fn from_pairs(pairs: Vec<(String, String)>) -> Self {
+    /// The filter a query's `operation`, `type` and `called` pairs give;
+    /// other keys are ignored. A 400 problem when `called` is neither `true`
+    /// nor `false`.
+    fn from_pairs(pairs: Vec<(String, String)>) -> ApiResult<Self> {
         let mut filter = Self::default();
         for (key, value) in pairs {
             match key.as_str() {
-                "operation" => filter.operations.insert(value),
-                "type" => filter.types.insert(value),
-                _ => false,
-            };
+                "operation" => {
+                    filter.operations.insert(value);
+                }
+                "type" => {
+                    filter.types.insert(value);
+                }
+                "called" => {
+                    filter.called = value.parse().map_err(|_| {
+                        Problem::bad_request(format!("called must be true or false, not {value:?}"))
+                    })?;
+                }
+                _ => {}
+            }
         }
-        filter
+        Ok(filter)
     }
 }
 
@@ -839,10 +947,11 @@ pub(crate) async fn resolve_version(
         ("version" = String, Path, description = "Contract version number, or `active`"),
         ("operation" = Option<Vec<String>>, Query, explode, description = "Answer only this operation (repeatable), with its gaps, refused entries and authors"),
         ("type" = Option<Vec<String>>, Query, explode, description = "Answer only this resource type (repeatable): its `types` entry, the operations of that type, and their gaps, refused entries and authors"),
+        ("called" = Option<bool>, Query, description = "Answer only what the mock's request log (any session) names: the operations called, the types they touch, the gaps naming one of those operations, or naming no operation and one of those types, or skipping a route of one of those types, and their refused entries and authors; gaps about the description as a whole are kept. `gaps_left_out` counts the gaps left out. Combines with `operation` and `type`"),
     ),
     responses(
-        (status = 200, description = "The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`.", body = WorldView),
-        (status = 400, description = "The version is neither a number nor `active`", body = Problem, content_type = "application/problem+json"),
+        (status = 200, description = "The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`.", body = WorldView),
+        (status = 400, description = "The version is neither a number nor `active`, or `called` is not a boolean", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such mock or version, or no active version", body = Problem, content_type = "application/problem+json"),
     )
 )]
@@ -853,11 +962,23 @@ pub async fn get_world(
     Query(pairs): Query<Vec<(String, String)>>,
 ) -> ApiResult<Json<WorldView>> {
     access.require(Permission::Read)?;
+    let filter = WorldFilter::from_pairs(pairs)?;
     let m = st.mock(&access.ws, &mock).await?;
     let v = resolve_version(&st, &m, &version).await?;
     let eff = effective_world(st.store.as_ref(), m.id, v.version, &v.bundle).await?;
     let mut view = WorldView::new(v.version, eff);
-    view.narrow(&WorldFilter::from_pairs(pairs));
+    // Read from the whole view, before `narrow` drops the gaps whose types
+    // it takes.
+    let called = if filter.called {
+        let logged = st.store.request_log_operations(m.id).await?;
+        Some(view.called_scope(&v.bundle, &logged))
+    } else {
+        None
+    };
+    view.narrow(&filter);
+    if let Some(called) = &called {
+        view.keep_called(called);
+    }
     Ok(Json(view))
 }
 

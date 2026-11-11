@@ -15,6 +15,7 @@ Workspace resources live under `/workspaces/{ws}` (`/workspaces/{ws}/mocks…`, 
 | Audit | `GET /workspaces/{ws}/audit`, `GET /audit` (all workspaces, sysadmin) |
 | Mocks | `GET/POST /mocks`, `GET/PATCH/DELETE /mocks/{mock}` |
 | Contracts | `GET/POST /mocks/{mock}/contracts`, `GET/DELETE …/contracts/{version}` (delete: any version but the active one, with the finished import jobs that produced it; `409` for the active version or a mock from the config file), `GET …/{version}/source` (an `application/octet-stream` attachment; the sniffed type is in `X-Mockingbird-Source-Type`), `POST …/{version}/activate` |
+| World descriptions | `GET/PUT/PATCH /mocks/{mock}/contracts/{version}/world` (`GET` takes `?operation=`, `?type=` and `?called=true`, which keeps what the request log names and counts the gaps it left out in `gaps_left_out`), `GET …/world/revisions`, `GET …/world/revisions/{revision}`, `POST …/revisions/{revision}/restore`, `GET …/world/diff` (see [World descriptions](world.md#reading-it)) |
 | Scenarios | `GET /mocks/{mock}/scenarios`, `PUT/DELETE …/scenarios/{name}` |
 | LLM profiles | `GET /llm-profiles`, `GET/PUT/DELETE /llm-profiles/{name}` |
 | Sessions | `GET /mocks/{mock}/sessions`, `GET/PUT/DELETE …/sessions/{session}` (export, seed, reset) |

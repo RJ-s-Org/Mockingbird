@@ -1510,6 +1510,20 @@ impl ControlStore for SqliteControlStore {
             .collect()
     }
 
+    async fn request_log_operations(
+        &self,
+        mock_id: Uuid,
+    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT operation_id FROM request_log \
+             WHERE mock_id = ? AND operation_id IS NOT NULL",
+        )
+        .bind(mock_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(ids.into_iter().collect())
+    }
+
     async fn get_request_log(&self, id: i64) -> Result<Option<RequestLogEntry>, StoreError> {
         let sql = format!("SELECT {LOG_COLUMNS} FROM request_log WHERE id = ?");
         sqlx::query(sqlx::AssertSqlSafe(sql))

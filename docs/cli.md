@@ -23,6 +23,9 @@ mockingbird world show orders --version 2
 # Only some operations or types (repeatable), with their gaps; an unknown
 # name prints a warning.
 mockingbird world show orders --operation getOrder --type order
+# Only what the request log names (any session): the operations the app
+# called, the types they touch, and their gaps. Run the app's flows first.
+mockingbird world show orders --called
 mockingbird world schema
 # Write it as revisions: put replaces the overlay, patch merges a JSON merge
 # patch (null removes an entry); each answers what applied and what was

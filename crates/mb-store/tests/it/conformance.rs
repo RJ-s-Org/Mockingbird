@@ -107,6 +107,7 @@ macro_rules! conformance_checks {
             contract_version_infos_match_the_versions,
             latest_contract_version_by_status,
             request_log_summaries_match_the_entries,
+            request_log_operations_are_distinct_per_mock,
             world_revisions_number_from_one_per_version,
             world_revision_expect_mismatch_conflicts,
             world_revisions_go_with_the_mock,
@@ -4277,6 +4278,41 @@ pub(crate) async fn request_log_summaries_match_the_entries(store: &Arc<dyn Cont
         (3, 4, 0, (7, 11)),
         "{sizes:?}"
     );
+}
+
+pub(crate) async fn request_log_operations_are_distinct_per_mock(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "called").await;
+    let other = create(store, "uncalled").await;
+    assert!(
+        store
+            .request_log_operations(mock.id)
+            .await
+            .expect("operations")
+            .is_empty()
+    );
+    for (session, op) in [("a", "listOrders"), ("b", "listOrders"), ("b", "a,b")] {
+        store
+            .append_request_log(log_entry(mock.id, session, op, "llm"), 1000)
+            .await
+            .expect("append");
+    }
+    let mut unnamed = log_entry(mock.id, "a", "x", "llm");
+    unnamed.operation_id = None;
+    store
+        .append_request_log(unnamed, 1000)
+        .await
+        .expect("append");
+    store
+        .append_request_log(log_entry(other.id, "a", "getOrder", "llm"), 1000)
+        .await
+        .expect("append");
+    let ops: Vec<String> = store
+        .request_log_operations(mock.id)
+        .await
+        .expect("operations")
+        .into_iter()
+        .collect();
+    assert_eq!(ops, ["a,b", "listOrders"]);
 }
 
 fn world_revision(author: Author, doc: serde_json::Value, expect: Option<i64>) -> NewWorldRevision {

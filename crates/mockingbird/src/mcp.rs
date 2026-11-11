@@ -76,6 +76,10 @@ const MAX_INLINE_BODY: usize = 64 * 1024;
 const IMPORT_GAPS: usize = 40;
 /// How many world gaps a `start_server` answer carries over all its mocks.
 const START_GAPS: usize = 80;
+/// Above this many world gaps, [`next_steps`] says to run the app's flows
+/// first and review only the gaps of what they call (`get_world` with
+/// `called`).
+const CALLED_GAPS: usize = 40;
 /// A mock's world gaps with the contract version they describe, or why
 /// they could not be read.
 type WorldGaps = Result<(u64, Vec<Value>), String>;
@@ -606,13 +610,14 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "get_world",
             title: "Show a contract version's world description",
-            description: "The world description of a contract version: how its types and operations behave (identity, targets, lifecycle, order, not_found, ...), the author of each entry set by a revision (unlisted entries are heuristic), the revision number (0 when only the heuristics wrote it), refused entries, and gaps to fix: what the description leaves open (no_identity, no_target, no_record, skipped_route, refused) and the behaviour the contract signals that it does not state yet (undescribed_param, and the advisory no_effect, no_unique and no_soft_delete, marked advisory: describe those only when the docs state the behaviour). The format is get_world_schema. On a large contract pass `operations` and/or `types` to get only the entries the app uses: the operations named, the types named and the operations of those types, with their gaps, refused entries and authors; names the version lacks are listed in `warnings`.",
+            description: "The world description of a contract version: how its types and operations behave (identity, targets, lifecycle, order, not_found, ...), the author of each entry set by a revision (unlisted entries are heuristic), the revision number (0 when only the heuristics wrote it), refused entries, and gaps to fix: what the description leaves open (no_identity, no_target, no_record, skipped_route, refused) and the behaviour the contract signals that it does not state yet (undescribed_param, and the advisory no_effect, no_unique and no_soft_delete, marked advisory: describe those only when the docs state the behaviour). The format is get_world_schema. On a large contract pass `operations` and/or `types` to get only the entries the app uses: the operations named, the types named and the operations of those types, with their gaps, refused entries and authors; names the version lacks are listed in `warnings`. On a large contract whose app has run against the mock, pass `called: true` to get only what the request log (any session) names: the operations called, the types they touch, and their gaps (gaps naming neither are left out and counted in `gaps_left_out`).",
             schema: obj(
                 json!({
                     "mock": mock(),
                     "version": n("Contract version; default the active one."),
                     "operations": { "type": "array", "items": { "type": "string" }, "description": "Operation ids to narrow the answer to." },
                     "types": { "type": "array", "items": { "type": "string" }, "description": "Resource types to narrow the answer to: each type's entry and the operations of that type." },
+                    "called": { "type": "boolean", "description": "Narrow the answer to the operations the mock's request log names and the types they touch, with their gaps; gaps_left_out counts the rest." },
                 }),
                 &["mock"],
             ),
@@ -1679,6 +1684,11 @@ impl McpServer {
                         })?;
                         query.push((key, name.to_string()));
                     }
+                }
+                match a.get("called") {
+                    None | Some(Value::Null | Value::Bool(false)) => {}
+                    Some(Value::Bool(true)) => query.push(("called", "true".to_string())),
+                    Some(_) => return Err(ToolError("called must be a boolean".into())),
                 }
                 self.ws(
                     Method::GET,
@@ -3102,10 +3112,20 @@ fn next_steps(
     let Some(obj) = answer.as_object_mut() else {
         return;
     };
+    let total = gaps.as_ref().map_or(0, Vec::len);
+    let review = if total > CALLED_GAPS {
+        format!(
+            "Version {version} has {total} world gaps, too many to review one by one. Run the app's flows against the mock first, then call get_world {{mock: {mock:?}, version: {version}, called: true}}: it lists only the gaps of the operations the app called and the types they touch. Work through those as the mockingbird-world skill says (read that skill), and repeat after each new flow. Gaps marked advisory are checks: act on them only where the docs state the behaviour."
+        )
+    } else {
+        format!(
+            "Review the world description of version {version} now, as the mockingbird-world skill says: read that skill, then work through world_gaps (get_world {{mock: {mock:?}, version: {version}}} lists them all). Gaps marked advisory are checks: act on them only where the docs state the behaviour."
+        )
+    };
     obj.insert(
         "next_steps".into(),
         json!([
-            format!("Review the world description of version {version} now, as the mockingbird-world skill says: read that skill, then work through world_gaps (get_world {{mock: {mock:?}, version: {version}}} lists them all). Gaps marked advisory are checks: act on them only where the docs state the behaviour."),
+            review,
             "For each gap, read that part of the contract and its documentation and write what they state with patch_world (author \"agent\"): what actions change, list filters, scope and paging, unique members, soft deletes. Leave out what they do not state.",
             "Read refused in each patch_world answer and fix those entries.",
             "Check the mock with call_mock: create a record, read it back and list it; run an action on it when the API has one.",
@@ -3247,6 +3267,38 @@ mod tests {
                 .is_some_and(|s| s.contains("mockingbird-world") && s.contains("version: 2"))
         );
         assert!(answer.get("world_gaps_error").is_none());
+    }
+
+    #[test]
+    fn next_steps_above_the_threshold_say_to_run_the_flows_then_list_the_called_gaps() {
+        let gap = |i: usize| json!({"code": "no_target", "operation": format!("op{i}"), "message": "fix"});
+        let mut answer = json!({"version": 3});
+        next_steps(
+            &mut answer,
+            "gh",
+            3,
+            Ok((0..=CALLED_GAPS).map(gap).collect()),
+            IMPORT_GAPS,
+        );
+        let first = answer["next_steps"][0].as_str().unwrap_or_default();
+        assert!(first.contains("Run the app's flows"), "{first}");
+        assert!(
+            first.contains(r#"get_world {mock: "gh", version: 3, called: true}"#),
+            "{first}"
+        );
+        assert_eq!(answer["world_gaps_total"], CALLED_GAPS + 1);
+
+        let mut answer = json!({"version": 3});
+        next_steps(
+            &mut answer,
+            "gh",
+            3,
+            Ok((0..CALLED_GAPS).map(gap).collect()),
+            IMPORT_GAPS,
+        );
+        let first = answer["next_steps"][0].as_str().unwrap_or_default();
+        assert!(!first.contains("called: true"), "{first}");
+        assert!(first.contains("lists them all"), "{first}");
     }
 
     #[test]
