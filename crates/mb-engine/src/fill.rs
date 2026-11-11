@@ -61,7 +61,11 @@ impl Engine {
         if let (Some(provider), Ok(validator)) =
             (&self.provider, self.schema_validator(bundle, &restricted))
         {
-            let prompt_schema = compact::response_prompt_schema(bundle, &restricted);
+            let prompt_schema = compact::response_prompt_schema(
+                bundle,
+                &restricted,
+                &compact::expanded_members(call),
+            );
             let messages = prompt::fill_messages(
                 bundle,
                 op,

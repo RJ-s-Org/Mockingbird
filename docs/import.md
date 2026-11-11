@@ -144,7 +144,7 @@ A draft lists what the importer was unsure about. Warnings never fail a job; che
 | `summaries_skipped` | Summaries for HAR or Postman operations could not be generated. |
 | `low_confidence` | An operation's confidence was below 0.4, so it was left out; the message gives the reason. |
 | `invented_default` | `default` values the documentation does not state were dropped. |
-| `schema_too_large` | A response schema is larger than the prompt budget (64 KiB of compact JSON); the generation prompt shows a trimmed schema. |
+| `schema_too_large` | A response schema is larger than the prompt budget (64 KiB of compact JSON); the generation prompt shows a trimmed schema. The schema of an answer the model writes is fitted to 24 KiB: a member that is either an id string or a related object (Stripe's expandable fields) shows only the id unless the request's `expand` names it, the definitions behind members that may be null become stubs first, and descriptions are cut. |
 | `source_skipped` | One source of a several-source import could not be fetched or read. |
 | `merge_skipped` | The import could not merge into the mock's version (not OpenAPI 3, or the merged draft did not compile); the draft holds only this import. |
 | `conflicting_component` | A component of the import differs from the version's component of the same name; the version's was kept. |
