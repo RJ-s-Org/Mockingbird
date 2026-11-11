@@ -34,10 +34,10 @@ mod admission;
 mod bundle_index;
 mod canonical;
 mod collections;
+mod computed;
 mod creates;
 mod cursors;
 mod deleted;
-mod derived;
 mod described;
 mod effects;
 mod entities;
@@ -62,6 +62,7 @@ mod replays;
 mod reporting;
 mod runs;
 mod session_memory;
+mod side_writes;
 mod state_access;
 mod state_lists;
 #[cfg(any(feature = "sse", feature = "graphql", feature = "grpc"))]
@@ -81,9 +82,9 @@ use creates::*;
 pub(crate) use described::Described;
 pub(crate) use effects::*;
 use entities::*;
+pub(crate) use exprs::CallExprs;
 #[cfg(feature = "graphql")]
 pub(crate) use exprs::seed_notes;
-pub(crate) use exprs::{CallExprs, SeqCounters};
 pub(crate) use list_query::undescribed_params;
 use lookup::*;
 use owners::*;
@@ -1689,12 +1690,12 @@ pub(crate) async fn complete(
                 tokens::after_answer(&mut state, plan, t, &id).await;
             }
         }
-        // A held record's derived members, from its children as state now has them.
+        // A held record's computed members, from the session as state now has it.
         if (200..300).contains(&generated.status)
             && !unstored
             && !foreign_key
             && let Some(t) = resource_type
-            && derived::describes(rt, t)
+            && computed::describes(rt, t)
             && match op.kind {
                 OperationKind::Command(Effect::Create) => true,
                 OperationKind::Command(Effect::Delete) => false,
@@ -1704,7 +1705,7 @@ pub(crate) async fn complete(
             && entity_fits(rt, t, body)
         {
             let before = body.clone();
-            let set = derived::fill(&mut state, session, t, body).await;
+            let set = computed::fill(&mut state, (plan, call), t, body).await;
             // The answer it ends up in, put back in its envelope, still fits the
             // operation's schema for its status; else the model's values stay.
             if !set.is_empty() {
@@ -1725,7 +1726,7 @@ pub(crate) async fn complete(
                     tracing::info!(
                         mock = %rt.name,
                         operation = %op.id,
-                        "an answer with its derived members does not fit its schema: not set"
+                        "an answer with its computed members does not fit its schema: not set"
                     );
                     *body = before;
                 }

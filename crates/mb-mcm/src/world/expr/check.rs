@@ -149,6 +149,12 @@ impl<'a> Walker<'a> {
                 let origin = Some((Root::Type(ty.name.clone()), Vec::new()));
                 self.with("it", origin, |w| w.walk(cond));
             }
+            Kind::Children(_, r#where) => {
+                self.function("children", n.pos);
+                if let Some(w) = r#where {
+                    self.walk(w);
+                }
+            }
             Kind::Sum(list, e) => {
                 self.function("sum", n.pos);
                 self.walk(list);

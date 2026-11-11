@@ -106,7 +106,7 @@ YAML or JSON, `version: 1`. Every key is optional; an absent key falls back to t
 | `lifecycle` | `{member, states?, initial?, soft_delete?}` | The status member and its states; `soft_delete: {state, listed_with?: {param, value}, unless?: {param, value}}` for a delete that only moves the record to a state, the list parameter that still shows it, and the delete's query parameter that removes it instead (`unless: {param: force, value: true}`). |
 | `unique` | `[{members, scope?, conflict?}]` | Member sets that must be unique, optionally within a member's scope, with the declared conflict status. |
 | `concurrency` | `{member?, header?, conflict?}` | The body member and/or header holding the version or ETag, and the declared conflict status. |
-| `derived` | `{<member>: {kind: count, of} \| {kind: sum, of, member, where?}}` | Members computed from stored records: the count of a child list, or the sum of a member over child records. |
+| `computed` | `{<member>: <expression>}` | Members computed whenever a record of the type is answered (a read, a list, a write's answer), each the value of an [expression](#expressions) over the record, and never stored: `line_count: "count('lines', it.order_id == record.id)"`. `derived` (`{kind: count, of}` or `{kind: sum, of, member, where?}`), which `computed` replaces, still loads ([below](#expressions)). |
 
 **Operations** (`operations.<operation id>`):
 
@@ -120,6 +120,7 @@ YAML or JSON, `version: 1`. Every key is optional; an absent key falls back to t
 | `transition` | `{<member>: <value>}` | Members an action sets; the type needs a `lifecycle`. |
 | `set` | `{<member>: <expression>}` | Members of the record a create, update, replace or action stores, each the value of an [expression](#expressions) (`request.body.name`, `held('lists', request.body.list_id).currency`, `'k_' + lower(request.body.name)`). A dotted member sets a member inside an object. |
 | `refuse` | `[{when: <expression>, status, code?, message?}]` | Refusals checked in order before anything is stored or generated: the first whose `when` is `true` answers its `status` (one the operation declares). `code` and `message` are text, or `{expr: <expression>}`. |
+| `effects` | `[{op: create \| update \| delete, type, id?, set?, when?}]` | Writes to other records after a create, update, replace, delete or action stored its target, in order, at most 8: `create` a record of `type` holding `set`, `update` the held record `id` names with `set`, `delete` it; each only when `when` is `true`. Values are [expressions](#expressions). |
 | `scope` | `{param, member, kind?, recursive?}` | The parameter that limits a list to one scope. `kind`: `eq` (the default), the member holds the parameter's value; `prefix`, the member is a `/`-separated path directly under the parameter's (`/a/b` under `/a`; any one-step path under a blank or `/` root), or anywhere below it when the `recursive` parameter is `true`; a member value holding no upper-case letter (`path_lower`) is compared with the path in lower case. |
 | `filters` | `[{param, member?, kind}]` or `[{param, grammar, member_prefix?}]` | `kind`: `eq`, `contains`, `gte`, `lte`, `flag`, `text`. `grammar`, for a parameter whose value is a filter expression: `scim`, `odata`, `field_value`, `deep_object` ([Filter grammars](#filter-grammars)); its attribute paths are member paths, below `member_prefix` when set. |
 | `order` | `{member, descending?}` | The order of a list. |
@@ -178,12 +179,13 @@ operations:
 
 ### Expressions
 
-`set`, `refuse` and their `code` and `message` take expressions in a subset of [CEL](https://cel.dev) (the Common Expression Language Kubernetes admission policies use): literals (numbers, text in `'…'` or `"…"`, `true`, `false`, `null`, lists `[…]`, maps `{'k': v}`), members (`a.b`, `a['b-c']`, `a[0]`), `?:`, `&&`, `||`, `!`, comparisons, `+ - * / %`, `in`, `has(a.b)`, and the macros `list.all(x, p)`, `list.exists(x, p)`, `list.map(x, e)`, `list.filter(x, p)`. Text is joined with `+`; there is no other template syntax. An expression is compiled once, when the world is loaded, and evaluated with a step budget.
+`set`, `refuse` (and its `code` and `message`), `computed` and `effects` take expressions in a subset of [CEL](https://cel.dev) (the Common Expression Language Kubernetes admission policies use): literals (numbers, text in `'…'` or `"…"`, `true`, `false`, `null`, lists `[…]`, maps `{'k': v}`), members (`a.b`, `a['b-c']`, `a[0]`), `?:`, `&&`, `||`, `!`, comparisons, `+ - * / %`, `in`, `has(a.b)`, and the macros `list.all(x, p)`, `list.exists(x, p)`, `list.map(x, e)`, `list.filter(x, p)`. Text is joined with `+`; there is no other template syntax. An expression is compiled once, when the world is loaded, and evaluated with a step budget.
 
 | Name | Value |
 | --- | --- |
 | `request` | `{body, path, query, headers}`: the parsed body, the path and query parameters, and the headers the mock records, their names in lower case (`request.headers['x-actor']`). |
-| `record` | The target as stored before the call, or `null` (a create, a target the session does not hold). |
+| `record` | In `set` and `refuse`, the target as stored before the call, or `null` (a create, a target the session does not hold). In `computed`, the record answered. In `effects`, the target as the call's write left it (as it was held, for a delete). |
+| `it` | In `effects`' `when` and `set`, the record an `update` or `delete` found (`null` for a `create`); inside `count`, `exists`, `sum` and the list macros, each item. |
 | `now` | The request time, RFC 3339 text: the seeded time when the call's draws are seeded (as generated dates are), else the clock. |
 
 | Function | What it does |
@@ -191,7 +193,7 @@ operations:
 | `held(type, id)` | The session's record of `type` stored under that id (in its identity pattern's forms too), however many the type holds, else the one record among its first 500 whose identity member or described alternate holds it, else `null`: `held('payment_intents', request.body.payment_intent).currency`. |
 | `count(type, cond)`, `exists(type, cond)` | How many of the session's records of `type` (at most 500) `cond` holds for, with `it` bound to each: `exists('incidents', it.key == request.body.key && it.status != 'resolved')`. |
 | `sum(list, expr)` | The sum of `expr` over `list`, with `it` bound to each item. |
-| `seq(scope)` | A counter per session and scope, from 1: `seq('incident')`, `seq('pr:' + request.path.repo)`. |
+| `seq(scope)` | A counter per session and scope, from 1: `seq('incident')`, `seq('pr:' + request.path.repo)`. The counters are the session's state: a reset clears them, a snapshot carries them, and a world patch or a restart does not start them again. |
 | `mint(pattern)` | A fresh id matching a regular expression, drawn from the seeded minting: `mint('[0-9]{12}')`. |
 | `md5`, `sha1`, `sha256`, `lower`, `upper`, `slug`, `size`, `string`, `int`, `double`, `startsWith`, `endsWith`, `contains`, `matches` | Text and conversion helpers: `md5(lower(request.body.email))`. |
 
@@ -202,7 +204,7 @@ Deliberate differences from CEL:
 - The type of `held`, `count` and `exists` is a literal resource type name.
 - A value is written as its member's schema declares it: an integral number into an `integer` member as an integer, a number into a `string` member as its text, text holding a number into a `number` or `integer` member as that number, `'true'`/`'false'` into a `boolean` member.
 
-Validation refuses an expression that does not compile, with its line and column, and one that reads what the contract does not declare: a `request.body` member the request body does not have, a `request.query`, `request.path` or `request.headers` name the operation does not declare as a parameter of that place, a member of `record` or `it` that the records of the operation's type (or the type named in `held`, `count`, `exists`) do not have, and a type that is not a resource type. A `set` member must be a member of the type's records, and only a create, update, replace or action takes `set`. An expression that fails when it runs (a type mismatch, its step budget) never fails the call: the value stays as the engine would make it (fill writes a create's member), a `refuse` entry whose `when` fails does not fire, and the request record says so under `expr_failed` ([request log](#gaps-in-the-request-log)).
+Validation refuses an expression that does not compile, with its line and column, and one that reads what the contract does not declare: a `request.body` member the request body does not have, a `request.query`, `request.path` or `request.headers` name the operation does not declare as a parameter of that place, a member of `record` or `it` that the records of the operation's type (or the type named in `held`, `count`, `exists`, or an effect's `type` for its `it`) do not have, and a type that is not a resource type. A `set` member must be a member of the type's records, and only a create, update, replace or action takes `set`. A `computed` member must be a member of the type's records; its `request` is whichever call answers the record, so its members are not checked against one operation, `it` is not bound, and it calls neither `seq` nor `mint`, which would change on every answer. An operation takes at most 8 `effects`, and only a create, update, replace, delete or action takes them; an effect's `type` must be a resource type and each `set` member a member of its records, an `update` or `delete` names its record in `id` and a `create` does not (`it` is not bound in `id`, nor anywhere in a `create`), and a `delete` sets nothing. An expression that fails when it runs (a type mismatch, its step budget) never fails the call: the value stays as the engine would make it (fill writes a create's member), a `refuse` entry whose `when` fails does not fire, and the request record says so under `expr_failed` ([request log](#gaps-in-the-request-log)).
 
 **`set`.** Applied to the record a create, update, replace or action stores, after the request is merged and before the record is checked against the type's reads; on a create the model and the faker never fill a member `set` names, one that sets the identity member names the record by it (`id: md5(lower(request.body.email))`), and an alternate key it sets is refused with the create's declared conflict when another record holds the value, as a sent one is. A create the executor leaves to generation (a seeded call, a record that does not fit) applies `set` to the generated record too, in the answer and the stored record. The values are evaluated once per call, so the stored record and the answer hold the same `seq()` or `mint()`.
 
@@ -223,11 +225,60 @@ operations:
         message: {expr: "'member ' + request.body.email + ' exists'"}
 ```
 
+**`computed`.** Evaluated whenever a record of the type is answered, and never stored: a read from state, each item of a list from state, the answer of a create, update, replace or action the executor makes, and a generated answer about a held record. A value is written as its member declares it, as `set`'s are; a value of `null`, one the member's schema refuses, and a failed expression (listed under `expr_failed`, with the pointer `/types/<type>/computed/<member>`) leave the member as the answer had it, and an item a list's schema refuses once its members are set is answered as it was. Counting and summing read the session's records of a type (at most 500).
+
+```yaml
+types:
+  orders:
+    computed:
+      # A count of children.
+      line_count: "count('lines', it.order_id == record.id)"
+      # A total from line items the record holds.
+      total: "sum(record.items, it.price * it.quantity)"
+      # A template.
+      label: "record.customer + ' #' + record.id"
+```
+
+**`effects`.** Writes to other records, in order, after the call's own write of its target. They run only when the executor stored (or removed) the target in this call: a refused call, one left to generation (a seeded call, a record that does not fit, a target the session does not hold), whatever write memory keeps of the generated answer, and one that stores nothing run none. Each effect:
+
+- `update` and `delete` find their record by the id `id` gives, as `held` finds one by key; an effect whose record the session does not hold is skipped;
+- `when`, when given, must be `true`;
+- `set` is evaluated with `record` the target as the write left it and `it` the record found (`null` for a `create`), each value written as its member declares it, `null` setting nothing;
+- a `create` stores a new record of `type` under the id `set` gives its identity member, else one minted as a create of the type mints it (seeded, like every minted id), in the collection its parent's path makes (the parent its `parent.member` names, else the target when the target is of the parent type), as created in the session; an id the session already holds skips it;
+- an `update` stores the record found with the `set` members;
+- a `delete` moves it to its type's soft-deleted state, or removes it and marks it deleted, so a later read of it answers as a read of a deleted record does.
+
+An expression that fails skips its effect and is listed under `expr_failed` (`/operations/<op>/effects/<i>/set/<member>`). Effects do not cascade: a record an effect writes is stored directly, never through the `refuse`, `set` or `effects` of the operation that would write it.
+
+```yaml
+operations:
+  createLine:
+    effects:
+      # A side-effect create of a child: the line's first event.
+      - op: create
+        type: events
+        set:
+          id: "'ev-' + record.id"
+          order_id: "record.order_id"
+          number: "seq('events')"
+      # A conditional status update on the parent.
+      - op: update
+        type: orders
+        id: "record.order_id"
+        when: "it.status == 'draft'"
+        set: {status: "'open'"}
+  deleteLine:
+    effects:
+      - {op: delete, type: events, id: "'ev-' + record.id"}
+```
+
+`derived` (`{<member>: {kind: count, of} | {kind: sum, of, member, where?}}`), the key `computed` replaces, still loads and answers as before: each member is read as a `computed` entry, `count` as the number of the record's held children of type `of` and `sum` as the exact decimal sum of their `member` over those holding the `where` values, its children found as before (named by the child type's `parent.member`, or stored under the collection its `parent.path_param` names; not soft-deleted). It is set only on a record created in the session or one with a child held; a sum goes into an `integer` member only when integral, a `number` member as a number and a `string` member at the children's largest scale, and nothing is set when a child's member is not a number or more than 500 children would have to be read. A `computed` entry for the same member wins. Write `computed` in new descriptions.
+
 `changes` (`{<member>: {from_request: <pointer>} | {value}}`), the key `set` replaces, still loads and sets as before: each entry is read as a `set` entry, `from_request` reading the request body at that JSON pointer (an explicit `null` sent is set) and `value` that literal, each set as it is (not converted to the member's type), and a `set` entry for the same member wins. As before, `changes` applies to updates, replaces and actions, not to creates. Write `set` in new descriptions.
 
 ## At runtime
 
-A mock answers from its active contract version's effective description: tier 0 overlaid with the newest revision's entries that validate. It never reads a raw revision. Each module reads the description first and keeps its heuristic for every key the description leaves out, key by key: a described `paging` keeps the guessed filters, and a type with a `lifecycle` but no `unique` keeps the guessed uniqueness checks. Tier 0 restates what the heuristics decide, so a mock with no revision answers exactly as one built without a description, but for its lists: a list of a type the description gives an identity is answered from the session's records ([Lists from state](#at-runtime)). A value the runtime makes from the description (a list page, a derived member, a lifecycle state, a minted id, a conflict body) is checked against the declared schema like a stored record; one that does not fit is not served, and the answer falls back to the heuristic path, never to an invalid answer.
+A mock answers from its active contract version's effective description: tier 0 overlaid with the newest revision's entries that validate. It never reads a raw revision. Each module reads the description first and keeps its heuristic for every key the description leaves out, key by key: a described `paging` keeps the guessed filters, and a type with a `lifecycle` but no `unique` keeps the guessed uniqueness checks. Tier 0 restates what the heuristics decide, so a mock with no revision answers exactly as one built without a description, but for its lists: a list of a type the description gives an identity is answered from the session's records ([Lists from state](#at-runtime)). A value the runtime makes from the description (a list page, a computed member, a lifecycle state, a minted id, a conflict body) is checked against the declared schema like a stored record; one that does not fit is not served, and the answer falls back to the heuristic path, never to an invalid answer.
 
 What reads or writes stored records works per session, with `consistency: on` (the default), on calls with no scenario and no forced status; lists answered from state also need an HTTP route or a SOAP or gRPC operation (a GraphQL field's selection narrows its answer), and an LLM for a next page by a token. GraphQL, gRPC and SOAP operations take kind, type, target, transitions, `set` and lifecycles by operation id; the header and status keys do not apply to them.
 
@@ -276,7 +327,7 @@ operations:
 
 <a id="embedded-records"></a>**Embedded records.** A type whose `parent.embedded` names an array member of its parent's records is not stored on its own. A read, update or delete of one by its own route (`/incidents/{incident_id}/incident_updates/{incident_update_id}`) that the session does not hold as a record finds the held parent whose array holds an item with that id (the parent its `parent.path_param` names, when the path has it, else the one held parent of the type holding it; when several do, the call is generated) and answers from that item with no LLM call: a read renders it, an update changes it as an update of a record does, a delete takes it out of the array (or, with the type's `soft_delete`, moves it to that state in place) and marks it deleted, so a later read of it is the declared `404`; the parent is stored with the item changed in place, in its collection as before. Its webhooks name the child's id. Nothing is answered this way while a write the parent's record does not show yet is remembered.
 
-**Derived members.** A type's `derived` members are computed when a record of it is answered from state, in a list from state, or in a generated answer about a held record, and are never stored. `count` counts the held children of the `of` type that are not soft-deleted and name the record through their type's `parent`; `sum` adds their `member`, over the children holding the `where` values, in exact decimal arithmetic. The result goes into an `integer` member only when it is integral, a `number` member as a number, and a `string` member at the children's largest scale. Nothing is set unless the record was created in the session or a child under it is held, and the model's value stays when the result does not fit the member's schema, a child's member is not a number, or more than 500 children would have to be read.
+**Computed members.** A type's `computed` members (and its `derived` ones, read as `computed`) are set when a record of it is answered from state, in a list from state, in a write's answer, or in a generated answer about a held record, and are never stored ([Expressions](#expressions)).
 
 ### Gaps in the request log
 

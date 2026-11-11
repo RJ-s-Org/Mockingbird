@@ -35,7 +35,8 @@ mod validate;
 
 pub use apply::{apply, record_at};
 pub use compiled::{
-    Expressions, OpExpressions, RefuseEntry, SetEntry, SetValue, TextValue, changes_as_set,
+    ComputedEntry, EffectEntry, Expressions, MAX_DERIVED_CHILD_TYPES, OpExpressions, RefuseEntry,
+    SetEntry, SetValue, TextValue, TypeExpressions, changes_as_set,
 };
 pub use effective::{effective, effective_validated};
 pub use tier0::{record_pointer, tier0};
@@ -110,9 +111,14 @@ pub struct TypeDesc {
     /// The concurrency token of a record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency: Option<ConcurrencyDesc>,
-    /// Members computed from stored records, keyed by member.
+    /// Members computed from stored records, keyed by member. Read as
+    /// [`TypeDesc::computed`] entries (see [`Expressions`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub derived: BTreeMap<String, DerivedDesc>,
+    /// Members computed whenever a record of the type is answered, and never
+    /// stored, keyed by member path, each the [expression](expr) its value is.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub computed: BTreeMap<String, String>,
     /// Unknown keys.
     #[serde(flatten)]
     pub extra: Extra,
@@ -308,6 +314,10 @@ pub struct OpDesc {
     /// whose `when` holds answers its status.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refuse: Vec<RefuseDesc>,
+    /// Writes to other records, in order, after the operation's own write of its
+    /// target ([`MAX_EFFECTS`] at most).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<EffectDesc>,
     /// The parameter that limits a list to one scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<ScopeDesc>,
@@ -651,6 +661,44 @@ pub struct RefuseDesc {
     /// Unknown keys.
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// Effects an operation states, at most.
+pub const MAX_EFFECTS: usize = 8;
+
+/// A write to another record an operation makes after its own write of its target.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct EffectDesc {
+    /// What it does to the record.
+    pub op: EffectOp,
+    /// The resource type of the record.
+    pub r#type: String,
+    /// The [expression](expr) giving the id of the record an `update` or `delete`
+    /// acts on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Members of the record a `create` or `update` sets, keyed by member path, each
+    /// an [expression](expr).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub set: BTreeMap<String, String>,
+    /// The [expression](expr) that must be `true` for the effect to apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
+    /// Unknown keys.
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// What an effect does to its record.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectOp {
+    /// Stores a new record.
+    Create,
+    /// Sets members of a held record.
+    Update,
+    /// Removes a held record (or moves it to its soft-deleted state).
+    Delete,
 }
 
 /// A text a refusal says: as written, or an [expression](expr)'s value.
@@ -1030,6 +1078,7 @@ fn overlay_type(mut b: TypeDesc, t: &TypeDesc) -> TypeDesc {
     set_vec(&mut b.unique, &t.unique);
     set(&mut b.concurrency, &t.concurrency);
     set_map(&mut b.derived, &t.derived);
+    set_map(&mut b.computed, &t.computed);
     merge_extra(&mut b.extra, &t.extra);
     b
 }
@@ -1049,6 +1098,7 @@ fn overlay_op(mut b: OpDesc, t: &OpDesc) -> OpDesc {
     set_map(&mut b.changes, &t.changes);
     set_map(&mut b.set, &t.set);
     set_vec(&mut b.refuse, &t.refuse);
+    set_vec(&mut b.effects, &t.effects);
     set(&mut b.scope, &t.scope);
     set_vec(&mut b.filters, &t.filters);
     set(&mut b.order, &t.order);

@@ -4,7 +4,7 @@
 //! type's identity member) is written into the runtime's bundle by
 //! [`mb_mcm::world::apply`]; everything else a module reads from the description
 //! (lifecycle, unique members, concurrency, paging, filters, scope, order,
-//! transitions, changes, derived members, idempotency, `not_found`) is looked up here,
+//! transitions, changes, computed and derived members, effects, idempotency, `not_found`) is looked up here,
 //! by operation id or type name, before the module's heuristic. A key the description
 //! leaves absent falls back to that heuristic, key by key.
 //!
@@ -44,7 +44,8 @@ pub(crate) struct Described {
     /// The `identity.alternates` of each type whose effective list differs from tier
     /// 0's.
     alternates: HashMap<String, Vec<String>>,
-    /// The world's `set`, `changes` and `refuse` expressions, compiled once.
+    /// The world's expressions (`set`, `changes`, `refuse`, `effects`, `computed`,
+    /// `derived`), compiled once.
     expressions: mb_mcm::world::Expressions,
 }
 
@@ -104,7 +105,7 @@ impl Described {
                 (alternates_of(base, t).as_ref() != Some(&a)).then(|| (t.clone(), a))
             })
             .collect();
-        super::derived::log_skipped_child_types(world);
+        super::computed::log_skipped_child_types(world);
         Self {
             world: Some(Arc::new(world.clone())),
             revision,
@@ -121,6 +122,12 @@ impl Described {
     /// rewritten as `set`, and its `refuse`), when it has any.
     pub(crate) fn expressions(&self, id: &str) -> Option<&mb_mcm::world::OpExpressions> {
         self.expressions.op(id)
+    }
+
+    /// The compiled computed members of type `t` (its `computed`, with its `derived`
+    /// rewritten as `computed`), when it has any.
+    pub(crate) fn computed(&self, t: &str) -> Option<&mb_mcm::world::TypeExpressions> {
+        self.expressions.of_type(t)
     }
 
     /// The effective world, when one is attached.

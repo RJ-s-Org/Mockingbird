@@ -649,7 +649,7 @@ pub(super) async fn page(
     let (array_parts, _) = schema_parts(bundle, Some(&shape.array));
     let size = list_query::requested_page(rt, op, call);
     // Each item's derived members, from one listing per child type.
-    derived::fill_page(state, &plan.session, t, &mut items, Some(&shape.items)).await;
+    computed::fill_page(state, (plan, call), t, &mut items, Some(&shape.items)).await;
     if let Some(q) = q {
         list_query::sort(q, &mut items);
     }

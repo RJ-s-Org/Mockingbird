@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::eval::{Num, double, type_name};
 use super::parse::Func;
-use super::{Fail, Host, compile_regex};
+use super::{Decimal, Fail, Host, compile_regex};
 
 pub(super) fn call(
     func: Func,
@@ -114,6 +114,29 @@ pub(super) fn call(
         Func::Sha1 => Value::String(hex(&Sha1::digest(string(0)?.as_bytes()))),
         Func::Sha256 => Value::String(hex(&Sha256::digest(string(0)?.as_bytes()))),
         Func::Seq => Value::from(host.seq(string(0)?)),
+        Func::DecimalSum => {
+            let Value::Array(items) = arg(0) else {
+                return Err(Fail::new(
+                    pos,
+                    format!("decimal_sum() needs a list, got {}", type_name(arg(0))),
+                ));
+            };
+            let member = string(1)?;
+            let mut sum = Decimal::ZERO;
+            for item in items {
+                match crate::member_at(item, member) {
+                    None | Some(Value::Null) => {}
+                    Some(v) => {
+                        sum = Decimal::parse(v)
+                            .and_then(|d| sum.checked_add(d))
+                            .ok_or_else(|| {
+                                Fail::new(pos, format!("decimal_sum() cannot add {}", type_name(v)))
+                            })?;
+                    }
+                }
+            }
+            Value::String(sum.text())
+        }
         Func::Mint => {
             let pattern = string(0)?;
             Value::String(host.mint(pattern).ok_or_else(|| {

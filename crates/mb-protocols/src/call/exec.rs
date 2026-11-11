@@ -27,9 +27,9 @@ use tracing::Instrument;
 use super::write_memory::Earlier;
 use super::writes::store_one;
 use super::{
-    CallPlan, OperationCall, StateAccess, collection_of, deleted, derived, envelopes, id_string,
-    minted, named_target, plain, records, replays, serve_held, state_lists, state_span, tokens,
-    world, write_memory,
+    CallPlan, OperationCall, StateAccess, collection_of, computed, deleted, envelopes, id_string,
+    minted, named_target, plain, records, replays, serve_held, side_writes, state_lists,
+    state_span, tokens, world, write_memory,
 };
 
 /// Why a classified call goes on to generation.
@@ -431,7 +431,7 @@ async fn held_read(
         values.extend(kept.cloned().unwrap_or_default());
         (!values.is_empty()).then_some(values)
     };
-    let derived = derived::filled(state, &plan.session, stored)
+    let derived = computed::filled(state, (plan, call), stored)
         .instrument(state_span())
         .await;
     let held = |kept: Option<&Map<String, Value>>| {
@@ -641,6 +641,20 @@ pub(super) async fn commit(
         let op = plan.op;
         let session = &plan.session;
         let collection = collection_of(op, call);
+        // What the operation's effects see of its target, when it has any: the record
+        // as the write leaves it (as it was held, for a removal or a write within its
+        // parent), and its type.
+        let effected = rt
+            .described()
+            .expressions(&op.id)
+            .is_some_and(|o| !o.effects.is_empty())
+            .then(|| match &write {
+                Write::Put { data, .. } => (t.to_string(), data.clone()),
+                Write::Remove { .. } => {
+                    (t.to_string(), held.map_or(Value::Null, |h| h.data.clone()))
+                }
+                Write::Within { child, .. } => (child.resource_type.clone(), child.data.clone()),
+            });
         // The record the write was of: the child for a write within its parent.
         let mut written = None;
         let id = match write {
@@ -721,6 +735,13 @@ pub(super) async fn commit(
                 id
             }
         };
+        // The operation's effects, once its own write landed.
+        if let Some((target_type, target)) = &effected
+            && state.available()
+        {
+            let target_id = written.as_deref().unwrap_or(&id);
+            side_writes::apply(state, (plan, call), target_type, (target_id, target)).await;
+        }
         // What earlier answers said of a deleted record goes, a soft-deleted one too.
         world::after_delete(
             state,

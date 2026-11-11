@@ -266,6 +266,21 @@ impl<'p> Eval<'p, '_, '_> {
                 }
                 Ok(Value::Bool(false))
             }
+            Kind::Children(ty, r#where) => {
+                let r#where = match r#where {
+                    Some(w) => self.eval(w)?,
+                    None => Value::Null,
+                };
+                let items = self
+                    .host
+                    .children(&ty.name, &r#where)
+                    .map_err(|m| Fail::new(pos, m))?;
+                self.steps_n(u64::try_from(items.len()).unwrap_or(u64::MAX), pos)?;
+                for item in &items {
+                    self.charge(item, pos)?;
+                }
+                Ok(Value::Array(items))
+            }
             Kind::Sum(list, e) => {
                 let items = self.items(list)?;
                 let mut acc = Num::I(0);

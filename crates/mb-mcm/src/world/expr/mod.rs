@@ -51,7 +51,10 @@ use std::fmt;
 
 use serde_json::Value;
 
+pub use decimal::Decimal;
+
 mod check;
+mod decimal;
 mod eval;
 mod funcs;
 mod lex;
@@ -189,6 +192,13 @@ pub trait Host {
     fn seq(&mut self, scope: &str) -> i64;
     /// A fresh id matching `pattern`, or `None` when the pattern cannot be generated.
     fn mint(&mut self, pattern: &str) -> Option<String>;
+    /// The held children of type `ty` of the record being answered, those holding the
+    /// values of `where` (a map, or `null` for all), for the internal `children()` a
+    /// world's `derived` members are read as; `Err` when they cannot be told exactly.
+    fn children(&mut self, ty: &str, r#where: &Value) -> Result<Vec<Value>, String> {
+        let _ = (ty, r#where);
+        Err("children() is not available here".to_string())
+    }
 }
 
 /// A compiled expression.
@@ -202,7 +212,19 @@ impl Program {
     /// Compiles `source`, refusing syntax errors, unknown names and functions,
     /// wrong numbers of arguments, invalid literal patterns and trees over the caps.
     pub fn compile(source: &str) -> Result<Program, CompileError> {
-        let root = parse::parse(source).map_err(|f| CompileError {
+        Self::compile_with(source, false)
+    }
+
+    /// [`Program::compile`], also admitting the runtime's own functions, which a
+    /// world cannot call: `children(type, where?)` ([`Host::children`]) and
+    /// `decimal_sum(list, member)`, the exact sum of `member` over `list`'s items as
+    /// decimal text ([`Decimal`]), a member that is `null` or missing adding nothing.
+    pub(crate) fn compile_internal(source: &str) -> Result<Program, CompileError> {
+        Self::compile_with(source, true)
+    }
+
+    fn compile_with(source: &str, internal: bool) -> Result<Program, CompileError> {
+        let root = parse::parse(source, internal).map_err(|f| CompileError {
             pos: position(source, f.pos),
             message: f.msg,
         })?;

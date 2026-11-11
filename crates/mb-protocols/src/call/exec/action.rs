@@ -11,7 +11,7 @@ use tracing::Instrument;
 use super::writes::written;
 use super::{Fallback, Held, Ran, Write, answered, commit, fell_back};
 use crate::call::{
-    CallPlan, OperationCall, StateAccess, derived, state_span, transitions, write_memory,
+    CallPlan, OperationCall, StateAccess, computed, state_span, transitions, write_memory,
 };
 
 /// Whether the executor takes these calls.
@@ -58,7 +58,7 @@ pub(super) async fn run(
     }
     let mut changed = stored.clone();
     transitions::apply(state, (plan, call), Some(&stored.data), &mut changed.data).await;
-    let derived = derived::filled(state, &plan.session, &changed)
+    let derived = computed::filled(state, (plan, call), &changed)
         .instrument(state_span())
         .await;
     let answer = derived

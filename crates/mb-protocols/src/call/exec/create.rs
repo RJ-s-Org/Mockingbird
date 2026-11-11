@@ -73,7 +73,7 @@ use crate::call::entities::type_check;
 use crate::call::owners::{Compound, schema_members};
 use crate::call::writes::type_members;
 use crate::call::{
-    CallPlan, MAX_SCAN, OperationCall, StateAccess, derived, header_ids, id_string,
+    CallPlan, MAX_SCAN, OperationCall, StateAccess, computed, header_ids, id_string,
     in_create_collection, lifecycle, path_set, records, repeats, replays, request_values,
     serve_held, state_lists, state_span, target_id, transitions, value_index,
 };
@@ -358,9 +358,9 @@ pub(super) async fn run(
 
     // Its derived members are answered from what state holds (its children, if any),
     // never stored; the record as stored is answered when the filled one does not render.
-    let filled = derived::filled_new(
+    let filled = computed::filled_new(
         state,
-        &plan.session,
+        (plan, call),
         &mb_state::StoredResource {
             resource_type: t.to_owned(),
             id: key.clone(),
@@ -604,7 +604,7 @@ fn server_owned(
         owned.push(member);
     }
     if let Some(desc) = rt.described().type_desc(t) {
-        for member in desc.derived.keys() {
+        for member in desc.derived.keys().chain(desc.computed.keys()) {
             owned.push(member.split('.').next().unwrap_or(member).to_string());
         }
     }

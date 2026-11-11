@@ -47,7 +47,7 @@ use crate::call::bundle_index::schema_parts;
 use crate::call::entities::added_violation;
 use crate::call::write_memory::{self, keep_owner, read_only, read_schema, without_contradictions};
 use crate::call::{
-    CallPlan, OperationCall, StateAccess, derived, id_string, lifecycle, records, state_span,
+    CallPlan, OperationCall, StateAccess, computed, id_string, lifecycle, records, state_span,
     tokens, transitions,
 };
 
@@ -169,9 +169,9 @@ async fn update(
     }
     // Its derived members are answered from its children as state has them, never
     // stored; the record as stored is answered when the filled one does not render.
-    let filled = derived::filled(
+    let filled = computed::filled(
         state,
-        &plan.session,
+        (plan, call),
         &StoredResource {
             data: data.clone(),
             ..stored.clone()
@@ -307,7 +307,9 @@ fn changed(
         let lifecycle = described
             .and_then(|d| d.lifecycle.as_ref())
             .map(|l| l.member.as_str());
-        let derived = |name: &str| described.is_some_and(|d| d.derived.contains_key(name));
+        let derived = |name: &str| {
+            described.is_some_and(|d| d.derived.contains_key(name) || d.computed.contains_key(name))
+        };
         for (name, value) in held {
             let unsent =
                 (derived(name) || lifecycle == Some(name.as_str())) && !out.contains_key(name);

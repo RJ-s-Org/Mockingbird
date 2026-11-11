@@ -16,11 +16,12 @@ use serde_json::Value;
 
 use super::expr::{MemberRef, Program, Root, Segment};
 use super::{
-    AnswerDesc, ChangeDesc, ConcurrencyDesc, DerivedDesc, Extra, FieldsDesc, FilterDesc,
-    FilterGrammar, HeaderRef, IdentityDesc, IdentityHeader, InstructionDesc, InstructionsDesc,
-    LifecycleDesc, LongRunning, MAX_BYTES, MAX_DEPTH, OpDesc, OpKind, OrderDesc, PagingDesc,
-    ParamValue, ParentDesc, Pointer, QueueDesc, QueueEffect, RecordsAt, RefuseDesc, RequeueDesc,
-    ScopeDesc, ScopeKind, SoftDelete, TargetDesc, TextDesc, TypeDesc, UniqueDesc, VERSION, World,
+    AnswerDesc, ChangeDesc, ConcurrencyDesc, DerivedDesc, EffectDesc, EffectOp, Extra, FieldsDesc,
+    FilterDesc, FilterGrammar, HeaderRef, IdentityDesc, IdentityHeader, InstructionDesc,
+    InstructionsDesc, LifecycleDesc, LongRunning, MAX_BYTES, MAX_DEPTH, MAX_EFFECTS, OpDesc,
+    OpKind, OrderDesc, PagingDesc, ParamValue, ParentDesc, Pointer, QueueDesc, QueueEffect,
+    RecordsAt, RefuseDesc, RequeueDesc, ScopeDesc, ScopeKind, SoftDelete, TargetDesc, TextDesc,
+    TypeDesc, UniqueDesc, VERSION, World,
 };
 use crate::{Binding, Bundle, Operation, RecordAt, StatusSelector};
 
@@ -259,8 +260,10 @@ pub fn validate(world: &World, bundle: &Bundle) -> Validation {
             &applied,
             &types.join(&name).join("derived"),
         );
+        let computed = cx.computed(&name, &t.computed, &types.join(&name).join("computed"));
         if let Some(desc) = applied.types.get_mut(&name) {
             desc.derived = derived;
+            desc.computed = computed;
         }
     }
 
@@ -282,6 +285,40 @@ pub fn validate(world: &World, bundle: &Bundle) -> Validation {
     Validation {
         applied,
         refused: cx.refused,
+    }
+}
+
+/// What an expression is read against.
+struct Scope<'a, 's> {
+    /// The operation whose request it reads; `None` checks no request member (a
+    /// computed member is answered by whichever operation answers its record).
+    op: Option<&'a Operation>,
+    /// `record`: its schema and type.
+    record: (Option<&'a Value>, Option<&'s str>),
+    /// The type of the records `it` is bound to, or why it is not bound.
+    it: Result<&'s str, &'static str>,
+    /// Whether it is a computed member, which calls no `seq` or `mint`.
+    computed: bool,
+}
+
+impl<'a, 's> Scope<'a, 's> {
+    /// An expression of operation `op`, whose target is a record of `ty`.
+    fn of_op(op: &'a Operation, record: (Option<&'a Value>, Option<&'s str>)) -> Self {
+        Self {
+            op: Some(op),
+            record,
+            it: Err("`it` is bound only inside count(), exists(), sum() and the list macros"),
+            computed: false,
+        }
+    }
+
+    /// Why function `name` cannot be called here, if it cannot.
+    fn refuses(&self, name: &str) -> Option<String> {
+        (self.computed && matches!(name, "seq" | "mint")).then(|| {
+            format!(
+                "{name}() is not called in a computed member: it is evaluated on every answer, and would change each time"
+            )
+        })
     }
 }
 
@@ -1496,7 +1533,7 @@ impl<'a> Ctx<'a> {
                 if !self.check_member(record, ty, member, &mp) {
                     continue;
                 }
-                if self.check_expression(op, (record, ty), source, &mp) {
+                if self.check_expression(&Scope::of_op(op, (record, ty)), source, &mp) {
                     out.set.insert(member.clone(), source.clone());
                 }
             }
@@ -1505,6 +1542,35 @@ impl<'a> Ctx<'a> {
             let rp = path.join("refuse").join(i);
             if let Some(kept) = self.refusal(op, (record, ty), r, &rp) {
                 out.refuse.push(kept);
+            }
+        }
+        let ep = path.join("effects");
+        let writes = matches!(
+            kind,
+            Some(
+                OpKind::Create | OpKind::Update | OpKind::Replace | OpKind::Delete | OpKind::Action
+            )
+        );
+        if !d.effects.is_empty() && !writes {
+            self.refuse(
+                &ep,
+                RefusalCode::Invalid,
+                "`effects` follow a write: a create, update, replace, delete or action".to_string(),
+            );
+        } else if d.effects.len() > MAX_EFFECTS {
+            self.refuse(
+                &ep,
+                RefusalCode::Invalid,
+                format!(
+                    "an operation has at most {MAX_EFFECTS} effects, not {}",
+                    d.effects.len()
+                ),
+            );
+        } else {
+            for (i, e) in d.effects.iter().enumerate() {
+                if let Some(kept) = self.effect(op, (record, ty), e, &ep.join(i)) {
+                    out.effects.push(kept);
+                }
             }
         }
 
@@ -1731,11 +1797,12 @@ impl<'a> Ctx<'a> {
         path: &Path,
     ) -> Option<RefuseDesc> {
         self.unknown(path, &r.extra);
-        let mut ok = self.check_expression(op, (record, ty), &r.when, &path.join("when"));
+        let scope = Scope::of_op(op, (record, ty));
+        let mut ok = self.check_expression(&scope, &r.when, &path.join("when"));
         ok &= self.check_status(op, r.status, &path.join("status"));
         for (key, text) in [("code", &r.code), ("message", &r.message)] {
             if let Some(TextDesc::Expr { expr }) = text {
-                ok &= self.check_expression(op, (record, ty), expr, &path.join(key));
+                ok &= self.check_expression(&scope, expr, &path.join(key));
             }
         }
         ok.then(|| RefuseDesc {
@@ -1747,21 +1814,16 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    /// An expression of operation `op`: it compiles (refused with the line and column
-    /// of its first error), and what it reads is declared: a `request.body` member is
-    /// one of the request body's (a dotted name too), the first member under
-    /// `request.query`, `request.path` and `request.headers` a declared parameter of
-    /// that place (a header ignoring case), a member of `record` one of the type's
-    /// records, and a member of `it` in `count`, `exists` or `held` one of that type's
-    /// records; the types it names are resource types. Each failure is refused at
+    /// An expression read in `scope`: it compiles (refused with the line and column
+    /// of its first error), calls no function `scope` refuses, and what it reads is
+    /// declared: a `request.body` member is one of the request body's (a dotted name
+    /// too), the first member under `request.query`, `request.path` and
+    /// `request.headers` a declared parameter of that place (a header ignoring case),
+    /// a member of `record` one of its type's records, a member of `it` one of the
+    /// records of the type `scope` binds it to (or, in `count`, `exists` or `held`, of
+    /// that type); the types it names are resource types. Each failure is refused at
     /// `path`, naming the expression's line and column.
-    fn check_expression(
-        &mut self,
-        op: &'a Operation,
-        (record, ty): (Option<&'a Value>, Option<&str>),
-        source: &str,
-        path: &Path,
-    ) -> bool {
+    fn check_expression(&mut self, scope: &Scope<'a, '_>, source: &str, path: &Path) -> bool {
         let program = match Program::compile(source) {
             Ok(p) => p,
             Err(e) => {
@@ -1775,6 +1837,12 @@ impl<'a> Ctx<'a> {
         };
         let refs = program.check();
         let mut ok = true;
+        for f in &refs.functions {
+            if let Some(why) = scope.refuses(f.name) {
+                self.refuse(path, RefusalCode::Invalid, format!("{}: {why}", f.pos));
+                ok = false;
+            }
+        }
         for t in &refs.types {
             if !self.types.contains(t.name.as_str()) {
                 self.refuse(
@@ -1789,7 +1857,7 @@ impl<'a> Ctx<'a> {
             }
         }
         for m in &refs.members {
-            if let Some(problem) = self.member_problem(op, (record, ty), m) {
+            if let Some(problem) = self.member_problem(scope, m) {
                 self.refuse(
                     path,
                     RefusalCode::Unresolved,
@@ -1801,20 +1869,30 @@ impl<'a> Ctx<'a> {
         ok
     }
 
-    /// Why member path `m` an expression of `op` reads is not declared, if it is not.
-    fn member_problem(
-        &self,
-        op: &'a Operation,
-        (record, ty): (Option<&'a Value>, Option<&str>),
-        m: &MemberRef,
-    ) -> Option<String> {
+    /// Why member path `m` an expression read in `scope` reads is not declared, if
+    /// it is not.
+    fn member_problem(&self, scope: &Scope<'a, '_>, m: &MemberRef) -> Option<String> {
         let b = self.bundle;
         let first = match m.path.first() {
             Some(Segment::Member(name)) => Some(name.as_str()),
             _ => None,
         };
+        let (record, ty) = scope.record;
+        let typed = |t: &str| -> Option<String> {
+            if !self.types.contains(t) {
+                // Refused as a type already.
+                return None;
+            }
+            match self.record_schema(t) {
+                Some(schema) => (!declares_path(b, schema, &m.path))
+                    .then(|| format!("`{m}` is not a member of a `{t}` record")),
+                None => Some(format!("type `{t}` has no record schema for `{m}`")),
+            }
+        };
         match &m.root {
+            Root::Body | Root::Query | Root::Path | Root::Headers if scope.op.is_none() => None,
             Root::Body => {
+                let op = scope.op?;
                 let body = op.input.body.as_ref();
                 match body {
                     Some(schema) if declares_path(b, schema, &m.path) => None,
@@ -1830,6 +1908,7 @@ impl<'a> Ctx<'a> {
                 }
             }
             Root::Query | Root::Path | Root::Headers => {
+                let op = scope.op?;
                 let name = first?;
                 let (declared, place) = match m.root {
                     Root::Query => (
@@ -1849,28 +1928,129 @@ impl<'a> Ctx<'a> {
             Root::Record => match (record, ty) {
                 (_, None) => Some(format!(
                     "`{m}` reads the target, but operation `{}` has no resource type",
-                    op.id
+                    scope.op.map_or("", |op| op.id.as_str())
                 )),
                 (None, Some(t)) => Some(format!("type `{t}` has no record schema for `{m}`")),
                 (Some(schema), Some(t)) => (!declares_path(b, schema, &m.path))
                     .then(|| format!("`{m}` is not a member of a `{t}` record")),
             },
-            Root::Type(t) => {
-                if !self.types.contains(t.as_str()) {
-                    // Refused as a type already.
-                    return None;
-                }
-                match self.record_schema(t) {
-                    Some(schema) => (!declares_path(b, schema, &m.path))
-                        .then(|| format!("`{m}` is not a member of a `{t}` record")),
-                    None => Some(format!("type `{t}` has no record schema for `{m}`")),
-                }
-            }
-            Root::It => Some(
-                "`it` is bound only inside count(), exists(), sum() and the list macros"
-                    .to_string(),
-            ),
+            Root::Type(t) => typed(t),
+            Root::It => match scope.it {
+                Ok(t) => typed(t),
+                Err(why) => Some(why.to_string()),
+            },
         }
+    }
+
+    /// A type's `computed` members: each a member of its records, its expression
+    /// reading what they declare ([`Self::check_expression`]: `record` is the record
+    /// answered, `it` is not bound, `request` is whichever call answers it and is not
+    /// checked against one), calling neither `seq` nor `mint`, which would change on
+    /// every answer.
+    fn computed(
+        &mut self,
+        name: &str,
+        computed: &BTreeMap<String, String>,
+        path: &Path,
+    ) -> BTreeMap<String, String> {
+        let record = self.record_schema(name);
+        let scope = Scope {
+            op: None,
+            record: (record, Some(name)),
+            it: Err("`it` is not bound in a computed member: read the record as `record`"),
+            computed: true,
+        };
+        let mut out = BTreeMap::new();
+        for (member, source) in computed {
+            let p = path.join(member);
+            if !self.check_member(record, Some(name), member, &p) {
+                continue;
+            }
+            if self.check_expression(&scope, source, &p) {
+                out.insert(member.clone(), source.clone());
+            }
+        }
+        out
+    }
+
+    /// An `effects` entry of operation `op`: a known type, an `id` exactly for an
+    /// update or a delete, `set` on a create or an update only, each `set` member one
+    /// of the type's records, and its expressions reading what the operation and the
+    /// records declare (`record` the operation's target, `it` the record an update or
+    /// delete finds, not bound in a create or in `id`).
+    fn effect(
+        &mut self,
+        op: &'a Operation,
+        (record, ty): (Option<&'a Value>, Option<&str>),
+        e: &EffectDesc,
+        path: &Path,
+    ) -> Option<EffectDesc> {
+        self.unknown(path, &e.extra);
+        let t = e.r#type.as_str();
+        if !self.types.contains(t) {
+            self.refuse(
+                &path.join("type"),
+                RefusalCode::Unresolved,
+                format!("no operation has resource type `{t}` and no definition is named so"),
+            );
+            return None;
+        }
+        let mut ok = true;
+        match (e.op, &e.id) {
+            (EffectOp::Create, Some(_)) => {
+                self.refuse(
+                    &path.join("id"),
+                    RefusalCode::Invalid,
+                    "a create effect takes no `id`: its id is minted, or set in `set`".to_string(),
+                );
+                ok = false;
+            }
+            (EffectOp::Update | EffectOp::Delete, None) => {
+                self.refuse(
+                    path,
+                    RefusalCode::Invalid,
+                    "an update or delete effect names its record in `id`".to_string(),
+                );
+                ok = false;
+            }
+            _ => {}
+        }
+        if e.op == EffectOp::Delete && !e.set.is_empty() {
+            self.refuse(
+                &path.join("set"),
+                RefusalCode::Invalid,
+                "a delete effect sets nothing".to_string(),
+            );
+            ok = false;
+        }
+        let scope = Scope {
+            it: match e.op {
+                EffectOp::Create => Err("`it` is null in a create effect: no record is found"),
+                _ => Ok(t),
+            },
+            ..Scope::of_op(op, (record, ty))
+        };
+        if let Some(id) = &e.id {
+            let id_scope = Scope {
+                it: Err("`it` is the record `id` finds: it is not bound in `id`"),
+                ..Scope::of_op(op, (record, ty))
+            };
+            ok &= self.check_expression(&id_scope, id, &path.join("id"));
+        }
+        if let Some(when) = &e.when {
+            ok &= self.check_expression(&scope, when, &path.join("when"));
+        }
+        let own = self.record_schema(t);
+        let sp = path.join("set");
+        for (member, source) in &e.set {
+            let mp = sp.join(member);
+            ok &= self.check_member(own, Some(t), member, &mp);
+            ok &= self.check_expression(&scope, source, &mp);
+        }
+        ok.then(|| EffectDesc {
+            extra: Extra::new(),
+            ..e.clone()
+        })
     }
 
     /// A read's or list's `fields`: its parameter declared, a separator that is not
@@ -2585,6 +2765,183 @@ mod tests {
         );
         assert_eq!(v.applied.operations["addMember"].refuse.len(), 1);
         assert_eq!(v.applied.operations["addMember"].refuse[0].status, 409);
+    }
+
+    /// Every refusal of `v`, as `(path, message)`.
+    fn refusals(v: &Validation) -> Vec<(&str, &str)> {
+        v.refused
+            .iter()
+            .map(|r| (r.path.as_str(), r.message.as_str()))
+            .collect()
+    }
+
+    fn refused_with(v: &Validation, path: &str, needle: &str) {
+        let refused = refusals(v);
+        assert!(
+            refused
+                .iter()
+                .any(|(p, m)| *p == path && m.contains(needle)),
+            "{path} {needle}: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn computed_members_keep_expressions_over_the_record_answered() {
+        let b = members();
+        let w = world(json!({"types": {"members": {"computed": {
+            "name": "record.email + ' (' + record.meta.source + ')'",
+            "currency": "held('lists', record.list_id).currency",
+            "meta.source": "count('members', it.list_id == record.list_id) > 1 ? 'shared' : 'own'",
+            "list_id": "request.query.anything"
+        }}}}));
+        let v = validate(&w, &b);
+        assert!(v.refused.is_empty(), "{:?}", v.refused);
+        assert_eq!(v.applied, w);
+    }
+
+    #[test]
+    fn computed_members_refuse_what_they_cannot_read() {
+        let b = members();
+        let w = world(json!({"types": {"members": {"computed": {
+            "name": "record.email +\n  ",
+            "email": "record.nickname",
+            "currency": "it.currency",
+            "list_id": "string(seq('x'))",
+            "id": "mint('[a-z]{4}')",
+            "nickname": "'x'"
+        }}}}));
+        let v = validate(&w, &b);
+        let at = |m: &str| format!("/types/members/computed/{m}");
+        refused_with(&v, &at("name"), "line 2, column 3");
+        refused_with(&v, &at("email"), "`record.nickname` is not a member");
+        refused_with(
+            &v,
+            &at("currency"),
+            "`it` is not bound in a computed member",
+        );
+        refused_with(
+            &v,
+            &at("list_id"),
+            "seq() is not called in a computed member",
+        );
+        refused_with(&v, &at("id"), "mint() is not called in a computed member");
+        refused_with(&v, &at("nickname"), "`nickname`");
+        assert!(
+            v.applied
+                .types
+                .get("members")
+                .is_none_or(|t| t.computed.is_empty())
+        );
+    }
+
+    #[test]
+    fn the_internal_functions_derived_is_read_through_are_unknown_to_a_world() {
+        let b = members();
+        let w = world(json!({"types": {"members": {"computed": {
+            "name": "string(size(children('members')))",
+            "email": "decimal_sum([], 'x')"
+        }}}}));
+        let v = validate(&w, &b);
+        refused_with(
+            &v,
+            "/types/members/computed/name",
+            "unknown function children()",
+        );
+        refused_with(
+            &v,
+            "/types/members/computed/email",
+            "unknown function decimal_sum()",
+        );
+    }
+
+    #[test]
+    fn effects_keep_writes_to_other_records_reading_what_is_declared() {
+        let b = members();
+        let w = world(json!({"operations": {"addMember": {"effects": [
+            {"op": "update", "type": "lists", "id": "request.body.list_id",
+             "when": "it.currency != record.currency", "set": {"currency": "record.currency"}},
+            {"op": "create", "type": "members", "when": "has(request.body.name)",
+             "set": {"email": "'copy-' + record.email", "list_id": "record.list_id"}},
+            {"op": "delete", "type": "members", "id": "'old-' + record.id"}
+        ]}}}));
+        let v = validate(&w, &b);
+        assert!(v.refused.is_empty(), "{:?}", v.refused);
+        assert_eq!(v.applied, w);
+    }
+
+    #[test]
+    fn effects_refuse_what_they_cannot_write() {
+        let b = members();
+        let w = world(json!({"operations": {
+            "addMember": {"effects": [
+                {"op": "update", "type": "accounts", "id": "'a'"},
+                {"op": "update", "type": "lists", "set": {"currency": "'x'"}},
+                {"op": "create", "type": "lists", "id": "'x'", "set": {"currency": "'x'"}},
+                {"op": "create", "type": "lists", "set": {"currency": "it.currency"}},
+                {"op": "update", "type": "lists", "id": "it.id", "set": {"owner": "'x'"}},
+                {"op": "update", "type": "lists", "id": "'l'", "set": {"currency": "it.owner"}},
+                {"op": "delete", "type": "lists", "id": "'l'", "set": {"currency": "'x'"}},
+                {"op": "update", "type": "lists", "id": "'l'", "when": "request.body.nope == 1 &&\n x"}
+            ]},
+            "getMember": {"effects": [{"op": "delete", "type": "lists", "id": "'l'"}]}
+        }}));
+        let v = validate(&w, &b);
+        let at = |i: usize, rest: &str| format!("/operations/addMember/effects/{i}{rest}");
+        refused_with(
+            &v,
+            &at(0, "/type"),
+            "no operation has resource type `accounts`",
+        );
+        refused_with(&v, &at(1, ""), "names its record in `id`");
+        refused_with(&v, &at(2, "/id"), "a create effect takes no `id`");
+        refused_with(
+            &v,
+            &at(3, "/set/currency"),
+            "`it` is null in a create effect",
+        );
+        refused_with(&v, &at(4, "/id"), "it is not bound in `id`");
+        refused_with(&v, &at(4, "/set/owner"), "`owner`");
+        refused_with(
+            &v,
+            &at(5, "/set/currency"),
+            "`it.owner` is not a member of a `lists` record",
+        );
+        refused_with(&v, &at(6, "/set"), "a delete effect sets nothing");
+        refused_with(&v, &at(7, "/when"), "line 2, column 2");
+        refused_with(
+            &v,
+            "/operations/getMember/effects",
+            "`effects` follow a write",
+        );
+        assert!(v.applied.operations["addMember"].effects.is_empty());
+    }
+
+    #[test]
+    fn an_operation_has_at_most_eight_effects() {
+        let b = members();
+        let effect = json!({"op": "delete", "type": "lists", "id": "request.body.list_id"});
+        let nine: Vec<Value> = (0..9).map(|_| effect.clone()).collect();
+        let v = validate(
+            &world(json!({"operations": {"addMember": {"effects": nine}}})),
+            &b,
+        );
+        assert_eq!(
+            paths(&v),
+            vec![("/operations/addMember/effects", RefusalCode::Invalid)]
+        );
+        refused_with(
+            &v,
+            "/operations/addMember/effects",
+            "at most 8 effects, not 9",
+        );
+        assert!(v.applied.operations["addMember"].effects.is_empty());
+        let eight: Vec<Value> = (0..8).map(|_| effect.clone()).collect();
+        let v = validate(
+            &world(json!({"operations": {"addMember": {"effects": eight}}})),
+            &b,
+        );
+        assert!(v.refused.is_empty(), "{:?}", v.refused);
+        assert_eq!(v.applied.operations["addMember"].effects.len(), 8);
     }
 
     fn paths(v: &Validation) -> Vec<(&str, RefusalCode)> {
