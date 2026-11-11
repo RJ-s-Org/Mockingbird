@@ -830,6 +830,7 @@ async fn patching_prefix_and_hosts_remounts_the_mock_live() {
     assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
     let view: Value = r.json().await.unwrap();
     assert_eq!(view["route_prefix"], "/", "{view}");
+    assert_eq!(view["hosts"], json!(["sandbox.plaid.test"]), "{view}");
 
     let mut moved = false;
     for _ in 0..250 {

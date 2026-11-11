@@ -184,3 +184,43 @@ All of it applies in one `patch_world` (no refusals; #397). `call_mock {mock: "p
 
 - **`/identity/get` (`render_failed`):** its items require `owners`, which the accounts stored by `/accounts/get` do not hold, so the model answers it, with the same accounts.
 - **`/transactions/sync` page 2 (`unknown_token`):** the first page is generated, so its `next_cursor` is the model's, and the executor cannot continue it. The model answers page 2.
+
+## Rerun (2026-11-11): a fresh Claude Code given one prompt
+
+`main` at `0d591b1b`, model `deepseek/deepseek-v4.1-flash-1017`, Python backend unchanged.
+
+**Setup:**
+- The mock was built by a fresh headless Claude Code (`claude -p`, default model) in a clean clone of the quickstart.
+- The plugin was installed the README way: `claude plugin marketplace add rj-s-org/mockingbird`, then `claude plugin install mockingbird@mockingbird`. As in the healthchecks rerun, `main`'s binary was on `PATH`, because the plugin would install the stale `v0.1.0` release.
+- The agent was given only this prompt:
+
+> I want to test this Plaid quickstart's Python backend (python/server.py) without Plaid credentials. Use Mockingbird to mock the Plaid API it calls, serving the mock with the OpenRouter model deepseek/deepseek-v4.1-flash-1017; my key is in OPENROUTER_API_KEY. My test script is mb-flow/flows.sh: it calls the backend's API routes in the order the React front end does (link token, set_access_token, then accounts, auth, identity, transactions, balance, item) on port 8017. Run the backend unchanged with dummy credentials and PLAID_ENV=sandbox, and make every flow return real-looking data from the mock.
+
+**How the agent built it:**
+- **Contract:** it downloaded Plaid's official OpenAPI spec and imported it with MCP `import_contract`. It did not use the catalog's Plaid example, which carries the reviewed world description (token aliases, scoped lists) that run 9 answered from. It found the catalog only at the end. The skills did not point to the catalog yet; #481, which landed after this run, makes it the first step.
+- **Tools:** 89 turns. 36 `Bash` calls, and MCP `patch_world` ×9, `reset_session` ×7, `update_mock` ×6, `call_mock` ×4, plus `start_server`, `get_world`, `put_scenario` and `put_world`.
+- **World attempts:** it tried to describe the item, accounts and transactions with `patch_world`. The calls fell back with `exec_fallback: not_plain`, and one revision answered `/item/get` with another item, so it put back the defaults.
+- **Route prefix:** it set `hosts` and then `route_prefix: /` with `update_mock`. The mock kept answering only under `/plaid` until the server restarted (failure 2).
+- **Time:** 11.3 min from the prompt to all ten flows answering 200 with consistent ids. Agent cost $3.40 at API prices (on the subscription here).
+
+### Scorecard (measured run after the agent finished)
+
+| # | Measure | Result |
+| --- | --- | --- |
+| 1 | Flows pass | 10 of 10 routes answer 200 with Plaid-shaped data |
+| 2 | Consistency the flows check | account ids agree across accounts, auth, balance, identity and transactions, and `item_id` across exchange and item. These agree only because the model was given the same context: none of the flow's account, item or transaction calls is answered from state. Identity lists 2 of the 3 accounts |
+| 3 | Agent build | **11.3 min** (target ≤ 15) |
+| 4 | State-served latency | 6 ms (1 call, `institutions/get_by_id`). The repeated `accounts/get` came from `cache` in 7 ms |
+| 5 | Model-served latency | **p50 4.5 s, p95 6.7 s** (8 calls; fails < 2 s). Prompts ran to 19k tokens, the full Plaid spec's schemas |
+| 6 | Spend per session | $0.0026 (92k prompt / 4.0k completion tokens) |
+| 7 | Errors | not exercised by the flows |
+
+**Sources:** 10 calls. 7 `llm`, 1 `patched`, 1 `state`, 1 `cache`. Run 9, with the catalog example, answered 5 of 11 from state.
+
+### Failures
+
+| # | Repro | Class | Status |
+| --- | --- | --- | --- |
+| 1 | The agent wrote its mock from the vendor's full spec instead of the catalog example, so only `institutions/get_by_id` was answered from state and the model's prompts ran to 11–19k tokens. | skills gap | fixed by #481 (the skills check the catalog first) |
+| 2 | `update_mock {route_prefix: "/"}` on a running server succeeded, and the mock's view showed `/`, but the agent saw the mock answer only under `/plaid` until it restarted the server. | engine (suspected) | not reproduced on `main`: a PATCH of `route_prefix` and `hosts` remounts the mock live on the data plane and the proxy's host list (`proxy::patching_prefix_and_hosts_remounts_the_mock_live`). One possible cause: the agent had started the server twice, and the second start hit "address in use" with the first still running. A PATCH answered by one process does not reach another's data plane. #474 (a host-bound mock defaults to `/`) removes the need for the edit |
+| 3 | `/transactions/sync` returns 1 transaction; the persona and a default scenario asking for more were ignored. | model answer | out of scope (the bar is testability) |
