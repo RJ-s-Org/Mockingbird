@@ -405,11 +405,17 @@ async fn the_record_others_refer_to_wins_a_lookup() {
     }
     let base = serve_on(
         SDL,
-        vec![json!({"__typename": "Repository", "id": "R_x", "issues": {
-            "__typename": "IssueConnection", "totalCount": 0, "nodes": []}})],
+        vec![
+            json!({"__typename": "Repository", "id": "R_y"}),
+            json!({"__typename": "Repository", "id": "R_x", "issues": {
+                "__typename": "IssueConnection", "totalCount": 0, "nodes": []}}),
+        ],
         state,
     )
     .await;
+    // Whether or not the query selects the records that refer to it.
+    let bare = gql(&base, r#"{ repository(owner: "o", name: "r") { id } }"#).await;
+    assert_eq!(bare["repository"]["id"], "R_1", "{bare}");
     let read = gql(
         &base,
         r#"{ repository(owner: "o", name: "r") { id issues(first: 5) { nodes { id title } } } }"#,
