@@ -169,6 +169,56 @@ async fn set_writes_members_from_the_request_a_held_record_a_template_a_hash_and
 }
 
 #[tokio::test]
+async fn a_create_s_set_reads_the_record_as_built_its_set_id_first() {
+    // `label` comes before `id` in the description; the id is still evaluated first.
+    let h = members(
+        add_member(json!({
+            "label": "'https://x/' + record.id",
+            "id": "'m_' + lower(request.body.name)",
+            "code": "record.email"
+        })),
+        vec![fill_decoys()],
+    );
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "a@x.io", "name": "Ada"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["id"], "m_ada", "{body}");
+    assert_eq!(body["label"], "https://x/m_ada", "{body}");
+    assert_eq!(body["code"], "a@x.io", "{body}");
+    let stored = h.stored("members", "m_ada").await.expect("stored");
+    assert_eq!(stored["label"], "https://x/m_ada");
+    assert!(record_of(&h, "addMember").get("expr_failed").is_none());
+}
+
+#[tokio::test]
+async fn a_create_s_set_reads_the_id_the_executor_minted() {
+    let h = members(
+        add_member(json!({"label": "'https://x/' + record.id"})),
+        vec![fill_decoys()],
+    );
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "a@x.io", "name": "Ada"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().expect("an id").to_owned();
+    assert_eq!(body["label"], format!("https://x/{id}"), "{body}");
+    let stored = h.stored("members", &id).await.expect("stored");
+    assert_eq!(stored["label"], format!("https://x/{id}"));
+    assert!(record_of(&h, "addMember").get("expr_failed").is_none());
+}
+
+#[tokio::test]
 async fn a_member_set_names_is_never_filled() {
     let h = members(
         add_member(json!({"tier": "request.body.amount > 100 ? 'gold' : 'basic'"})),
