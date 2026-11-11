@@ -321,6 +321,53 @@ fn a_graphql_create_or_delete_of_a_record_is_identified_by_its_payload_and_id_ar
     );
 }
 
+const STOREFRONT: &str = r#"
+type ProductVariant { id: ID! }
+type CartLine { id: ID! quantity: Int! merchandise: ProductVariant! }
+type Cart { id: ID! lines: [CartLine!]! }
+type CartUserError { message: String! }
+type CartCreatePayload { cart: Cart userErrors: [CartUserError!]! }
+type CartLinesAddPayload { cart: Cart userErrors: [CartUserError!]! }
+type CartLinesUpdatePayload { cart: Cart userErrors: [CartUserError!]! }
+input CartLineInput { merchandiseId: ID! quantity: Int }
+input CartLineUpdateInput { id: ID! quantity: Int }
+type Query { cart(id: ID!): Cart }
+type Mutation {
+  cartCreate: CartCreatePayload
+  cartLinesAdd(cartId: ID!, lines: [CartLineInput!]!): CartLinesAddPayload
+  cartLinesUpdate(cartId: ID!, lines: [CartLineUpdateInput!]!): CartLinesUpdatePayload
+}
+"#;
+
+/// A mutation on part of the record its payload holds (Shopify's cart lines) acts on
+/// that record, named by its `<type>Id` argument, not on its payload type or on the
+/// part its name names.
+#[test]
+fn a_graphql_mutation_acts_on_the_record_its_payload_holds() {
+    let b = compile(STOREFRONT.as_bytes()).unwrap();
+    for name in ["Mutation.cartLinesAdd", "Mutation.cartLinesUpdate"] {
+        let o = op(&b, name);
+        assert_eq!(o.kind, OperationKind::Command(Effect::Other), "{name}");
+        assert_eq!(o.resource_type.as_deref(), Some("cart"), "{name}");
+        let identity = o.identity.as_ref().unwrap();
+        assert_eq!(identity.input_field.as_deref(), Some("cartId"), "{name}");
+        assert_eq!(identity.record, Some(RecordAt::Member("cart".into())));
+    }
+    // A create of the record is what it was.
+    assert_eq!(
+        op(&b, "Mutation.cartCreate").kind,
+        OperationKind::Command(Effect::Create)
+    );
+    let world = tier0(&b);
+    let add = &world.operations["Mutation.cartLinesAdd"];
+    assert_eq!(add.kind, Some(OpKind::Action));
+    assert_eq!(add.r#type.as_deref(), Some("cart"));
+    assert_eq!(
+        add.target.as_ref().and_then(|t| t.member.as_deref()),
+        Some("cartId")
+    );
+}
+
 /// An eBay Trading-style WSDL: the record is a member named for the type, keyed by
 /// `<Type>ID`; the create sends the record whole and answers its id.
 const TRADING: &str = r#"<?xml version="1.0"?>

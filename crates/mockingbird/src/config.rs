@@ -1032,6 +1032,10 @@ async fn build_app_inner(
             role,
             leader: leadership.watch(),
             reload: reload.clone(),
+            data_plane: (role != Role::Control && cfg.server.port != 0).then(|| ops::DataPlane {
+                port: cfg.server.port,
+                tls: cfg.server.tls.is_some(),
+            }),
         },
         metrics_gate,
     );

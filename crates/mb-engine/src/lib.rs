@@ -978,7 +978,7 @@ impl Engine {
                     guards::refusals(op, status, &ctx, call, &validator, effects_envelope);
                 // The refusals' shared error body, written by the model as well.
                 let refusal_error = guards::refusal_error_schema(op, &refusals)
-                    .map(|error| compact::response_prompt_schema(bundle, error));
+                    .map(|error| compact::response_prompt_schema(bundle, error, &HashSet::new()));
                 // The effects envelope's root is an object already.
                 let items_envelope = !effects_envelope
                     && guards::items_envelope(provider.capabilities(), validator.schema());
@@ -1007,7 +1007,11 @@ impl Engine {
                     op,
                     status,
                     call,
-                    compact::response_prompt_schema(bundle, written),
+                    compact::response_prompt_schema(
+                        bundle,
+                        written,
+                        &compact::expanded_members(call),
+                    ),
                 );
                 let format = ResponseFormat::JsonSchema {
                     name: format_name(&op.id),
@@ -1173,7 +1177,7 @@ impl Engine {
             "required": keys,
         });
         let validator = self.schema_validator(bundle, &combined).ok()?;
-        let prompt_schema = compact::response_prompt_schema(bundle, &combined);
+        let prompt_schema = compact::response_prompt_schema(bundle, &combined, &HashSet::new());
         let messages = tracing::info_span!("mb.prompt").in_scope(|| {
             prompt::build_joint_messages(
                 bundle,
@@ -1455,6 +1459,7 @@ impl Engine {
         member: &str,
         kept: Option<&Map<String, Value>>,
     ) -> Option<()> {
+        let schema = consistency::non_null(bundle, schema);
         for name in consistency::required_members(bundle, schema) {
             if name == member || envelope.contains_key(&name) {
                 continue;
@@ -1486,7 +1491,8 @@ impl Engine {
     /// record's, which the state-first executor renders from the faker
     /// (`docs/superpowers/specs/2026-11-06-state-first-engine-design.md`, §4). A
     /// boolean is `true`, as the answer it is in is a success (a random one could say
-    /// `success: false`); any other is drawn
+    /// `success: false`), a list that may be empty is `[]` (a success's `userErrors`
+    /// lists none); any other is drawn
     /// from the engine's seed (`0` without one) mixed with the contract, the operation
     /// and the member, so every read of the operation answers them the same. Empty
     /// when the answer holds its record in no envelope.
@@ -1504,6 +1510,7 @@ impl Engine {
         ) else {
             return drawn;
         };
+        let schema = consistency::non_null(bundle, schema);
         for name in consistency::required_members(bundle, schema) {
             if name == member {
                 continue;
@@ -1517,6 +1524,12 @@ impl Engine {
             // The answer is a success: a boolean beside its record says so.
             if consistency::declares_boolean(bundle, &member_schema) {
                 drawn.insert(name, Value::Bool(true));
+                continue;
+            }
+            // A list beside the record (GraphQL's `userErrors`, `warnings`) holds
+            // nothing on a success.
+            if consistency::declares_empty_array(bundle, &member_schema) {
+                drawn.insert(name, Value::Array(Vec::new()));
                 continue;
             }
             let validator = self.schema_validator(bundle, &member_schema).ok();
@@ -2697,6 +2710,7 @@ impl Engine {
             response_format: format.clone(),
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
+            max_answer_bytes: answer_cap(format, self.config.output_budget),
             timeout: self.config.timeout,
         };
         let span = llm_span();
@@ -2734,6 +2748,33 @@ impl Engine {
             Err(_) => Err("LLM request timed out".into()),
         }
     }
+}
+
+/// Times the estimated size of an answer its text may reach before the reply is
+/// stopped (see [`answer_cap`]).
+const ANSWER_CAP_FACTOR: f64 = 4.0;
+
+/// The fewest bytes of answer text a reply is allowed (see [`answer_cap`]).
+const MIN_ANSWER_CAP: usize = 8 * 1024;
+
+/// Most bytes of answer text to read for `format`: [`ANSWER_CAP_FACTOR`] times
+/// the larger of the estimated answer to its schema and `output_budget` (the
+/// completion tokens answers are shaped to), at least [`MIN_ANSWER_CAP`]. Past
+/// it the model is running on (a URL repeating its fragment), and the text so
+/// far is salvaged as a truncated reply. `None` without a schema, for one too
+/// large to estimate, or with the output budget off (`0`): long answers are then
+/// expected.
+fn answer_cap(format: &ResponseFormat, output_budget: u32) -> Option<usize> {
+    let ResponseFormat::JsonSchema { schema, .. } = format else {
+        return None;
+    };
+    if output_budget == 0 {
+        return None;
+    }
+    let tokens = budget::estimated_tokens(schema)?.max(f64::from(output_budget));
+    // Compact JSON runs about 3.5 bytes a token.
+    let bytes = (tokens * 3.5 * ANSWER_CAP_FACTOR).ceil();
+    Some((bytes as usize).max(MIN_ANSWER_CAP))
 }
 
 /// An LLM answer that passed the checks.
@@ -4344,8 +4385,23 @@ fn force_identity(
     if declared.is_none() && op.kind == OperationKind::Command(Effect::Delete) {
         return body;
     }
-    let Some(field) = declared_member(declared.as_ref(), field) else {
-        return body;
+    // A request member naming another member of the record than its key (GraphQL's
+    // `product(handle:)`) sets that member: the key keeps the answer's own value.
+    let input = identity
+        .input_field
+        .as_deref()
+        .filter(|f| from_path.is_none() && *f != identity.field);
+    let declares = |f: &&str| {
+        declared
+            .as_ref()
+            .is_some_and(|d| consistency::declares_member(d, f))
+    };
+    let field = match input.filter(declares) {
+        Some(member) => member,
+        None => match declared_member(declared.as_ref(), field) {
+            Some(field) => field,
+            None => return body,
+        },
     };
     // A path value that reached a held record by another member than its key (a
     // template read by its id where its alias is its key) names that record: its key
@@ -5479,5 +5535,41 @@ components:
         let bundle = enveloped("data", "");
         let op = bundle.operation("getDeal").unwrap();
         assert!(engine.envelope_draws(&bundle, op, None).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod answer_cap_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn schema(schema: Value) -> ResponseFormat {
+        ResponseFormat::JsonSchema {
+            name: "s".into(),
+            schema,
+        }
+    }
+
+    #[test]
+    fn the_cap_is_a_few_times_the_output_budget_or_the_estimate_whichever_is_larger() {
+        let small = schema(json!({"type": "object", "properties": {"id": {"type": "string"}}}));
+        // 4 x 1500 tokens x 3.5 bytes.
+        assert_eq!(answer_cap(&small, 1500), Some(21_000));
+        let props: serde_json::Map<String, Value> = (0..2000)
+            .map(|i| (format!("member_{i}"), json!({"type": "string"})))
+            .collect();
+        let large = schema(json!({"type": "object", "properties": props}));
+        assert!(answer_cap(&large, 1500).unwrap_or_default() > 21_000);
+        assert_eq!(answer_cap(&ResponseFormat::JsonObject, 1500), None);
+    }
+
+    /// With the output budget off, answers may be any size: a page of 10 charges or
+    /// a map of 20 users is never cut.
+    #[test]
+    fn no_cap_with_the_output_budget_off() {
+        let users = schema(json!({"type": "object", "additionalProperties": {"type": "object"}}));
+        assert_eq!(answer_cap(&users, 0), None);
+        // A 10 KB map of users fits the default cap.
+        assert!(answer_cap(&users, 1500).unwrap_or_default() > 10_000);
     }
 }

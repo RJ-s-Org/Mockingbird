@@ -2499,8 +2499,9 @@ export interface components {
             /** @description What the description leaves open, including each refused entry. */
             gaps: components["schemas"]["WorldGap"][];
             /**
-             * @description The newest revision's entries that did not validate; they fall back
-             *     to tier 0.
+             * @description The newest revision's entries that did not validate, and the
+             *     entries of a config-file mock's `world:` file refused when the config
+             *     was last loaded; they fall back to tier 0.
              */
             refused: components["schemas"]["WorldRefusal"][];
             /**
@@ -2514,6 +2515,11 @@ export interface components {
              *     `active`).
              */
             version: number;
+            /**
+             * @description The `operation` and `type` filters that name nothing in this version,
+             *     one line per kind. Absent when there is none.
+             */
+            warnings?: string[];
             /**
              * @description The description: tier 0 overlaid with the newest revision's entries
              *     that validate. Its format is `mockingbird world schema`.
@@ -3863,7 +3869,12 @@ export interface operations {
     };
     contracts_get_world_default: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Answer only this operation (repeatable), with its gaps, refused entries and authors */
+                operation?: string[];
+                /** @description Answer only this resource type (repeatable): its `types` entry, the operations of that type, and their gaps, refused entries and authors */
+                type?: string[];
+            };
             header?: never;
             path: {
                 /** @description Mock name */
@@ -3875,7 +3886,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. */
+            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6635,7 +6646,12 @@ export interface operations {
     };
     contracts_get_world: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Answer only this operation (repeatable), with its gaps, refused entries and authors */
+                operation?: string[];
+                /** @description Answer only this resource type (repeatable): its `types` entry, the operations of that type, and their gaps, refused entries and authors */
+                type?: string[];
+            };
             header?: never;
             path: {
                 /** @description Workspace name */
@@ -6649,7 +6665,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. */
+            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. */
             200: {
                 headers: {
                     [name: string]: unknown;

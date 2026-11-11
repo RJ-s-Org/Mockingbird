@@ -20,6 +20,9 @@ mockingbird contracts activate orders 2
 # A contract version's world description: gaps first, then each entry, as
 # text (--json prints the Admin API answer); and the description format.
 mockingbird world show orders --version 2
+# Only some operations or types (repeatable), with their gaps; an unknown
+# name prints a warning.
+mockingbird world show orders --operation getOrder --type order
 mockingbird world schema
 # Write it as revisions: put replaces the overlay, patch merges a JSON merge
 # patch (null removes an entry); each answers what applied and what was

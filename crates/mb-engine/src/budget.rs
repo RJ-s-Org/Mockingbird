@@ -176,6 +176,19 @@ pub fn shape(
     Some(Shaped { schema, dropped })
 }
 
+/// The estimated completion tokens of an answer to `doc` (a schema with its
+/// `$defs`), its arrays at their usual sizes; `None` for a schema graph too
+/// large to estimate.
+#[must_use]
+pub fn estimated_tokens(doc: &Value) -> Option<f64> {
+    let held = Held {
+        floor: None,
+        pages: None,
+        kept: None,
+    };
+    Stats::of(doc, held).map(|s| s.tokens)
+}
+
 /// One attempt at shaping.
 struct Plan {
     schema: Value,

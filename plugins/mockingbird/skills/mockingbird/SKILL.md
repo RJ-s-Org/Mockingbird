@@ -33,6 +33,7 @@ command -v mockingbird || curl -fsSL https://raw.githubusercontent.com/rj-s-org/
 mockingbird init --offline --contract ./openapi.yaml          # or --provider openrouter (see mockingbird-setup)
 mockingbird server start -c mockingbird.yaml                  # background; prints URLs as JSON
 curl -s localhost:8080/<mock>/<path>                           # the mock, mounted at /<file stem>
+curl -s localhost:8080/<path> -H 'Host: api.example.com'     # a mock with hosts: [api.example.com] needs its Host
 mockingbird server stop
 ```
 

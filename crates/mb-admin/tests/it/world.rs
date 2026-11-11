@@ -1170,6 +1170,102 @@ async fn get_world_returns_tier0_and_gaps() {
 }
 
 #[tokio::test]
+async fn get_world_narrows_to_the_operations_and_types_asked_for() {
+    let (_st, app) = admin().await;
+    let src = with_skipped_route();
+    let uploaded = send(
+        &app,
+        Method::POST,
+        &format!("{BASE}/widgets/contracts"),
+        "application/yaml",
+        src.clone().into_bytes(),
+    )
+    .await;
+    let version = uploaded["version"].as_i64().unwrap();
+    let world = format!("{BASE}/widgets/contracts/{version}/world");
+    let get = |query: &str| {
+        let app = app.clone();
+        let uri = format!("{world}?{query}");
+        async move { send(&app, Method::GET, &uri, "application/json", Vec::new()).await }
+    };
+    let keys = |v: &Value| -> Vec<String> {
+        v.as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    let full = get("").await;
+    assert!(full.get("warnings").is_none(), "{full}");
+    assert!(keys(&full["world"]["operations"]).len() > 2, "{full}");
+
+    // One operation: only it, and only its gaps.
+    let skipped = full["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["code"] == "skipped_route")
+        .and_then(|g| g["operation"].as_str())
+        .unwrap_or_else(|| panic!("{full}"))
+        .to_string();
+    let one = get(&format!("operation={skipped}")).await;
+    assert_eq!(
+        keys(&one["world"]["operations"]),
+        std::slice::from_ref(&skipped),
+        "{one}"
+    );
+    assert_eq!(one["world"]["types"], Value::Null, "{one}");
+    let gaps = one["gaps"].as_array().unwrap();
+    assert!(gaps.iter().any(|g| g["code"] == "skipped_route"), "{one}");
+    assert!(
+        gaps.iter().all(|g| g["operation"] == skipped.as_str()),
+        "{one}"
+    );
+    assert!(one.get("warnings").is_none(), "{one}");
+
+    // Repeated, two operations.
+    let two = get("operation=getWidget&operation=listWidgets").await;
+    assert_eq!(
+        keys(&two["world"]["operations"]),
+        ["getWidget", "listWidgets"],
+        "{two}"
+    );
+
+    // A type: its entry and the operations of that type.
+    let ty = widget_type(&compile(&src));
+    let typed = get(&format!("type={ty}")).await;
+    assert_eq!(
+        keys(&typed["world"]["types"]),
+        std::slice::from_ref(&ty),
+        "{typed}"
+    );
+    let ops = keys(&typed["world"]["operations"]);
+    assert!(ops.contains(&"getWidget".to_string()), "{typed}");
+    for op in &ops {
+        assert_eq!(
+            typed["world"]["operations"][op]["type"],
+            ty.as_str(),
+            "{typed}"
+        );
+    }
+    for g in typed["gaps"].as_array().unwrap() {
+        let about_op = g["operation"]
+            .as_str()
+            .is_some_and(|o| ops.iter().any(|k| k == o));
+        assert!(about_op || g["type"] == ty.as_str(), "{g}");
+    }
+
+    // Unknown names: an empty answer and a warning naming them.
+    let unknown = get("operation=nope&type=Nope").await;
+    assert_eq!(unknown["world"]["operations"], Value::Null, "{unknown}");
+    assert_eq!(unknown["world"]["types"], Value::Null, "{unknown}");
+    assert_eq!(unknown["gaps"], json!([]), "{unknown}");
+    let warnings = unknown["warnings"].to_string();
+    assert!(
+        warnings.contains("nope") && warnings.contains("Nope"),
+        "{unknown}"
+    );
+}
+
+#[tokio::test]
 async fn get_world_on_a_mock_without_an_active_version_is_404() {
     let (_st, app) = admin().await;
     let (status, ctype, body) =

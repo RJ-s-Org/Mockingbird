@@ -18,19 +18,161 @@ pub use mb_import::PROMPT_SCHEMA_BUDGET;
 /// Longest description kept once the schema is over budget.
 pub const MAX_DESCRIPTION: usize = 160;
 
+/// Longest description kept when the schema is still over budget with its far
+/// definitions stubbed (a root with many members).
+pub const SHORT_DESCRIPTION: usize = 60;
+
+/// Bytes of compact JSON the schema of an answer the model writes may take (about
+/// 7k tokens). Smaller than [`PROMPT_SCHEMA_BUDGET`]: the model reads it on every
+/// call, and with structured output reads it twice, while the answer only needs its
+/// own members in detail.
+pub const RESPONSE_SCHEMA_BUDGET: usize = 24 * 1024;
+
 /// `schema` with its reachable definitions, fitted to the prompt budget. A
 /// schema that carries its own `$defs` (one shaped to the output budget) is
 /// taken as complete.
 /// Its `description` strings have their credentials redacted, as the prompt's other
 /// contract text does.
 pub fn prompt_schema(bundle: &Bundle, schema: &Value) -> Value {
+    prompt_schema_expanding(bundle, schema, &HashSet::new(), PROMPT_SCHEMA_BUDGET)
+}
+
+/// [`prompt_schema`], with each id-or-object member (see [`collapse_expandables`])
+/// asking for its id unless `expand` names it.
+pub(crate) fn prompt_schema_expanding(
+    bundle: &Bundle,
+    schema: &Value,
+    expand: &HashSet<String>,
+    budget: usize,
+) -> Value {
     let mut doc = if schema.get("$defs").is_some() {
         schema.clone()
     } else {
         bundle.with_reachable_defs(schema)
     };
+    if collapse_expandables(&mut doc, None, expand) {
+        drop_unreachable_defs(&mut doc);
+    }
     redact_descriptions(&mut doc);
-    fit(doc, PROMPT_SCHEMA_BUDGET)
+    fit(doc, budget)
+}
+
+/// The member names a request asks to have expanded: each step of the paths in
+/// its `expand` (or `expand[]`) query parameter or body member, a string or a list
+/// of strings (`expand[]=line_items`, `expand=data.customer`).
+pub(crate) fn expanded_members(call: &crate::OperationCall) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let body = call.body.as_ref().and_then(Value::as_object);
+    for source in [Some(&call.query), body].into_iter().flatten() {
+        for key in ["expand", "expand[]"] {
+            let paths: Vec<&str> = match source.get(key) {
+                Some(Value::String(p)) => vec![p.as_str()],
+                Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
+                _ => Vec::new(),
+            };
+            for path in paths {
+                out.extend(path.split('.').filter(|s| !s.is_empty()).map(String::from));
+            }
+        }
+    }
+    out
+}
+
+/// Rewrites each id-or-object union in `node` (an `anyOf` or `oneOf` of a plain
+/// string, schema references or objects, and `null`) to its string and `null`
+/// branches, unless the member holding it is named in `expand`: such a member
+/// answers the related record's id unless asked to expand it (Stripe's
+/// `customer`, `latest_charge`), and its object branch pulls the related
+/// record's whole schema graph into the prompt. `name` is the member `node` is
+/// the schema of. Returns whether anything changed. For the prompt only: the
+/// answer is validated against the contract's schema, which still allows either.
+fn collapse_expandables(node: &mut Value, name: Option<&str>, expand: &HashSet<String>) -> bool {
+    let Value::Object(obj) = node else {
+        return match node {
+            Value::Array(items) => items
+                .iter_mut()
+                .fold(false, |c, v| collapse_expandables(v, name, expand) | c),
+            _ => false,
+        };
+    };
+    let mut changed = false;
+    for key in ["anyOf", "oneOf"] {
+        let Some(Value::Array(branches)) = obj.get(key) else {
+            continue;
+        };
+        let is_id = |b: &Value| {
+            b.get("type").and_then(Value::as_str) == Some("string")
+                && b.get("enum").is_none()
+                && b.get("const").is_none()
+        };
+        let is_null = |b: &Value| b.get("type").and_then(Value::as_str) == Some("null");
+        let is_object = |b: &Value| {
+            b.get("$ref").is_some() || b.get("type").and_then(Value::as_str) == Some("object")
+        };
+        let expandable = branches.iter().any(is_id)
+            && branches.iter().any(is_object)
+            && branches
+                .iter()
+                .all(|b| is_id(b) || is_null(b) || is_object(b))
+            && !name.is_some_and(|n| expand.contains(n));
+        if expandable {
+            let kept: Vec<Value> = branches
+                .iter()
+                .filter(|b| is_id(b) || is_null(b))
+                .cloned()
+                .collect();
+            obj.insert(key.to_string(), Value::Array(kept));
+            changed = true;
+        }
+    }
+    for (key, value) in obj.iter_mut() {
+        changed |= match key.as_str() {
+            "properties" | "patternProperties" | "$defs" | "definitions" => match value {
+                Value::Object(members) => members.iter_mut().fold(false, |c, (member, schema)| {
+                    let next = if key == "properties" || key == "patternProperties" {
+                        Some(member.as_str())
+                    } else {
+                        None
+                    };
+                    collapse_expandables(schema, next, expand) | c
+                }),
+                _ => false,
+            },
+            // An array's items, and a union's or composition's branches, are still
+            // the member's.
+            "items" | "anyOf" | "oneOf" | "allOf" | "additionalProperties" => {
+                collapse_expandables(value, name, expand)
+            }
+            _ => false,
+        };
+    }
+    changed
+}
+
+/// Removes the `$defs` entries no `$ref` from the root (outside `$defs`) reaches.
+fn drop_unreachable_defs(doc: &mut Value) {
+    let mut pending = Vec::new();
+    if let Value::Object(root) = &*doc {
+        for (k, v) in root {
+            if k != "$defs" {
+                refs(v, &mut pending);
+            }
+        }
+    }
+    let Some(defs) = doc.get("$defs").and_then(Value::as_object) else {
+        return;
+    };
+    let mut reached: HashSet<String> = HashSet::new();
+    while let Some(name) = pending.pop() {
+        if reached.insert(name.clone())
+            && let Some(def) = defs.get(&name)
+        {
+            refs(def, &mut pending);
+        }
+    }
+    if let Some(defs) = doc.get_mut("$defs").and_then(Value::as_object_mut) {
+        defs.retain(|name, _| reached.contains(name));
+    }
 }
 
 /// Every `description` string in `value`, at any depth, with its credentials
@@ -57,8 +199,17 @@ fn redact_descriptions(value: &mut Value) {
 
 /// [`prompt_schema`] for a response the engine finishes (see
 /// [`crate::encoded`]): base64 fields ask for their plain text.
-pub(crate) fn response_prompt_schema(bundle: &Bundle, schema: &Value) -> Value {
-    crate::encoded::hint(prompt_schema(bundle, schema))
+pub(crate) fn response_prompt_schema(
+    bundle: &Bundle,
+    schema: &Value,
+    expand: &HashSet<String>,
+) -> Value {
+    crate::encoded::hint(prompt_schema_expanding(
+        bundle,
+        schema,
+        expand,
+        RESPONSE_SCHEMA_BUDGET,
+    ))
 }
 
 /// Most members [`with_echoes_required`] adds to one answer's `required` lists.
@@ -333,24 +484,29 @@ fn require_at(doc: &mut Value, path: &[Step], name: &str, defs: &Value) -> bool 
 
 /// `doc` (a schema carrying `$defs`) fitted to `budget` bytes of compact
 /// JSON: unchanged when it fits; else with descriptions cut to
-/// [`MAX_DESCRIPTION`] characters; else also with the definitions more than
-/// N `$ref` hops from the root stubbed, for the largest N that fits (0 when
-/// none does).
+/// [`MAX_DESCRIPTION`] characters; else also with the definitions furthest from
+/// the root stubbed (see [`fill`]); else stubbed again from descriptions cut
+/// to [`SHORT_DESCRIPTION`].
 pub(crate) fn fit(doc: Value, budget: usize) -> Value {
     if size(&doc) <= budget {
         return doc;
     }
-    let doc = cut_descriptions(doc);
+    let doc = cut_descriptions(doc, MAX_DESCRIPTION);
     if size(&doc) <= budget {
         return doc;
     }
-    fill(doc, budget)
+    let filled = fill(doc.clone(), budget);
+    if size(&filled) <= budget {
+        return filled;
+    }
+    // Shorter descriptions, then stubs again: the stubs keep their whole text.
+    fill(cut_descriptions(doc, SHORT_DESCRIPTION), budget)
 }
 
-/// Keeps the definitions the root references directly, then adds the rest
-/// nearest first (smallest first at one depth) while the result stays within
-/// `budget`; a definition that does not fit becomes a short stub where a
-/// kept one references it, and is dropped otherwise.
+/// Adds the definitions nearest the root first (smallest first at one depth)
+/// while the result stays within `budget`; a definition that does not fit
+/// becomes a short stub where the root or a kept one references it, and is
+/// dropped otherwise.
 fn fill(mut doc: Value, budget: usize) -> Value {
     let depths = def_depths(&doc);
     let root_size = match &doc {
@@ -361,6 +517,16 @@ fn fill(mut doc: Value, budget: usize) -> Value {
             .sum::<usize>(),
         other => size(other),
     } + 12;
+    let stub_size = |name: &str| 2 * name.len() + 80;
+    // A root that is a reference keeps its definition, which is the answer's own shape.
+    // The definitions its members reference start as stubs like the rest, so a root
+    // with many large members (Stripe's `payment_intent`) still fits.
+    let own = doc
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|r| r.strip_prefix("#/$defs/"))
+        .map(def_name);
+    let needed = non_null_refs(&doc);
     let Some(defs) = doc.get_mut("$defs").and_then(Value::as_object_mut) else {
         return doc;
     };
@@ -376,15 +542,27 @@ fn fill(mut doc: Value, budget: usize) -> Value {
             (n.as_str(), out.into_iter().collect())
         })
         .collect();
-    let stub_size = |name: &str| 2 * name.len() + 80;
-    let mut kept: HashSet<&str> = depths
-        .iter()
-        .filter(|(_, d)| **d == 0)
-        .filter_map(|(n, _)| sizes.get_key_value(n.as_str()).map(|(k, _)| *k))
+    let mut kept: HashSet<&str> = own
+        .as_deref()
+        .and_then(|own| sizes.get_key_value(own).map(|(k, _)| *k))
+        .into_iter()
         .collect();
-    let mut stubs: HashSet<String> = kept
+    // A root member that cannot be null needs its definition whole: the model would
+    // guess its shape from a stub. Only those reached through members that may be
+    // null start as stubs (the model can write null).
+    kept.extend(
+        needed
+            .iter()
+            .filter_map(|n| sizes.get_key_value(n.as_str()).map(|(k, _)| *k)),
+    );
+    let mut stubs: HashSet<String> = depths
         .iter()
-        .flat_map(|n| edges.get(n).into_iter().flatten().cloned())
+        .filter(|(n, d)| **d == 0 && sizes.contains_key(n.as_str()))
+        .map(|(n, _)| n.clone())
+        .chain(
+            kept.iter()
+                .flat_map(|n| edges.get(n).into_iter().flatten().cloned()),
+        )
         .filter(|r| !kept.contains(r.as_str()))
         .collect();
     let mut total = root_size
@@ -431,24 +609,90 @@ fn fill(mut doc: Value, budget: usize) -> Value {
     doc
 }
 
+/// The definitions the root needs whole to show its own shape: those it reaches
+/// through `$ref`, `items`, `allOf`, union branches, and members that cannot
+/// be null, without passing a member or branch that may be null (the model can
+/// write null there) or another definition.
+fn non_null_refs(doc: &Value) -> HashSet<String> {
+    fn admits_null(schema: &Value) -> bool {
+        let null_type = |s: &Value| match s.get("type") {
+            Some(Value::String(t)) => t == "null",
+            Some(Value::Array(ts)) => ts.iter().any(|t| t == "null"),
+            _ => false,
+        };
+        null_type(schema)
+            || schema.get("nullable") == Some(&Value::Bool(true))
+            || ["anyOf", "oneOf"].iter().any(|k| {
+                schema
+                    .get(*k)
+                    .and_then(Value::as_array)
+                    .is_some_and(|bs| bs.iter().any(admits_null))
+            })
+    }
+    fn walk(schema: &Value, out: &mut HashSet<String>) {
+        let Value::Object(obj) = schema else {
+            return;
+        };
+        if let Some(rest) = obj
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+        {
+            out.insert(def_name(rest));
+        }
+        if let Some(items) = obj.get("items") {
+            walk(items, out);
+        }
+        if let Some(Value::Array(parts)) = obj.get("allOf") {
+            parts.iter().for_each(|p| walk(p, out));
+        }
+        // A union that admits null may be null: its other branches can go.
+        if !admits_null(schema) {
+            for key in ["anyOf", "oneOf"] {
+                if let Some(Value::Array(branches)) = obj.get(key) {
+                    branches.iter().for_each(|b| walk(b, out));
+                }
+            }
+        }
+        if let Some(Value::Object(members)) = obj.get("properties") {
+            members
+                .values()
+                .filter(|m| !admits_null(m))
+                .for_each(|m| walk(m, out));
+        }
+    }
+    let mut out = HashSet::new();
+    if let Value::Object(root) = doc {
+        let mut root = root.clone();
+        root.remove("$defs");
+        walk(&Value::Object(root), &mut out);
+    }
+    out
+}
+
 fn size(v: &Value) -> usize {
     v.to_string().len()
 }
 
-fn cut_descriptions(value: Value) -> Value {
+fn cut_descriptions(value: Value, max: usize) -> Value {
     match value {
         Value::Object(obj) => Value::Object(
             obj.into_iter()
                 .map(|(k, v)| match (k.as_str(), v) {
-                    ("description", Value::String(d)) if d.chars().count() > MAX_DESCRIPTION => {
-                        let cut: String = d.chars().take(MAX_DESCRIPTION).collect();
+                    ("description", Value::String(d)) if d.chars().count() > max => {
+                        let cut: String = d.chars().take(max).collect();
                         (k, Value::String(format!("{cut}…")))
                     }
-                    (_, v) => (k, cut_descriptions(v)),
+                    (_, v) => (k, cut_descriptions(v, max)),
                 })
                 .collect(),
         ),
-        Value::Array(items) => Value::Array(items.into_iter().map(cut_descriptions).collect()),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|v| cut_descriptions(v, max))
+                .collect(),
+        ),
         other => other,
     }
 }
@@ -486,6 +730,13 @@ fn def_depths(doc: &Value) -> HashMap<String, u64> {
     depths
 }
 
+/// The definition a `#/$defs/` reference's `rest` names: its first step, with
+/// the JSON Pointer escapes decoded (`a~1b` is `a/b`), as the bundle names them.
+fn def_name(rest: &str) -> String {
+    let name = rest.split('/').next().unwrap_or(rest);
+    name.replace("~1", "/").replace("~0", "~")
+}
+
 fn refs(value: &Value, out: &mut Vec<String>) {
     match value {
         Value::Object(obj) => {
@@ -494,9 +745,7 @@ fn refs(value: &Value, out: &mut Vec<String>) {
                     k.as_str(),
                     v.as_str().and_then(|r| r.strip_prefix("#/$defs/")),
                 ) {
-                    ("$ref", Some(name)) => {
-                        out.push(name.split('/').next().unwrap_or(name).to_string())
-                    }
+                    ("$ref", Some(rest)) => out.push(def_name(rest)),
                     _ => refs(v, out),
                 }
             }
@@ -662,7 +911,7 @@ components:
     fn sent(bundle: &Bundle, op_id: &str, body: Option<Value>) -> Value {
         let op = bundle.operation(op_id).unwrap();
         let schema = op.success_output().unwrap().schema.clone().unwrap();
-        let doc = response_prompt_schema(bundle, &schema);
+        let doc = response_prompt_schema(bundle, &schema, &HashSet::new());
         with_echoes_required(bundle, op, 201, &call(body), doc)
     }
 
@@ -697,7 +946,7 @@ components:
         let bundle = mb_import::compile(ECHOES.as_bytes()).unwrap();
         let op = bundle.operation("listItems").unwrap();
         let schema = op.success_output().unwrap().schema.clone().unwrap();
-        let doc = response_prompt_schema(&bundle, &schema);
+        let doc = response_prompt_schema(&bundle, &schema, &HashSet::new());
         let out = with_echoes_required(&bundle, op, 200, &call(None), doc.clone());
         assert_eq!(names(&out), ["entries"], "{out}");
         // Not for an error answer.
@@ -724,5 +973,142 @@ components:
             (0..30).map(|i| (format!("m{i}"), json!("v"))).collect();
         let out = sent(&bundle, "createThing", Some(Value::Object(body)));
         assert_eq!(names(&out).len(), MAX_ECHOED_REQUIRED, "{out}");
+    }
+}
+
+#[cfg(test)]
+mod expand_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn nullable_expandable(def: &str) -> Value {
+        json!({"anyOf": [
+            {"anyOf": [{"type": "string", "maxLength": 5000}, {"$ref": format!("#/$defs/{def}")}],
+             "description": "id or object"},
+            {"type": "null"}
+        ]})
+    }
+
+    #[test]
+    fn an_id_or_object_member_asks_for_its_id_unless_expanded() {
+        let mut doc = json!({
+            "type": "object",
+            "properties": {"latest_charge": nullable_expandable("charge"), "customer": nullable_expandable("customer")},
+            "$defs": {"charge": {"type": "object", "properties": {"id": {"type": "string"}}},
+                      "customer": {"type": "object", "properties": {"id": {"type": "string"}}}}
+        });
+        let expand: HashSet<String> = ["customer".to_string()].into();
+        assert!(collapse_expandables(&mut doc, None, &expand));
+        drop_unreachable_defs(&mut doc);
+        assert_eq!(
+            doc["properties"]["latest_charge"]["anyOf"][0]["anyOf"],
+            json!([{"type": "string", "maxLength": 5000}])
+        );
+        assert_eq!(
+            doc["properties"]["customer"]["anyOf"][0]["anyOf"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+        assert!(doc["$defs"].get("charge").is_none());
+        assert!(doc["$defs"].get("customer").is_some());
+    }
+
+    #[test]
+    fn expand_paths_name_each_step() {
+        let call = crate::OperationCall {
+            operation_id: "x".into(),
+            path_params: Default::default(),
+            query: json!({"expand[]": ["line_items", "data.customer"]})
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+            headers: Default::default(),
+            body: Some(json!({"expand": "payment_intent"})),
+        };
+        let got = expanded_members(&call);
+        for m in ["line_items", "data", "customer", "payment_intent"] {
+            assert!(got.contains(m), "{m}: {got:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod root_member_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn big() -> Value {
+        json!({"type": "object", "properties": {"v": {"enum": (0..300).map(|i| format!("v{i}")).collect::<Vec<_>>()}}})
+    }
+
+    #[test]
+    fn a_definition_named_with_a_slash_survives_a_collapse() {
+        let mut doc = json!({
+            "type": "object",
+            "properties": {
+                "x": {"$ref": "#/$defs/a~1b"},
+                "c": {"anyOf": [{"type": "string"}, {"$ref": "#/$defs/C"}]}
+            },
+            "$defs": {"a/b": {"type": "object"}, "C": {"type": "object"}}
+        });
+        assert!(collapse_expandables(&mut doc, None, &HashSet::new()));
+        drop_unreachable_defs(&mut doc);
+        assert!(doc["$defs"].get("a/b").is_some(), "{doc}");
+        assert!(doc["$defs"].get("C").is_none(), "{doc}");
+    }
+
+    #[test]
+    fn an_array_root_keeps_its_item_definition() {
+        let doc = json!({"type": "array", "items": {"$ref": "#/$defs/Pet"}, "$defs": {"Pet": big(), "Other": big()}});
+        let out = fit(doc, 200);
+        assert!(out["$defs"]["Pet"]["properties"].is_object(), "{out}");
+    }
+
+    #[test]
+    fn short_descriptions_come_before_stubs_which_keep_their_text() {
+        let long = "d".repeat(150);
+        let props: serde_json::Map<String, Value> = (0..40)
+            .map(|i| {
+                (
+                    format!("m{i}"),
+                    json!({"type": "string", "description": long}),
+                )
+            })
+            .collect();
+        let mut props = props;
+        props.insert(
+            "optional".into(),
+            json!({"anyOf": [{"$ref": "#/$defs/Optional"}, {"type": "null"}]}),
+        );
+        let doc = json!({"type": "object", "properties": props, "$defs": {"Optional": big()}});
+        let out = fit(doc, 4000);
+        let cut = out["properties"]["m0"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(cut.chars().count() <= SHORT_DESCRIPTION + 1, "{cut}");
+        let stub = out["$defs"]["Optional"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(stub.ends_with("null where allowed)"), "{stub}");
+    }
+
+    #[test]
+    fn a_member_that_cannot_be_null_keeps_its_definition_and_a_nullable_one_is_stubbed() {
+        let big = || json!({"type": "object", "properties": {"v": {"enum": (0..300).map(|i| format!("v{i}")).collect::<Vec<_>>()}}});
+        let doc = json!({
+            "type": "object",
+            "properties": {
+                "needed": {"$ref": "#/$defs/Needed"},
+                "optional": {"anyOf": [{"$ref": "#/$defs/Optional"}, {"type": "null"}]}
+            },
+            "$defs": {"Needed": big(), "Optional": big()}
+        });
+        let out = fit(doc.clone(), size(&doc["$defs"]["Needed"]) + 400);
+        assert!(out["$defs"]["Needed"]["properties"].is_object(), "{out}");
+        assert!(
+            out["$defs"]["Optional"].get("properties").is_none(),
+            "{out}"
+        );
     }
 }

@@ -288,6 +288,11 @@ async fn host_guard_allows_external_host_only() {
             assert_eq!(body.as_object().unwrap().len(), 3, "{body}");
         }
     }
+    // An authenticated caller (the MCP server's `call_mock`) also learns
+    // where the data plane listens.
+    let (_, body) = h.send("GET", "/readyz", None, Some(&viewer), None).await;
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert!(body["data_plane"]["port"].is_u64(), "{body}");
 }
 
 #[tokio::test]

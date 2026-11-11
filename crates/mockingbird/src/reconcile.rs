@@ -13,7 +13,7 @@ use std::path::Path;
 
 use anyhow::{Context, anyhow, bail};
 use chrono::Utc;
-use mb_mcm::world::Author;
+use mb_mcm::world::{Author, Refusal};
 use mb_mcm::{Bundle, Trigger};
 use mb_state::StateStore;
 use mb_store::{
@@ -90,6 +90,8 @@ struct Prepared<'a> {
     /// The `world:` file's entries that validate against `bundle`, as the
     /// overlay document a revision stores.
     world: Option<serde_json::Value>,
+    /// The `world:` file's entries refused against `bundle`.
+    world_refused: Vec<Refusal>,
 }
 
 /// A validated `channels:` entry: `(enabled, triggers)`.
@@ -438,13 +440,14 @@ async fn validate<'a>(
         }
 
         let channels = validate_channels(cfg, name, mock, &bundle)?;
-        let world = match &mock.world {
-            Some(path) => Some(
-                read_world(path, &bundle)
+        let (world, world_refused) = match &mock.world {
+            Some(path) => {
+                let (doc, refused) = read_world(path, &bundle)
                     .await
-                    .with_context(|| format!("mock {label:?}"))?,
-            ),
-            None => None,
+                    .with_context(|| format!("mock {label:?}"))?;
+                (Some(doc), refused)
+            }
+            None => (None, Vec::new()),
         };
         prepared.push(Prepared {
             workspace: ws,
@@ -456,6 +459,7 @@ async fn validate<'a>(
             bundle,
             channels,
             world,
+            world_refused,
         });
     }
     // gRPC services are unique across every workspace (one shared
@@ -655,6 +659,9 @@ async fn apply_mock(
     {
         changed = true;
     }
+    if let Some(version) = active_version {
+        mb_admin::world::record_file_refusals(mock.id, version, p.world_refused.clone());
+    }
 
     let current: HashMap<String, Scenario> = store
         .list_scenarios(mock.id)
@@ -722,14 +729,17 @@ const MAX_WORLD_FILE_BYTES: u64 = 4 * mb_mcm::world::MAX_BYTES as u64;
 
 /// Reads a mock's `world:` file (YAML, or JSON for a `.json` file) and
 /// validates it against `bundle`: the overlay document of the entries that
-/// apply. Refused entries are logged at warn level.
+/// apply, and the entries refused (also logged at warn level).
 ///
 /// # Errors
 ///
 /// Fails, naming `path`, when the file cannot be read or parsed, or is
 /// refused whole (a file over 1 MiB, a description over 256 KiB, too deep,
 /// not of the format's shape).
-async fn read_world(path: &Path, bundle: &Bundle) -> anyhow::Result<serde_json::Value> {
+async fn read_world(
+    path: &Path,
+    bundle: &Bundle,
+) -> anyhow::Result<(serde_json::Value, Vec<Refusal>)> {
     let (file, bundle) = (path.to_path_buf(), bundle.clone());
     // File reads and the whole-document checks block: keep them off the
     // runtime.
@@ -778,7 +788,9 @@ async fn read_world(path: &Path, bundle: &Bundle) -> anyhow::Result<serde_json::
             r.message
         );
     }
-    serde_json::to_value(&validation.applied).context("serializing the world description")
+    let doc =
+        serde_json::to_value(&validation.applied).context("serializing the world description")?;
+    Ok((doc, validation.refused))
 }
 
 /// Adds `document` as the newest world description revision (by `user`)

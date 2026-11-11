@@ -1223,6 +1223,66 @@ fn mcp_get_world_matches_admin() {
         let operations = text.find("Operations").unwrap_or_else(|| panic!("{text}"));
         assert!(gaps < operations, "{text}");
         assert!(text.contains("revision 0"), "{text}");
+
+        // --operation narrows to one operation, as the MCP tool's
+        // `operations` and the Admin API's `?operation=` do.
+        let op = admin["world"]["operations"]
+            .as_object()
+            .and_then(|o| o.keys().next().cloned())
+            .unwrap_or_else(|| panic!("{admin}"));
+        let narrowed = run_json(
+            dir.path(),
+            &[
+                "--admin-url",
+                &admin_url,
+                "world",
+                "show",
+                "orders",
+                "--operation",
+                &op,
+                "--json",
+            ],
+        );
+        let ops: Vec<&String> = narrowed["world"]["operations"]
+            .as_object()
+            .map(|o| o.keys().collect())
+            .unwrap_or_default();
+        assert_eq!(ops, [&op], "{narrowed}");
+        assert!(
+            narrowed["gaps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|g| g["operation"] == op.as_str()),
+            "{narrowed}"
+        );
+        let world = mcp.tool("get_world", json!({ "mock": "orders", "operations": [op] }));
+        assert_eq!(world, narrowed);
+        // An unknown name answers nothing, with a warning.
+        let out = bin()
+            .args([
+                "--admin-url",
+                &admin_url,
+                "world",
+                "show",
+                "orders",
+                "--operation",
+                "noSuchOp",
+                "--type",
+                "NoSuchType",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(text.contains("warning: no operation noSuchOp"), "{text}");
+        assert!(text.contains("warning: no type NoSuchType"), "{text}");
+        assert!(text.contains("Operations (0)"), "{text}");
     }));
     mcp.tool("stop_server", json!({}));
     if let Err(panic) = result {

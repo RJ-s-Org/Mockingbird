@@ -21,13 +21,14 @@ use crate::{
     ACQUIRE_TIMEOUT, ActiveBundle, AdminSession, AdminSessionGrant, ApiKey, AuditEvent,
     AuditFilter, CHANGE_CHANNEL_CAPACITY, ChannelSettings, ContractStatus, ContractVersion,
     ContractVersionInfo, ControlChange, ControlStore, DEFAULT_WORKSPACE, ImportJob,
-    ImportJobStatus, ImportOutcome, ImportProgress, LlmProfile, MAX_IMPORT_JOB_LIST, Mock,
-    MockEventSettings, NewAuditEvent, NewContractVersion, NewImportJob, NewMock,
-    NewRequestLogEntry, OidcPendingLogin, OutputMode, PruneCounter, RequestKind, RequestLogEntry,
-    RequestLogFilter, RequestLogSummary, ResourceSource, STALE_IMPORT_ERROR, Scenario,
-    ScenarioRules, StoreError, Workspace, lease_times, missing_workspace, not_a_draft, now,
-    queued_progress, require_draft_status, sha256_hex, validate_header_name, validate_hosts,
-    validate_mock_name, validate_mock_settings, validate_route_prefix, validate_workspace_name,
+    ImportJobStatus, ImportOutcome, ImportProgress, LlmProfile, MAX_IMPORT_JOB_LIST,
+    MEMORY_ACQUIRE_TIMEOUT, Mock, MockEventSettings, NewAuditEvent, NewContractVersion,
+    NewImportJob, NewMock, NewRequestLogEntry, OidcPendingLogin, OutputMode, PruneCounter,
+    RequestKind, RequestLogEntry, RequestLogFilter, RequestLogSummary, ResourceSource,
+    STALE_IMPORT_ERROR, Scenario, ScenarioRules, StoreError, Workspace, lease_times,
+    missing_workspace, not_a_draft, now, queued_progress, require_draft_status, sha256_hex,
+    validate_header_name, validate_hosts, validate_mock_name, validate_mock_settings,
+    validate_route_prefix, validate_workspace_name,
 };
 use crate::{
     NewWorldRevision, WorldRevision, WorldRevisionInfo, parse_author, world_revision_conflict,
@@ -121,7 +122,7 @@ impl SqliteControlStore {
             // One pooled connection that never expires, so writers are
             // serialised as before.
             let pool = SqlitePoolOptions::new()
-                .acquire_timeout(ACQUIRE_TIMEOUT)
+                .acquire_timeout(MEMORY_ACQUIRE_TIMEOUT)
                 .max_connections(1)
                 .min_connections(1)
                 .idle_timeout(None)

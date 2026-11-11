@@ -211,6 +211,14 @@ pub enum WorldCommand {
         /// The contract version [default: the active one].
         #[arg(long, value_name = "N")]
         version: Option<u64>,
+        /// Show only this operation, with its gaps and refused entries
+        /// (repeatable).
+        #[arg(long = "operation", value_name = "ID")]
+        operations: Vec<String>,
+        /// Show only this resource type: its entry, the operations of that
+        /// type, and their gaps and refused entries (repeatable).
+        #[arg(long = "type", value_name = "TYPE")]
+        types: Vec<String>,
         /// Print the Admin API's JSON answer instead.
         #[arg(long)]
         json: bool,
@@ -821,12 +829,30 @@ pub async fn run_workflow(
             )
             .await
         }
-        WorkflowCommand::World(WorldCommand::Show { mock, version, .. }) => {
-            let version = version.map_or_else(|| "active".to_string(), |v| v.to_string());
-            api.send(
-                Method::GET,
-                &["mocks", &mock, "contracts", &version, "world"],
-                None,
+        WorkflowCommand::World(WorldCommand::Show {
+            mock,
+            version,
+            operations,
+            types,
+            ..
+        }) => {
+            let version = version_segment(version);
+            let query: Vec<(&str, String)> = operations
+                .into_iter()
+                .map(|o| ("operation", o))
+                .chain(types.into_iter().map(|t| ("type", t)))
+                .collect();
+            api_with(
+                admin_url,
+                token,
+                workspace,
+                ApiRequest {
+                    query: &query,
+                    ..ApiRequest::new(
+                        Method::GET,
+                        &["mocks", &mock, "contracts", &version, "world"],
+                    )
+                },
             )
             .await
         }
@@ -968,6 +994,9 @@ pub fn world_text(view: &Value) -> String {
     let mut out = String::new();
     let list = |key: &str| view[key].as_array().cloned().unwrap_or_default();
     let authors = view["authors"].as_object().cloned().unwrap_or_default();
+    for w in list("warnings") {
+        let _ = writeln!(out, "warning: {}", w.as_str().unwrap_or_default());
+    }
     let _ = writeln!(
         out,
         "contract version {}, revision {}",

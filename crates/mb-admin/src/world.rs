@@ -15,7 +15,8 @@
 //!
 //! `GET /api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world`
 //! ([`get_world`]) answers a version's effective description as a
-//! [`WorldView`]. The same path takes `PUT` ([`put_world`], a whole
+//! [`WorldView`], narrowed by `?operation=` and `?type=` ([`WorldFilter`]).
+//! The same path takes `PUT` ([`put_world`], a whole
 //! overlay) and `PATCH` ([`patch_world`], a JSON merge patch of the newest
 //! overlay), each adding a revision that holds only the entries that
 //! validate; `…/world/revisions[/{r}]` lists and reads revisions,
@@ -23,7 +24,8 @@
 //! `…/world/diff` compares two. A write with `If-Match: <revision>` applies
 //! only on top of that revision (else a 412 `revision_conflict`).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{LazyLock, Mutex, PoisonError};
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -81,7 +83,9 @@ pub struct EffectiveWorld {
     /// The newest revision's number; `0` when there is none.
     pub revision: i64,
     /// The newest revision's entries that did not validate, which fall back
-    /// to tier 0.
+    /// to tier 0, then the entries of the mock's `world:` file refused when
+    /// the config was last applied to this version (see
+    /// [`record_file_refusals`]).
     pub refused: Vec<Refusal>,
     /// What the description leaves open, including each refused entry.
     pub gaps: Vec<Gap>,
@@ -104,12 +108,13 @@ pub async fn effective_world(
 ) -> Result<EffectiveWorld, StoreError> {
     let base = tier0(bundle);
     let Some(latest) = store.latest_world_revision(mock_id, version).await? else {
-        let gaps = gaps(bundle, &base, &[]);
+        let refused = with_file_refusals(Vec::new(), mock_id, version);
+        let gaps = gaps(bundle, &base, &refused);
         return Ok(EffectiveWorld {
             world: base,
             authors: BTreeMap::new(),
             revision: 0,
-            refused: Vec::new(),
+            refused,
             gaps,
         });
     };
@@ -136,6 +141,7 @@ pub async fn effective_world(
         .into_iter()
         .map(|(pointer, origin)| (pointer, origin.author))
         .collect();
+    let refused = with_file_refusals(refused, mock_id, version);
     let gaps = gaps(bundle, &world, &refused);
     Ok(EffectiveWorld {
         world,
@@ -144,6 +150,45 @@ pub async fn effective_world(
         refused,
         gaps,
     })
+}
+
+/// The entries of each config-file mock's `world:` file refused when the
+/// config was last applied, by mock id: the contract version they were
+/// validated against, and the refusals. Only the node that applies the
+/// config (the leader) holds them.
+static FILE_REFUSALS: LazyLock<Mutex<FileRefusals>> = LazyLock::new(Mutex::default);
+
+/// Per mock id: the contract version, and its `world:` file's refusals.
+type FileRefusals = HashMap<Uuid, (i64, Vec<Refusal>)>;
+
+/// Records the entries of `mock_id`'s `world:` file that `version` refused
+/// as the config was applied, replacing those of the previous load; an
+/// empty `refused` clears them. [`effective_world`] of that version lists
+/// them under `refused` (and its gaps), since the stored revision holds only
+/// the entries that validate.
+pub fn record_file_refusals(mock_id: Uuid, version: i64, refused: Vec<Refusal>) {
+    let mut all = FILE_REFUSALS.lock().unwrap_or_else(PoisonError::into_inner);
+    if refused.is_empty() {
+        all.remove(&mock_id);
+    } else {
+        all.insert(mock_id, (version, refused));
+    }
+}
+
+/// `refused` followed by the recorded file refusals of `mock_id`'s
+/// `version` whose pointer it does not already name.
+fn with_file_refusals(mut refused: Vec<Refusal>, mock_id: Uuid, version: i64) -> Vec<Refusal> {
+    let all = FILE_REFUSALS.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((v, file)) = all.get(&mock_id)
+        && *v == version
+    {
+        for r in file {
+            if !refused.iter().any(|e| e.path == r.path) {
+                refused.push(r.clone());
+            }
+        }
+    }
+    refused
 }
 
 /// The world description a runtime of `mock_id`'s contract `version` serves,
@@ -620,13 +665,18 @@ pub struct WorldView {
     pub authors: BTreeMap<String, Author>,
     /// The newest revision's number; `0` when there is none.
     pub revision: i64,
-    /// The newest revision's entries that did not validate; they fall back
-    /// to tier 0.
+    /// The newest revision's entries that did not validate, and the
+    /// entries of a config-file mock's `world:` file refused when the config
+    /// was last loaded; they fall back to tier 0.
     #[schema(value_type = Vec<RefusalSchema>)]
     pub refused: Vec<Refusal>,
     /// What the description leaves open, including each refused entry.
     #[schema(value_type = Vec<GapSchema>)]
     pub gaps: Vec<Gap>,
+    /// The `operation` and `type` filters that name nothing in this version,
+    /// one line per kind. Absent when there is none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl WorldView {
@@ -638,7 +688,115 @@ impl WorldView {
             revision: eff.revision,
             refused: eff.refused,
             gaps: eff.gaps,
+            warnings: Vec::new(),
         }
+    }
+
+    /// Narrows the view to what `filter` names (nothing when it is empty):
+    /// the operations it names and those whose resource type it names, the
+    /// types it names, and the gaps, refused entries and authors about
+    /// either. Gaps and refusals about the description as a whole (neither
+    /// an operation nor a type) are kept. A name the version does not have
+    /// is listed in [`WorldView::warnings`].
+    fn narrow(&mut self, filter: &WorldFilter) {
+        if filter.operations.is_empty() && filter.types.is_empty() {
+            return;
+        }
+        let known_ops: BTreeSet<&str> = self
+            .world
+            .operations
+            .keys()
+            .map(String::as_str)
+            .chain(self.gaps.iter().filter_map(|g| g.operation.as_deref()))
+            .collect();
+        let known_types: BTreeSet<&str> = self
+            .world
+            .types
+            .keys()
+            .map(String::as_str)
+            .chain(
+                self.world
+                    .operations
+                    .values()
+                    .filter_map(|o| o.r#type.as_deref()),
+            )
+            .chain(self.gaps.iter().filter_map(|g| g.r#type.as_deref()))
+            .collect();
+        for (kind, asked, known) in [
+            ("operation", &filter.operations, &known_ops),
+            ("type", &filter.types, &known_types),
+        ] {
+            let unknown: Vec<&str> = asked
+                .iter()
+                .map(String::as_str)
+                .filter(|n| !known.contains(n))
+                .collect();
+            if !unknown.is_empty() {
+                self.warnings.push(format!(
+                    "no {kind} {} in contract version {}",
+                    unknown.join(", "),
+                    self.version
+                ));
+            }
+        }
+        // The operations kept: those named, and those of a named type.
+        let ops: BTreeSet<String> = self
+            .world
+            .operations
+            .iter()
+            .filter(|(_, d)| d.r#type.as_ref().is_some_and(|t| filter.types.contains(t)))
+            .map(|(id, _)| id.clone())
+            .chain(filter.operations.iter().cloned())
+            .collect();
+        let types = &filter.types;
+        self.world.operations.retain(|id, _| ops.contains(id));
+        self.world.types.retain(|t, _| types.contains(t));
+        self.gaps.retain(|g| match (&g.operation, &g.r#type) {
+            (None, None) => true,
+            (op, ty) => {
+                op.as_ref().is_some_and(|o| ops.contains(o))
+                    || ty.as_ref().is_some_and(|t| types.contains(t))
+            }
+        });
+        // `None`: a pointer about the description as a whole.
+        let keeps = |pointer: &str| -> Option<bool> {
+            let mut parts = pointer.strip_prefix('/')?.splitn(3, '/');
+            let section = parts.next()?;
+            let name = parts.next()?.replace("~1", "/").replace("~0", "~");
+            match section {
+                "operations" => Some(ops.contains(&name)),
+                "types" => Some(types.contains(&name)),
+                _ => None,
+            }
+        };
+        self.refused.retain(|r| keeps(&r.path).unwrap_or(true));
+        self.authors.retain(|p, _| keeps(p).unwrap_or(true));
+    }
+}
+
+/// Which entries of a world view to answer: `?operation=<id>` and
+/// `?type=<resource type>`, each repeatable. With neither, all of them.
+#[derive(Debug, Default)]
+pub struct WorldFilter {
+    /// Operation ids.
+    pub operations: BTreeSet<String>,
+    /// Resource types.
+    pub types: BTreeSet<String>,
+}
+
+impl WorldFilter {
+    /// The filter a query's `operation` and `type` pairs give; other keys are
+    /// ignored.
+    fn from_pairs(pairs: Vec<(String, String)>) -> Self {
+        let mut filter = Self::default();
+        for (key, value) in pairs {
+            match key.as_str() {
+                "operation" => filter.operations.insert(value),
+                "type" => filter.types.insert(value),
+                _ => false,
+            };
+        }
+        filter
     }
 }
 
@@ -674,9 +832,11 @@ pub(crate) async fn resolve_version(
         ("ws" = String, Path, description = "Workspace name"),
         ("mock" = String, Path, description = "Mock name"),
         ("version" = String, Path, description = "Contract version number, or `active`"),
+        ("operation" = Option<Vec<String>>, Query, explode, description = "Answer only this operation (repeatable), with its gaps, refused entries and authors"),
+        ("type" = Option<Vec<String>>, Query, explode, description = "Answer only this resource type (repeatable): its `types` entry, the operations of that type, and their gaps, refused entries and authors"),
     ),
     responses(
-        (status = 200, description = "The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0.", body = WorldView),
+        (status = 200, description = "The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`.", body = WorldView),
         (status = 400, description = "The version is neither a number nor `active`", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such mock or version, or no active version", body = Problem, content_type = "application/problem+json"),
     )
@@ -685,12 +845,15 @@ pub async fn get_world(
     State(st): State<AdminState>,
     access: WsAccess,
     Path(WorldPath { mock, version }): Path<WorldPath>,
+    Query(pairs): Query<Vec<(String, String)>>,
 ) -> ApiResult<Json<WorldView>> {
     access.require(Permission::Read)?;
     let m = st.mock(&access.ws, &mock).await?;
     let v = resolve_version(&st, &m, &version).await?;
     let eff = effective_world(st.store.as_ref(), m.id, v.version, &v.bundle).await?;
-    Ok(Json(WorldView::new(v.version, eff)))
+    let mut view = WorldView::new(v.version, eff);
+    view.narrow(&WorldFilter::from_pairs(pairs));
+    Ok(Json(view))
 }
 
 // ---------------------------------------------------------------------------

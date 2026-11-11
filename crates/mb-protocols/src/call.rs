@@ -1563,8 +1563,8 @@ pub(crate) async fn complete(
         if rt.consistency && (200..300).contains(&generated.status) {
             // An effect on an update's own target goes on what was just stored, under
             // the protections the answer has.
-            let own = resource_type
-                .zip(acted_on.as_deref())
+            let acted = resource_type.zip(acted_on.as_deref());
+            let own = acted
                 .filter(|_| op.kind == OperationKind::Command(Effect::Update) && !op.is_action());
             let shown = shown_types(rt, target.as_ref(), &related, &created_since);
             resolve_effect_types(&mut state, session, rt, &shown, &mut generated.effects).await;
@@ -1604,7 +1604,7 @@ pub(crate) async fn complete(
                 session,
                 rt,
                 &generated.effects,
-                own,
+                (own, acted),
                 (plan, call, generated.status),
             )
             .await;

@@ -935,6 +935,11 @@ async fn an_oversized_world_file_is_refused_before_it_is_read() {
     assert!(msg.contains("too_large"), "{msg}");
 }
 
+/// How long a test waits for the config watch to apply an edit. A watch
+/// raises no event a test can await, so tests poll; under a loaded test
+/// runner a reload can take well over five seconds.
+const WATCH_DEADLINE: Duration = Duration::from_secs(30);
+
 /// `--watch` watches each mock's `world:` file: editing only that file
 /// reloads it and adds a revision.
 #[tokio::test]
@@ -967,7 +972,7 @@ async fn watch_reloads_an_edited_world_file() {
         "version: 1\noperations:\n  getOrder:\n    not_found: 404\n  deleteOrder:\n    kind: delete\n",
     )
     .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WATCH_DEADLINE;
     loop {
         let n = store.list_world_revisions(mock.id, 1).await.unwrap().len();
         if n == 2 {
@@ -1598,6 +1603,71 @@ async fn file_managed_resources_are_read_only() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
+}
+
+/// The `refused` of the orders mock's active world description, as
+/// `world show` reads it from the Admin API.
+async fn world_refused(admin: &str) -> Vec<Value> {
+    let r = reqwest::get(format!(
+        "{admin}/api/v1/mocks/orders/contracts/active/world"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(r.status(), 200);
+    let view: Value = r.json().await.unwrap();
+    view["refused"].as_array().cloned().unwrap()
+}
+
+/// A `world:` file entry refused as the config loads shows in the world
+/// description's `refused` and as a doctor warning, until a reload whose
+/// file has no refused entry clears it.
+#[tokio::test]
+async fn refused_world_file_entries_show_in_world_show_and_doctor() {
+    let ws = Workspace::new();
+    let world = ws.dir.path().join("orders.world.yaml");
+    std::fs::write(&world, ORDERS_WORLD).unwrap();
+    ws.write(&with_world());
+    let app = start(config_args(&ws, true)).await;
+
+    let refused = world_refused(&app.admin).await;
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(refused[0]["path"], "/operations/noSuchOperation");
+    assert_eq!(refused[0]["code"], "unresolved");
+    assert!(
+        refused[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("noSuchOperation"),
+        "{refused:?}"
+    );
+
+    let args = mockingbird::daemon::DoctorArgs {
+        config: Some(ws.config_path()),
+        state: mockingbird::daemon::StateArgs {
+            state_dir: ws.dir.path().join(".mockingbird"),
+        },
+    };
+    let report = mockingbird::daemon::doctor(&args, &app.admin, None).await;
+    let warnings = report["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{report}");
+    let warning = warnings[0].as_str().unwrap();
+    assert!(warning.contains("\"orders\""), "{warning}");
+    assert!(warning.contains("/operations/noSuchOperation"), "{warning}");
+
+    // Give the watcher a moment to register, then drop the bad entry.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    std::fs::write(
+        &world,
+        "version: 1\noperations:\n  getOrder:\n    not_found: 404\n",
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !world_refused(&app.admin).await.is_empty() {
+        assert!(Instant::now() < deadline, "the refusal was not cleared");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let report = mockingbird::daemon::doctor(&args, &app.admin, None).await;
+    assert_eq!(report["warnings"], json!([]), "{report}");
 }
 
 async fn scenario_names(admin: &str) -> Vec<String> {
@@ -3786,7 +3856,7 @@ async fn watch_applies_an_edit_made_before_it_started() {
     )
     .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WATCH_DEADLINE;
     while store
         .get_mock(DEFAULT_WORKSPACE, "orders")
         .await
@@ -3826,7 +3896,7 @@ async fn watch_applies_a_mocks_block_added_later() {
     ws.write(&format!(
         "{head}proxy:\n  enabled: true\n  port: 1\nmocks:\n  orders:\n    contract: sub/orders.yaml\n    route_prefix: /orders\n    hosts: [api.orders.test]\n"
     ));
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WATCH_DEADLINE;
     loop {
         let r = reqwest::Client::new()
             .get(format!("{}/orders/orders", app.data))

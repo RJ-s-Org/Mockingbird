@@ -113,6 +113,12 @@ pub struct ChatRequest {
     pub temperature: f32,
     /// Most completion tokens the answer may use.
     pub max_tokens: u32,
+    /// Most bytes of answer text (not reasoning) to read before the reply is
+    /// stopped and returned as [`LlmError::Truncated`] with the text so far,
+    /// for a caller that knows how long a sane answer is: a model that runs
+    /// on (a URL that never ends) costs seconds per kilobyte. `None` reads to
+    /// `max_tokens`. Providers that do not stream ignore it.
+    pub max_answer_bytes: Option<usize>,
     /// How long one request may take.
     pub timeout: Duration,
 }
@@ -192,9 +198,10 @@ pub enum LlmError {
     /// The answer is not the JSON the client expects.
     #[error("LLM response decode error: {0}")]
     Decode(String),
-    /// The provider stopped at `max_tokens` (`finish_reason: "length"`), so
-    /// the output is cut short. Retrying with the same limit would truncate
-    /// again; a caller may salvage `partial` instead.
+    /// The output is cut short: the provider stopped at `max_tokens`
+    /// (`finish_reason: "length"`), or the client stopped a streamed answer past
+    /// [`ChatRequest::max_answer_bytes`]. Retrying with the same limit would
+    /// truncate again; a caller may salvage `partial` instead.
     #[error("LLM output truncated: {message}")]
     Truncated {
         /// What was cut, and where.

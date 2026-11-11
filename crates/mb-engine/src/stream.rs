@@ -127,6 +127,7 @@ impl Engine {
             response_format: format,
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
+            max_answer_bytes: None,
             timeout: self.config.timeout,
         }
     }

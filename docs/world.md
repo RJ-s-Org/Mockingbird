@@ -22,10 +22,14 @@ A later tier overrides an earlier one entry by entry. `get_world` reports the au
 ```sh
 mockingbird world show orders              # the active version: gaps first, then each entry
 mockingbird world show orders --version 2 --json
+mockingbird world show orders --operation getOrder --operation listOrders   # only these, with their gaps
+mockingbird world show orders --type order # the type, its operations, and their gaps
 mockingbird world schema                   # the format, as JSON Schema
 ```
 
-The MCP tool is `get_world {mock, version?}`, and `get_world_schema` answers the format's JSON Schema as `mockingbird world schema` prints it; the Admin API is `GET /api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world`, with `version` a number or `active`. The answer:
+On a large contract, narrow the answer to the operations an app uses: `--operation <id>` and `--type <resource type>` (each repeatable; `operations` and `types` arrays on `get_world`; `?operation=` and `?type=` on the Admin API) keep only the operations named, the types named and the operations of those types, and the gaps, refused entries and authors about them. Gaps and refusals about the description as a whole are kept. A name the version does not have gives an empty answer with `warnings` listing it, not an error.
+
+The MCP tool is `get_world {mock, version?, operations?, types?}`, and `get_world_schema` answers the format's JSON Schema as `mockingbird world schema` prints it; the Admin API is `GET /api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world`, with `version` a number or `active`. The answer:
 
 | Field | What it holds |
 | --- | --- |
@@ -35,6 +39,7 @@ The MCP tool is `get_world {mock, version?}`, and `get_world_schema` answers the
 | `revision` | The newest revision's number; `0` when only the heuristics wrote it (every version stored before world descriptions starts there). |
 | `refused` | Entries of the newest revision that did not validate; each falls back to tier 0. |
 | `gaps` | What the description leaves open. |
+| `warnings` | The `operation` and `type` filters naming nothing in the version; absent when there is none. |
 
 Gaps. The first three codes also mark the recorded calls of each operation they concern (see [Gaps in the request log](#gaps-in-the-request-log)). The last four point at behaviour the contract signals and the description does not state yet. `undescribed_param` is something the executor cannot answer from the records; the three marked `advisory: true` are checks: read the docs for each, and write an entry only when they state the behaviour, otherwise leave the gap.
 
@@ -378,7 +383,7 @@ The world tools act on the active contract version unless they are given `versio
 
 A mock declared in `mockingbird.yaml` takes its description from a file named by `mocks.<name>.world` (for example `world: orders.world.yaml` next to `contract: orders.yaml`), relative to the config file: YAML, or JSON for a `.json` file. See [the configuration reference](configuration.md#mocks).
 
-The file is an overlay, the same document `put_world` takes. On every reconcile (startup, and with `--watch` each edit of the config, the contract or the world file) Mockingbird validates it against the active contract version and, when the entries that apply differ from the newest revision's, stores them as a new revision by `user`; an unchanged file adds no revision. Refused entries (for example one naming an operation the contract no longer has) are logged at warn level and the rest applies. A file that cannot be read or parsed, or is refused whole (a file over 1 MiB, a description over 256 KiB in its JSON form, nested over 32 deep, not of the format's shape), fails the reconcile and names the file. The 256 KiB limit is on the description, so YAML comments and layout do not count against it.
+The file is an overlay, the same document `put_world` takes. On every reconcile (startup, and with `--watch` each edit of the config, the contract or the world file) Mockingbird validates it against the active contract version and, when the entries that apply differ from the newest revision's, stores them as a new revision by `user`; an unchanged file adds no revision. Refused entries (for example one naming an operation the contract no longer has) are logged at warn level and the rest applies; until a load whose file has none, `get_world` (`mockingbird world show`) lists them under `refused` and in its gaps, and `mockingbird doctor` warns about the mock, naming their pointers. A file that cannot be read or parsed, or is refused whole (a file over 1 MiB, a description over 256 KiB in its JSON form, nested over 32 deep, not of the format's shape), fails the reconcile and names the file. The 256 KiB limit is on the description, so YAML comments and layout do not count against it.
 
 The file wins: an edit made through the API or MCP is replaced by the file's entries at the next reconcile. Removing the `world:` key leaves the stored revisions as they are.
 
