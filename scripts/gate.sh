@@ -9,7 +9,8 @@
 #
 # What it runs:
 #   - `cargo fmt --all --check` (it takes seconds)
-#   - clippy, nextest and doctests for each crate with a changed file (any file under
+#   - clippy, nextest, doctests and the API docs (`cargo doc`, warnings denied, as CI
+#     builds them) for each crate with a changed file (any file under
 #     its directory, not only .rs) and the workspace crates that depend on it directly;
 #     files the CLI embeds or its tests read (plugins/, docs/, examples/, .github/, deploy/,
 #     install.sh)
@@ -78,6 +79,7 @@ if [[ $FULL -eq 1 ]]; then
   cargo clippy --workspace --all-targets --all-features -- -D warnings
   cargo nextest run --workspace --all-features
   cargo test --doc --workspace --all-features
+  RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps --all-features
 elif [[ -n "$pkgs" ]]; then
   args=()
   for p in $pkgs; do args+=(-p "$p"); done
@@ -89,6 +91,8 @@ elif [[ -n "$pkgs" ]]; then
   cargo nextest run "${args[@]}" --all-features --no-tests=pass
   step "doctests: $pkgs"
   cargo test --doc "${args[@]}" --all-features
+  step "API docs: $pkgs"
+  RUSTDOCFLAGS=-Dwarnings cargo doc "${args[@]}" --no-deps --all-features
 fi
 
 if grep -q '^crates/mb-console/web/' <<<"$changed"; then
