@@ -157,6 +157,8 @@ pub struct HarnessOptions {
     pub cached: bool,
     /// Answer a read of an id the session does not hold with its `404`.
     pub unknown_ids_not_found: bool,
+    /// The usage every scripted LLM call reports (none when unset).
+    pub usage: Option<mb_llm::Usage>,
 }
 
 /// [`described`]'s runtime, with `configure` applied to the bare runtime before it is
@@ -186,8 +188,12 @@ pub fn harness_of(
     use mb_llm::{Provider, ScriptedProvider};
     use mb_state::{CachingStateStore, MemoryStore, StateStore};
 
-    let provider = Arc::new(ScriptedProvider::new(
-        script.into_iter().map(|v| Ok(v.to_string())).collect(),
+    let usage = options.usage.unwrap_or_default();
+    let provider = Arc::new(ScriptedProvider::with_usage(
+        script
+            .into_iter()
+            .map(|v| Ok((v.to_string(), usage)))
+            .collect(),
     ));
     let mut store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     if options.cached {
