@@ -1211,13 +1211,14 @@ pub(super) fn read_schemas(rt: &crate::MockRuntime, t: &str) -> Vec<Value> {
     read_shapes(rt, t).into_iter().map(|(s, _)| s).collect()
 }
 
-/// [`read_schemas`], each with whether it is a list's item, which a list renders a
-/// record into as it projects it ([`crate::call::lists::projected`]).
-/// The first member a create's `request` sends of its record (at its top, or one level
-/// into an object member the type's reads do not declare: GraphQL's `input`) with a
-/// non-empty array or object value (child records), of another JSON type than the type's reads hold it and
-/// with no conversion that loses nothing ([`converted`]); a reference to a held record
-/// ([`references_object`]) is the record it names, so it is kept.
+/// The first member a create's `request` sends of its record one level into an object
+/// member the type's reads do not declare (GraphQL's `input`), with a non-empty array
+/// or object value (child records) of another JSON type than the type's reads hold it
+/// and with no conversion that loses nothing ([`converted`]): Shopify's
+/// `cartCreate(input: {lines})`, a list of line inputs, beside the cart's connection of
+/// lines. A reference to a held record ([`references_object`]) is the record it names,
+/// so it is kept. A member at the request's top is [`reshape`]'s: one in another
+/// container is left out for fill ([`other_container`]).
 fn unkept(rt: &crate::MockRuntime, t: &str, request: &Value) -> Option<String> {
     let bundle = rt.bundle();
     let reads = read_shapes(rt, t);
@@ -1255,10 +1256,12 @@ fn unkept(rt: &crate::MockRuntime, t: &str, request: &Value) -> Option<String> {
         Value::Object(inner) if schemas_of(name).is_empty() => {
             inner.iter().find_map(|(name, sent)| check(name, sent))
         }
-        _ => check(name, sent),
+        _ => None,
     })
 }
 
+/// [`read_schemas`], each with whether it is a list's item, which a list renders a
+/// record into as it projects it ([`crate::call::lists::projected`]).
 fn read_shapes(rt: &crate::MockRuntime, t: &str) -> Vec<(Value, bool)> {
     let mut schemas: Vec<(Value, bool)> = type_check(rt, t)
         .and_then(|(read, shape)| shape.or_else(|| read.success_output()?.schema.as_ref()))
