@@ -219,6 +219,8 @@ pub(crate) async fn from_state(
     }
     let mut walk = Walk {
         bundle: &rt.bundle,
+        narrowed: rt.narrowed(),
+        superseded: Vec::new(),
         held,
     };
     // A root selection carries no arguments of its own.
@@ -227,6 +229,9 @@ pub(crate) async fn from_state(
         ..sel.clone()
     };
     walk.field(schema, &sel, body, None, 0);
+    for (t, id) in walk.superseded {
+        call::forget_stored(rt, session, &t, &id).await;
+    }
 }
 
 /// The keyed types `sel` reaches below `schema`.
@@ -274,6 +279,9 @@ struct Page {
 
 struct Walk<'a> {
     bundle: &'a Bundle,
+    narrowed: &'a super::select::NarrowCache,
+    /// Records the engine stored from this answer that name one found.
+    superseded: Vec<(String, String)>,
     /// By definition name, most recent first.
     held: HashMap<String, Vec<StoredResource>>,
 }
@@ -288,7 +296,13 @@ impl Walk<'_> {
         parent: Option<&Parent>,
         depth: usize,
     ) {
-        if depth > MAX_DEPTH || sel.fields.is_empty() || value.is_null() {
+        if depth > MAX_DEPTH || sel.fields.is_empty() {
+            return;
+        }
+        // A null object read by arguments may still be one the session holds.
+        if value.is_null()
+            && (sel.args.is_empty() || !matches!(shape(self.bundle, schema), Shape::One(_)))
+        {
             return;
         }
         match shape(self.bundle, schema) {
@@ -300,8 +314,33 @@ impl Walk<'_> {
                     && let Some((ty, record)) =
                         self.find(&types, &sel.args, parent, generated.as_deref())
                 {
-                    let base = Some(&*value).filter(|v| typename_is(v, &ty));
+                    let base = Some(&*value).filter(|v| v.is_object() && typename_is(v, &ty));
                     *value = self.render(&ty, &record, sel, base);
+                    // What the engine stored of this answer is a second
+                    // record of the one found: it goes.
+                    // Only a copy: a held record the arguments do not name
+                    // (the model answered another real one's id) stays.
+                    if let Some(generated) = generated.filter(|g| *g != record.id)
+                        && self.held.get(&ty).into_iter().flatten().any(|r| {
+                            r.id == generated && matches(&sel.args, r) == (true, sel.args.len())
+                        })
+                    {
+                        self.superseded.push((ty.to_lowercase(), generated));
+                    }
+                } else if parent.is_none()
+                    && !sel.args.is_empty()
+                    && let Value::Object(obj) = value
+                    && !obj.contains_key("id")
+                    && sel.fields.get("id").is_none_or(|c| c.name == "id")
+                {
+                    // A record read by its arguments without its id
+                    // (`repository(owner:, name:) { issues { … } }`) gets
+                    // one, unseen by the client, so that it is stored and
+                    // what is listed under it is stored under it.
+                    obj.insert(
+                        "id".into(),
+                        json!(format!("mb_{:016x}", rand::random::<u64>())),
+                    );
                 }
                 self.object(schema, sel, value, parent, depth);
             }
@@ -335,6 +374,51 @@ impl Walk<'_> {
         }
     }
 
+    /// The id of an object of type `ty` answered without one, under
+    /// `parent`, from a lookup key (`Issue.number`): the stored record's
+    /// under that parent with the same key, else one made of it, so that
+    /// every answer naming it names the same record. `None` when the answer
+    /// holds no lookup key.
+    fn id_by_keys(
+        &self,
+        ty: &str,
+        sel: &Selection,
+        obj: &Map<String, Value>,
+        parent: &Parent,
+    ) -> Option<String> {
+        // The first lookup key the answer holds (keys sort by name), so
+        // that every list naming the record names it alike.
+        let (key, value) = self
+            .narrowed
+            .lookup_keys(self.bundle, ty)?
+            .iter()
+            .filter(|key| *key != "id")
+            .find_map(|key| {
+                let value = sel
+                    .fields
+                    .iter()
+                    .find(|(_, c)| c.name == *key)
+                    .and_then(|(k, _)| obj.get(k))
+                    .filter(|v| !v.is_null() && !v.is_object() && !v.is_array())?;
+                Some((key.clone(), value.clone()))
+            })?;
+        let mut values = Map::new();
+        values.insert(key, value);
+        if let Some(held) = self.held.get(ty).into_iter().flatten().find(|r| {
+            refs(r).contains(&parent.id.as_str()) && matches(&values, r) == (true, values.len())
+        }) {
+            return Some(held.id.clone());
+        }
+        let named: Vec<String> = values
+            .iter()
+            .map(|(k, v)| match v {
+                Value::String(v) => format!("{k}={v}"),
+                v => format!("{k}={v}"),
+            })
+            .collect();
+        Some(format!("mb_{ty}_{}_{}", parent.id, named.join("_")))
+    }
+
     /// The children of `value`, an object of `schema`.
     fn object(
         &mut self,
@@ -353,6 +437,13 @@ impl Walk<'_> {
         let Some(props) = def.get("properties").and_then(Value::as_object) else {
             return;
         };
+        if props.contains_key("id")
+            && !obj.contains_key("id")
+            && let Some(parent) = parent
+            && let Some(id) = self.id_by_keys(name, sel, obj, parent)
+        {
+            obj.insert("id".into(), json!(id));
+        }
         let own = match obj.get("id") {
             Some(Value::String(id)) if props.contains_key("id") => Some(Parent {
                 ty: name.to_string(),
@@ -647,10 +738,35 @@ impl Walk<'_> {
         sel: &Selection,
         base: Option<&Value>,
     ) -> Value {
-        let mut out = match base {
-            Some(Value::Object(obj)) => obj.clone(),
-            _ => self.fake(ty, sel),
-        };
+        // Every selected field gets a value: the faker's, under the fullest
+        // record of the type the session holds (a model's answer, so dates
+        // read as dates), under `base`, under the record's own members.
+        let mut out = self.fake(ty, sel);
+        if let Some(template) = self
+            .held
+            .get(ty)
+            .into_iter()
+            .flatten()
+            .filter(|r| r.id != record.id)
+            .max_by_key(|r| r.data.as_object().map_or(0, Map::len))
+        {
+            // Its scalars only: another record's objects and lists are not
+            // this one's.
+            let scalars: Map<String, Value> = template
+                .data
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(_, v)| !v.is_object() && !v.is_array())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            overlay(&mut out, &Value::Object(scalars), sel);
+        }
+        if let Some(Value::Object(base)) = base {
+            for (key, value) in base {
+                out.insert(key.clone(), value.clone());
+            }
+        }
         out.insert("__typename".into(), json!(ty));
         overlay(&mut out, &record.data, sel);
         for (key, _) in sel.fields.iter().filter(|(_, c)| c.name == "id") {
@@ -871,5 +987,86 @@ pub(crate) async fn link_args(
                 }
             }
         }
+    }
+}
+
+/// Gives the records a mutation answers without their ids (gh's
+/// `addComment { commentEdge { node { url } } }`) an id, unseen by the
+/// client, so that they are stored with what the input says: the objects
+/// of a type with an `id` nearest the answer's top.
+pub(crate) fn name_written(
+    bundle: &Bundle,
+    op: &mb_mcm::Operation,
+    sel: &Selection,
+    args: &Map<String, Value>,
+    body: &mut Value,
+) {
+    // An update names its record by id: nothing new is written.
+    let names_one = |args: &Map<String, Value>| args.contains_key("id");
+    if names_one(args) || args.values().filter_map(Value::as_object).any(names_one) {
+        return;
+    }
+    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return;
+    };
+    let mut nearest = None;
+    keyed_depth(bundle, schema, sel, body, 0, &mut |_, depth| {
+        if nearest.is_none_or(|n| depth < n) {
+            nearest = Some(depth);
+        }
+    });
+    let Some(nearest) = nearest else {
+        return;
+    };
+    keyed_depth(bundle, schema, sel, body, 0, &mut |obj, depth| {
+        if depth == nearest && !obj.contains_key("id") {
+            obj.insert(
+                "id".into(),
+                json!(format!("mb_{:016x}", rand::random::<u64>())),
+            );
+        }
+    });
+}
+
+/// Calls `f` with every object of a type with an `id` in `value` (answered
+/// for `schema` and `sel`) and its depth in objects.
+fn keyed_depth(
+    bundle: &Bundle,
+    schema: &Value,
+    sel: &Selection,
+    value: &mut Value,
+    depth: usize,
+    f: &mut dyn FnMut(&mut Map<String, Value>, usize),
+) {
+    if depth > MAX_DEPTH || sel.fields.is_empty() {
+        return;
+    }
+    match value {
+        Value::Array(items) => {
+            if let Some(item) = list_item(schema) {
+                for v in items {
+                    keyed_depth(bundle, item, sel, v, depth, f);
+                }
+            }
+        }
+        Value::Object(obj) => {
+            let Some((_, def)) = object_type(bundle, schema, obj) else {
+                return;
+            };
+            let Some(props) = def.get("properties").and_then(Value::as_object) else {
+                return;
+            };
+            if props.contains_key("id") {
+                f(obj, depth);
+            }
+            for (key, child) in &sel.fields {
+                if let (Some(member), Some(field)) =
+                    (obj.get_mut(key), child.names().find_map(|n| props.get(n)))
+                {
+                    keyed_depth(bundle, field, child, member, depth + 1, f);
+                }
+            }
+        }
+        _ => {}
     }
 }

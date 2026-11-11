@@ -425,6 +425,17 @@ pub(super) fn input_value(v: &InputValueDefinition) -> InputValue {
     out
 }
 
+/// [`lookup_keys`] of `bundle`'s SDL; none when it has none or it does
+/// not parse.
+pub(super) fn lookup_keys_of(bundle: &mb_mcm::Bundle) -> super::select::LookupKeys {
+    match &bundle.protocol_payload {
+        Some(ProtocolPayload::Graphql { sdl }) => {
+            parse(sdl).map(|sdl| lookup_keys(&sdl)).unwrap_or_default()
+        }
+        _ => super::select::LookupKeys::new(),
+    }
+}
+
 /// The scalar fields each object type is looked up by: for every field
 /// returning one object (not a list) of a type, or of a union's or an
 /// interface's member types, each of its arguments that names a scalar or
@@ -528,7 +539,6 @@ pub(crate) fn build_schema(rt: &Arc<MockRuntime>) -> Result<Served, GraphqlError
         }
     }
 
-    rt.narrowed().set_lookup_keys(lookup_keys(&sdl));
     let adjusted = implementation_types(&sdl)?;
     let mut builder = Schema::build(query, mutation.as_deref(), subscription.as_deref());
     for (name, def) in &sdl.types {

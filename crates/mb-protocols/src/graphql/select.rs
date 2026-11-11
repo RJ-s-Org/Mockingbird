@@ -256,14 +256,16 @@ impl NarrowCache {
         narrowed
     }
 
-    /// Sets the schema's lookup keys (once, when the schema is built).
-    pub(crate) fn set_lookup_keys(&self, keys: LookupKeys) {
-        let _ = self.1.set(keys);
-    }
-
-    /// The lookup keys of object type `ty`.
-    pub(crate) fn lookup_keys(&self, ty: &str) -> Option<&std::collections::BTreeSet<String>> {
-        self.1.get()?.get(ty)
+    /// The lookup keys of object type `ty` in `bundle`'s schema, found once
+    /// per runtime.
+    pub(crate) fn lookup_keys(
+        &self,
+        bundle: &mb_mcm::Bundle,
+        ty: &str,
+    ) -> Option<&std::collections::BTreeSet<String>> {
+        self.1
+            .get_or_init(|| super::schema::lookup_keys_of(bundle))
+            .get(ty)
     }
 
     #[cfg(test)]

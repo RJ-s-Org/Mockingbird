@@ -30,7 +30,8 @@ type Issue implements Node {
   repository: Repository!
   comments(first: Int): IssueCommentConnection!
 }
-type IssueComment implements Node { id: ID! body: String! issue: Issue! }
+type IssueComment implements Node { id: ID! body: String! createdAt: String issue: Issue! }
+type IssueCommentEdge { node: IssueComment }
 type PullRequest implements Node {
   id: ID!
   number: Int!
@@ -50,7 +51,7 @@ input CloseIssueInput { issueId: ID! }
 input AddCommentInput { subjectId: ID! body: String! }
 type CreateIssuePayload { issue: Issue }
 type CloseIssuePayload { issue: Issue }
-type AddCommentPayload { comment: IssueComment }
+type AddCommentPayload { commentEdge: IssueCommentEdge }
 type Query { repository(owner: String!, name: String!): Repository }
 type Mutation {
   createIssue(input: CreateIssueInput!): CreateIssuePayload
@@ -132,13 +133,16 @@ async fn nested_fields_answer_from_state() {
         json!({"__typename": "CreateIssuePayload", "issue": issue("I_2", 2, "Created", "OPEN")}),
         // Later reads of the repository are generated wrong; state wins.
         repo(vec![issue("I_7", 7, "Made up", "OPEN")]),
-        json!({"__typename": "Repository", "id": "R_x", "issue": issue("I_8", 2, "Wrong", "OPEN")}),
+        // A null answer for a record the session holds.
+        json!({"__typename": "Repository", "id": "R_x", "issue": null}),
         json!({"__typename": "Repository", "id": "R_x",
                "issueOrPullRequest": pull("PR_5", 2, "main")}),
-        json!({"__typename": "AddCommentPayload", "comment": {"__typename": "IssueComment", "id": "C_1", "body": "Reproduced"}}),
         json!({"__typename": "Repository", "id": "R_x",
-               "issue": {"__typename": "Issue", "id": "I_2", "comments": {"__typename": "IssueCommentConnection", "totalCount": 3, "nodes": [
-                   {"__typename": "IssueComment", "id": "C_9", "body": "Made up"}]}}}),
+               "issue": {"__typename": "Issue", "id": "I_1", "comments": {"__typename": "IssueCommentConnection", "totalCount": 1, "nodes": [
+                   {"__typename": "IssueComment", "id": "C_5", "body": "Older", "createdAt": "2024-01-01T00:00:00Z"}]}}}),
+        json!({"__typename": "AddCommentPayload", "commentEdge": {"__typename": "IssueCommentEdge", "node": {"__typename": "IssueComment"}}}),
+        json!({"__typename": "Repository", "id": "R_x",
+               "issue": {"__typename": "Issue", "id": "I_2", "comments": {"__typename": "IssueCommentConnection", "totalCount": 0, "nodes": []}}}),
         json!({"__typename": "CloseIssuePayload", "issue": {"__typename": "Issue", "id": "I_2", "state": "CLOSED"}}),
         repo(vec![issue("I_2", 2, "Created", "OPEN")]),
         json!({"__typename": "Repository", "id": "R_x", "closed": {"__typename": "IssueConnection", "totalCount": 0, "nodes": []},
@@ -194,18 +198,29 @@ async fn nested_fields_answer_from_state() {
 
     gql(
         &base,
-        r#"mutation { addComment(input: {subjectId: "I_2", body: "Reproduced"}) { comment { id } } }"#,
+        r#"{ repository(owner: "o", name: "r") { issue(number: 1) { id
+            comments(first: 10) { nodes { id body createdAt } } } } }"#,
+    )
+    .await;
+    gql(
+        &base,
+        // gh selects no id of the comment it adds, two objects down.
+        r#"mutation { addComment(input: {subjectId: "I_2", body: "Reproduced"}) {
+            commentEdge { node { __typename } } } }"#,
     )
     .await;
     let comments = gql(
         &base,
         r#"{ repository(owner: "o", name: "r") { issue(number: 2) { id
-            comments(first: 10) { totalCount nodes { id body } } } } }"#,
+            comments(first: 10) { totalCount nodes { id body createdAt } } } } }"#,
     )
     .await;
     let comments = &comments["repository"]["issue"]["comments"];
     assert_eq!(comments["totalCount"], 1, "{comments}");
     assert_eq!(comments["nodes"][0]["body"], "Reproduced");
+    // What the comment does not hold is drawn from another stored comment's
+    // scalars, not the faker's words.
+    assert_eq!(comments["nodes"][0]["createdAt"], "2024-01-01T00:00:00Z");
 
     gql(
         &base,
@@ -279,6 +294,78 @@ async fn stored_edges_page_with_cursors() {
     assert_eq!(prs["pageInfo"]["hasNextPage"], false);
 }
 
+/// A repository read without its id still holds what is listed under it:
+/// gh's `issue list` selects no `repository { id }`.
+#[tokio::test]
+async fn a_record_read_without_its_id_keeps_its_list() {
+    let list =
+        r#"{ repository(owner: "o", name: "r") { issues(first: 10) { nodes { id number } } } }"#;
+    let repo = |issues: Vec<Value>| json!({"__typename": "Repository", "issues": {"__typename": "IssueConnection", "totalCount": issues.len(), "nodes": issues}});
+    let base = serve(vec![
+        repo(vec![issue("I_1", 1, "Seeded", "OPEN")]),
+        json!({"__typename": "Repository", "id": "R_generated"}),
+        json!({"__typename": "CreateIssuePayload", "issue": issue("I_2", 2, "Created", "OPEN")}),
+        repo(vec![issue("I_7", 7, "Made up", "OPEN")]),
+    ])
+    .await;
+    gql(&base, list).await;
+    let repo_id = gql(&base, r#"{ repository(owner: "o", name: "r") { id } }"#).await;
+    let repo_id = repo_id["repository"]["id"].as_str().unwrap().to_string();
+    assert_ne!(repo_id, "R_generated");
+    gql_with(
+        &base,
+        &format!(
+            r#"mutation {{ createIssue(input: {{repositoryId: "{repo_id}", title: "Created"}}) {{ issue {{ id }} }} }}"#
+        ),
+        &[("x-mockingbird-seed", "1")],
+    )
+    .await;
+    let listed = gql(&base, list).await;
+    let mut ids: Vec<&str> = listed["repository"]["issues"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["I_1", "I_2"], "{listed}");
+}
+
+/// Items listed without their ids (gh's `issue list`) are stored under
+/// their parent by their lookup key (`number`), once each.
+#[tokio::test]
+async fn items_listed_without_ids_are_stored_by_their_lookup_keys() {
+    let list = r#"{ repository(owner: "o", name: "r") { id issues(first: 10) { nodes { number title } } } }"#;
+    let untitled =
+        |n: u64, title: &str| json!({"__typename": "Issue", "number": n, "title": title});
+    let repo = |issues: Vec<Value>| json!({"__typename": "Repository", "id": "R_1", "issues": {"__typename": "IssueConnection", "totalCount": issues.len(), "nodes": issues}});
+    let base = serve(vec![
+        repo(vec![untitled(1, "One"), untitled(2, "Two")]),
+        repo(vec![untitled(5, "Made up")]),
+        json!({"__typename": "Repository", "id": "R_1", "issue": untitled(9, "Made up")}),
+    ])
+    .await;
+    gql(&base, list).await;
+    let again = gql(&base, list).await;
+    let titles: Vec<&str> = again["repository"]["issues"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles.len(), 2, "{again}");
+    assert!(
+        titles.contains(&"One") && titles.contains(&"Two"),
+        "{again}"
+    );
+    let one = gql(
+        &base,
+        r#"{ repository(owner: "o", name: "r") { id issue(number: 2) { number title } } }"#,
+    )
+    .await;
+    assert_eq!(one["repository"]["issue"]["title"], "Two", "{one}");
+}
+
 const SHOP: &str = r#"
 interface Node { id: ID! }
 type Product implements Node { id: ID! handle: String! title: String! }
@@ -302,7 +389,10 @@ async fn a_listed_connection_item_is_read_back_by_its_arguments() {
                 {"__typename": "ProductEdge", "cursor": "a", "node": product("P_1", "tee", "Organic tee")},
                 {"__typename": "ProductEdge", "cursor": "b", "node": product("P_2", "mug", "Mug")}]}),
             product("P_9", "tee", "Made up"),
+            product("P_7", "tee", "Made up again"),
             product("P_8", "other", "Made up too"),
+            // Another real product's id, answered for the handle "tee".
+            product("P_2", "tee", "Made up"),
         ],
     )
     .await;
@@ -316,9 +406,20 @@ async fn a_listed_connection_item_is_read_back_by_its_arguments() {
         by_handle["product"],
         json!({"id": "P_1", "title": "Organic tee"})
     );
+    // The answer the engine stored for that read is gone, so a later read
+    // is not taken by it either.
+    let again = gql(&base, r#"{ product(handle: "tee") { id title } }"#).await;
+    assert_eq!(
+        again["product"],
+        json!({"id": "P_1", "title": "Organic tee"})
+    );
     let by_id = gql(&base, r#"{ product(id: "P_2") { id handle title } }"#).await;
     assert_eq!(
         by_id["product"],
         json!({"id": "P_2", "handle": "mug", "title": "Mug"})
     );
+    gql(&base, r#"{ product(handle: "tee") { id title } }"#).await;
+    // P_2 is a record of its own, not a copy of P_1: it stays.
+    let held = gql(&base, r#"{ product(id: "P_2") { id } }"#).await;
+    assert_eq!(held["product"], json!({"id": "P_2"}));
 }
