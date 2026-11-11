@@ -1207,9 +1207,9 @@ pub struct FileMock {
     /// others read, by type name and identity.
     #[serde(default)]
     pub shares: Option<String>,
-    /// Validate requests strictly even when the contract was inferred by the smart
-    /// import (from documentation pages), whose request schemas are guesses and are
-    /// otherwise validated leniently.
+    /// Validate requests strictly: refuse a member the request schema does not
+    /// declare, which is otherwise let through, and validate a contract the smart
+    /// import inferred (whose request schemas are guesses, see `mb_mcm::Bundle::inferred`) as any other.
     #[serde(default)]
     pub strict_requests: bool,
     /// Host names the mock answers for (by `Host`); empty answers for any

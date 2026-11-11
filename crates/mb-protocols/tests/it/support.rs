@@ -426,6 +426,23 @@ impl DescribedHarness {
         send_to(&self.router, req).await
     }
 
+    /// Sends one REST request with `body` as is, sent as `content_type`.
+    #[allow(dead_code, reason = "used by `it`, not by the exec test binaries")]
+    pub async fn send_raw(
+        &self,
+        (method, uri): (&str, &str),
+        body: &str,
+        content_type: &str,
+    ) -> axum::http::StatusCode {
+        let req = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", content_type)
+            .body(axum::body::Body::from(body.to_owned()))
+            .unwrap();
+        send_to(&self.router, req).await.0
+    }
+
     /// The ids of the records of type `t` stored in the default session. Only
     /// `tests/exec.rs` uses it; `tests/it` includes this module too.
     #[allow(dead_code)]
