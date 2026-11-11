@@ -59,12 +59,16 @@ type Mutation {
 "#;
 
 async fn serve(script: Vec<Value>) -> String {
+    serve_sdl(SDL, script).await
+}
+
+async fn serve_sdl(sdl: &str, script: Vec<Value>) -> String {
     let provider = Arc::new(ScriptedProvider::new(
         script.into_iter().map(|v| Ok(v.to_string())).collect(),
     ));
     let rt = MockRuntime::new(
         "gh",
-        Arc::new(compile(SDL.as_bytes()).unwrap()),
+        Arc::new(compile(sdl.as_bytes()).unwrap()),
         Arc::new(Engine::new(
             Some(provider as Arc<dyn Provider>),
             EngineConfig::default(),
@@ -230,4 +234,48 @@ async fn nested_fields_answer_from_state() {
     // No pull request is stored yet: the generated one is kept unless the
     // filter rules it out, as here.
     assert_eq!(closed["repository"]["prs"]["edges"], json!([]), "{closed}");
+}
+
+const SHOP: &str = r#"
+interface Node { id: ID! }
+type Product implements Node { id: ID! handle: String! title: String! }
+type ProductEdge { cursor: String! node: Product! }
+type ProductConnection { edges: [ProductEdge!]! }
+type Query {
+  products(first: Int, query: String): ProductConnection!
+  product(id: ID, handle: String): Product
+}
+"#;
+
+/// A product listed under `edges[].node` is the one a later read by its
+/// handle or by its id answers (nextjs-commerce's storefront).
+#[tokio::test]
+async fn a_listed_connection_item_is_read_back_by_its_arguments() {
+    let product = |id: &str, handle: &str, title: &str| json!({"__typename": "Product", "id": id, "handle": handle, "title": title});
+    let base = serve_sdl(
+        SHOP,
+        vec![
+            json!({"__typename": "ProductConnection", "edges": [
+                {"__typename": "ProductEdge", "cursor": "a", "node": product("P_1", "tee", "Organic tee")},
+                {"__typename": "ProductEdge", "cursor": "b", "node": product("P_2", "mug", "Mug")}]}),
+            product("P_9", "tee", "Made up"),
+            product("P_8", "other", "Made up too"),
+        ],
+    )
+    .await;
+    gql(
+        &base,
+        r#"{ products(first: 2) { edges { node { id handle title } } } }"#,
+    )
+    .await;
+    let by_handle = gql(&base, r#"{ product(handle: "tee") { id title } }"#).await;
+    assert_eq!(
+        by_handle["product"],
+        json!({"id": "P_1", "title": "Organic tee"})
+    );
+    let by_id = gql(&base, r#"{ product(id: "P_2") { id handle title } }"#).await;
+    assert_eq!(
+        by_id["product"],
+        json!({"id": "P_2", "handle": "mug", "title": "Mug"})
+    );
 }

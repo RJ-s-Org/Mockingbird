@@ -284,8 +284,12 @@ impl Walk<'_> {
         }
         match shape(self.bundle, schema) {
             Shape::One(types) => {
+                // The engine may have stored this very answer already: it
+                // is not the record the arguments name.
+                let generated = generated_id(value, sel);
                 if !sel.args.is_empty()
-                    && let Some((ty, record)) = self.find(&types, &sel.args, parent)
+                    && let Some((ty, record)) =
+                        self.find(&types, &sel.args, parent, generated.as_deref())
                 {
                     let base = Some(&*value).filter(|v| typename_is(v, &ty));
                     *value = self.render(&ty, &record, sel, base);
@@ -400,9 +404,13 @@ impl Walk<'_> {
         types: &[String],
         args: &Map<String, Value>,
         parent: Option<&Parent>,
+        generated: Option<&str>,
     ) -> Option<(String, StoredResource)> {
         for ty in types {
             for record in self.held.get(ty).into_iter().flatten() {
+                if generated == Some(record.id.as_str()) {
+                    continue;
+                }
                 if parent.is_some_and(|p| !self.loosely_under(record, p)) {
                     continue;
                 }
@@ -659,6 +667,16 @@ fn overlay(out: &mut Map<String, Value>, data: &Value, sel: &Selection) {
             }
         }
     }
+}
+
+/// The id of the generated object `value` (keyed by `sel`'s response keys).
+fn generated_id(value: &Value, sel: &Selection) -> Option<String> {
+    let key = sel
+        .fields
+        .iter()
+        .find(|(_, c)| c.name == "id")
+        .map_or("id", |(k, _)| k.as_str());
+    value.get(key)?.as_str().map(str::to_string)
 }
 
 /// Whether `value` (an object) is untagged or tagged `ty`.
