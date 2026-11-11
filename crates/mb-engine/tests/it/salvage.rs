@@ -479,3 +479,17 @@ async fn a_root_member_left_out_is_repaired() {
     assert_eq!(out.source, Source::Repaired);
     assert_eq!(provider.requests().len(), 2);
 }
+
+/// An item holding none of its schema's members (here each order wrapped in its
+/// own member) is the wrong shape, not an oversight: it is repaired, never filled.
+#[tokio::test]
+async fn a_wrapped_item_is_repaired_not_filled() {
+    let (provider, engine) = scripted(vec![
+        Ok(json!([{"order": valid_order()}]).to_string()),
+        Ok(json!([valid_order()]).to_string()),
+    ]);
+    let out = generate(&engine, "listOrders").await;
+    assert_eq!(out.source, Source::Repaired);
+    assert_eq!(provider.requests().len(), 2);
+    assert_eq!(out.body.unwrap()[0]["customerId"], json!("c1"));
+}

@@ -409,7 +409,8 @@ impl Engine {
             Checked::Invalid(errors) => {
                 let target = wrapped(validator, &value).cloned().unwrap_or(value);
                 if !answers_root(validator, &target)
-                    || (fill_missing == Missing::Nested && validator.lacks_root_member(&target))
+                    || (fill_missing == Missing::Nested
+                        && !validator.lacks_only_nested_members(&target))
                 {
                     return Checked::Invalid(errors);
                 }
@@ -1606,9 +1607,11 @@ fn unwrap_items(validator: &SchemaValidator, value: Value) -> Value {
 /// Which missing required members [`Engine::check_answer`] fills with the faker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Missing {
-    /// Those of nested objects (an item, a member's object), when the root
-    /// lacks none: a root lacking a member is more likely the wrong shape (a
-    /// wrapper, an object for an array) than an oversight, so it is repaired.
+    /// Those of nested objects (an item, a member's object) that hold at least
+    /// one member their schema declares, when the root lacks none: a root or an
+    /// object lacking a member and holding none of its own is more likely the
+    /// wrong shape (a wrapper, an object for an array, another resource) than an
+    /// oversight, so it is repaired.
     Nested,
     /// Every one: what a cut answer lost.
     All,
