@@ -287,6 +287,56 @@ async fn patch_limits_null_clears() {
 }
 
 #[tokio::test]
+async fn a_mock_bound_to_hosts_is_mounted_at_the_root_unless_it_names_a_prefix() {
+    let h = harness().await;
+    // Created with hosts and no prefix: the proxy forwards the app's own paths.
+    let (s, body) = h
+        .send(
+            Method::POST,
+            "/api/v1/mocks",
+            Some(json!({"name": "slack", "hosts": ["hooks.slack.test"]})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    assert_eq!(body["route_prefix"], "/", "{body}");
+    // Without hosts it keeps `/<name>`; binding it to hosts later moves it to the root.
+    let (s, body) = h
+        .send(Method::POST, "/api/v1/mocks", Some(json!({"name": "ops"})))
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    assert_eq!(body["route_prefix"], "/ops", "{body}");
+    let (s, body) = h.patch("ops", json!({"hosts": ["api.ops.test"]})).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["route_prefix"], "/", "{body}");
+    // A prefix the caller names is kept, given with the hosts or set before them.
+    let (s, body) = h
+        .send(
+            Method::POST,
+            "/api/v1/mocks",
+            Some(json!({"name": "tg", "route_prefix": "/tg"})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    let (s, body) = h
+        .patch(
+            "tg",
+            json!({"hosts": ["api.tg.test"], "route_prefix": "/bot"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["route_prefix"], "/bot", "{body}");
+    let (s, body) = h
+        .send(
+            Method::POST,
+            "/api/v1/mocks",
+            Some(json!({"name": "gh", "route_prefix": "/api", "hosts": ["api.gh.test"]})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    assert_eq!(body["route_prefix"], "/api", "{body}");
+}
+
+#[tokio::test]
 async fn hosts_let_mocks_share_a_prefix() {
     let h = harness().await;
     let create =

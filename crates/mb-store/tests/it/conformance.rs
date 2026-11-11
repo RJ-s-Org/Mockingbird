@@ -112,6 +112,7 @@ macro_rules! conformance_checks {
             world_revisions_go_with_the_mock,
             a_world_revision_on_the_active_version_publishes_a_mock_change,
             a_world_revision_on_an_inactive_version_publishes_nothing,
+            a_mock_bound_to_hosts_defaults_to_the_root_prefix,
         }
     };
 }
@@ -136,6 +137,31 @@ fn new_mock(name: &str) -> NewMock {
         hosts: vec![],
         webhooks: vec![],
     }
+}
+
+pub(crate) async fn a_mock_bound_to_hosts_defaults_to_the_root_prefix(
+    store: &Arc<dyn ControlStore>,
+) {
+    let mut hosted = new_mock("hosted");
+    hosted.hosts = vec!["api.hosted.test".into()];
+    let m = store
+        .create_mock(DEFAULT_WORKSPACE, hosted)
+        .await
+        .expect("hosted");
+    assert_eq!(m.route_prefix, "/");
+    let m = store
+        .create_mock(DEFAULT_WORKSPACE, new_mock("plain"))
+        .await
+        .expect("plain");
+    assert_eq!(m.route_prefix, "/plain");
+    let mut named = new_mock("named");
+    named.hosts = vec!["api.named.test".into()];
+    named.route_prefix = Some("/v1".into());
+    let m = store
+        .create_mock(DEFAULT_WORKSPACE, named)
+        .await
+        .expect("named");
+    assert_eq!(m.route_prefix, "/v1");
 }
 
 pub(crate) async fn mock_webhooks_round_trip(store: &Arc<dyn ControlStore>) {

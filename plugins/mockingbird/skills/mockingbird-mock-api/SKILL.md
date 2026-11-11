@@ -38,7 +38,7 @@ After every import (and every `approve_draft`), call `get_world {mock, version}`
 
 To point a real app at mocks without editing its code or base URLs:
 
-1. Give the mock the host the app calls: `hosts: [api.example.com]` under `mocks.<name>` in `mockingbird.yaml` (or `update_mock`).
+1. Give the mock the host the app calls: `hosts: [api.example.com]` under `mocks.<name>` in `mockingbird.yaml` (or `update_mock`). A mock bound to hosts is mounted at `/` unless it names a `route_prefix`, since the proxy forwards the app's own paths; set one only when the API lives below a path on its host.
 2. Start the server with the proxy: `start_server {config: "mockingbird.yaml", proxy: true}` (CLI `mockingbird server start --proxy -c mockingbird.yaml`).
 3. Export the variables `proxy_env` returns (its `export` field) in the shell that runs the app (CLI `eval "$(mockingbird proxy env)"`). They route HTTP(S) through the proxy and make the app trust Mockingbird's local CA; calls to the mocked hosts are answered by the mock, others pass through.
 

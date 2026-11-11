@@ -408,7 +408,7 @@ impl MockView {
 pub struct CreateMock {
     /// `^[a-z0-9][a-z0-9-]{0,62}$`
     pub name: String,
-    /// Defaults to `/<name>`.
+    /// Defaults to `/<name>`, or `/` when `hosts` is given.
     pub route_prefix: Option<String>,
     pub persona: Option<String>,
     pub llm_profile: Option<String>,
@@ -605,7 +605,7 @@ pub async fn create(
     Json(body): Json<CreateMock>,
 ) -> ApiResult<impl IntoResponse> {
     access.require(Permission::Edit)?;
-    // The name first: a duplicate's default prefix `/<name>` is taken too,
+    // The name first: a duplicate's default prefix (`/<name>`, `/` with hosts) is taken too,
     // and the name is the conflict the caller needs to hear about.
     if st.store.get_mock(&access.ws, &body.name).await?.is_some() {
         return Err(mock_exists(&access.ws, &body.name));
@@ -613,7 +613,7 @@ pub async fn create(
     let prefix = body
         .route_prefix
         .clone()
-        .unwrap_or_else(|| format!("/{}", body.name));
+        .unwrap_or_else(|| mb_store::default_route_prefix(&body.name, &body.hosts));
     validate_hosts(&body.hosts)?;
     check_webhooks(&body.webhooks, &st.api_webhook_secret_refs)?;
     ensure_route_free(&st, &prefix, &body.hosts, None).await?;
@@ -710,7 +710,7 @@ pub async fn patch(
     State(st): State<AdminState>,
     access: WsAccess,
     Path(MockPath { mock }): Path<MockPath>,
-    Json(body): Json<PatchMock>,
+    Json(mut body): Json<PatchMock>,
 ) -> ApiResult<Json<MockView>> {
     access.require(Permission::Edit)?;
     let mut m = st.mock(&access.ws, &mock).await?;
@@ -726,6 +726,15 @@ pub async fn patch(
     }
     if let Some(prefix) = &body.route_prefix {
         validate_route_prefix(prefix)?;
+    }
+    // A mock at its default prefix that is bound to hosts for the first time moves to
+    // the prefix a mock created with them takes.
+    if body.route_prefix.is_none()
+        && let Some(hosts) = &body.hosts
+        && m.hosts.is_empty()
+        && m.route_prefix == mb_store::default_route_prefix(&m.name, &[])
+    {
+        body.route_prefix = Some(mb_store::default_route_prefix(&m.name, hosts));
     }
     if body.route_prefix.is_some() || body.hosts.is_some() {
         let prefix = body.route_prefix.as_deref().unwrap_or(&m.route_prefix);

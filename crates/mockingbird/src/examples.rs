@@ -596,10 +596,7 @@ mod tests {
             let text = example.file("mockingbird.yaml").unwrap();
             let cfg: crate::file_config::FileConfig = serde_saphyr::from_str(text).unwrap();
             for (name, mock) in &cfg.mocks {
-                let prefix = mock
-                    .route_prefix
-                    .clone()
-                    .unwrap_or_else(|| format!("/{name}"));
+                let prefix = mock.effective_prefix(name);
                 for (other, other_prefix, other_hosts) in &mocks {
                     assert!(
                         !mb_store::routes_collide(&prefix, &mock.hosts, other_prefix, other_hosts),

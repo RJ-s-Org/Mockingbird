@@ -399,14 +399,15 @@ fn proxy_env_prints_exports_and_json() {
 }
 
 /// Serves an app with the `orders` mock on `host` (proxy disabled): data
-/// plane and admin port on ephemeral ports.
+/// plane and admin port on ephemeral ports. The config names no `route_prefix`:
+/// a mock bound to hosts is mounted at `/`, where the proxy forwards the app's paths.
 async fn serve_hosted_app(host: &str) -> (String, String, watch::Sender<bool>, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("mockingbird.yaml");
     std::fs::write(
         &cfg,
         format!(
-            "storage:\n  url: \"sqlite::memory:\"\nmocks:\n  orders:\n    contract: {}\n    route_prefix: /\n    hosts: [{host}]\n",
+            "storage:\n  url: \"sqlite::memory:\"\nmocks:\n  orders:\n    contract: {}\n    hosts: [{host}]\n",
             fixture("openapi/orders-3.0.yaml").display()
         ),
     )
