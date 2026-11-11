@@ -22,7 +22,7 @@ input CreateIssueInput { repositoryId: ID! title: String! milestoneId: ID }
 input CloseIssueInput { issueId: ID! milestoneId: ID }
 type CreateIssuePayload { issue: Issue }
 type CloseIssuePayload { issue: Issue }
-type Query { repository(owner: String!, name: String!): Repository issue(id: ID!): Issue }
+type Query { repository(owner: String!, name: String!): Repository node(id: ID!): Issue }
 type Mutation {
   createIssue(input: CreateIssueInput!): CreateIssuePayload
   closeIssue(input: CloseIssueInput!): CloseIssuePayload
@@ -51,7 +51,7 @@ async fn an_executor_create_is_linked_to_the_record_its_id_argument_names() {
         "version": 1,
         "types": {"issue": {"identity": {"member": "id"}, "lifecycle": {"member": "state", "states": ["OPEN", "CLOSED"], "initial": "OPEN"}}},
         "operations": {
-            "Query.issue": {"kind": "read", "type": "issue", "target": {"member": "id"}},
+            "Query.node": {"kind": "read", "type": "issue", "target": {"member": "id"}},
             "Mutation.createIssue": {"kind": "create", "type": "issue", "answer": {"record": "/issue"}},
             "Mutation.closeIssue": {"kind": "action", "type": "issue",
                 "target": {"member": "input.issueId"}, "transition": {"state": "CLOSED"},
@@ -87,13 +87,17 @@ async fn an_executor_create_is_linked_to_the_record_its_id_argument_names() {
         )
         .await
         .unwrap();
+    let bundle = compile(SDL.as_bytes()).unwrap();
+    let base_world = mb_mcm::world::tier0(&bundle);
+    let (world, refused) = mb_mcm::world::effective(&bundle, &base_world, &world);
+    assert!(refused.is_empty(), "{refused:?}");
     let rt = MockRuntime::new(
         "gh",
-        Arc::new(compile(SDL.as_bytes()).unwrap()),
+        Arc::new(bundle),
         Arc::new(Engine::new(None, EngineConfig::default())),
         Arc::clone(&store),
     )
-    .with_world(&world, &world, 1);
+    .with_world(&base_world, &world, 1);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let router = graphql::try_router(Arc::new(rt)).unwrap();
