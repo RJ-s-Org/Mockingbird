@@ -321,11 +321,8 @@ fn ci_gates_present() {
         "protocol-features",
         "cargo check -p mockingbird-cli --no-default-features"
     ));
-    // Pull requests cancel superseded runs; main runs always finish.
-    assert_eq!(
-        scalar(&doc["concurrency"]["cancel-in-progress"]),
-        "${{ github.event_name == 'pull_request' }}"
-    );
+    // A newer push cancels the run it supersedes, on pull requests and on main.
+    assert_eq!(scalar(&doc["concurrency"]["cancel-in-progress"]), "true");
 
     assert!(runs("helm", "scripts/check-helm.sh"));
     assert!(runs("semver", "scripts/semver-check.sh"));
