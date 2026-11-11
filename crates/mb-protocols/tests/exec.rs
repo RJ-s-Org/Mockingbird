@@ -4395,7 +4395,7 @@ paths:
   /carts:
     post:
       operationId: createCart
-      requestBody: {content: {application/json: {schema: {type: object, properties: {currency: {type: string}, line_items: {type: array, items: {type: object, properties: {price: {type: string}, quantity: {type: integer}}}}}}}}}
+      requestBody: {content: {application/json: {schema: {type: object, properties: {currency: {type: string}, tags: {type: object}, line_items: {type: array, items: {type: object, properties: {price: {type: string}, quantity: {type: integer}}}}}}}}}
       responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Cart"}}}}}
   /carts/{id}:
     get:
@@ -4504,6 +4504,7 @@ components:
         id: {type: string}
         version: {type: integer}
         currency: {type: string}
+        tags: {type: array, items: {type: string}}
         line_items: {type: object, properties: {object: {type: string, enum: [list]}, data: {type: array, items: {type: object, properties: {price: {type: string}, quantity: {type: integer}}}}}}
     Workspace:
       type: object
@@ -4694,7 +4695,7 @@ async fn a_list_sent_for_a_member_the_reads_hold_as_an_object_is_filled_not_refu
     let listed = json!({"object": "list", "data": [{"price": "p1", "quantity": 2}]});
     let h = support::harness(
         SERVER_SET,
-        vec![json!({"line_items": listed})],
+        vec![json!({"line_items": listed, "tags": []})],
         &HarnessOptions::default(),
         |rt| rt,
     );
@@ -4707,6 +4708,25 @@ async fn a_list_sent_for_a_member_the_reads_hold_as_an_object_is_filled_not_refu
         vec![create_line("createCart", None)]
     );
     assert_eq!(body["line_items"], listed, "{body}");
+}
+
+#[tokio::test]
+async fn an_object_sent_for_a_member_the_reads_hold_as_a_list_is_filled_not_refused() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(
+        SERVER_SET,
+        vec![json!({"tags": ["gift"], "line_items": {"object": "list", "data": []}})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let sent = json!({"currency": "EUR", "tags": {"gift": true}});
+    let (status, _, body) = h.send("POST", "/carts", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        capture.of("createCart"),
+        vec![create_line("createCart", None)]
+    );
+    assert_eq!(body["tags"], json!(["gift"]), "{body}");
 }
 
 #[tokio::test]

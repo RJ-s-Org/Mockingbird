@@ -42,7 +42,9 @@
 //!   the member, [`initial`]) and the tokens' first values ([`initial_token`]) are set
 //!   before fill, and a member named for a path parameter is the record it names
 //!   ([`path_references`]). A request member of another JSON type than the reads hold
-//!   is converted where nothing is lost ([`converted`]), else left for the gate.
+//!   is converted where nothing is lost ([`converted`]); a list where the reads hold
+//!   an object, or the reverse, is left out for fill ([`other_container`]); anything
+//!   else is left for the gate.
 //! - Before it is stored, the record is checked against every read of its type
 //!   ([`read_schemas`]), as those reads render it: one a read would not render (a
 //!   reference where the read holds an object, an array item lacking a required id)
