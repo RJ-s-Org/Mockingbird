@@ -44,14 +44,12 @@ pub const LEADER_LOCK: &str = "control";
 #[derive(Parser, Debug)]
 #[command(name = "mockingbird", version, about = "LLM-backed mock endpoints")]
 pub struct Cli {
-    /// Admin API base URL used by the client subcommands.
-    #[arg(
-        long,
-        global = true,
-        env = "MB_ADMIN_URL",
-        default_value = crate::client::DEFAULT_ADMIN_URL
-    )]
-    pub admin_url: String,
+    /// Admin API base URL used by the client subcommands [default: the
+    /// admin listener (`server.admin_port`, `server.host`, with MB_ADMIN_PORT
+    /// and MB_HOST applied) of `doctor -c`/`proxy -c`, else of
+    /// ./mockingbird.yaml when it exists, else http://127.0.0.1:9090].
+    #[arg(long, global = true, env = "MB_ADMIN_URL")]
+    pub admin_url: Option<String>,
     /// Bearer token (an API key) the client subcommands send to the Admin
     /// API.
     #[arg(long, global = true, env = "MB_ADMIN_TOKEN", hide_env_values = true)]
@@ -67,6 +65,23 @@ pub struct Cli {
     pub workspace: String,
     #[command(subcommand)]
     pub cmd: Command,
+}
+
+impl Cli {
+    /// The Admin API URL the command talks to (see
+    /// [`crate::client::resolve_admin_url`]): `--admin-url` or
+    /// `MB_ADMIN_URL`, else the admin listener of the command's
+    /// `-c/--config` (`doctor`, `proxy`), else of `./mockingbird.yaml`,
+    /// else [`crate::client::DEFAULT_ADMIN_URL`].
+    #[must_use]
+    pub fn resolved_admin_url(&self) -> String {
+        let config = match &self.cmd {
+            Command::Doctor(args) => args.config.as_deref(),
+            Command::Proxy(args) if args.cmd.is_none() => args.run.config.as_deref(),
+            _ => None,
+        };
+        crate::client::resolve_admin_url(self.admin_url.as_deref(), config)
+    }
 }
 
 /// A parsed command line: a [`Cli`] command, or one of the
@@ -160,8 +175,7 @@ where
     };
     let global = |id: &str| matches.get_one::<String>(id).cloned();
     Ok(Invocation::Workflow {
-        admin_url: global("admin_url")
-            .unwrap_or_else(|| crate::client::DEFAULT_ADMIN_URL.to_string()),
+        admin_url: crate::client::resolve_admin_url(global("admin_url").as_deref(), None),
         token: global("token"),
         workspace: global("workspace").unwrap_or_else(|| mb_store::DEFAULT_WORKSPACE.to_string()),
         cmd,

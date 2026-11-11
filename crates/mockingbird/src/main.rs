@@ -54,6 +54,7 @@ async fn run(invocation: Invocation) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    let admin_url = cli.resolved_admin_url();
     let result = match cli.cmd {
         Command::Run(args) => {
             return match mockingbird::run::run(args).await {
@@ -71,15 +72,14 @@ async fn run(invocation: Invocation) -> ExitCode {
         Command::Validate { contract } => validate(&contract),
         Command::Openapi => openapi(),
         Command::Init(args) => print_json(onboard::init(&args)),
-        Command::Llm(cmd) => llm(&cli.admin_url, cli.token.as_deref(), &cli.workspace, cmd).await,
+        Command::Llm(cmd) => llm(&admin_url, cli.token.as_deref(), &cli.workspace, cmd).await,
         Command::Server(cmd) => server_cmd(cmd).await,
-        Command::Doctor(args) => print_json(Ok(daemon::doctor(
-            &args,
-            &cli.admin_url,
-            cli.token.as_deref(),
-        )
-        .await)),
-        Command::Mcp(args) => mcp::run(args, &cli.admin_url, cli.token.as_deref(), &cli.workspace)
+        Command::Doctor(args) => {
+            print_json(Ok(
+                daemon::doctor(&args, &admin_url, cli.token.as_deref()).await
+            ))
+        }
+        Command::Mcp(args) => mcp::run(args, &admin_url, cli.token.as_deref(), &cli.workspace)
             .await
             .map_err(Failure::Other),
         Command::Agent(cmd) => print_json(match cmd {
@@ -87,7 +87,7 @@ async fn run(invocation: Invocation) -> ExitCode {
             AgentCommand::Print { client } => Ok(agents::print(client)),
             AgentCommand::Skills { dir } => agents::skills(&dir),
         }),
-        Command::Proxy(args) => mockingbird::proxy::run(args, &cli.admin_url)
+        Command::Proxy(args) => mockingbird::proxy::run(args, &admin_url)
             .await
             .map_err(Failure::Other),
         Command::Ca(cmd) => mockingbird::proxy::ca_command(cmd).map_err(Failure::Other),
@@ -95,19 +95,16 @@ async fn run(invocation: Invocation) -> ExitCode {
             print_json(mockingbird::keys::setup(&args).await)
         }
         Command::Snapshot(cmd) => print_json(
-            mockingbird::snapshot::run(&cli.admin_url, cli.token.as_deref(), &cli.workspace, cmd)
-                .await,
+            mockingbird::snapshot::run(&admin_url, cli.token.as_deref(), &cli.workspace, cmd).await,
         ),
-        Command::Report(args) => report(&cli.admin_url, cli.token.as_deref(), &cli.workspace, args)
+        Command::Report(args) => report(&admin_url, cli.token.as_deref(), &cli.workspace, args)
             .await
             .map_err(Failure::Other),
         Command::Verify(args) => {
-            verify(&cli.admin_url, cli.token.as_deref(), &cli.workspace, args).await
+            verify(&admin_url, cli.token.as_deref(), &cli.workspace, args).await
         }
         Command::Examples(cmd) => print_json(mockingbird::examples::run(cmd).await),
-        Command::Client(cmd) => {
-            client(&cli.admin_url, cli.token.as_deref(), &cli.workspace, cmd).await
-        }
+        Command::Client(cmd) => client(&admin_url, cli.token.as_deref(), &cli.workspace, cmd).await,
     };
     exit_code(result)
 }
