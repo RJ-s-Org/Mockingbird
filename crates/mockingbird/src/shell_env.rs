@@ -68,8 +68,24 @@ pub unsafe fn import() -> &'static [String] {
 fn login_env() -> Option<Vec<(String, String)>> {
     let shell = std::env::var_os("SHELL").filter(|s| !s.is_empty())?;
     let script = format!("printf '%s' {MARKER}; env -0; printf '%s' {MARKER}");
+    let (out, timed_out) = run_login_shell(&shell, &script, TIMEOUT)?;
+    if timed_out {
+        // Straight to stderr: this runs before `main` installs the tracing
+        // subscriber, which would drop the event.
+        eprintln!("{}", timeout_warning(TIMEOUT));
+    }
+    Some(parse(&out))
+}
+
+/// Runs `shell -l -i -c script` and returns its stdout, and whether it was
+/// killed for taking longer than `timeout`.
+fn run_login_shell(
+    shell: &std::ffi::OsStr,
+    script: &str,
+    timeout: Duration,
+) -> Option<(String, bool)> {
     let mut child = Command::new(shell)
-        .args(["-l", "-i", "-c", &script])
+        .args(["-l", "-i", "-c", script])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -82,15 +98,13 @@ fn login_env() -> Option<Vec<(String, String)>> {
         out
     });
     let start = Instant::now();
+    let mut timed_out = false;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) if start.elapsed() < TIMEOUT => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(20)),
             _ => {
-                tracing::warn!(
-                    timeout_secs = TIMEOUT.as_secs(),
-                    "the login shell did not print its environment in time: its variables (such as an LLM key a profile references) were not imported"
-                );
+                timed_out = true;
                 let _ = child.kill();
                 let _ = child.wait();
                 break;
@@ -98,7 +112,14 @@ fn login_env() -> Option<Vec<(String, String)>> {
         }
     }
     let out = reader.join().ok()?;
-    Some(parse(&String::from_utf8_lossy(&out)))
+    Some((String::from_utf8_lossy(&out).into_owned(), timed_out))
+}
+
+fn timeout_warning(timeout: Duration) -> String {
+    format!(
+        "warning: the login shell did not print its environment within {} seconds: its variables (such as an LLM key a profile references) were not imported",
+        timeout.as_secs()
+    )
 }
 
 /// The `NAME=value` pairs between the markers, valid names only.
@@ -149,5 +170,34 @@ mod tests {
         assert!(parse("A=1\0").is_empty());
         assert!(!valid_name("1A"));
         assert!(valid_name("_A1"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_past_the_deadline_is_killed_and_reported() {
+        let started = Instant::now();
+        let (out, timed_out) = run_login_shell(
+            std::ffi::OsStr::new("/bin/sh"),
+            "printf early; exec sleep 30",
+            Duration::from_millis(200),
+        )
+        .expect("/bin/sh runs");
+        assert!(timed_out);
+        assert!(parse(&out).is_empty(), "{out}");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "killed, not waited out"
+        );
+        assert!(timeout_warning(TIMEOUT).contains("within 15 seconds"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_within_the_deadline_is_read() {
+        let script = format!("printf '%s' {MARKER}; printf 'A=1'; printf '%s' {MARKER}");
+        let (out, timed_out) = run_login_shell(std::ffi::OsStr::new("/bin/sh"), &script, TIMEOUT)
+            .expect("/bin/sh runs");
+        assert!(!timed_out);
+        assert_eq!(parse(&out), vec![("A".to_string(), "1".to_string())]);
     }
 }
