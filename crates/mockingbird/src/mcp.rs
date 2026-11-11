@@ -38,6 +38,36 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "
 /// under the common 60 s tool-call timeout of agents.
 const KEY_PAGE_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 
+/// The header `call_mock` marks its request with, to find the call's request record.
+const CALL_HEADER: &str = "x-mockingbird-call";
+
+/// How long `call_mock` waits for its call's request record to be written.
+const CALL_RECORD_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The mock serving `path` on `host`: of `mocks` (the Admin API's list), the one with
+/// the longest route prefix `path` starts with, at a segment boundary, among those
+/// whose `hosts` hold `host` or that list none; at one prefix, a mock naming the host
+/// wins over one that serves every host, as on the data plane.
+fn mock_for_path(mocks: &Value, path: &str, host: &str) -> Option<String> {
+    mocks
+        .as_array()?
+        .iter()
+        .filter_map(|m| {
+            let prefix = m["route_prefix"].as_str()?.trim_end_matches('/');
+            let rest = path.strip_prefix(prefix)?;
+            let hosts: Vec<&str> = m["hosts"]
+                .as_array()
+                .map(|h| h.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            let named = hosts.iter().any(|h| h.eq_ignore_ascii_case(host));
+            ((rest.is_empty() || rest.starts_with('/') || rest.starts_with('?'))
+                && (named || hosts.is_empty()))
+            .then(|| ((prefix.len(), named), m["name"].as_str()))
+        })
+        .max_by_key(|(rank, _)| *rank)
+        .and_then(|(_, name)| name.map(String::from))
+}
+
 /// Largest body `call_mock` returns inline.
 const MAX_INLINE_BODY: usize = 64 * 1024;
 /// How many world gaps an import answer carries (`world_gaps_total` counts them all).
@@ -470,7 +500,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "update_mock",
             title: "Update a mock",
-            description: "PATCH a mock. Fields: route_prefix, persona, llm_profile, header_overrides, data_plane_auth {mode: none|api_key|passthrough_validate, header}, chaos {error_rate, latency_jitter {min_ms, max_ms}, drop_stream_rate} (null clears), limits, faker_seed (0 to 2^64-1; null clears). Only the given fields change.",
+            description: "PATCH a mock. Fields: route_prefix, persona, llm_profile, header_overrides, unknown_ids (generate|404: how a read of an id the session does not hold is answered), data_plane_auth {mode: none|api_key|passthrough_validate, header}, chaos {error_rate, latency_jitter {min_ms, max_ms}, drop_stream_rate} (null clears), limits, faker_seed (0 to 2^64-1; null clears). Only the given fields change.",
             schema: obj(
                 json!({ "name": mock(), "patch": o("Fields to change.") }),
                 &["name", "patch"],
@@ -806,7 +836,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "call_mock",
             title: "Call a mock",
-            description: "Send an HTTP request to the data plane (REST, GraphQL at <prefix>/graphql, SOAP) and return status, x-mockingbird-* headers and body. Override fields map to X-Mockingbird-* headers.",
+            description: "Send an HTTP request to the data plane (REST, GraphQL at <prefix>/graphql, SOAP) and return status, x-mockingbird-* headers and body, with `expr_failed` (the pointers of world expressions that failed in the call) when one did, or `expr_failed_unknown` when the call's request record could not be read. Override fields map to X-Mockingbird-* headers.",
             schema: obj(
                 json!({
                     "method": s("HTTP method; default GET."),
@@ -2088,6 +2118,9 @@ impl McpServer {
                 req = req.header(header, v.to_string());
             }
         }
+        // A mark only this call carries, so its request record can be found among others.
+        let call = uuid::Uuid::new_v4().to_string();
+        req = req.header(CALL_HEADER, call.as_str());
         req = match a.get("body") {
             None | Some(Value::Null) => req,
             Some(Value::String(text)) => req.body(text.clone()),
@@ -2112,13 +2145,77 @@ impl McpServer {
         let shown = &bytes[..bytes.len().min(MAX_INLINE_BODY)];
         let body = serde_json::from_slice::<Value>(shown)
             .unwrap_or_else(|_| json!(String::from_utf8_lossy(shown)));
-        Ok(json!({
+        let mut out = json!({
             "url": url,
             "status": status,
             "headers": headers,
             "body": body,
             "truncated": truncated,
-        }))
+        });
+        // Only a mock's answer has a request record (a router 404 or another server's
+        // answer carries no source).
+        if headers.contains_key("x-mockingbird-source") {
+            let host = a["headers"]
+                .as_object()
+                .and_then(|h| h.iter().find(|(k, _)| k.eq_ignore_ascii_case("host")))
+                .and_then(|(_, v)| v.as_str())
+                .map(|h| h.split(':').next().unwrap_or(h).to_string())
+                .or_else(|| reqwest::Url::parse(&url).ok()?.host_str().map(String::from))
+                .unwrap_or_default();
+            let session = opt_str(a, "session").unwrap_or_else(|| "default".into());
+            match self.expr_failed(path, &host, &session, &call).await {
+                Some(Value::Null) => {}
+                Some(failed) => out["expr_failed"] = failed,
+                None => out["expr_failed_unknown"] = json!(true),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The world expressions that failed in the call marked `call` to `path` on `host`
+    /// in `session`, as its request record lists them (`expr_failed`): `Some(Null)` when
+    /// none did, `None` when the record cannot be read (the mock is not found by its
+    /// route prefix, the Admin API is not reachable, or the record is not among the
+    /// session's newest within [`CALL_RECORD_WAIT`]: the request log is written in the
+    /// background).
+    async fn expr_failed(
+        &self,
+        path: &str,
+        host: &str,
+        session: &str,
+        call: &str,
+    ) -> Option<Value> {
+        let mocks = self.ws(Method::GET, &["mocks"], &[], None).await.ok()?;
+        let mock = mock_for_path(&mocks, path, host)?;
+        let deadline = tokio::time::Instant::now() + CALL_RECORD_WAIT;
+        loop {
+            let log = self
+                .ws(
+                    Method::GET,
+                    &["mocks", &mock, "requests"],
+                    &[("limit", "20".into()), ("session", session.to_string())],
+                    None,
+                )
+                .await
+                .ok()?;
+            let found = log
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|r| r["request"]["headers"][CALL_HEADER].as_str() == Some(call));
+            if let Some(record) = found {
+                return Some(
+                    record["request"]
+                        .get("expr_failed")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                );
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     /// Handles one JSON-RPC message; `None` for notifications and
@@ -2634,6 +2731,35 @@ mod tests {
     }
 
     const WS: &str = "/api/v1/workspaces/default";
+
+    #[test]
+    fn a_call_is_matched_to_the_mock_with_the_longest_prefix() {
+        let mocks = json!([
+            {"name": "root", "route_prefix": "/"},
+            {"name": "orders", "route_prefix": "/orders"},
+            {"name": "orders-v2", "route_prefix": "/orders/v2/"},
+        ]);
+        let at = |p: &str| mock_for_path(&mocks, p, "127.0.0.1");
+        assert_eq!(at("/orders/orders/1").as_deref(), Some("orders"));
+        assert_eq!(at("/orders/v2/items").as_deref(), Some("orders-v2"));
+        assert_eq!(at("/orders?x=1").as_deref(), Some("orders"));
+        // A prefix that ends mid-segment is not this mock's.
+        assert_eq!(at("/ordersx/1").as_deref(), Some("root"));
+        let one = json!([{"name": "a", "route_prefix": "/a"}]);
+        assert_eq!(mock_for_path(&one, "/b", "h"), None);
+        // One prefix on disjoint hosts: the host decides, and a mock naming it wins over
+        // one serving every host.
+        let hosted = json!([
+            {"name": "any", "route_prefix": "/"},
+            {"name": "a", "route_prefix": "/", "hosts": ["a.test"]},
+            {"name": "b", "route_prefix": "/", "hosts": ["b.test"]},
+        ]);
+        assert_eq!(mock_for_path(&hosted, "/x", "B.test").as_deref(), Some("b"));
+        assert_eq!(
+            mock_for_path(&hosted, "/x", "c.test").as_deref(),
+            Some("any")
+        );
+    }
 
     #[tokio::test]
     async fn list_requests_asks_for_summaries_unless_bodies_are_wanted() {

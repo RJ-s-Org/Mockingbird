@@ -1,13 +1,13 @@
 ---
 name: mockingbird-world
-description: Review and write a Mockingbird mock's world description - how its contract behaves as a world (record identity, where requests and answers hold the record, parents, lifecycles and soft deletes, unique members, concurrency tokens, list scope, filters, order and paging). Use after every contract import, or when a mock loses records, cannot read back what it created, or pages, filters or deletes differently from the API's documentation.
+description: Review and write a Mockingbird mock's world description - how its contract behaves as a world (record identity, where requests and answers hold the record, parents, lifecycles and soft deletes, unique members, concurrency tokens, list scope, filters, order and paging; expressions for computed members, generated ids (set, mint, seq), conditional refusals, side effects on other records and sort parameters). Use after every contract import, or when a mock loses records, cannot read back what it created, or pages, filters or deletes differently from the API's documentation.
 ---
 
 # Describe a mock's world
 
 Every contract version has a **world description**: a small structured statement of how the API behaves as a world. Mockingbird's heuristics write one automatically (author `heuristic`). You improve it from the contract and its documentation, and Mockingbird validates every entry against the contract before it applies. A description is optional: a mock works without your entries, but a missing identity or record pointer cascades into lost records later.
 
-The format is the JSON Schema `get_world_schema` answers (`mockingbird world schema` on the CLI). Every key is optional; an absent key falls back to the heuristics. The mock answers from every entry that validates: lists filter, order and page as described, soft deletes keep the record, unique sets and concurrency tokens refuse before any LLM call, an idempotency header replays the first answer, and derived counts and sums are computed from the stored records. So write only what the documentation states: a wrong entry changes answers.
+The format is the JSON Schema `get_world_schema` answers (`mockingbird world schema` on the CLI). Every key is optional; an absent key falls back to the heuristics. The mock answers from every entry that validates: lists filter, order and page as described, soft deletes keep the record, unique sets and concurrency tokens refuse before any LLM call, an idempotency header replays the first answer, and expressions (`set`, `computed`, `refuse`, `effects`, `list`; see [Expressions](#expressions)) compute members, refusals, writes to other records and list filters and orders from the request and the stored records. So write only what the documentation states: a wrong entry changes answers.
 
 ## The loop
 
@@ -19,9 +19,9 @@ The format is the JSON Schema `get_world_schema` answers (`mockingbird world sch
    - `refused`: an entry of the newest revision that did not validate (often after a contract change).
 
    The next four point at behaviour the contract signals that the description does not state yet. Read the docs for each and write the entry they describe; when they say nothing, leave it:
-   - `undescribed_param`: list query parameters the executor reads nothing for. A request that sends one is answered by the model, not from the records. Describe each as the docs define it (a filter, the scope, the `paging` parameter or `fields`), or list it in `ignores` when it asks nothing of the items. A sort parameter has no description yet: leave it.
+   - `undescribed_param`: list query parameters the executor reads nothing for. A request that sends one is answered by the model, not from the records. Describe each as the docs define it (a filter, the scope, the `paging` parameter or `fields`), or list it in `ignores` when it asks nothing of the items. A sort parameter is a `list.sort` ([Expressions](#expressions), pattern 6).
    - The advisory gaps (`advisory: true`) are checks. Write an entry only when the docs state the behaviour; otherwise leave the gap.
-     - `no_effect`: an action that the description gives nothing to change. If the docs say what it does to the record, write its `changes` (members it sets, from the request or a value) or a `transition` of the type's lifecycle. An action the docs say changes nothing (a send, a test) needs neither.
+     - `no_effect`: an action that the description gives nothing to change. If the docs say what it does to the record, write its `set` (members it sets, as [expressions](#expressions) over the request and the record) or a `transition` of the type's lifecycle; when it writes another record, its `effects`. An action the docs say changes nothing (a send, a test) needs neither.
      - `no_unique`: a create can answer 409 and the type has no `unique`.
      - `no_soft_delete`: the deleted type's records have a member such as `deleted`, `is_trashed` or `deleted_at`. If the docs say a delete only marks the record, write `lifecycle.soft_delete`.
 2. **Write what the contract or its docs state.** For each gap, read that part of the contract and its documentation, then write the entries with `patch_world {mock, version, patch, author: "agent"}` (the same `version` as in step 1; a JSON merge patch onto the current overlay; `null` removes a key, arrays are replaced whole). `put_world {mock, world, author: "agent"}` replaces the whole overlay instead. Record only what the contract or the documentation says. Do not guess a lifecycle, a uniqueness rule or a paging style from a field name; leave the key out and the heuristics keep deciding.
@@ -29,7 +29,7 @@ The format is the JSON Schema `get_world_schema` answers (`mockingbird world sch
    - `unknown_key`: the format has no such key there (a typo such as `path_parm`). Check `get_world_schema`.
    - `unresolved`: it names an operation, type, member, parameter, header, status or schema location the contract does not have. Use the contract's exact names and operation ids.
    - `not_applicable`: it does not fit the operation's protocol, e.g. a header or a status on a GraphQL or gRPC operation.
-   - `invalid`: the entry is malformed (a pattern without exactly one `{id}`, a state not among the states, a `from_request` pointer that does not parse, or a pointer that does not reach into the schema).
+   - `invalid`: the entry is malformed (a pattern without exactly one `{id}`, a state not among the states, a `from_request` pointer that does not parse, a pointer that does not reach into the schema, or an expression that does not compile: the message quotes the error with its line and column).
 
    Some mistakes refuse the whole write instead, and the server stores nothing: the tool call fails with a problem answer. A document over 256 KiB answers 413 (`too_large`; describe structure, never data). A document nested deeper than 32, of the wrong shape (a string where an object belongs, an unknown `kind`), or with a `request` or `answer` pointer that does not parse answers 422 (`invalid`), and its `path` names the first entry at fault. Fix that entry and send the write again.
 4. **Check it on the mock.** A write applies at once: the mock reloads with the new revision and keeps the records it stored. `call_mock` a create, then read the record back by the id the answer gave (and list it). If the read is a 404 or the list misses it, the identity, target or record pointers are still wrong: look at `get_world` again.
@@ -51,15 +51,18 @@ Types (`types.<resource type>`):
 - `lifecycle: {member, states?, initial?, soft_delete?: {state, listed_with?: {param, value}, unless?: {param, value}}}`: the status member, and the state a delete only moves the record to, with the list parameter and value that still show such records (`?status=deleted` is `listed_with: {param: status, value: deleted}`), and the delete's query parameter that removes the record instead (`unless: {param: force, value: true}` when the docs say `?force=true` deletes permanently).
 - `unique: [{members, scope?, conflict?}]`: member sets the docs say are unique, within a member's scope (a member path such as `warehouse.id` when they are unique within a referenced record), with the declared conflict status.
 - `concurrency: {member?, header?, conflict?}`: the body member and/or header holding a version or ETag, and the declared conflict status.
-- `derived: {<member>: {kind: count, of} | {kind: sum, of, member, where?}}`: a member the docs define as a count of a child list or a sum over child records.
+- `computed: {<member>: <expression>}`: a member the docs define from other data (a count of children, a total, a label), evaluated whenever a record is answered and never stored. See [Expressions](#expressions). (`derived`, the older count/sum form, still loads.)
 
 Operations (`operations.<operation id>`):
-- `kind`: `create`, `read`, `list`, `update`, `replace`, `delete` or `action`; `type`: the resource type. A `PUT` to an item path whose body is the whole record (`PUT /widgets/{id}` with a `Widget`) is `replace`, not `update`: it drops the members it does not send (identity, read-only, lifecycle and derived members stay), where an update merges.
+- `kind`: `create`, `read`, `list`, `update`, `replace`, `delete` or `action`; `type`: the resource type. A `PUT` to an item path whose body is the whole record (`PUT /widgets/{id}` with a `Widget`) is `replace`, not `update`: it drops the members it does not send (identity, read-only, lifecycle and computed members stay), where an update merges.
 - `target: {path_param | member}`: what names the record the operation acts on. It replaces tier 0's target whole: a field you leave out is not kept. For a `POST` create, name the new record by its body member, not by a parent's path parameter; a `PUT` create whose route ends in the record's parameter (`PUT /buckets/{name}`) keeps that `path_param`.
 - `request` and `answer`: `{record}` or `{records}` as JSON pointers into the body (nested envelopes, one-item arrays, bulk arrays); `answer.long_running: {done, result}` for long-running operations.
 - `answer.identity_header`: the declared 2xx response header a create names its new id in (`Location`, `Resource-ID`), or `false` when it names it in none. HTTP only.
 - `transition: {<member>: <value>}`: members an action sets (the type needs a `lifecycle`).
-- `changes: {<member>: {from_request: <pointer>} | {value}}`: members of the target an action changes. An action that writes request values onto the record lists them here beside its `transition`, or the record keeps the old values: `POST /orders/{id}/cancel {reason}` is `transition: {status: cancelled}`, `changes: {cancel_reason: {from_request: /reason}}`.
+- `set: {<member path>: <expression>}`: members a create, update, replace or action writes onto the record it stores. An action that writes request values onto the record lists them here beside its `transition`, or the record keeps the old values: `POST /orders/{id}/cancel {reason}` is `transition: {status: cancelled}`, `set: {cancel_reason: "request.body.reason"}`. On a create, a member `set` names is never generated. (`changes`, the older form, still loads.)
+- `refuse: [{when: <expression>, status, code?, message?}]`: refusals the docs state, checked in order before anything is stored; the answer is the operation's declared error body for `status`, with `code` and `message` placed in it.
+- `effects: [{op: create|update|delete, type, id?, when?, set?}]`: writes to other records after the target's write (at most 8; they do not cascade).
+- `list: {where?, sort?: {param, by}}` on a list: a default item filter, and a sort parameter turned into an order.
 - `request.instructions: {at, kind, kinds: {<kind>: {changes}}}`: an update whose request sends instructions instead of a record (a semantic patch, `{instructions: [{kind: addTags, values: [...]}]}`). `at` points to the array, `kind` names the member saying each instruction's kind, and each kind's `changes` take `{value}`, `{from_instruction: <pointer>}`, `{from_request: <pointer>}`, or `{append | remove: <pointer>}` for an array member; a braced step (`environments.{environmentKey}.on`) is that member's value in the instruction, else in the body. Describe every kind the documentation gives: an undescribed kind is generated. JSON Patch, SCIM PatchOp and merge-patch bodies need no entry.
 - Lists: `scope: {param, member, kind?, recursive?}`, `filters: [{param, member?, kind}]` (`eq`, `contains`, `gte`, `lte`, `flag`, `text`), `order: {member, descending?}`, `paging: {style, request?, response?, response_header?, size?}` (`cursor`, `page`, `offset`, `next_url`, `header_cursor`). `scope.kind: prefix` for a list of a folder's entries by its path (`path_lower` directly under `path`), with `recursive` naming the switch that lists every depth. Give a list or search its `type` when tier 0 has none, and `answer.records` when the items sit below the top level (`{results: {widgets: [...]}}` is `/results/widgets`). Describe every filter parameter the documentation gives; an undescribed one is generated unless an item member shares its name. When the docs page by a `Link` header (`<…?max_id=…>; rel="next"`), write `{style: next_url, request: <the cursor parameter the URL carries>, response_header: Link}`: the answer's `Link` names the next page's URL.
 - A list asked by a body (a `POST` search, a SOAP request): a `param` may be a body pointer (`/q`, `/ActiveList/Pagination/PageNumber`), or a plain name the body declares (`limit`). Describe every body member the documentation gives, and list those that ask nothing of the items (an API version, a detail level) in `ignores: [param]`: an undescribed member the request sends is generated.
@@ -76,6 +79,88 @@ Operations (`operations.<operation id>`):
 - `idempotency: {header}`: the header that makes a replay answer as the first call did; `not_found`: the declared status of a missing record.
 
 GraphQL, gRPC, SOAP and AsyncAPI operations use the same keys, keyed by operation id; HTTP-only keys (headers, statuses) are refused there as `not_applicable`.
+
+## Expressions
+
+`set`, `computed`, `refuse` (`when`; `code` and `message` are literal text, or `{expr: …}`), `effects` and `list` (`where`, `sort.by`) take expressions in a subset of CEL, the language Kubernetes admission policies use. Write one only for behaviour the documentation states, as a JSON or YAML string. Text inside an expression is quoted with `'…'`; text is joined with `+` (there is no other template syntax).
+
+What an expression can read:
+
+| Name | Value |
+| --- | --- |
+| `request` | `{body, path, query, headers}`: `request.body.email`, `request.path.id`, `request.query.status`, `request.headers['x-actor']` (header names in lower case) |
+| `record` | The target as stored before the call (`null` on a create); in `computed`, the record answered; in `effects`, the target as the call left it; not bound in `list` |
+| `now` | The request time, RFC 3339 text |
+| `it` | Each record inside `count`, `exists` and `sum`, and in `list.where`; in an effect's `when` and `set`, the record it found. The macros name their own item: `record.items.map(x, x.price)` |
+| `value` | In `list.sort.by`, the sort parameter's value as sent |
+
+Functions: `held(type, id)` (a stored record of a type by its id, else `null`), `count(type, cond)`, `exists(type, cond)`, `sum(list, expr)`, `seq(scope)` (a counter per session, from 1), `mint(regex)` (a fresh id matching it), `md5`, `sha1`, `sha256`, `lower`, `upper`, `slug`, `size`, `string`, `int`, `double`, `startsWith`, `endsWith`, `contains`, `matches`, `split`, `substring`, `trim`, `replace`, `has(a.b)`, and `list.all/exists/map/filter(x, …)`. Operators: `?:`, `&&`, `||`, `!`, comparisons, `+ - * / %`, `in`. A member of `null` or a missing member is `null`, not an error. A value is written as its member's schema declares it (a number into a `string` member as its text).
+
+The six patterns below cover most of what documentation asks for. Each is generic: replace the names with the contract's. A `refuse` status must be one the operation declares, and a `request.headers`, `request.query` or `request.path` name one of its declared parameters, or `patch_world` refuses the entry.
+
+1. **Through-reference: a member copied from a record the request names.** "A parcel ships from its warehouse's country."
+   ```yaml
+   operations:
+     createParcel:
+       set: { origin_country: "held('warehouses', request.body.warehouse_id).country" }
+   ```
+2. **Template: a member built from others.** "A plot's number is `PLT-` and a sequence; its label is its name and number."
+   ```yaml
+   operations:
+     createPlot:
+       set: { number: "'PLT-' + string(seq('plots'))" }
+   types:
+     plots:
+       computed: { label: "record.name + ' (' + record.number + ')'" }
+   ```
+3. **Hash id: an identity the docs define as a hash.** "A device's id is the SHA-256 of its lower-cased serial." Setting the identity member names the record by it, so a read by that hash finds it. An id format the docs give without a hash (a `dev_` prefix and 24 lower-case letters or digits) is `set: { id: "'dev_' + mint('[a-z0-9]{24}')" }`.
+   ```yaml
+   operations:
+     registerDevice:
+       set: { id: "sha256(lower(request.body.serial))" }
+   ```
+4. **Guarded refusal: a refusal under a condition.** "A harvested plot cannot be edited (409 `plot_harvested`); plot names are unique ignoring case among plots not retired (400 `duplicate_name`)."
+   ```yaml
+   operations:
+     updatePlot:
+       refuse:
+         - when: "record.state == 'harvested'"
+           status: 409
+           code: plot_harvested
+           message: { expr: "'plot ' + string(record.id) + ' is harvested'" }
+     createPlot:
+       refuse:
+         - when: "exists('plots', lower(it.name) == lower(request.body.name) && it.state != 'retired')"
+           status: 400
+           code: duplicate_name
+   ```
+5. **Side-effect create: a write that adds or changes another record.** "Creating a garden adds its first log entry and stamps the gardener's `last_garden_at`."
+   ```yaml
+   operations:
+     createGarden:
+       effects:
+         - op: create
+           type: logs
+           set: { garden_id: "record.id", kind: "'created'", at: "now" }
+         - op: update
+           type: gardeners
+           id: "record.gardener_id"
+           set: { last_garden_at: "now" }
+   ```
+   A count or total of other records is a `computed` member (`count('gardens', it.gardener_id == record.id)`), not an effect that adds one: effects do not run on calls left to generation, and nothing takes one away on a delete. A conditional state change is a `set` with `?:`: `set: { status: "record.shipped + request.body.quantity >= record.quantity ? 'shipped' : 'partially_shipped'" }`.
+6. **Sort parameter: a list ordered by what the request asks.** "`order_by` takes comma-separated members, `-` before one for descending (`order_by=-rating,title`); draft recipes are not listed." `by` turns the parameter's text (`value`) into a list of `{member, desc}`; `where` keeps only the stored records it holds for (`it`), before filters and paging.
+   ```yaml
+   operations:
+     listRecipes:
+       list:
+         where: "it.state != 'draft'"
+         sort:
+           param: order_by
+           by: "value.split(',').map(s, s.startsWith('-') ? {'member': s.substring(1), 'desc': true} : {'member': s, 'desc': false})"
+   ```
+   For `order_by=rating:desc` it is `{'member': value.split(':')[0], 'desc': value.endsWith(':desc')}` (one map or a list of them). A bracketed sort (`sort[0][field]=rating&sort[0][dir]=desc`) arrives parsed: `{'member': request.query.sort['0'].field, 'desc': request.query.sort['0'].dir == 'desc'}`. Without the parameter, and on ties, the list keeps its `order`.
+
+Check every expression you write on the mock. `patch_world` refuses one that does not compile (code `invalid`, the message quoting the error at its line and column) or that reads a member, parameter or type the contract does not have (`unresolved`): fix it at the pointer it names. An expression that fails when it runs (a type mismatch, a `null` it did not expect) never fails the call; the engine answers as it would without it, and `call_mock`'s answer lists it under `expr_failed` (`[{pointer, error}]`; the request record keeps it too). When you see `expr_failed`, fix the expression at that pointer and call again. When the answer has `expr_failed_unknown: true` instead, `call_mock` could not read the call's request record; read it with `list_requests {mock, session, include_bodies: true}`.
 
 ## Worked example
 
@@ -102,7 +187,7 @@ operations:
     kind: action
     type: folder
     target: { path_param: name }
-    changes: { parent: { from_request: /destinationParent } }
+    set: { parent: "request.body.destinationParent" }
   DeleteFolder:
     kind: action
     type: folder

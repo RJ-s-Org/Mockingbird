@@ -542,6 +542,7 @@ fn mcp_drives_a_background_server() {
             json!({ "method": "POST", "path": "/orders/orders", "body": { "customerId": "c1", "total": 10 }, "session": "t" }),
         );
         assert_eq!(created["status"], 201, "{created}");
+        assert!(created.get("expr_failed_unknown").is_none(), "{created}");
         // The state-first executor creates the order, with no LLM call.
         assert_eq!(created["headers"]["x-mockingbird-source"], "state");
         let id = created["body"]["id"].as_str().unwrap().to_string();
@@ -576,6 +577,51 @@ fn mcp_drives_a_background_server() {
             json!({ "mock": "orders", "limit": 5 }),
         );
         assert_eq!(deliveries, json!([]), "{deliveries}");
+
+        // An expression that does not compile is refused at its pointer, quoting
+        // where it fails; one that fails when it runs is named in call_mock's answer.
+        let patched = mcp.tool(
+            "patch_world",
+            json!({ "mock": "orders", "author": "agent", "patch": { "operations": { "createOrder": { "set": {
+                "status": "request.body.customerId +",
+                "total": "request.body.customerId * 2"
+            } } } } }),
+        );
+        let refused = patched["refused"].as_array().expect("refused");
+        assert_eq!(refused.len(), 1, "{patched}");
+        assert_eq!(
+            refused[0]["path"], "/operations/createOrder/set/status",
+            "{patched}"
+        );
+        assert!(
+            refused[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("line 1, column"),
+            "{patched}"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let failed = loop {
+            let answer = mcp.tool(
+                "call_mock",
+                json!({ "method": "POST", "path": "/orders/orders", "body": { "customerId": "c2", "total": 3 }, "session": "t" }),
+            );
+            if answer.get("expr_failed").is_some() || std::time::Instant::now() >= deadline {
+                break answer;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert_eq!(
+            failed["expr_failed"][0]["pointer"], "/operations/createOrder/set/total",
+            "{failed}"
+        );
+        let clean = mcp.tool(
+            "call_mock",
+            json!({ "path": "/orders/orders", "session": "t" }),
+        );
+        // The call's record was found and lists no failure.
+        assert!(clean.get("expr_failed").is_none(), "{clean}");
+        assert!(clean.get("expr_failed_unknown").is_none(), "{clean}");
 
         let imported = mcp.tool(
             "import_contract",

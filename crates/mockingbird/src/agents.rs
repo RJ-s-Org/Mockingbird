@@ -821,6 +821,50 @@ mod tests {
         }
     }
 
+    /// The expressions in a world document: the values of `set` and `computed`, and
+    /// `when`, `id`, `where`, `by` and `{expr}` wherever they appear.
+    fn expressions(doc: &Value, key: Option<&str>, out: &mut Vec<String>) {
+        match doc {
+            Value::String(s) => {
+                if matches!(key, Some("when" | "id" | "where" | "by" | "expr")) {
+                    out.push(s.clone());
+                }
+            }
+            Value::Object(m) => {
+                for (k, v) in m {
+                    if matches!(k.as_str(), "set" | "computed") {
+                        for e in v.as_object().into_iter().flat_map(|m| m.values()) {
+                            match e {
+                                Value::String(s) => out.push(s.clone()),
+                                e => expressions(e, None, out),
+                            }
+                        }
+                    } else {
+                        expressions(v, Some(k), out);
+                    }
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|v| expressions(v, key, out)),
+            _ => {}
+        }
+    }
+
+    /// Every expression in the world skill's examples compiles.
+    #[test]
+    fn world_skill_expressions_compile() {
+        let mut all = Vec::new();
+        for block in fenced(skill("mockingbird-world"), "yaml") {
+            let doc: Value = serde_saphyr::from_str(block).unwrap();
+            expressions(&doc, None, &mut all);
+        }
+        assert!(all.len() >= 10, "{all:?}");
+        for e in all {
+            if let Err(err) = mb_mcm::world::expr::Program::compile(&e) {
+                panic!("`{e}` does not compile: {err}");
+            }
+        }
+    }
+
     #[test]
     fn merge_keeps_other_servers() {
         let dir = std::env::temp_dir().join(format!("mb-agents-{}", uuid::Uuid::new_v4()));
