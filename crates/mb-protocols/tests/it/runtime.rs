@@ -813,30 +813,113 @@ async fn cache_hits_do_not_seed_again() {
     assert_eq!(store.seeded.load(Ordering::SeqCst), first);
 }
 
-/// A faker answer standing in for a failed LLM call is cached like any
-/// other read: the identical repeat is served at once, still reported as a
-/// fallback, instead of waiting for the LLM again.
+/// A faker answer standing in for a timed-out LLM call does not stick: the
+/// identical repeat asks the LLM again and gets its answer, which later
+/// repeats are served from the stored record.
 #[tokio::test]
-async fn a_fallback_is_cached_and_still_reported_as_one() {
+async fn a_fallback_does_not_stick() {
     let store = mb_state::CachingStateStore::wrap(
         memory(),
         Duration::from_secs(3600),
         mb_state::DEFAULT_CACHE_ENTRIES,
     );
-    let provider = Arc::new(ScriptedProvider::new(vec![Err(mb_llm::LlmError::Timeout)]));
+    let real = order("o1");
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        Err(mb_llm::LlmError::Timeout),
+        Ok(real.to_string()),
+    ]));
     let router = http_rest::router(Arc::new(runtime(Some(provider.clone()), store)));
     let first = send(&router, get_with("/orders/o1", &[])).await;
     assert_eq!(first.headers()["x-mockingbird-source"], "fallback");
-    let body = body_json(first).await;
     let again = send(&router, get_with("/orders/o1", &[])).await;
-    assert_eq!(again.headers()["x-mockingbird-source"], "fallback");
-    let reason = again.headers()["x-mockingbird-fallback-reason"]
+    assert_eq!(again.headers()["x-mockingbird-source"], "llm");
+    assert_eq!(body_json(again).await, real);
+    assert_eq!(
+        provider.requests().len(),
+        2,
+        "the repeat asked the LLM again"
+    );
+    let third = send(&router, get_with("/orders/o1", &[])).await;
+    assert_eq!(third.headers()["x-mockingbird-source"], "state");
+    assert_eq!(body_json(third).await, real);
+    assert_eq!(provider.requests().len(), 2);
+}
+
+/// Repeats arriving while a cached fallback is retried are served that
+/// fallback at once, still reported as one, instead of each waiting for the
+/// LLM too.
+#[tokio::test]
+async fn repeats_during_a_fallback_retry_are_served_the_fallback() {
+    let store = mb_state::CachingStateStore::wrap(
+        memory(),
+        Duration::from_secs(3600),
+        mb_state::DEFAULT_CACHE_ENTRIES,
+    );
+    let real = order("o1");
+    let inner = Arc::new(ScriptedProvider::new(vec![
+        Err(mb_llm::LlmError::Timeout),
+        Ok(real.to_string()),
+    ]));
+    let gated = Arc::new(Gated {
+        inner: inner.clone(),
+        entered: AtomicUsize::new(0),
+        open: tokio::sync::Notify::new(),
+    });
+    let router = http_rest::router(Arc::new(runtime(Some(gated.clone()), store)));
+    let first = send(&router, get_with("/orders/o1", &[])).await;
+    assert_eq!(first.headers()["x-mockingbird-source"], "fallback");
+    let fallback = body_json(first).await;
+    // The first repeat retries, held in the LLM call.
+    let retry = tokio::spawn({
+        let router = router.clone();
+        async move { send(&router, get_with("/orders/o1", &[])).await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while gated.entered.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the repeat retries");
+    // A repeat meanwhile is answered with the fallback at once.
+    let during = send(&router, get_with("/orders/o1", &[])).await;
+    assert_eq!(during.headers()["x-mockingbird-source"], "fallback");
+    let reason = during.headers()["x-mockingbird-fallback-reason"]
         .to_str()
         .unwrap()
         .to_string();
     assert!(reason.contains("earlier"), "{reason}");
-    assert_eq!(body_json(again).await, body);
-    assert_eq!(provider.requests().len(), 1, "the repeat made no LLM call");
+    assert_eq!(body_json(during).await, fallback);
+    assert_eq!(gated.entered.load(Ordering::SeqCst), 2);
+    gated.open.notify_one();
+    let retried = retry.await.unwrap();
+    assert_eq!(retried.headers()["x-mockingbird-source"], "llm");
+    assert_eq!(body_json(retried).await, real);
+    assert_eq!(inner.requests().len(), 2);
+}
+
+/// Answers as its inner provider does, holding every call after the first
+/// until `open` is notified.
+struct Gated {
+    inner: Arc<ScriptedProvider>,
+    entered: AtomicUsize,
+    open: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl Provider for Gated {
+    fn capabilities(&self) -> mb_llm::Capabilities {
+        self.inner.capabilities()
+    }
+    async fn complete(
+        &self,
+        req: mb_llm::ChatRequest,
+    ) -> Result<mb_llm::ChatResponse, mb_llm::LlmError> {
+        if self.entered.fetch_add(1, Ordering::SeqCst) > 0 {
+            self.open.notified().await;
+        }
+        self.inner.complete(req).await
+    }
 }
 
 /// A faker list standing in for a failed LLM call seeds nothing: its items

@@ -154,3 +154,34 @@ async fn an_answer_older_than_an_invalidation_is_not_cached() {
     c.put_if_current(&key("a"), "list".into(), Some("orders"), answer(2), before);
     assert_eq!(c.get(&key("a"), "list"), Some(answer(2)));
 }
+
+/// A cached fallback is generated again by one caller at a time: the first
+/// repeat claims the retry, a concurrent one is served the fallback, and a
+/// claim that never finished lapses after its window.
+#[tokio::test(start_paused = true)]
+async fn one_caller_at_a_time_retries_a_cached_fallback() {
+    let st = store();
+    let c = st.response_cache().unwrap();
+    let s = key("a");
+    let window = Duration::from_secs(20);
+    c.put(&s, "real".into(), None, answer(1));
+    assert!(!c.claim_retry(&s, "real", window), "a real answer is kept");
+    assert!(!c.claim_retry(&s, "missing", window));
+    let fallback = CachedResponse {
+        fallback_reason: Some("LLM request timed out".into()),
+        ..answer(2)
+    };
+    c.put(&s, "k".into(), None, fallback.clone());
+    assert!(c.claim_retry(&s, "k", window));
+    assert!(!c.claim_retry(&s, "k", window), "a retry is under way");
+    tokio::time::advance(window).await;
+    assert!(c.claim_retry(&s, "k", window), "an abandoned claim lapses");
+    c.release_retry(&s, "k");
+    assert!(c.claim_retry(&s, "k", window), "a released claim is free");
+    // An answer cached in the fallback's place is kept.
+    c.put(&s, "k".into(), None, answer(3));
+    assert!(!c.claim_retry(&s, "k", window));
+    // A fallback cached again may be retried again.
+    c.put(&s, "k".into(), None, fallback);
+    assert!(c.claim_retry(&s, "k", window));
+}
