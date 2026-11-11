@@ -205,6 +205,7 @@ async fn prepare(
         admin_url: admin_url.to_owned(),
         ca_dir: cfg.proxy.effective_ca_dir()?,
         unmapped: cfg.proxy.unmapped,
+        vendor_subdomains: cfg.proxy.vendor_subdomains,
         images: cfg.proxy.images.clone(),
     };
     let (stop_tx, stop_rx) = watch::channel(false);

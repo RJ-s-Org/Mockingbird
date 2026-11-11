@@ -86,6 +86,7 @@ metrics-exporter-prometheus.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
+psl.workspace = true
 rcgen.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
