@@ -90,20 +90,22 @@ The same app at `54a7985`, on `main` after the pool, GraphQL-reference, null-opt
 | Run | Cards render | Pins | Calls | Sources | State/cache p50 | Model p50 / p95 | Tokens (prompt / completion) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `main` `0d591b1b` | 10/14 | 2/5 named pins; the unknown repository errors | 15 | 12 `llm`, 3 `cache`, 0 fallbacks | 2 ms | 1.52 s / 3.68 s | 19.4k / 1.9k |
-| With #473 and #471 | 14/14 | 5/5, and the unknown repository renders | 15 | 13 `llm`, 2 `cache`, 0 fallbacks | 6 ms | 1.76 s / 3.34 s | 14.9k / 2.6k |
+| With #471 and #473 | 12/14 | 4/5 named pins (`denoland/deno`, G2b) | 15 | 13 `llm`, 2 `cache`, 0 fallbacks | 4 ms | 1.69 s / 3.23 s | 16.5k / 2.5k |
 
 **Pins on `main`:**
 - `octocat/hello-world` answered both `user` and `organization`, which the app reads as ambiguous.
 - `rust-lang/rust` answered both null (6 completion tokens).
 - `denoland/deno` answered `user.repository: null`.
 
+**With the fixes:** the unknown user errors too. It gets an empty account whose nullable `repositories.nodes` is left out, so the app fails on `undefined` (G7).
+
 The app's pin query sent straight to the data plane, 7 repositories, a new session for each sample:
 
-| Build | Pins that render | Failures |
-| --- | --- | --- |
-| `main` | 11/21 | 6 both roots null, 1 both found, 4 `user.repository` null |
-| Nested lookup fix only | 12/21 | 9 both roots null |
-| Both fixes | **28/28** | none; p50 1.37 s, p95 4.6 s |
+| Build | Contract | Pins that render | Failures |
+| --- | --- | --- | --- |
+| `main` | agent's | 11/21 | 6 both roots null, 1 both found, 4 `user.repository` null |
+| #471 + #473 | agent's (no interfaces) | **21/21** | none; p50 1.32 s, p95 2.86 s |
+| #471 + #473 | agent's, with GitHub's `RepositoryOwner` interface on `User` and `Organization` | 19/21 | 2 `user.repository` null or private; p50 1.87 s, p95 3.55 s |
 
 Unit tests: 241/242, the same `calculateRank` rounding failure as with no mock. They stub axios themselves.
 
@@ -111,21 +113,23 @@ Unit tests: 241/242, the same `calculateRank` rounding failure as with no mock. 
 
 | # | Class | Failure | Fix |
 | --- | --- | --- | --- |
-| G1 | Engine, general | When every root field of a joint GraphQL answer may be null, `{}` validated, and the model gave it for `user(login:)` + `organization(login:)`. | #471: the validator requires one root found (repair); the provider's schema is unchanged. |
-| G2 | Engine, general | Root fields with the same arguments under different types were both answered, by the model or by per-field generation after a failed joint answer. | #471: only the first one found is kept. |
-| G3 | Engine, general | A nested lookup by a value of its record (`repository(name:)`) came back `null`. | #473: generated as found, like a REST read of a named id. |
+| G1 | Engine, general | A joint answer for root fields that may all be null could be `{}`, and the model gave it for `user(login:)` + `organization(login:)`. The joint prompt's blanket "at most one of them exists" invited it. | #471: the blanket sentence is gone. Root fields that look up one thing form a lookup group, decided from the schema (different object types implementing one interface that declares every argument). A group answer finding none is repaired. |
+| G2 | Engine, general | Root fields of one lookup group were both answered, by the model or by per-field generation after a failed joint answer. | #471: one per group is kept: the part answered from state or a scenario, else the first in the query. |
+| G2b | Contract | The agent's hand-written SDL declares no interface on `User` and `Organization`, so no group forms. `denoland/deno` was answered by both roots once in the app flows (0 of 21 in the data-plane samples). | Not fixed. Candidate: the skills could ask agents trimming a schema to keep the interfaces its root fields' types implement. |
+| G3 | Engine, general | A nested lookup by a value of its record (`repository(name:)`) came back `null`. | #473: the field's description tells the model the record exists. The schema still allows `null`, for scenarios, the world and stored state. |
 | G4 | Skills gap | The agent wrote no world description, again, and nothing in the tool results pointed it to one. So stats, top-langs and pins for one user are generated separately (`no_identity`). | Not fixed. Candidate: `start_server`/`import_contract` results for a GraphQL mock without a world could say what a world description would make stateful. |
 | G5 | Install and config | No environment variable or `start_server` field for the proxy port, while the data, admin and gRPC ports have `MB_*` variables. | Not fixed. The agent coped by editing the config. |
-| G6 | Measure 7 | An unknown login gets an invented user (zero counts), not GitHub's `NOT_FOUND` error. After G3, an unknown repository is found too. | None needed for the flows. A GraphQL contract declares no error, and without a world nothing says a login is unknown. |
+| G6 | Measure 7 | An unknown login gets an invented user, not GitHub's `NOT_FOUND` error. | None needed for the flows. A GraphQL contract declares no error, and without a world nothing says a login is unknown. |
+| G7 | Model answer | A nullable list (`repositories.nodes`) is left out of an empty account, and the app reads `.filter` of `undefined`. | Not fixed; seen once in 14 requests. |
 
 ### Scorecard (measures 1–7)
 
 | # | Measure | Target | `main` `0d591b1b` | With both fixes |
 | --- | --- | --- | --- | --- |
-| 1 | App's tests and main flows pass | 100% | ✗ 10/14 card requests (pins) | ✓ 14/14; pin query 28/28 |
+| 1 | App's tests and main flows pass | 100% | ✗ 10/14 card requests (pins) | ✗ 12/14 (G2b, G7); pin query 21/21 on the agent's contract |
 | 2 | Consistency the flows rely on | 100% | Partly: repeats are identical (`cache`); different queries for one user are generated separately (G4); no writes | Same |
 | 3 | Agent build ≤ 15 min, skills/MCP/CLI only | ≤ 15 min | ✓ 5.0 min, 31 turns | n/a (same build) |
-| 4 | State/pool latency | p50 < 50 ms | ✓ 2 ms (n = 3) | ✓ 6 ms (n = 2) |
-| 5 | Model latency | p50 < 2 s, p95 < 5 s, rare | p50 1.52 s and p95 3.68 s ✓; not rare (12 of 15) | p50 1.76 s and p95 3.34 s ✓; not rare (13 of 15) |
+| 4 | State/pool latency | p50 < 50 ms | ✓ 2 ms (n = 3) | ✓ 4 ms (n = 2) |
+| 5 | Model latency | p50 < 2 s, p95 < 5 s, rare | p50 1.52 s and p95 3.68 s ✓; not rare (12 of 15) | p50 1.69 s and p95 3.23 s ✓; not rare (13 of 15) |
 | 6 | Model spend per session | < $0.05 | ✓ about $0.002 | ✓ about $0.002 |
 | 7 | Errors: unknown ids, invalid input | declared status and body | n/a: no declared GraphQL errors (G6) | Same |
