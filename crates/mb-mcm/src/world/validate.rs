@@ -1052,6 +1052,17 @@ impl<'a> Ctx<'a> {
         let record = self.record_schema(name);
         let ty = Some(name);
         let mut out = TypeDesc::default();
+        for (i, other) in t.same_as.iter().enumerate() {
+            if other.trim().is_empty() {
+                self.refuse(
+                    &path.join("same_as").join(i),
+                    RefusalCode::Invalid,
+                    "a type name may not be empty".to_string(),
+                );
+            } else {
+                out.same_as.push(other.clone());
+            }
+        }
 
         if let Some(id) = &t.identity {
             let p = path.join("identity");
@@ -3689,6 +3700,20 @@ mod tests {
         let w = world(json!({"operations": {"listAccounts": {"type": "acount"}}}));
         let v = validate(&w, &b);
         refused_with(&v, "/operations/listAccounts/type", "`acount`");
+    }
+
+    #[test]
+    fn validate_refuses_an_empty_same_as_name() {
+        let w = world(json!({"types": {"folder": {"same_as": ["folders-v2", " "]}}}));
+        let v = validate(&w, &folders());
+        assert_eq!(
+            paths(&v),
+            vec![("/types/folder/same_as/1", RefusalCode::Invalid)]
+        );
+        assert_eq!(
+            v.applied.types["folder"].same_as,
+            vec!["folders-v2".to_string()]
+        );
     }
 
     #[test]

@@ -250,7 +250,9 @@ async fn run_state_changes(
             }
             Err(broadcast::error::RecvError::Closed) => return,
         };
-        if change.session.workspace != inner.rt.workspace || change.session.mock != inner.rt.name {
+        if change.session.workspace != inner.rt.workspace
+            || change.session.mock != inner.rt.store_name()
+        {
             continue;
         }
         // A change made by a consumed message continues its hop count, so

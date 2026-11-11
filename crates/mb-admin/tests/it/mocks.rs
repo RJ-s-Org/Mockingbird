@@ -632,3 +632,48 @@ async fn webhook_url_credentials_never_leave_the_store() {
     assert_eq!(targets[0].url, "https://hooks.test/in?token=abc123");
     assert_eq!(targets[0].delay_ms, 5);
 }
+
+/// The session endpoints of mocks that share their sessions reach them under
+/// the shared name: one mock's seed is the other's session.
+#[tokio::test]
+async fn sessions_of_mocks_that_share_are_one() {
+    let h = harness().await;
+    for name in ["rest", "graphql"] {
+        h.create(name).await;
+        let mut mock = h
+            .store
+            .get_mock(DEFAULT_WORKSPACE, name)
+            .await
+            .unwrap()
+            .unwrap();
+        mock.behavior.shares = Some("github".into());
+        h.store.update_mock(&mock).await.unwrap();
+    }
+    let seeded = json!([{"resource_type": "issue", "id": "7", "data": {"title": "Shared"}}]);
+    let (status, body) = h
+        .send(
+            Method::PUT,
+            "/api/v1/workspaces/default/mocks/graphql/sessions/s1",
+            Some(seeded),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) = h
+        .send(
+            Method::GET,
+            "/api/v1/workspaces/default/mocks/rest/sessions/s1",
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.to_string().contains("Shared"), "{body}");
+    let (status, listed) = h
+        .send(
+            Method::GET,
+            "/api/v1/workspaces/default/mocks/rest/sessions",
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed.as_array().map(Vec::len), Some(1), "{listed}");
+}

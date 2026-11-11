@@ -1202,6 +1202,11 @@ pub struct FileMock {
     /// A scenario of this mock applied when a call names none.
     #[serde(default)]
     pub default_scenario: Option<String>,
+    /// A name the mocks of one API (GitHub's REST beside its GraphQL) give
+    /// alike to share their session records: a record one writes, the
+    /// others read, by type name and identity.
+    #[serde(default)]
+    pub shares: Option<String>,
     /// Host names the mock answers for (by `Host`); empty answers for any
     /// host. With hosts, two mocks may share a route prefix.
     #[serde(default)]
@@ -1401,6 +1406,7 @@ impl FileMock {
             consistency: Consistency::default(),
             unknown_ids: UnknownIds::default(),
             default_scenario: None,
+            shares: None,
             hosts: Vec::new(),
             path_rewrite: mb_store::PathRewrite::default(),
             graphql_path: None,
@@ -1658,6 +1664,17 @@ impl FileConfig {
                 .to_store()
                 .validate()
                 .map_err(|e| format!("{prefix}{e}"))?;
+            if let Some(group) = &mock.shares
+                && !self.mocks.iter().any(|(other, m)| {
+                    other != name
+                        && m.workspace == mock.workspace
+                        && m.shares.as_ref() == Some(group)
+                })
+            {
+                return Err(format!(
+                    "{prefix}shares: no other mock of its workspace shares {group:?}; give the mocks of one API the same name"
+                ));
+            }
             if let Some(default) = &mock.default_scenario
                 && !mock.scenarios.contains_key(default)
             {

@@ -99,6 +99,16 @@ struct Harness {
 
 /// The orders mock with `orderCreated` set up as `enabled` with `triggers`.
 fn start(enabled: bool, triggers: Vec<Trigger>, lease: Arc<dyn LeaseProvider>) -> Harness {
+    start_sharing(enabled, triggers, lease, None)
+}
+
+/// [`start`], the mock keeping its sessions under `shares`.
+fn start_sharing(
+    enabled: bool,
+    triggers: Vec<Trigger>,
+    lease: Arc<dyn LeaseProvider>,
+    shares: Option<&str>,
+) -> Harness {
     let records = Arc::new(Capture::default());
     let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     let mut rt = MockRuntime::new(
@@ -108,6 +118,7 @@ fn start(enabled: bool, triggers: Vec<Trigger>, lease: Arc<dyn LeaseProvider>) -
         Arc::clone(&state),
     );
     rt.recorder = Some(Arc::clone(&records) as Arc<dyn RequestRecorder>);
+    rt.shares = shares.map(str::to_string);
     let brokers = memory_brokers();
     let broker = brokers.memory("mem").unwrap_or_default();
     let deps = EventDeps {
@@ -266,6 +277,27 @@ async fn state_change_trigger_publishes_with_key() {
         keys,
         [b"41".to_vec(), b"42".to_vec(), b"44".to_vec()].map(Some)
     );
+}
+
+/// A mock that shares its sessions fires on changes kept under the shared name.
+#[tokio::test]
+async fn state_change_trigger_fires_for_a_shared_session() {
+    let h = start_sharing(
+        true,
+        vec![Trigger::OnStateChange {
+            resource_type: "orders".into(),
+            kind: StateChangeKind::Upserted,
+        }],
+        ScriptedLease::new(vec![Ok(false)]),
+        Some("shop"),
+    );
+    let shared = SessionKey {
+        mock: "shop".into(),
+        ..session("s1")
+    };
+    h.state.upsert(&shared, order("51")).await.unwrap();
+    let published = h.broker.wait_published(1, Duration::from_secs(5)).await;
+    assert_eq!(published[0].1.key.as_deref(), Some(b"51".as_slice()));
 }
 
 #[tokio::test]

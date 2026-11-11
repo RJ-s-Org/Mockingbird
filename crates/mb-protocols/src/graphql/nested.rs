@@ -212,7 +212,26 @@ pub(crate) async fn from_state(
     collect(&rt.bundle, schema, sel, 0, &mut types);
     let mut held = HashMap::new();
     for t in types {
-        let records = call::stored_of_type(rt, session, &t.to_lowercase(), MAX_HELD).await;
+        let own = t.to_lowercase();
+        let mut records = call::stored_of_type(rt, session, &own, MAX_HELD).await;
+        // What the mock this one shares stored, in this type's shape.
+        let props = rt
+            .bundle
+            .defs
+            .get(&t)
+            .and_then(|d| d.get("properties"))
+            .and_then(Value::as_object);
+        if let Some(props) = props {
+            for other in call::shared::equivalents(rt, &own) {
+                for record in call::stored_of_type(rt, session, &other, MAX_HELD).await {
+                    records.push(StoredResource {
+                        resource_type: own.clone(),
+                        data: call::shared::reshape(props, &rt.bundle.defs, &record.data),
+                        id: record.id,
+                    });
+                }
+            }
+        }
         if !records.is_empty() {
             held.insert(t, records);
         }

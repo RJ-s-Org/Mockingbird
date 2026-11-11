@@ -270,7 +270,7 @@ impl ChannelInner {
         };
         let key = SessionKey {
             workspace: self.rt.workspace.clone(),
-            mock: self.rt.name.clone(),
+            mock: self.rt.store_name().to_string(),
             session: session.to_string(),
         };
         let resource = (

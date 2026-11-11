@@ -3711,6 +3711,29 @@ fn default_scenario_must_name_a_scenario() {
         "{err:#}"
     );
 }
+#[tokio::test]
+async fn shares_needs_another_mock_and_reaches_the_runtime() {
+    let ws = Workspace::new();
+    ws.write("mocks:\n  rest:\n    contract: orders.yaml\n    shares: shop\n");
+    let err = file_config::load(&ws.config_path()).unwrap_err();
+    assert!(format!("{err:#}").contains("mocks.rest.shares"), "{err:#}");
+
+    ws.write(
+        "mocks:\n  rest:\n    contract: orders.yaml\n    shares: shop\n  other:\n    contract: orders.yaml\n    route_prefix: /other\n    shares: shop\n",
+    );
+    let cfg = file_config::load(&ws.config_path()).unwrap();
+    let (store, state) = (store().await, no_state());
+    reconcile(store.as_ref(), state.as_ref(), &cfg)
+        .await
+        .unwrap();
+    let rest = store
+        .get_mock(DEFAULT_WORKSPACE, "rest")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rest.behavior.shares.as_deref(), Some("shop"));
+}
+
 const TWO_HOSTED: &str = "mocks:\n  rest:\n    contract: orders.yaml\n    route_prefix: /\n    hosts: [api.github.test]\n  other:\n    contract: orders.yaml\n    route_prefix: /\n    hosts: [HOSTS2]\n";
 
 #[tokio::test]
