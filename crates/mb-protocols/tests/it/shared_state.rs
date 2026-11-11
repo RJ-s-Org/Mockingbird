@@ -288,3 +288,87 @@ type Mutation { createIssue(input: CreateIssueInput!): CreateIssuePayload }
     .await;
     assert_eq!(read["title"], "Over GraphQL", "{read}");
 }
+
+/// The other mock's record refers to its owner by an id only (GraphQL's
+/// `repository: {id}`): a reference that names no owner says nothing of the one
+/// the path names (`{repo}` = `trellis`), so the read still finds the record.
+#[tokio::test]
+async fn an_owner_reference_by_id_alone_does_not_hide_the_record() {
+    const SCOPED: &str = r##"
+openapi: 3.0.3
+info: {title: issues, version: "1"}
+paths:
+  /repos/{owner}/{repo}/issues/{issue_number}:
+    get:
+      operationId: getIssue
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+        - {name: issue_number, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200":
+          description: the issue
+          content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}
+        "404": {description: missing}
+components:
+  schemas:
+    Issue:
+      type: object
+      required: [number, title, state]
+      properties:
+        number: {type: integer}
+        title: {type: string}
+        state: {type: string, enum: [open, closed]}
+        repository:
+          type: object
+          properties:
+            id: {type: integer}
+            name: {type: string}
+            full_name: {type: string}
+"##;
+    const GQL: &str = r#"
+enum IssueState { OPEN CLOSED }
+type Repository { id: ID! name: String! }
+type Issue { id: ID! number: Int! title: String! state: IssueState! repository: Repository! }
+input CreateIssueInput { repositoryId: ID! title: String! }
+type CreateIssuePayload { issue: Issue }
+type Query { repository(owner: String!, name: String!): Repository }
+type Mutation { createIssue(input: CreateIssueInput!): CreateIssuePayload }
+"#;
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let gh = runtime(
+        "github-graphql",
+        GQL,
+        vec![
+            json!({"__typename": "CreateIssuePayload", "issue": {"__typename": "Issue",
+            "id": "I_1", "number": 7007, "title": "Over GraphQL", "state": "OPEN",
+            "repository": {"__typename": "Repository", "id": "R_1"}}}),
+        ],
+        Arc::clone(&state),
+    );
+    let gql_router = graphql::try_router(gh).unwrap();
+    let world = serde_json::from_value::<mb_mcm::world::World>(json!({"version": 1,
+        "types": {"issues": {"identity": {"member": "number"}}}}))
+    .unwrap();
+    let rest_rt = runtime("github-rest", SCOPED, vec![], Arc::clone(&state));
+    let rest_rt = Arc::try_unwrap(rest_rt)
+        .ok()
+        .unwrap()
+        .with_world(&world, &world, 1);
+    let rest_router = http_rest::router(Arc::new(rest_rt));
+
+    gql(
+        &gql_router,
+        r#"mutation { createIssue(input: {repositoryId: "R_1", title: "Over GraphQL"}) { issue { id number } } }"#,
+        true,
+    )
+    .await;
+    let read = rest(
+        &rest_router,
+        "GET",
+        "/repos/fernwood/trellis/issues/7007",
+        None,
+    )
+    .await;
+    assert_eq!(read["title"], "Over GraphQL", "{read}");
+}

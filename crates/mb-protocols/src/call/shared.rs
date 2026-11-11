@@ -119,6 +119,46 @@ pub(crate) fn reshape(
     defs: &Map<String, Value>,
     data: &Value,
 ) -> Value {
+    reshape_at(props, defs, data, 0)
+}
+
+/// The properties of the object `schema` is, through `$ref`s and a nullable
+/// `anyOf`, among `defs`.
+fn object_props<'a>(
+    defs: &'a Map<String, Value>,
+    schema: &'a Value,
+) -> Option<&'a Map<String, Value>> {
+    let mut schema = schema;
+    for _ in 0..4 {
+        if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+            return Some(props);
+        }
+        if let Some(name) = schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+        {
+            schema = defs.get(name)?;
+            continue;
+        }
+        schema = schema
+            .get("anyOf")
+            .and_then(Value::as_array)?
+            .iter()
+            .find(|b| b.get("type").and_then(Value::as_str) != Some("null"))?;
+    }
+    None
+}
+
+/// [`reshape`] `depth` objects down: an object member is reshaped as its own
+/// schema declares it (a GraphQL `repository: {id: "R_1"}` where REST's
+/// repository id is a number loses its id), to four levels.
+fn reshape_at(
+    props: &Map<String, Value>,
+    defs: &Map<String, Value>,
+    data: &Value,
+    depth: usize,
+) -> Value {
     let mut out = Map::new();
     for (key, value) in data.as_object().into_iter().flatten() {
         let Some((name, schema)) = [key.clone(), snake(key), camel(key)]
@@ -127,11 +167,17 @@ pub(crate) fn reshape(
         else {
             continue;
         };
-        let value = fit_enum(schema, defs, value);
+        let mut value = fit_enum(schema, defs, value);
         // A value of another JSON type than the member holds (GraphQL's `"I_1"`
         // id where REST's is a number) is left out for fill to write.
         if !of_type(schema, defs, &value) {
             continue;
+        }
+        if value.is_object()
+            && depth < 4
+            && let Some(inner) = object_props(defs, schema)
+        {
+            value = reshape_at(inner, defs, &value, depth + 1);
         }
         out.insert(name, value);
     }
