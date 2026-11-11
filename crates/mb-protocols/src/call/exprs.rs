@@ -742,8 +742,9 @@ pub(super) fn sets(rt: &MockRuntime, op_id: &str) -> bool {
 /// `value` written as type `t`'s `member` declares it: an integral number into an
 /// `integer` member as an integer, a number or boolean into a `string` member as its
 /// text, a text holding a number into a `number` or `integer` member as that number,
-/// `"true"`/`"false"` into a `boolean` member. A value of a type the member declares
-/// (or one with no declared type) stays as it is.
+/// `"true"`/`"false"` into a `boolean` member; an object or list with the members its
+/// schema fixes filled in ([`with_fixed`]). A value of a type the member declares (or
+/// one with no declared type) stays as it is otherwise.
 pub(super) fn written_back(rt: &MockRuntime, t: &str, member: &str, value: Value) -> Value {
     let bundle = rt.bundle();
     let Some(schema) = read_schema(rt, t).and_then(|r| property_schema(bundle, r, member)) else {
@@ -800,8 +801,8 @@ pub(super) fn written_back(rt: &MockRuntime, t: &str, member: &str, value: Value
     }
 }
 
-/// `value` with each object in it given the members its schema fixes (a `const`) and
-/// it leaves out: a GraphQL object's `__typename`, which an expression writing a whole
+/// `value` with each object in it given the required members its schema fixes (a
+/// `const`) and it leaves out: a GraphQL object's `__typename`, which an expression writing a whole
 /// connection (`{'edges': [{'node': {...}}]}`) should not have to spell at every level.
 /// An object whose schema is a choice of several (a union) is left as it is: which
 /// one it is, the value says.
@@ -826,17 +827,24 @@ fn with_fixed(bundle: &mb_mcm::Bundle, schema: &Value, value: Value, depth: usiz
             let Some(props) = schema.get("properties").and_then(Value::as_object) else {
                 return Value::Object(members);
             };
+            let required = |name: &str| {
+                schema
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .is_some_and(|r| r.iter().any(|n| n == name))
+            };
             for (name, member) in props {
                 match members.remove(name) {
                     Some(held) => {
                         members.insert(name.clone(), with_fixed(bundle, member, held, depth + 1));
                     }
-                    None => {
+                    None if required(name) => {
                         if let Some(fixed) = one_shape(bundle, member).and_then(|m| m.get("const"))
                         {
                             members.insert(name.clone(), fixed.clone());
                         }
                     }
+                    None => {}
                 }
             }
             Value::Object(members)
