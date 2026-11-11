@@ -11,8 +11,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use mb_mcm::world::{OpDesc, OpKind, Refusal, World};
-use mb_mcm::{Bundle, Operation};
+use mb_mcm::world::{IdentityDesc, OpDesc, OpKind, Refusal, World, apply, tier0};
+use mb_mcm::{Bundle, Operation, OperationKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -39,7 +39,8 @@ pub struct Gap {
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum GapCode {
-    /// A type that operations write to has no `identity`.
+    /// A type that operations name has no identity their calls can use
+    /// ([`identified`]), so the model answers those calls.
     NoIdentity,
     /// A read, update, replace, delete or action on a type has no `target`.
     NoTarget,
@@ -101,8 +102,10 @@ impl fmt::Display for GapCode {
 /// identity (by name); then, in contract order, operations with no target or
 /// no record; skipped HTTP routes; refused entries, in document order.
 ///
-/// - [`GapCode::NoIdentity`]: a type an operation creates, updates,
-///   replaces, deletes or acts on, with no `identity`.
+/// - [`GapCode::NoIdentity`]: a type named by an operation whose calls have no
+///   identity to work with ([`identified`]), once per type: the executor
+///   answers none of those calls, the model does (`exec_fallback: no_identity`
+///   in the request log).
 /// - [`GapCode::NoTarget`]: a read, update, replace, delete or action with
 ///   a type and no `target`.
 /// - [`GapCode::NoRecord`]: a create, update or replace with a type whose
@@ -147,32 +150,19 @@ pub fn structural_gaps(bundle: &Bundle, world: &World, refused: &[Refusal]) -> V
     let kind = |op: &Operation| desc(op).kind.or_else(|| OpKind::of(op));
     let ty = |op: &Operation| desc(op).r#type.clone().or_else(|| op.resource_type.clone());
 
-    let mut writes: BTreeMap<String, Vec<&str>> = BTreeMap::new();
-    for op in &bundle.operations {
-        if let (Some(t), Some(k)) = (ty(op), kind(op))
-            && is_write(k)
-        {
-            writes.entry(t).or_default().push(&op.id);
-        }
-    }
-    for (t, ops) in &writes {
-        if world
-            .types
-            .get(t)
-            .and_then(|d| d.identity.as_ref())
-            .is_none()
-        {
-            out.push(Gap {
-                code: GapCode::NoIdentity,
-                operation: None,
-                r#type: Some(t.clone()),
-                message: format!(
-                    "type `{t}` is written by {} but has no identity: no member is known to name a record",
-                    list(ops)
-                ),
-                advisory: false,
-            });
-        }
+    // Judged on the bundle as the runtime holds it, with `world` written into it.
+    let applied = apply(bundle, &tier0(bundle), world);
+    for (t, ops) in &unidentified(&applied, world) {
+        out.push(Gap {
+            code: GapCode::NoIdentity,
+            operation: None,
+            r#type: Some(t.clone()),
+            message: format!(
+                "type `{t}` is named by {} but has no identity: no member is known to name a record, so their calls are answered by the model",
+                list(ops)
+            ),
+            advisory: false,
+        });
     }
 
     for op in &bundle.operations {
@@ -419,14 +409,70 @@ fn skipped_routes(bundle: &Bundle, ty: &dyn Fn(&Operation) -> Option<String>, ou
 #[cfg(not(feature = "http-rest"))]
 fn skipped_routes(_: &Bundle, _: &dyn Fn(&Operation) -> Option<String>, _: &mut Vec<Gap>) {}
 
-fn is_write(k: OpKind) -> bool {
-    matches!(
-        k,
-        OpKind::Create | OpKind::Update | OpKind::Replace | OpKind::Delete | OpKind::Action
-    )
+/// The operations of `applied` whose calls have no identity to work with under
+/// `world` ([`identified`]), by type, in contract order: the ones the executor
+/// falls back to the model on (`no_identity`). `applied` is the bundle as the
+/// runtime holds it, with `world` written into it ([`mb_mcm::world::apply`]). An
+/// operation with no kind or type is left out.
+#[must_use]
+pub fn unidentified(applied: &Bundle, world: &World) -> BTreeMap<String, Vec<String>> {
+    let read_by_id = reads_by_id(applied);
+    let none = OpDesc::default();
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for op in &applied.operations {
+        let d = world.operations.get(&op.id).unwrap_or(&none);
+        let kind = d.kind.or_else(|| OpKind::of(op));
+        let ty = d.r#type.clone().or_else(|| op.resource_type.clone());
+        if let (Some(t), Some(k)) = (ty, kind) {
+            let described = world.types.get(&t).and_then(|d| d.identity.as_ref());
+            if !identified(k, op.identity.is_some(), described, read_by_id.contains(&t)) {
+                out.entry(t).or_default().push(op.id.clone());
+            }
+        }
+    }
+    out
 }
 
-fn list(ops: &[&str]) -> String {
+/// Whether a call of an operation of `kind` has an identity to work with: `own`,
+/// the operation's own (`op.identity`, where its answer holds the record), else
+/// `described`, its type's in the effective description, else (but for a list)
+/// `read_by_id`, whether a read by id of its type has one (a query, not an action,
+/// whose identity has a path parameter and whose success answer has a schema). A list
+/// needs its type's identity `member`.
+///
+/// The one rule for `no_identity`: the executor answers only calls of operations it
+/// holds, and falls back to the model on the others (`exec_fallback: no_identity`);
+/// [`structural_gaps`] reports the type of each of those operations.
+#[must_use]
+pub fn identified(
+    kind: OpKind,
+    own: bool,
+    described: Option<&IdentityDesc>,
+    read_by_id: bool,
+) -> bool {
+    own || match kind {
+        OpKind::List => described.is_some_and(|i| i.member.is_some()),
+        _ => described.is_some() || read_by_id,
+    }
+}
+
+/// The types `bundle` reads by id: a query (not an action) of the type whose identity
+/// has a path parameter and whose success answer has a schema.
+fn reads_by_id(bundle: &Bundle) -> BTreeSet<String> {
+    bundle
+        .operations
+        .iter()
+        .filter(|op| {
+            matches!(op.kind, OperationKind::Query)
+                && !op.is_action()
+                && op.identity.as_ref().is_some_and(|i| i.path_param.is_some())
+                && success_schema(op).is_some()
+        })
+        .filter_map(|op| op.resource_type.clone())
+        .collect()
+}
+
+fn list(ops: &[String]) -> String {
     let mut names: Vec<String> = ops.iter().take(3).map(|o| format!("`{o}`")).collect();
     if ops.len() > 3 {
         names.push(format!("{} more", ops.len() - 3));

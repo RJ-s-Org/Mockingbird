@@ -598,7 +598,7 @@ pub struct RefusalSchema {
 #[derive(ToSchema, Debug)]
 #[schema(as = WorldGapCode, rename_all = "snake_case")]
 pub enum GapCodeSchema {
-    /// A type that operations write to has no `identity`.
+    /// A type that operations name has no identity their calls can use, so the model answers them.
     NoIdentity,
     /// An operation on a type has no `target`.
     NoTarget,

@@ -143,10 +143,7 @@ pub(super) fn classify(
     } else if !desc
         .and_then(|d| d.r#type.as_deref())
         .or(op.resource_type.as_deref())
-        .is_some_and(|t| match kind {
-            OpKind::List => op.identity.is_some() || list::identified(rt, op, kind),
-            _ => identified(rt, op, t),
-        })
+        .is_some_and(|t| identified(rt, op, kind, t))
     {
         Some(Fallback::NoIdentity)
     } else if !matches!(kind, OpKind::Create | OpKind::List) && named_target(rt, op, call).is_none()
@@ -219,20 +216,25 @@ fn acts_on_own_record(rt: &crate::MockRuntime, op: &mb_mcm::Operation) -> bool {
     !past.is_empty() && past.iter().all(|s| s != "{}") && !listed_here
 }
 
-/// Whether records of type `t` have an identity: `op`'s own (where its answer holds
-/// the record), else the description's, else that of the type's read by id.
-fn identified(rt: &crate::MockRuntime, op: &mb_mcm::Operation, t: &str) -> bool {
-    op.identity.is_some()
-        || rt
-            .described()
+/// Whether a call of `op`, of `kind` on type `t`, has an identity to work with
+/// ([`crate::world_gaps::identified`], the rule the gap report's `no_identity` follows):
+/// `op`'s own (where its answer holds the record), else the description's, else that
+/// of the type's read by id.
+fn identified(rt: &crate::MockRuntime, op: &mb_mcm::Operation, kind: OpKind, t: &str) -> bool {
+    let read_by_id = rt
+        .index()
+        .detail_reads
+        .get(t)
+        .and_then(|i| rt.bundle().operations.get(*i))
+        .is_some_and(|read| read.identity.is_some());
+    crate::world_gaps::identified(
+        kind,
+        op.identity.is_some(),
+        rt.described()
             .type_desc(t)
-            .is_some_and(|d| d.identity.is_some())
-        || rt
-            .index()
-            .detail_reads
-            .get(t)
-            .and_then(|i| rt.bundle().operations.get(*i))
-            .is_some_and(|read| read.identity.is_some())
+            .and_then(|d| d.identity.as_ref()),
+        read_by_id,
+    )
 }
 
 /// The schemas records of type `t` are read by: its read by id's record and each of
