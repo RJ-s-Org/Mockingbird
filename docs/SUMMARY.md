@@ -58,3 +58,4 @@
   - [GitHub CLI (Go)](trials/gh-cli.md)
   - [Next.js Commerce](trials/nextjs-commerce.md)
   - [Stripe accept-a-payment (Java)](trials/stripe-java.md)
+  - [github-readme-stats (holdout)](trials/github-readme-stats.md)
