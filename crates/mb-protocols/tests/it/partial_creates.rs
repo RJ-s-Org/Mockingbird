@@ -44,20 +44,13 @@ paths:
           application/json:
             schema:
               type: object
-              required: [access_token]
-              properties: {access_token: {type: string}}
+              properties: {access_token: {type: string}, item_id: {type: string}}
       responses:
         "200":
           description: ok
           content:
             application/json:
-              schema:
-                type: object
-                required: [item, request_id]
-                additionalProperties: false
-                properties:
-                  item: {$ref: "#/components/schemas/Item"}
-                  request_id: {type: string}
+              schema: {$ref: "#/components/schemas/ItemGetResponse"}
         "400":
           description: bad
           content:
@@ -67,6 +60,13 @@ paths:
                 properties: {error_code: {type: string}, error_message: {type: string}}
 components:
   schemas:
+    ItemGetResponse:
+      type: object
+      required: [item, request_id]
+      additionalProperties: false
+      properties:
+        item: {$ref: "#/components/schemas/Item"}
+        request_id: {type: string}
     Item:
       type: object
       required: [item_id, institution_id, products]
@@ -81,7 +81,8 @@ pub(crate) fn world() -> Value {
         "types": {"item": {"identity": {"member": "item_id"}}},
         "operations": {
             "exchange": {"kind": "create", "type": "item", "answer": {"record": ""}},
-            "itemGet": {"kind": "read", "type": "item", "answer": {"record": "/item"}}
+            "itemGet": {"kind": "read", "type": "item", "target": {"member": "item_id"},
+                        "answer": {"record": "/item"}}
         }
     })
 }
@@ -116,4 +117,14 @@ async fn a_create_answering_only_the_identity_and_its_own_members_stores_the_rec
         .unwrap_or_else(|| panic!("not stored: {body}"));
     assert_eq!(stored["item_id"], json!(id), "{stored}");
     assert_eq!(stored["institution_id"], json!("ins_1"), "{stored}");
+    assert_eq!(stored["products"], json!(["auth"]), "{stored}");
+
+    // Read back from state, in the read's own envelope.
+    let (status, headers, body) = h
+        .send("POST", "/item/get", Some(json!({"item_id": id})), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(headers["x-mockingbird-source"], "state", "{body}");
+    assert_eq!(body["item"], stored, "{body}");
+    assert!(body["request_id"].is_string(), "{body}");
 }

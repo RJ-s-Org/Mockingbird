@@ -40,7 +40,8 @@ pub(crate) struct BundleIndex {
     pub(super) detail_reads: HashMap<String, usize>,
     /// Per resource type with no such read, what a stored resource must
     /// suit instead, with the position of the read it comes from: a list's
-    /// item schema, else a singleton read's success schema (`/user`).
+    /// item schema, else a singleton read's success schema (`/user`), or the record
+    /// it holds where its identity says (`{item, request_id}`'s `item`).
     pub(super) other_shapes: HashMap<String, (usize, Value)>,
     /// Per resource type, the types whose answers have a reference field of
     /// it (see [`reference_targets`]), sorted and deduplicated.
