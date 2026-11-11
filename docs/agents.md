@@ -71,7 +71,7 @@ Ask in plain words: "mock the API in openapi.yaml", "use OpenRouter for Mockingb
 
 Tools carry MCP annotations (`readOnlyHint`, `destructiveHint`), so agents can ask before destructive calls. The server also offers each skill as a resource (`mockingbird://skills/<name>`), the provider catalogue as `mockingbird://providers`, and five prompts (`setup`, `mock-api`, `self-host`, `testing`, `world`).
 
-The MCP server talks to the Admin API at `--admin-url` / `MB_ADMIN_URL` (default `http://127.0.0.1:9090`) in workspace `--workspace` / `MB_WORKSPACE`, sending `--token` / `MB_ADMIN_TOKEN` when set, so it can drive a remote Mockingbird too.
+The MCP server talks to the Admin API at `--admin-url` / `MB_ADMIN_URL` (default: `server.admin_port` of the `mockingbird.yaml` in the directory it starts in, else `http://127.0.0.1:9090`) in workspace `--workspace` / `MB_WORKSPACE`, sending `--token` / `MB_ADMIN_TOKEN` when set, so it can drive a remote Mockingbird too.
 
 ## LLM onboarding
 

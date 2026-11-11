@@ -41,7 +41,7 @@ Every response carries `X-Mockingbird-Source: llm | patched | repaired | fallbac
 
 ## MCP tools
 
-When the `mockingbird` MCP server is connected, prefer its tools over shell commands; they return JSON. All of them work against the Admin API at `MB_ADMIN_URL` (default `http://127.0.0.1:9090`) in workspace `MB_WORKSPACE` (default `default`).
+When the `mockingbird` MCP server is connected, prefer its tools over shell commands; they return JSON. All of them work against the Admin API at `MB_ADMIN_URL` (default: `server.admin_port` of `./mockingbird.yaml`, else `http://127.0.0.1:9090`) in workspace `MB_WORKSPACE` (default `default`).
 
 - Setup and lifecycle: `doctor`, `list_llm_providers`, `init_config`, `configure_llm`, `test_llm`, `validate_contract`, `start_server`, `server_status`, `server_logs`, `stop_server`, `proxy_env`
 - Mocks: `list_mocks`, `get_mock`, `create_mock`, `update_mock`, `delete_mock`, `import_contract`, `list_contract_versions`, `activate_contract_version`

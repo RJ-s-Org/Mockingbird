@@ -1,6 +1,6 @@
 # CLI client
 
-The same binary drives the Admin API. It prints JSON on stdout and problem details on stderr, and exits 1 on any non-2xx response. The target is `--admin-url`, then `MB_ADMIN_URL`, then `http://127.0.0.1:9090`.
+The same binary drives the Admin API. It prints JSON on stdout and problem details on stderr, and exits 1 on any non-2xx response. The target is `--admin-url`, then `MB_ADMIN_URL`, then the admin port of `doctor -c` / `proxy -c` or else of `./mockingbird.yaml` when it exists (`server.admin_port` on `server.host` with `MB_ADMIN_PORT` and `MB_HOST` applied over them as `server start` does, loopback when the host is `0.0.0.0` or `::`, `https` with `server.tls`), then `http://127.0.0.1:9090`. So a server started with `mockingbird server start -c mockingbird.yaml` is found from that directory without either.
 
 ```sh
 mockingbird mocks list
@@ -71,4 +71,4 @@ For an OpenAPI, Swagger 2.0 or AsyncAPI contract, the root document is the one c
 
 ## Reference
 
-`mockingbird serve --help` lists the flags, and the [configuration reference](configuration.md#environment-variables-and-flags) maps every flag and `MB_*` variable to its key. The CLI client reads `MB_ADMIN_URL` (default `http://127.0.0.1:9090`), `MB_ADMIN_TOKEN` and `MB_WORKSPACE`.
+`mockingbird serve --help` lists the flags, and the [configuration reference](configuration.md#environment-variables-and-flags) maps every flag and `MB_*` variable to its key. The CLI client reads `MB_ADMIN_URL` (default: from `./mockingbird.yaml`, else `http://127.0.0.1:9090`; see above), `MB_ADMIN_TOKEN` and `MB_WORKSPACE`.

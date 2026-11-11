@@ -1489,3 +1489,128 @@ fn help_lists_the_workflow_commands() {
     assert!(help(&["contracts", "--help"]).contains("activate"));
     assert!(help(&["api", "--help"]).contains("--data"));
 }
+
+/// Runs the binary in `dir` without `--admin-url` or the variables that
+/// pick the admin URL, plus `env`.
+async fn run_in(dir: &std::path::Path, args: &[&str], env: &[(&str, &str)]) -> Output {
+    let dir = dir.to_path_buf();
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let env: Vec<(String, String)> = env
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    tokio::task::spawn_blocking(move || {
+        let out = Command::cargo_bin("mockingbird")
+            .unwrap()
+            .args(&args)
+            .current_dir(&dir)
+            .env_remove("MB_ADMIN_URL")
+            .env_remove("MB_ADMIN_TOKEN")
+            .env_remove("MB_WORKSPACE")
+            .env_remove("MB_HOST")
+            .env_remove("MB_ADMIN_PORT")
+            .envs(env)
+            .output()
+            .unwrap();
+        Output {
+            code: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    })
+    .await
+    .unwrap()
+}
+
+/// The admin URL `mocks list` tried, from its "cannot reach" error (no
+/// server listens on the ports these tests use).
+fn unreachable_url(out: &Output) -> String {
+    assert_eq!(out.code, 1, "stdout: {}", out.stdout);
+    let rest = out
+        .stderr
+        .split("cannot reach the Admin API at ")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no unreachable URL: {}", out.stderr));
+    rest.split("/api/v1").next().unwrap().to_string()
+}
+
+/// A temporary directory whose `mockingbird.yaml` is `config`.
+fn dir_with_config(config: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("mockingbird.yaml"), config).unwrap();
+    dir
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_url_comes_from_the_config_admin_port() {
+    let admin = admin_url().await;
+    let port = admin.rsplit(':').next().unwrap();
+    let dir = dir_with_config(&format!("server:\n  admin_port: {port}\n"));
+    // A client subcommand reaches the server ./mockingbird.yaml names ...
+    let out = run_in(dir.path(), &["mocks", "list"], &[]).await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.json(), json!([]));
+    // ... and so does a workflow command (`api`, `drafts`, `contracts`,
+    // `mocks update`), parsed on a path of its own.
+    let out = run_in(
+        dir.path(),
+        &["api", "GET", "/workspaces/default/mocks"],
+        &[],
+    )
+    .await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.json(), json!([]));
+    // MB_ADMIN_PORT applies over the file, as it does for `server start`.
+    let dir = dir_with_config("server:\n  admin_port: 1\n");
+    let out = run_in(dir.path(), &["mocks", "list"], &[("MB_ADMIN_PORT", port)]).await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    // `doctor -c` names a file elsewhere; 0.0.0.0 is reached on loopback.
+    let other = tempfile::tempdir().unwrap();
+    let config = other.path().join("custom.yaml");
+    std::fs::write(&config, "server:\n  host: 0.0.0.0\n  admin_port: 9\n").unwrap();
+    let out = run_in(dir.path(), &["doctor", "-c", config.to_str().unwrap()], &[]).await;
+    assert_eq!(
+        out.json()["admin"]["url"],
+        "http://127.0.0.1:9",
+        "{}",
+        out.stdout
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_url_flag_and_env_beat_the_config() {
+    let dir = dir_with_config("server:\n  admin_port: 7\n");
+    let env = [("MB_ADMIN_URL", "http://127.0.0.1:8")];
+    let out = run_in(
+        dir.path(),
+        &["--admin-url", "http://127.0.0.1:9", "mocks", "list"],
+        &env,
+    )
+    .await;
+    assert_eq!(unreachable_url(&out), "http://127.0.0.1:9");
+    let out = run_in(dir.path(), &["mocks", "list"], &env).await;
+    assert_eq!(unreachable_url(&out), "http://127.0.0.1:8");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_url_defaults_to_9090_without_a_config() {
+    let dir = tempfile::tempdir().unwrap();
+    // `doctor` only reports the URL, so a server that owns 9090 on this
+    // machine is left alone.
+    let out = run_in(dir.path(), &["doctor"], &[]).await;
+    assert_eq!(
+        out.json()["admin"]["url"],
+        "http://127.0.0.1:9090",
+        "{}",
+        out.stdout
+    );
+    // A config without server.admin_port keeps the default port.
+    std::fs::write(dir.path().join("mockingbird.yaml"), "mocks: {}\n").unwrap();
+    let out = run_in(dir.path(), &["doctor"], &[]).await;
+    assert_eq!(
+        out.json()["admin"]["url"],
+        "http://127.0.0.1:9090",
+        "{}",
+        out.stdout
+    );
+}

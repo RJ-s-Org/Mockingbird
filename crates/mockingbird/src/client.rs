@@ -17,8 +17,89 @@ use clap::{Args, Subcommand};
 use reqwest::{Method, StatusCode, Url};
 use serde_json::{Value, json};
 
-/// Default `--admin-url` (and `MB_ADMIN_URL`).
+/// The admin URL client subcommands fall back to when neither
+/// `--admin-url`, `MB_ADMIN_URL` nor a config file names one.
 pub const DEFAULT_ADMIN_URL: &str = "http://127.0.0.1:9090";
+
+/// The config file client subcommands read the admin URL from when no
+/// `-c/--config` is given.
+pub const DEFAULT_CONFIG: &str = "mockingbird.yaml";
+
+/// The Admin API URL the client subcommands use: `explicit`
+/// (`--admin-url`, else `MB_ADMIN_URL`) when given; else the admin
+/// listener a server started here would bind, as `server start` and `run`
+/// work it out: the config file `config` (without one, `./mockingbird.yaml`
+/// when it exists) with `MB_HOST` and `MB_ADMIN_PORT` applied over it, so
+/// `server.admin_port` (default 9090) on `server.host` (default
+/// 127.0.0.1; loopback in place of `0.0.0.0` or `::`), over `https` when
+/// `server.tls` is set. Without a config file or those variables that is
+/// [`DEFAULT_ADMIN_URL`]. A config file that cannot be read or parsed, or
+/// a variable that does not parse, counts as absent.
+#[must_use]
+pub fn resolve_admin_url(explicit: Option<&str>, config: Option<&Path>) -> String {
+    resolve_admin_url_with(explicit, config, |k| std::env::var(k).ok())
+}
+
+/// [`resolve_admin_url`] with `lookup` in place of the environment.
+fn resolve_admin_url_with(
+    explicit: Option<&str>,
+    config: Option<&Path>,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> String {
+    if let Some(url) = explicit.filter(|u| !u.trim().is_empty()) {
+        return url.to_string();
+    }
+    let path = match config {
+        Some(path) => path.to_path_buf(),
+        None => PathBuf::from(DEFAULT_CONFIG),
+    };
+    let text = std::fs::read_to_string(&path).ok();
+    admin_url_from_config(text.as_deref(), lookup)
+}
+
+/// The admin URL the config document `text` (none: an all-defaults
+/// config) describes once `MB_HOST` and `MB_ADMIN_PORT` (from `lookup`)
+/// are applied (see [`resolve_admin_url`]).
+fn admin_url_from_config(text: Option<&str>, lookup: impl Fn(&str) -> Option<String>) -> String {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    #[derive(serde::Deserialize, Default)]
+    #[serde(default)]
+    struct Probe {
+        server: Option<ProbeServer>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    #[serde(default)]
+    struct ProbeServer {
+        host: Option<IpAddr>,
+        admin_port: Option<u16>,
+        tls: Option<serde::de::IgnoredAny>,
+    }
+    let server = text
+        .filter(|t| !t.trim().is_empty())
+        .and_then(|t| serde_saphyr::from_str::<Probe>(t).ok())
+        .and_then(|p| p.server)
+        .unwrap_or_default();
+    let env = |k: &str| lookup(k).filter(|v| !v.is_empty());
+    let host = env("MB_HOST")
+        .and_then(|v| v.parse::<IpAddr>().ok())
+        .or(server.host);
+    let host = match host {
+        Some(IpAddr::V4(ip)) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Some(IpAddr::V6(ip)) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        Some(ip) => ip,
+        None => IpAddr::V4(Ipv4Addr::LOCALHOST),
+    };
+    let port = env("MB_ADMIN_PORT")
+        .and_then(|v| v.parse::<u16>().ok())
+        .or(server.admin_port)
+        .unwrap_or(9090);
+    let scheme = if server.tls.is_some() {
+        "https"
+    } else {
+        "http"
+    };
+    format!("{scheme}://{}", SocketAddr::new(host, port))
+}
 
 /// The client subcommands, flattened into the top-level command.
 #[derive(Subcommand, Debug)]
@@ -2016,9 +2097,78 @@ impl AdminClient {
 
 #[cfg(test)]
 mod tests {
+    use super::contract_media_type;
     use std::path::Path;
 
-    use super::contract_media_type;
+    #[test]
+    fn admin_url_from_config_server_section() {
+        let url = |text: &str| super::admin_url_from_config(Some(text), |_| None);
+        assert_eq!(url(""), super::DEFAULT_ADMIN_URL);
+        assert_eq!(url("mocks: {}\n"), super::DEFAULT_ADMIN_URL);
+        assert_eq!(url("server: [not, a, map]\n"), super::DEFAULT_ADMIN_URL);
+        assert_eq!(
+            url("server:\n  admin_port: 19190\n"),
+            "http://127.0.0.1:19190"
+        );
+        assert_eq!(url("server:\n  host: 0.0.0.0\n"), "http://127.0.0.1:9090");
+        assert_eq!(
+            url("server:\n  host: '::'\n  admin_port: 7000\n"),
+            "http://[::1]:7000"
+        );
+        assert_eq!(
+            url("server:\n  host: 10.0.0.5\n  tls: {cert_file: c.pem, key_file: k.pem}\n"),
+            "https://10.0.0.5:9090"
+        );
+    }
+
+    #[test]
+    fn mb_host_and_mb_admin_port_apply_over_the_config() {
+        let env = |port: &'static str, host: &'static str| {
+            move |k: &str| match k {
+                "MB_ADMIN_PORT" => Some(port.to_string()),
+                "MB_HOST" => Some(host.to_string()),
+                _ => None,
+            }
+        };
+        let text = Some("server:\n  host: 10.0.0.5\n  admin_port: 19190\n");
+        assert_eq!(
+            super::admin_url_from_config(text, env("7000", "")),
+            "http://10.0.0.5:7000"
+        );
+        assert_eq!(
+            super::admin_url_from_config(text, env("", "0.0.0.0")),
+            "http://127.0.0.1:19190"
+        );
+        // Without a config file, and ignoring values that do not parse.
+        assert_eq!(
+            super::admin_url_from_config(None, env("7000", "")),
+            "http://127.0.0.1:7000"
+        );
+        assert_eq!(
+            super::admin_url_from_config(text, env("x", "y")),
+            "http://10.0.0.5:19190"
+        );
+    }
+
+    #[test]
+    fn resolve_admin_url_prefers_the_explicit_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("m.yaml");
+        std::fs::write(&config, "server:\n  admin_port: 19190\n").unwrap();
+        let port = |k: &str| (k == "MB_ADMIN_PORT").then(|| "7000".to_string());
+        assert_eq!(
+            super::resolve_admin_url_with(Some("http://h:1"), Some(&config), port),
+            "http://h:1"
+        );
+        assert_eq!(
+            super::resolve_admin_url_with(None, Some(&config), |_| None),
+            "http://127.0.0.1:19190"
+        );
+        assert_eq!(
+            super::resolve_admin_url_with(None, Some(&dir.path().join("missing.yaml")), |_| None),
+            super::DEFAULT_ADMIN_URL
+        );
+    }
 
     #[test]
     fn contract_media_types() {

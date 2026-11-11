@@ -373,6 +373,6 @@ Overrides of an AsyncAPI mock's event channels, by channel id. Channels not list
 | | `--watch` | Reconcile again when the file or a contract changes (a usage error on `data` nodes). |
 | `MB_CHAOS_SEED` | | Seed of the chaos random choices. |
 | `VAULT_ADDR`, `VAULT_TOKEN`, `VAULT_TOKEN_FILE`, `VAULT_NAMESPACE`, `VAULT_CACERT` | | Enable and configure `vault:` secret references. |
-| `MB_ADMIN_URL`, `MB_ADMIN_TOKEN`, `MB_WORKSPACE` | `--admin-url`, `--token`, `--workspace` | The CLI client's Admin API, API key and workspace. |
+| `MB_ADMIN_URL`, `MB_ADMIN_TOKEN`, `MB_WORKSPACE` | `--admin-url`, `--token`, `--workspace` | The CLI client's Admin API, API key and workspace. Without `--admin-url` or `MB_ADMIN_URL` the client uses `server.admin_port` (and `server.host`) of `./mockingbird.yaml` (or of `doctor -c` / `proxy -c`), with `MB_ADMIN_PORT` and `MB_HOST` applied over it as `server start` does, else `http://127.0.0.1:9090`. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | | OTLP trace export (HTTP/protobuf; a `grpc` protocol is warned about). |
 | `RUST_LOG` | | Log filter. |
