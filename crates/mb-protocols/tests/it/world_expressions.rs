@@ -470,7 +470,19 @@ async fn a_changes_world_keeps_its_pointer_and_value_semantics() {
         json!({"id": "m1", "email": "a@x.io", "name": "Grace", "label": "kept", "note": null});
     assert_eq!(body, want);
     assert_eq!(h.stored("members", "m1").await, Some(want));
-    assert!(record_of(&h, "renameMember").get("expr_failed").is_none());
+    // The value its member refuses is dropped, and noted.
+    let request = record_of(&h, "renameMember");
+    let pointers: Vec<Value> = request["expr_failed"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|f| f["pointer"].clone())
+        .collect();
+    assert_eq!(
+        pointers,
+        vec![json!("/operations/renameMember/changes/number")],
+        "{request}"
+    );
 }
 
 #[tokio::test]
@@ -904,4 +916,246 @@ async fn a_stated_refusal_whose_message_its_schema_refuses_still_asks_the_model(
         "{:?}",
         h.provider.requests()
     );
+}
+
+/// Issues created under a repository and read by number (trimmed from a GitHub
+/// contract): the author is an object with required members, `closed_at` nullable.
+const ISSUES: &str = r##"
+openapi: 3.0.3
+info: {title: Issues, version: "1"}
+paths:
+  /repos/{owner}/{repo}/issues:
+    parameters:
+      - {name: owner, in: path, required: true, schema: {type: string}}
+      - {name: repo, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: issuesCreate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: {type: string}
+                body: {type: string}
+      responses:
+        "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+  /repos/{owner}/{repo}/issues/{issue_number}:
+    get:
+      operationId: issuesGet
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+        - {name: issue_number, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+components:
+  schemas:
+    Issue:
+      type: object
+      required: [id, node_id, number, title, state, url, repository_url, user, comments, created_at]
+      properties:
+        id: {type: integer}
+        node_id: {type: string}
+        number: {type: integer}
+        title: {type: string}
+        body: {type: string, nullable: true}
+        state: {type: string, enum: [open, closed]}
+        locked: {type: boolean}
+        url: {type: string}
+        repository_url: {type: string}
+        user:
+          type: object
+          required: [login, id, type]
+          properties:
+            login: {type: string}
+            id: {type: integer}
+            type: {type: string, enum: [Bot, User]}
+        comments: {type: integer}
+        created_at: {type: string, format: date-time}
+        closed_at: {type: string, nullable: true}
+"##;
+
+fn issues_create(set: Value) -> Value {
+    json!({
+        "types": {"issues": {"identity": {"member": "id"}}},
+        "operations": {"issuesCreate": {"kind": "create", "type": "issues", "set": set}}
+    })
+}
+
+/// What fill answers for an issue: decoys for every member `set` writes.
+fn issue_fill() -> Value {
+    json!({
+        "node_id": "n", "url": "u", "created_at": "2026-01-01T00:00:00Z",
+        "user": {"id": 1, "login": "octo", "type": "User"},
+        "body": "decoy", "comments": 999, "number": 999, "repository_url": "decoy", "closed_at": "decoy",
+        "locked": true, "state": "closed"
+    })
+}
+
+#[tokio::test]
+async fn a_create_s_set_with_a_nested_member_is_in_its_answer_and_its_stored_record() {
+    // `user.type` leaves `user` without the members fill writes next: no reason to
+    // drop what the other entries set. A `null` on a nullable member is set.
+    let world = issues_create(json!({
+        "comments": "0",
+        "number": "seq('issues:' + request.path.owner + '/' + request.path.repo)",
+        "repository_url": "'https://api.github.com/repos/' + request.path.owner + '/' + request.path.repo",
+        "closed_at": "null",
+        "locked": "false",
+        "state": "'open'",
+        "title": "request.body.title",
+        "body": "request.body.body",
+        "user.type": "'Bot'"
+    }));
+    let h = support::described(ISSUES, world, vec![issue_fill(), issue_fill()]);
+    for n in 1..=2 {
+        let (status, headers, body) = h
+            .send(
+                "POST",
+                "/repos/acme/backups/issues",
+                Some(json!({"title": "down", "body": "b"})),
+                &[],
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(headers["x-mockingbird-source"], "state", "{body}");
+        assert_eq!(body["number"], n, "{body}");
+        assert_eq!(body["comments"], 0, "{body}");
+        assert_eq!(
+            body["repository_url"], "https://api.github.com/repos/acme/backups",
+            "{body}"
+        );
+        assert_eq!(body["closed_at"], Value::Null, "{body}");
+        assert_eq!(body["locked"], false, "{body}");
+        assert_eq!(body["state"], "open", "{body}");
+        assert_eq!(body["user"]["type"], "Bot", "{body}");
+        assert_eq!(
+            body["user"]["login"], "octo",
+            "fill completes the rest: {body}"
+        );
+        let id = body["id"].to_string();
+        let stored = h.stored("issues", &id).await.unwrap_or_default();
+        for member in ["number", "comments", "repository_url", "closed_at", "user"] {
+            assert_eq!(stored[member], body[member], "{member}: {stored}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_set_value_its_member_refuses_is_on_the_request_record() {
+    let world = issues_create(json!({"comments": "'many'", "locked": "false"}));
+    let h = support::described(ISSUES, world, vec![issue_fill()]);
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/repos/acme/backups/issues",
+            Some(json!({"title": "down"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["locked"], false, "{body}");
+    let request = record_of(&h, "issuesCreate");
+    let failed = request["expr_failed"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(failed.len(), 1, "{request}");
+    assert_eq!(
+        failed[0]["pointer"],
+        "/operations/issuesCreate/set/comments"
+    );
+}
+
+#[tokio::test]
+async fn a_null_a_create_s_set_gives_a_member_that_refuses_it_sets_nothing() {
+    // `node_id` is no nullable member: fill completes it, and nothing is noted.
+    let h = support::described(
+        ISSUES,
+        issues_create(json!({"node_id": "null", "comments": "0"})),
+        vec![issue_fill()],
+    );
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/repos/acme/backups/issues",
+            Some(json!({"title": "down"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["node_id"], "n", "{body}");
+    assert_eq!(body["comments"], 0, "{body}");
+    let request = record_of(&h, "issuesCreate");
+    assert!(request.get("expr_failed").is_none(), "{request}");
+}
+
+/// Things read by id, holding at most three members: each of `a` and `b` fits its
+/// member, but a record holding both does not fit the type.
+const THINGS: &str = r##"
+openapi: 3.0.3
+info: {title: Things, version: "1"}
+paths:
+  /things:
+    post:
+      operationId: createThing
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}}}}}
+      responses:
+        "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+  /things/{id}:
+    get:
+      operationId: getThing
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+components:
+  schemas:
+    Thing:
+      type: object
+      required: [id, name]
+      maxProperties: 3
+      properties:
+        id: {type: string}
+        name: {type: string}
+        a: {type: string}
+        b: {type: string}
+"##;
+
+#[tokio::test]
+async fn a_create_whose_set_breaks_the_finished_record_is_generated_and_its_set_noted() {
+    // The executor's record breaks the type's reads once built: it is never stored,
+    // the create is generated, and on the generated record the set, which breaks it
+    // too, is dropped whole and noted.
+    let world =
+        json!({"operations": {"createThing": {"kind": "create", "set": {"a": "'x'", "b": "'y'"}}}});
+    let generated = json!({"id": "t1", "name": "lamp"});
+    let h = support::described(THINGS, world, vec![generated.clone()]);
+    let (status, _, body) = h
+        .send("POST", "/things", Some(json!({"name": "lamp"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body, generated, "{body}");
+    let request = record_of(&h, "createThing");
+    assert_eq!(request["exec_fallback"], "record_invalid", "{request}");
+    assert_eq!(request["render_error"], "<root> maxProperties", "{request}");
+    let failed = request["expr_failed"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(failed.len(), 1, "{request}");
+    assert_eq!(failed[0]["pointer"], "/operations/createThing", "{request}");
+    let error = failed[0]["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("<root>") && error.contains("maxProperties"),
+        "{request}"
+    );
+    // Only the generated record is stored, as it fits.
+    let ids = h.stored_ids("things").await;
+    assert_eq!(ids, vec!["t1".to_string()], "{ids:?}");
+    assert_eq!(h.stored("things", "t1").await, Some(generated));
 }

@@ -54,9 +54,9 @@ const COUNTERS_ID: &str = "counters";
 /// Scopes one session counts at most; its counters are emptied when full.
 const MAX_SEQ_SCOPES: usize = 1024;
 
-/// A call's `set` values: each member, its value (`None` when its expression failed
-/// or gave `null`, or its `from_request` pointer reads nothing), and whether it is a
-/// `changes` entry.
+/// A call's `set` values: each member, its value (`None` when its expression failed,
+/// gave `null` on a write other than a create, or its `from_request` pointer reads
+/// nothing), and whether it is a `changes` entry.
 type SetValues = Vec<(String, Option<Value>, bool)>;
 
 /// What one call's world expressions decided, and what the executor noted of the call
@@ -65,7 +65,7 @@ type SetValues = Vec<(String, Option<Value>, bool)>;
 pub(crate) struct CallExprs {
     notes: Mutex<Notes>,
     /// The call's `set` values, once evaluated: each member and its value (`None`
-    /// when its expression failed or gave `null`).
+    /// when its expression failed, or gave `null` on a write other than a create).
     /// The values, and for a create the record id they were evaluated against.
     set: Mutex<Option<(Option<Value>, SetValues)>>,
 }
@@ -617,11 +617,12 @@ pub(super) async fn refusal(
 }
 
 /// The members `plan`'s operation sets on the record it stores, each with its value
-/// (`None` when its expression failed or gave `null`: the member is left as the
-/// engine makes it), evaluated once per call against `before`, the target as stored
-/// before it; for a create (`building`), the record as built so far, an entry setting
-/// the type's identity member evaluated first and bound into it, so the others read
-/// the record's id (`'https://x/' + record.id`).
+/// (`None` when its expression failed, or gave `null` on a write other than a create:
+/// the member is left as the engine makes it; a create keeps `null`, which it sets
+/// where the member's schema admits it), evaluated once per call against `before`,
+/// the target as stored before it; for a create (`building`), the record as built so
+/// far, an entry setting the type's identity member evaluated first and bound into
+/// it, so the others read the record's id (`'https://x/' + record.id`).
 pub(super) async fn set_values(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
@@ -688,9 +689,8 @@ pub(super) async fn set_values(
                 .as_ref()
                 .and_then(|b| b.pointer(p.as_str()))
                 .cloned(),
-            SetValue::Expr(p) => {
-                eval(plan, rt, (p, &entry.pointer), bound, host).filter(|v| !v.is_null())
-            }
+            SetValue::Expr(p) => eval(plan, rt, (p, &entry.pointer), bound, host)
+                .filter(|v| building || !v.is_null()),
         }
     };
     // A create's identity entry first: the others read the record by its id.
@@ -700,7 +700,8 @@ pub(super) async fn set_values(
     {
         let value = match kept_identity.take() {
             Some((_, value)) => value,
-            None => value_of(&ops.set[i], &bound, &mut host),
+            // A `null` identity names no record: the minted one stays.
+            None => value_of(&ops.set[i], &bound, &mut host).filter(|v| !v.is_null()),
         };
         if let Some(v) = &value
             && bound.record.is_object()

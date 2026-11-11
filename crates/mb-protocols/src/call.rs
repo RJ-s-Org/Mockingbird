@@ -1420,7 +1420,7 @@ pub(crate) async fn complete(
                 // stored from it.
                 let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
                 let before = mb_mcm::member_at(record, field).cloned();
-                transitions::apply_on_create(&mut state, (plan, call), record)
+                transitions::apply_on_create(&mut state, (plan, call), record, false)
                     .instrument(state_span())
                     .await;
                 set_moved_identity = mb_mcm::member_at(record, field) != before.as_ref();
