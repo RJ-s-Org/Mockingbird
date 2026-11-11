@@ -193,6 +193,14 @@
             "type": "string",
             "minLength": 1
           }
+        },
+        "same_as": {
+          "description": "The names this type goes by in the mocks whose records this mock shares (`shares`), where they differ beyond case and plural, e.g. REST `pulls` beside GraphQL `pullrequest`.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },

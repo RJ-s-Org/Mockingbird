@@ -1052,6 +1052,17 @@ impl<'a> Ctx<'a> {
         let record = self.record_schema(name);
         let ty = Some(name);
         let mut out = TypeDesc::default();
+        for (i, other) in t.same_as.iter().enumerate() {
+            if other.trim().is_empty() {
+                self.refuse(
+                    &path.join("same_as").join(i),
+                    RefusalCode::Invalid,
+                    "a type name may not be empty".to_string(),
+                );
+            } else {
+                out.same_as.push(other.clone());
+            }
+        }
 
         if let Some(id) = &t.identity {
             let p = path.join("identity");

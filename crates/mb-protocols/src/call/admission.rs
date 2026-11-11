@@ -422,7 +422,7 @@ pub(crate) async fn plan<'a>(
         op,
         session: SessionKey {
             workspace: rt.workspace.clone(),
-            mock: rt.name.clone(),
+            mock: rt.shares.clone().unwrap_or_else(|| rt.name.clone()),
             session: overrides.session,
         },
         scenario,

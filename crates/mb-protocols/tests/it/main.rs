@@ -75,6 +75,7 @@ mod repro234;
 mod routing;
 mod runtime;
 mod seeded_mints;
+mod shared_state;
 mod sibling_writes;
 mod skeletal_answers;
 mod soap;

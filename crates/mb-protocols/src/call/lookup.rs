@@ -81,8 +81,19 @@ pub(super) async fn read_context(
                             None => {
                                 let tried: Vec<&str> =
                                     read_fields.iter().chain(&then).copied().collect();
-                                records::by_extra_fields(state, session, t, (&tried, id), owner)
-                                    .await
+                                match records::by_extra_fields(
+                                    state,
+                                    session,
+                                    t,
+                                    (&tried, id),
+                                    owner,
+                                )
+                                .await
+                                {
+                                    Some(hit) => Some(hit),
+                                    // What the mock this one shares stored.
+                                    None => shared::by_shared(state, session, (op, t), id).await,
+                                }
                             }
                         }
                     }

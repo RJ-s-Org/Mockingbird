@@ -388,6 +388,9 @@ pub struct MockRuntime {
     pub unknown_ids: UnknownIds,
     /// The scenario applied when a call names none.
     pub default_scenario: Option<String>,
+    /// The name the mocks of one API keep their sessions under together
+    /// (see `call::shared`); `None` keeps this mock's own.
+    pub shares: Option<String>,
     /// Sends webhook events after successful writes; `None` sends none.
     pub webhooks: Option<Arc<webhooks::deliver::WebhookDispatcher>>,
     /// Path prefixes the contract's HTTP operations are also served under,
@@ -543,6 +546,7 @@ impl MockRuntime {
             consistency: true,
             unknown_ids: UnknownIds::default(),
             default_scenario: None,
+            shares: None,
             webhooks: None,
             base_paths: Vec::new(),
             credential_names,
