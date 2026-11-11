@@ -77,7 +77,9 @@ mod base_url;
     allow(dead_code)
 )]
 mod call;
-pub use call::exec_pool::{MIN_POOL_TOKENS, POOL_SIZE, RecordPool, fill as fill_record_pool};
+pub use call::exec_pool::{
+    MIN_POOL_TOKENS, POOL_SIZE, RecordPool, fill as fill_record_pool, warm_validators,
+};
 pub mod chaos;
 #[cfg_attr(
     not(any(

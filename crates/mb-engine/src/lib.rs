@@ -80,7 +80,7 @@ pub mod validate;
 
 pub use extract::extract_json;
 pub use faker::{Costs, Faker, FakerHints};
-pub use fill::{FillContext, Filled, fill_nulls};
+pub use fill::{FillContext, Filled, fill_nulls, free_text};
 pub use guards::{
     EngineGuards, GenerationLimiter, TokenBudget, without_effects_schema, without_items_schema,
 };
@@ -1467,6 +1467,18 @@ impl Engine {
         }
     }
 
+    /// Compiles and caches the validator of `op`'s success answer, which
+    /// [`Engine::serve_stored`] and generation check against, so that the first
+    /// call needing it does not compile it (seconds for a large contract's
+    /// schema). Nothing when the answer has no schema or it does not compile.
+    pub fn warm_validator(&self, bundle: &Bundle, op: &Operation) {
+        if let Some(variant) = op.success_output()
+            && let Some(schema) = variant.schema.as_ref()
+        {
+            let _ = self.validator(bundle, op, success_status(variant.status), schema);
+        }
+    }
+
     /// `stored` served as `op`'s success answer, tagged `State`, when the
     /// success variant has a schema (the narrowed `response_schema` when
     /// given) and `stored` validates against it. `None` otherwise: a partial
@@ -2451,13 +2463,26 @@ impl Engine {
         schema: &Value,
         draws: &mut seed::Draws,
     ) -> Value {
+        self.fake_member(bundle, field, schema, &FakerHints::default(), draws)
+    }
+
+    /// [`Engine::fake_field`], with `hints` (request values echoed into the member
+    /// named for them, where they fit its schema).
+    fn fake_member(
+        &self,
+        bundle: &Bundle,
+        field: &str,
+        schema: &Value,
+        hints: &FakerHints,
+        draws: &mut seed::Draws,
+    ) -> Value {
         let field = mb_mcm::leaf_member(field);
         let wrapper = serde_json::json!({
             "type": "object",
             "required": [field],
             "properties": {field: schema},
         });
-        self.fake_value(bundle, &wrapper, None, &FakerHints::default(), draws)
+        self.fake_value(bundle, &wrapper, None, hints, draws)
             .get(field)
             .cloned()
             .unwrap_or(Value::Null)

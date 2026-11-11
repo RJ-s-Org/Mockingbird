@@ -406,7 +406,11 @@ pub(super) async fn run(
                     &fill_schema(&asked, &required),
                     known,
                     &names,
-                    FillContext { op, call },
+                    FillContext {
+                        op,
+                        call,
+                        sent: sent.as_object(),
+                    },
                 )
                 .await;
             usage = filled.usage;
