@@ -169,6 +169,7 @@ pub(super) async fn seed_own_read(
     }
     if state.insert_seeded(session, resource.clone()).await {
         rt.own_reads().remember(session, &resource);
+        rt.variants().remember(session, op, call, &resource);
         if let Some(collection) = collection_of(op, call) {
             rt.collections().remember(session, &resource, collection);
         }
@@ -182,6 +183,7 @@ pub(super) async fn seed_own_read(
         && state.upsert(session, resource.clone()).await
     {
         rt.own_reads().remember(session, &resource);
+        rt.variants().remember(session, op, call, &resource);
         if let Some(collection) = collection_of(op, call) {
             rt.collections().remember(session, &resource, collection);
         }
