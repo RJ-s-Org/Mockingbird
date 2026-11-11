@@ -338,7 +338,36 @@ async fn a_list_whose_items_are_another_type_never_shapes_the_pool() {
     let h = support::described(&contract, w, vec![batch, widget(9)]);
     mb_protocols::fill_record_pool(Arc::downgrade(&h.rt), 60_000).await;
     assert_eq!(h.rt.pool.sizes().get("widgets").copied().unwrap_or(0), 0);
-    let (_, headers, body) = h.send("GET", "/widgets/w9", None, &[]).await;
-    assert_ne!(headers["x-mockingbird-source"], "state", "{body}");
-    assert_ne!(body["id"], "k1", "{body}");
+    // The model was asked for widgets alone: the kinds' id enum never reached it.
+    let asked = format!("{:?}", h.provider.requests());
+    assert!(
+        !asked.contains("k2"),
+        "the pool call carried the kinds' enum"
+    );
+}
+
+#[tokio::test]
+async fn a_type_whose_lists_show_a_summary_of_its_record_is_still_pooled() {
+    // The read by id answers the whole widget; the list shows a summary of it.
+    let contract = WIDGETS
+        .replace(
+            "schema: {type: array, items: {$ref: \"#/components/schemas/Widget\"}}",
+            "schema: {type: array, items: {$ref: \"#/components/schemas/WidgetSummary\"}}",
+        )
+        .replace(
+            "      required: [id, name]\n      properties:\n        id: {type: string}\n        name: {type: string}\n",
+            "      required: [id, name, description]\n      properties:\n        id: {type: string}\n        name: {type: string}\n        description: {type: string}\n    WidgetSummary:\n      type: object\n      additionalProperties: false\n      required: [id, name]\n      properties:\n        id: {type: string}\n        name: {type: string}\n",
+        );
+    let full = |i: usize| json!({"id": format!("w{i}"), "name": format!("Widget {i}"), "description": format!("The {i}th")});
+    let batch = json!({"records": (1..=5).map(full).collect::<Vec<_>>()});
+    let h = support::described(&contract, world(), vec![batch]);
+    mb_protocols::fill_record_pool(Arc::downgrade(&h.rt), 60_000).await;
+    assert_eq!(h.rt.pool.sizes().get("widgets"), Some(&5));
+    let (_, headers, listed) = h.send("GET", "/widgets", None, &[]).await;
+    assert_eq!(headers["x-mockingbird-source"], "state", "{listed}");
+    assert_eq!(listed.as_array().unwrap().len(), 5, "{listed}");
+    assert!(
+        listed[0].get("description").is_none(),
+        "a summary: {listed}"
+    );
 }

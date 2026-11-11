@@ -6,8 +6,8 @@
 //! its world). For each type the executor stores (one with an identity, read by id or
 //! listed), it asks the model for [`POOL_SIZE`] records with the mock's persona (no more
 //! than one page of each of the type's lists admits, its `maxItems`), in calls of
-//! [`PER_CALL`], written as the type's own record (its read by id's schema, else its first
-//! list's items) and then checked against every schema the type is read by
+//! [`PER_CALL`], written as the type's own record (its read by id's schema, else the first
+//! shape it is read by) and then checked against every schema the type is read by
 //! ([`super::create::unreadable`]): a type whose shapes no record meets, such as one with
 //! a list whose items are another type's, is left unpooled. It stops at the mock's token cap, counted per build of
 //! the runtime (and per replica: each fills its own), and a call is made only while a
@@ -268,7 +268,7 @@ pub async fn fill(rt: Weak<MockRuntime>, cap: u64) {
                     break;
                 };
                 // The model writes the type's own record: its read by id's schema, else
-                // its first list's items. Never every shape at once: a list whose items
+                // the first shape it is read by. Never every shape at once: a list whose items
                 // are another type's (a list of genres typed as movies) would make the
                 // model, or the local patching of its answer, take that type's ids and
                 // members. Each record is then checked against every shape the type is
