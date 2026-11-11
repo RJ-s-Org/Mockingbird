@@ -60,10 +60,11 @@ fn next_retry_delay(delay: Duration) -> Duration {
 }
 
 /// A scheduled rebuild of a mock whose world description could not be
-/// loaded.
+/// loaded, or whose build failed.
 struct WorldRetry {
-    /// The build generation of the mounted runtime it rebuilds: it does
-    /// nothing once another build replaced that runtime.
+    /// The build generation of the mounted runtime it rebuilds (a fresh one
+    /// for a failed build): it does nothing once another build replaced that
+    /// runtime or succeeded.
     generation: u64,
     /// How long it waits.
     delay: Duration,
@@ -233,7 +234,8 @@ pub struct MockRegistry {
     /// runtime does nothing once a later build replaced it.
     generations: AtomicU64,
     /// `(workspace, name)` → the scheduled rebuild of a mounted mock whose
-    /// world description could not be loaded; at most one per mock.
+    /// world description could not be loaded, or of a mock whose build
+    /// failed; at most one per mock.
     world_retries: std::sync::Mutex<HashMap<MockKey, WorldRetry>>,
     /// This registry, for the retry tasks it spawns (which must not keep it
     /// alive).
@@ -336,7 +338,9 @@ impl MockRegistry {
     /// A mounted runtime whose world is `pending` gets one retry, keyed to
     /// its build generation; any other outcome of a build that did not
     /// fail cancels the retry. A failed build leaves a scheduled retry as it
-    /// is, and reschedules a retry whose own build failed.
+    /// is, and otherwise schedules one (the next delay after a retry whose
+    /// own build failed), so a mock that failed transiently comes back
+    /// without a config change.
     fn settle_retry(
         &self,
         deps: &RuntimeDeps,
@@ -368,13 +372,13 @@ impl MockRegistry {
                     .or(old.map(|o| o.delay))
                     .unwrap_or(WORLD_RETRY_FIRST)
             }
-            BuildEnd::Failed => match retried {
-                Some(delay) if !retries.contains_key(key) => next_retry_delay(delay),
-                _ => return,
-            },
+            BuildEnd::Failed if retries.contains_key(key) => return,
+            BuildEnd::Failed => retried.map_or(WORLD_RETRY_FIRST, next_retry_delay),
         };
-        let Some(generation) = pending else {
-            return;
+        let generation = match (pending, end) {
+            (Some(generation), _) => generation,
+            (None, BuildEnd::Failed) => self.next_generation(),
+            (None, BuildEnd::Built) => return,
         };
         let me = self.me.clone();
         let deps = deps.clone();
@@ -399,8 +403,9 @@ impl MockRegistry {
     }
 
     /// Mock `key`'s scheduled world retry, after `delay`: rebuilds the mock
-    /// when the retry is still its own and the runtime of build
-    /// `generation` is still mounted with a `pending` world.
+    /// when the retry is still its own and either the runtime of build
+    /// `generation` is still mounted with a `pending` world or the mock's
+    /// last build failed.
     async fn retry_world(
         &self,
         deps: &RuntimeDeps,
@@ -421,7 +426,8 @@ impl MockRegistry {
             .mounted
             .load()
             .iter()
-            .any(|m| m.is(&key.0, &key.1) && m.generation == generation && m.world.pending);
+            .any(|m| m.is(&key.0, &key.1) && m.generation == generation && m.world.pending)
+            || self.failed.lock().is_ok_and(|f| f.contains_key(&key));
         if !current {
             return;
         }
@@ -537,11 +543,17 @@ impl MockRegistry {
         if let Ok(mut slot) = self.failed.lock() {
             *slot = failed;
         }
-        // A mock no longer stored has nothing to retry.
+        // A mock no longer stored, or no longer failing, has nothing to
+        // retry (a mock whose build failed keeps its retry's backoff).
         let mounted = self.mounted.load_full();
+        let failed: BTreeSet<MockKey> = self
+            .failed
+            .lock()
+            .map(|f| f.keys().cloned().collect())
+            .unwrap_or_default();
         if let Ok(mut retries) = self.world_retries.lock() {
             retries.retain(|key, retry| {
-                let keep = mounted.iter().any(|m| m.is(&key.0, &key.1));
+                let keep = mounted.iter().any(|m| m.is(&key.0, &key.1)) || failed.contains(key);
                 if !keep {
                     retry.task.abort();
                 }
