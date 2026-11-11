@@ -2676,16 +2676,32 @@ enum Owner {
 /// Whose server `/readyz` body `body` describes for the project in `dir`
 /// that last started a server with `started`: the project's when the config
 /// it was started with is `started` or lies under `dir`, or, started
-/// without a config, when its working folder lies under `dir`.
+/// without a config, when its working folder lies under `dir`. When `dir`
+/// is the filesystem root or the home folder (where some agents start MCP
+/// servers), which holds every project, only `dir` itself counts, not the
+/// folders under it.
 fn server_owner(body: &Value, dir: &std::path::Path, started: Option<&std::path::Path>) -> Owner {
     let Some(server_dir) = body.get("dir").and_then(Value::as_str) else {
         return Owner::Unknown;
     };
     let dir = daemon::same_file_key(dir);
+    let home = ["HOME", "USERPROFILE"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(|h| daemon::same_file_key(std::path::Path::new(&h)))
+        .any(|h| h == dir);
+    let broad = home || dir.parent().is_none();
+    let inside = |folder: &std::path::Path| {
+        if broad {
+            folder == dir
+        } else {
+            folder.starts_with(&dir)
+        }
+    };
     match body.get("config").and_then(Value::as_str) {
         Some(config) => {
             let config = daemon::same_file_key(std::path::Path::new(config));
-            if config.starts_with(&dir)
+            if config.parent().is_some_and(inside)
                 || started.is_some_and(|s| daemon::same_file_key(s) == config)
             {
                 Owner::Project
@@ -2693,9 +2709,7 @@ fn server_owner(body: &Value, dir: &std::path::Path, started: Option<&std::path:
                 Owner::Other(format!("config {}", config.display()))
             }
         }
-        None if daemon::same_file_key(std::path::Path::new(server_dir)).starts_with(&dir) => {
-            Owner::Project
-        }
+        None if inside(&daemon::same_file_key(std::path::Path::new(server_dir))) => Owner::Project,
         None => Owner::Other(format!("started without a config in {server_dir}")),
     }
 }
@@ -3800,6 +3814,31 @@ mod tests {
             server_owner(&json!({"status": "ready"}), dir, None),
             Owner::Unknown
         );
+    }
+
+    #[test]
+    fn from_the_root_folder_only_its_own_config_is_the_projects() {
+        let root = std::path::Path::new("/");
+        let at = |config: &str| json!({"config": config, "dir": "/"});
+        assert_eq!(
+            server_owner(&at("/mockingbird.yaml"), root, None),
+            Owner::Project
+        );
+        assert!(matches!(
+            server_owner(&at("/work/other/mockingbird.yaml"), root, None),
+            Owner::Other(_)
+        ));
+        assert!(matches!(
+            server_owner(&json!({"config": null, "dir": "/work/other"}), root, None),
+            Owner::Other(_)
+        ));
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            let config = home.join("some-project/mockingbird.yaml");
+            assert!(matches!(
+                server_owner(&json!({"config": config, "dir": home}), &home, None),
+                Owner::Other(_)
+            ));
+        }
     }
 
     /// A project-mode server in `dir` whose `./mockingbird.yaml` puts the

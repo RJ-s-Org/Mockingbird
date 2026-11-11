@@ -1156,7 +1156,7 @@ fn mcp_acts_only_on_its_projects_server() {
     // configs would.
     let project = tempdir();
     std::fs::copy(fixture(), project.path().join("orders.yaml")).unwrap();
-    let data_port = free_port().to_string();
+    // Data port 0: only the admin port can be busy at the first start.
     run_json(
         project.path(),
         &[
@@ -1165,7 +1165,7 @@ fn mcp_acts_only_on_its_projects_server() {
             "--contract",
             "orders.yaml",
             "--port",
-            &data_port,
+            "0",
             "--admin-port",
             &foreign_port,
         ],
