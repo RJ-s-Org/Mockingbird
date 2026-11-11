@@ -563,6 +563,8 @@ fn session_functions() {
     assert_eq!(ok("seq('pr:' + request.path.repo)"), json!(1));
     assert_eq!(ok("mint('[0-9]{12}')"), json!("minted:[0-9]{12}"));
     assert!(eval_err("mint('bad')").contains("mint() cannot generate"));
+    // Its pattern may be a credential header: the note never quotes it.
+    assert!(!eval_err("mint('bad')").contains("bad"));
     assert!(eval_err("seq(1)").contains("seq() needs a string"));
 }
 

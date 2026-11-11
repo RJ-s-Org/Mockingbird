@@ -199,7 +199,13 @@ pub(super) fn call(
         Func::Mint => {
             let pattern = string(0)?;
             Value::String(host.mint(pattern).ok_or_else(|| {
-                Fail::new(pos, format!("mint() cannot generate from {pattern:?}"))
+                Fail::new(
+                    pos,
+                    format!(
+                        "mint() cannot generate from a pattern of {} characters",
+                        pattern.chars().count()
+                    ),
+                )
             })?)
         }
     })
