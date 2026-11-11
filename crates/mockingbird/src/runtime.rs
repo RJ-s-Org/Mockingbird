@@ -289,6 +289,7 @@ async fn bare_engine(
         persona: mock.persona.clone(),
         stream: deps.stream.clone(),
         output_budget: deps.limits.output_budget_tokens,
+        generation_timeout: Some(deps.limits.generation_timeout),
         ..EngineConfig::default()
     };
     let provider = match profile {

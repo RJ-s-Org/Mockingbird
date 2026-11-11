@@ -441,6 +441,10 @@ pub struct EngineConfig {
     /// Completion tokens an answer is shaped to (see [`budget`]); 0 turns
     /// shaping off.
     pub output_budget: u32,
+    /// The longest a served answer's LLM calls may take in all, whatever a
+    /// provider chain's hops add up to (`limits.generation_timeout`); `None`:
+    /// the provider's total.
+    pub generation_timeout: Option<Duration>,
 }
 
 /// Limits and pacing for [`Engine::generate_stream`].
@@ -544,6 +548,7 @@ impl Default for EngineConfig {
             faker_depth: 6,
             stream: StreamConfig::default(),
             output_budget: budget::DEFAULT_OUTPUT_BUDGET,
+            generation_timeout: None,
         }
     }
 }
@@ -2497,7 +2502,7 @@ impl Engine {
             name: format_name(&op.id),
             schema: guards::effects_schema(none),
         };
-        let limit = provider.total_timeout(self.config.timeout);
+        let limit = self.llm_limit(provider);
         let deadline = Instant::now() + limit;
         let reply = match self.admit(deadline).await {
             Ok(_permit) => {
@@ -2559,8 +2564,9 @@ impl Engine {
         checks: &Checks<'_>,
         usage: &mut Usage,
     ) -> Result<LlmAnswer, String> {
-        // A fallback chain gets every hop's timeout, not just the first's.
-        let limit = provider.total_timeout(self.config.timeout);
+        // A fallback chain gets every hop's timeout, not just the first's, up to
+        // the generation timeout.
+        let limit = self.llm_limit(provider);
         let deadline = Instant::now() + limit;
         let _permit = self.admit(deadline).await?;
         let first = self
@@ -2666,6 +2672,16 @@ impl Engine {
             other => (other, effects),
         };
         (checked, true, effects.all_dropped())
+    }
+
+    /// How long one generation's LLM calls may take: the provider's total
+    /// timeout (every hop of a fallback chain), at most
+    /// [`EngineConfig::generation_timeout`].
+    pub(crate) fn llm_limit(&self, provider: &dyn Provider) -> Duration {
+        let total = provider.total_timeout(self.config.timeout);
+        self.config
+            .generation_timeout
+            .map_or(total, |cap| total.min(cap))
     }
 
     async fn complete(

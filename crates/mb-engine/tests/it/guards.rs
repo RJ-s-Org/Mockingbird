@@ -692,3 +692,47 @@ async fn seeded_bodyless_effects_scrub_alike_for_the_same_call() {
     let b = bodyless_effect_pair(&engine, "c-2").await;
     assert_ne!(a, b, "another call replaces otherwise");
 }
+
+/// A provider chain whose hops add up to two minutes and which never answers in
+/// time.
+struct HangingChain;
+
+#[async_trait]
+impl Provider for HangingChain {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            json_schema: true,
+            json_mode: true,
+        }
+    }
+
+    fn total_timeout(&self, _request_timeout: Duration) -> Duration {
+        Duration::from_secs(120)
+    }
+
+    async fn complete(&self, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        Err(LlmError::Timeout)
+    }
+}
+
+/// A served answer waits at most the generation timeout, even when a fallback
+/// chain's hops add up to more, and the faker answers then.
+#[tokio::test(start_paused = true)]
+async fn a_chain_waits_at_most_the_generation_timeout() {
+    let bundle = bundle();
+    let config = EngineConfig {
+        timeout: Duration::from_secs(60),
+        generation_timeout: Some(Duration::from_secs(20)),
+        ..EngineConfig::default()
+    };
+    let engine = Engine::new(Some(Arc::new(HangingChain)), config);
+    let started = tokio::time::Instant::now();
+    let response = generate(&engine, &bundle).await;
+    let elapsed = started.elapsed();
+    assert_eq!(response.source, Source::Fallback);
+    assert!(
+        elapsed >= Duration::from_secs(20) && elapsed < Duration::from_secs(21),
+        "took {elapsed:?}, expected the 20 s generation timeout"
+    );
+}
