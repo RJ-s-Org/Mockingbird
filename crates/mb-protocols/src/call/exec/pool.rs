@@ -386,11 +386,11 @@ pub(super) fn create_fill(
     (!out.is_empty()).then_some(out)
 }
 
-/// Writes `to` for `from` in every string of `value` where `from` names the record:
-/// the whole string, or an occurrence that starts the string or follows a `/` or `=`
-/// (a path, a query value) and is not followed by a letter or digit (`pi_1` in
-/// `pi_1_secret_x` and `/widgets/pi_1`, never in `/widgets/pi_12`, nor `123` in
-/// `555-123-4567`).
+/// Writes `to` for `from` in every string of `value` where `from` names the record: a
+/// path segment (after a `/`, not followed by a letter or digit: `/widgets/w1`,
+/// `/items/7/parts`), or, for an id that is not all digits, the whole string or its
+/// start before a `_` or `-` (`pi_1` in `pi_1_secret_x`). A number at the start of a
+/// string, or one in a query value, is left as written (`1.99`, `1 Main St`, `limit=7`).
 fn rewrite_id(value: &mut Value, from: &str, to: &str) {
     match value {
         Value::String(s) if !from.is_empty() && s.contains(from) => *s = rewritten(s, from, to),
@@ -401,18 +401,22 @@ fn rewrite_id(value: &mut Value, from: &str, to: &str) {
 }
 
 fn rewritten(s: &str, from: &str, to: &str) -> String {
+    let numeric = from.chars().all(|c| c.is_ascii_digit());
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     let mut before: Option<char> = None;
+    let mut start = true;
     while let Some(at) = rest.find(from) {
         let prev = rest[..at].chars().last().or(before);
         let next = rest[at + from.len()..].chars().next();
-        let names_it =
-            prev.is_none_or(|c| c == '/' || c == '=') && next.is_none_or(|c| !c.is_alphanumeric());
+        let at_start = start && at == 0;
+        let segment = prev == Some('/') && next.is_none_or(|c| !c.is_alphanumeric());
+        let prefix = at_start && !numeric && next.is_none_or(|c| c == '_' || c == '-');
         out.push_str(&rest[..at]);
-        out.push_str(if names_it { to } else { from });
+        out.push_str(if segment || prefix { to } else { from });
         before = from.chars().last();
         rest = &rest[at + from.len()..];
+        start = false;
     }
     out.push_str(rest);
     out
@@ -545,6 +549,14 @@ mod tests {
 
     #[test]
     fn an_id_is_rewritten_only_where_it_names_the_record() {
+        assert_eq!(rewritten("1.99", "1", "42"), "1.99");
+        assert_eq!(rewritten("1 Main St", "1", "42"), "1 Main St");
+        assert_eq!(rewritten("123 Main St", "123", "42"), "123 Main St");
+        assert_eq!(
+            rewritten("/widgets/7?limit=7", "7", "42"),
+            "/widgets/42?limit=7"
+        );
+        assert_eq!(rewritten("7", "7", "42"), "7");
         assert_eq!(rewritten("w1", "w1", "new"), "new");
         assert_eq!(
             rewritten("https://x.test/widgets/w1", "w1", "new"),
@@ -552,7 +564,7 @@ mod tests {
         );
         assert_eq!(
             rewritten("/widgets/w1/parts?id=w1", "w1", "new"),
-            "/widgets/new/parts?id=new"
+            "/widgets/new/parts?id=w1"
         );
         assert_eq!(rewritten("pi_1_secret_x", "pi_1", "pi_9"), "pi_9_secret_x");
         assert_eq!(rewritten("/widgets/w12", "w1", "new"), "/widgets/w12");
