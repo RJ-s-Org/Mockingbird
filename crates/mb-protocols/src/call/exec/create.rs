@@ -1697,10 +1697,21 @@ async fn reshape(
         if !references_object(bundle, member, &sent) {
             // With no conversion losing nothing, the value stays as sent and the gate
             // refuses the record: client data is never replaced by an invented value.
-            if of_another_type(bundle, member, &sent)
-                && let Some(value) = converted(bundle, member, &sent).filter(|c| fits_all(c))
-            {
-                record.insert(name, value);
+            // But a list sent where the reads hold an object, or an object where they
+            // hold a list, is not that member: a create parameter that shares its name
+            // (Stripe's `line_items`, a list of prices to charge, beside the session's
+            // `line_items` list object). It is left out, and fill writes the member
+            // with the request in view.
+            if of_another_type(bundle, member, &sent) {
+                match converted(bundle, member, &sent).filter(|c| fits_all(c)) {
+                    Some(value) => {
+                        record.insert(name, value);
+                    }
+                    None if other_container(bundle, member, &sent) => {
+                        record.remove(&name);
+                    }
+                    None => {}
+                }
             }
             continue;
         }
@@ -1937,6 +1948,18 @@ fn converted(bundle: &mb_mcm::Bundle, schema: &Value, value: &Value) -> Option<V
             })
         }
         _ => None,
+    }
+}
+
+/// Whether `value` is a list where `schema` admits an object and no list, or an
+/// object where it admits a list and no object.
+fn other_container(bundle: &mb_mcm::Bundle, schema: &Value, value: &Value) -> bool {
+    let admitted = admitted_types(bundle, schema);
+    let has = |t: &str| admitted.iter().any(|a| a == t);
+    match value {
+        Value::Array(_) => has("object") && !has("array"),
+        Value::Object(_) => has("array") && !has("object"),
+        _ => false,
     }
 }
 
