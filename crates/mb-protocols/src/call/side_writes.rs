@@ -8,13 +8,15 @@
 //!
 //! Each effect, in order:
 //! - `update` and `delete` find their record with `held`'s lookup by key
-//!   ([`records::held_by_key`]) of the id their `id` gives; one not held is skipped;
+//!   ([`records::held_by_key`]) of the id their `id` gives; one not held, or
+//!   soft-deleted, is skipped;
 //! - `when`, if any, must be `true`;
 //! - its `set` values are evaluated with `record` the target as the write left it (as
 //!   it was held, for a removal; the item as held before, for a write within its
 //!   parent) and `it` the record found (`null` for a create); each is written as its
 //!   member declares it ([`exprs::written_back`]), and a `null` sets nothing;
-//! - a `create` stores a new record of its type, under the id `set` gives its identity
+//! - a `create` stores a new record of its type (one a read of the type would not
+//!   render is not stored, and is noted under `expr_failed`), under the id `set` gives its identity
 //!   member, else one minted as a create mints it ([`records::mint_one`]), in the
 //!   collection its parent's path parameter makes (the parent named by the record's
 //!   `parent.member`, else the target when the target is of the parent type), noted as
@@ -33,27 +35,29 @@ use super::exprs::{self, Bound, SessionHost};
 use super::*;
 
 /// Applies `plan`'s effects, after its write of its target of type `t`, `target` (the
-/// record as the write leaves it) held under `id`.
+/// record as the write leaves it) held under `id`. Whether any effect wrote.
 pub(super) async fn apply(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
     t: &str,
     (id, target): (&str, &Value),
-) {
+) -> bool {
     let rt = state.rt;
     let Some(ops) = rt
         .described()
         .expressions(&plan.op.id)
         .filter(|o| !o.effects.is_empty())
     else {
-        return;
+        return false;
     };
     let mut host = exprs::host(state, rt, (plan, call), ops).await;
+    let mut wrote = false;
     let mut bound = Bound::new(rt, call, Some(target));
     for effect in &ops.effects {
         // Each effect reads the session as the ones before it left it.
         host.refresh(state).await;
         let applied = one(state, (plan, call), (t, id), effect, &mut host, &mut bound).await;
+        wrote |= applied;
         tracing::info!(
             mock = %rt.name,
             operation = %plan.op.id,
@@ -63,6 +67,7 @@ pub(super) async fn apply(
         );
     }
     host.store_counters(state).await;
+    wrote
 }
 
 /// Applies one effect; whether it wrote.
@@ -90,9 +95,13 @@ async fn one(
                 exprs::failed(plan, rt, &pointer, &format!("`id` gave {value}, not an id"));
                 return false;
             };
+            // A soft-deleted record is not held: it is neither updated nor deleted again.
+            let gone = lifecycle::exclusion(rt, ty);
             match records::held_by_key(state, session, ty, &id).await {
-                Some(found) => Some(found),
-                None => return false,
+                Some(found) if !gone.as_ref().is_some_and(|g| g.excludes(&found.data)) => {
+                    Some(found)
+                }
+                _ => return false,
             }
         }
         None => None,
@@ -129,7 +138,10 @@ async fn one(
         }
     }
     match (effect.op, found) {
-        (EffectOp::Create, _) => create(state, (plan, call), (t, target_id), ty, &values).await,
+        (EffectOp::Create, _) => {
+            let at = (plan, call, at);
+            create(state, at, (t, target_id), ty, &values).await
+        }
         (EffectOp::Update, Some(found)) => {
             let mut data = found.data.clone();
             for (member, value) in values {
@@ -149,7 +161,7 @@ async fn one(
 /// A create effect: a new record of type `ty` holding `values`.
 async fn create(
     state: &mut StateAccess<'_>,
-    (plan, call): (&CallPlan<'_>, &OperationCall),
+    (plan, call, pointer): (&CallPlan<'_>, &OperationCall, &str),
     (t, target_id): (&str, &str),
     ty: &str,
     values: &[(&str, Value)],
@@ -189,6 +201,18 @@ async fn create(
         .await
         .is_some()
     {
+        return false;
+    }
+    // A record a read of its type would not render is never stored, as a create's.
+    let record = StoredResource {
+        resource_type: ty.to_string(),
+        id: id.clone(),
+        data: data.clone(),
+    };
+    let filled = computed::filled_new(state, (plan, call), &record).await;
+    if let Some(why) = super::exec::unreadable(rt, ty, &data, filled.as_ref().map(|f| &f.data)) {
+        let why = format!("the record it creates would not render: {why}");
+        exprs::failed(plan, rt, pointer, &why);
         return false;
     }
     // Where its type's create would put it: under its parent's path.

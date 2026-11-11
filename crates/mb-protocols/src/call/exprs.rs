@@ -92,13 +92,20 @@ impl CallExprs {
         self.with_notes(|n| n.fallback = Some((reason.to_string(), on.map(str::to_string))));
     }
 
-    /// Notes that the expression at `pointer` failed with `error`.
-    pub(super) fn failed(&self, pointer: &str, error: &str) {
+    /// Notes that the expression at `pointer` failed with `error`, once per pointer
+    /// (a computed member fails alike on each item of a list); whether it is new.
+    pub(super) fn failed(&self, pointer: &str, error: &str) -> bool {
+        let mut new = false;
         self.with_notes(|n| {
+            if n.failed.iter().any(|f| f["pointer"] == pointer) {
+                return;
+            }
+            new = true;
             if n.failed.len() < MAX_FAILED {
                 n.failed.push(json!({"pointer": pointer, "error": error}));
             }
         });
+        new
     }
 
     /// The notes, as a request record's `request` keeps them: `exec_fallback`,
@@ -459,6 +466,9 @@ pub(super) fn eval(
 }
 
 pub(super) fn failed(plan: &CallPlan<'_>, rt: &MockRuntime, pointer: &str, error: &str) {
+    if !plan.exprs.failed(pointer, error) {
+        return;
+    }
     tracing::info!(
         mock = %rt.name,
         operation = %plan.op.id,
@@ -466,7 +476,6 @@ pub(super) fn failed(plan: &CallPlan<'_>, rt: &MockRuntime, pointer: &str, error
         error = %error,
         "a world expression failed: the value stays as the engine makes it"
     );
-    plan.exprs.failed(pointer, error);
 }
 
 /// Reads what `ops`' expressions need of the session.

@@ -40,8 +40,8 @@ use serde_json::{Map, Value, json};
 use tracing::Instrument;
 
 use super::{
-    Fallback, Held, Ran, Stop, Write, answered, commit, create, embedded, fell_back, fell_back_on,
-    patches, render,
+    Fallback, Held, Ran, Rendered, Stop, Write, answered, commit, create, embedded, fell_back,
+    fell_back_on, patches, render,
 };
 use crate::call::bundle_index::schema_parts;
 use crate::call::entities::added_violation;
@@ -187,6 +187,15 @@ async fn update(
         return Ran::Generate(None);
     };
     answer.usage = usage;
+    let rendered = Rendered {
+        id: id.to_owned(),
+        record: StoredResource {
+            data: data.clone(),
+            ..stored.clone()
+        },
+        schema: response_schema,
+        new: false,
+    };
     let answer = match &within {
         Some(e) => {
             let write = Write::Within {
@@ -196,14 +205,15 @@ async fn update(
                 removed: false,
             };
             let held = (e.parent.resource_type.as_str(), Some(&e.parent));
-            commit(state, plan, call, held, write, answer).await
+            commit(state, plan, call, held, (write, Some(rendered)), answer).await
         }
         None => {
             let write = Write::Put {
                 id: id.to_owned(),
                 data,
             };
-            commit(state, plan, call, (t, Some(stored)), write, answer).await
+            let held = (t, Some(stored));
+            commit(state, plan, call, held, (write, Some(rendered)), answer).await
         }
     };
     // The tokens it moved are confirmed: a later write sending an old value is stale.
@@ -571,7 +581,7 @@ async fn delete(
             removed: !soft,
         };
         let held = (e.parent.resource_type.as_str(), Some(&e.parent));
-        let answer = commit(state, plan, call, held, write, answer).await;
+        let answer = commit(state, plan, call, held, (write, None), answer).await;
         answered(rt, plan, kind);
         return Ran::Answered(Box::new(answer));
     }
@@ -587,7 +597,7 @@ async fn delete(
         },
         false => Write::Remove { id: id.to_owned() },
     };
-    let answer = commit(state, plan, call, (t, Some(stored)), write, answer).await;
+    let answer = commit(state, plan, call, (t, Some(stored)), (write, None), answer).await;
     answered(rt, plan, kind);
     Ran::Answered(Box::new(answer))
 }

@@ -67,7 +67,7 @@ use serde_json::{Map, Value};
 use tracing::Instrument;
 
 use super::writes::written;
-use super::{Fallback, Held, Ran, Write, answered, commit, fell_back};
+use super::{Fallback, Held, Ran, Rendered, Write, answered, commit, fell_back};
 use crate::call::bundle_index::record_schema_of;
 use crate::call::entities::type_check;
 use crate::call::owners::{Compound, schema_members};
@@ -401,8 +401,26 @@ pub(super) async fn run(
     } else {
         answer.headers.extend(minted_headers);
     }
+    let rendered = Rendered {
+        id: key.clone(),
+        record: mb_state::StoredResource {
+            resource_type: t.to_owned(),
+            id: key.clone(),
+            data: data.clone(),
+        },
+        schema: response_schema,
+        new: true,
+    };
     let write = Write::Put { id: key, data };
-    let answer = commit(state, plan, call, (t, None), write, answer).await;
+    let answer = commit(
+        state,
+        plan,
+        call,
+        (t, None),
+        (write, Some(rendered)),
+        answer,
+    )
+    .await;
     answered(rt, plan, kind);
     Ran::Answered(Box::new(answer))
 }
@@ -1427,7 +1445,7 @@ fn non_null(bundle: &mb_mcm::Bundle, schema: &Value) -> Value {
 /// list's item projected to its schema first, as the list projects it. The first
 /// violation (`<pointer> <keyword>`) of the first read schema neither validates
 /// against, as a read's `render_error` gives it. `None` when every read renders it.
-fn unreadable(
+pub(in crate::call) fn unreadable(
     rt: &crate::MockRuntime,
     t: &str,
     record: &Value,

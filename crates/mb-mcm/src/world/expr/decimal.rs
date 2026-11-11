@@ -32,13 +32,22 @@ impl Decimal {
     /// `None` for anything else, or more than [`MAX_DIGITS`] digits.
     pub fn parse(value: &Value) -> Option<Self> {
         match value {
-            Value::Number(n) => Self::parse_text(&n.to_string()),
-            Value::String(text) => Self::parse_text(text.trim()),
+            Value::Number(n) => Self::parse_text(&n.to_string(), MAX_DIGITS),
+            Value::String(text) => Self::parse_text(text.trim(), MAX_DIGITS),
             _ => None,
         }
     }
 
-    fn parse_text(text: &str) -> Option<Self> {
+    /// The decimal [`Self::text`] wrote, whatever its number of digits (a sum may hold
+    /// more than [`MAX_DIGITS`]); `None` for anything else.
+    pub fn read_back(value: &Value) -> Option<Self> {
+        match value {
+            Value::String(text) => Self::parse_text(text, usize::MAX),
+            other => Self::parse(other),
+        }
+    }
+
+    fn parse_text(text: &str, max_digits: usize) -> Option<Self> {
         let (negative, rest) = match text.as_bytes().first()? {
             b'-' => (true, &text[1..]),
             b'+' => (false, &text[1..]),
@@ -57,7 +66,7 @@ impl Decimal {
             return None;
         }
         let digits = digits.trim_start_matches('0');
-        if digits.len() > MAX_DIGITS {
+        if digits.len() > max_digits {
             return None;
         }
         let mut mantissa: i128 = if digits.is_empty() {
@@ -72,7 +81,7 @@ impl Decimal {
         }
         let scale = u32::try_from(scale)
             .ok()
-            .filter(|s| *s as usize <= MAX_DIGITS)?;
+            .filter(|s| *s as usize <= max_digits.min(i128::MAX.ilog10() as usize))?;
         if negative {
             mantissa = -mantissa;
         }
@@ -141,6 +150,15 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_sum_read_back_keeps_digits_past_what_a_child_holds() {
+        let big = "1234567890123456789012345678901.5";
+        assert_eq!(Decimal::parse(&json!(big)), None);
+        let sum = Decimal::read_back(&json!(big)).unwrap();
+        assert_eq!(sum.text(), big);
+        assert_eq!(Decimal::read_back(&json!(3)), Decimal::whole(3));
+    }
 
     fn d(v: Value) -> Decimal {
         Decimal::parse(&v).unwrap()

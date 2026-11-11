@@ -32,7 +32,7 @@ paths:
                 type: object
                 required: [orders]
                 properties:
-                  orders: {type: array, items: {$ref: "#/components/schemas/Order"}}
+                  orders: {type: array, items: {$ref: "#/components/schemas/OrderSummary"}}
     post:
       operationId: createOrder
       requestBody: {content: {application/json: {schema: {type: object, properties: {customer: {type: string}, items: {type: array, items: {$ref: "#/components/schemas/Item"}}}}}}}
@@ -85,6 +85,13 @@ components:
         line_count: {type: integer}
         total: {type: number}
         label: {type: string}
+    OrderSummary:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        line_count: {type: integer}
+        label: {type: string}
     Line:
       type: object
       required: [id]
@@ -95,7 +102,7 @@ components:
         quantity: {type: integer}
     Event:
       type: object
-      required: [id]
+      required: [id, kind]
       properties:
         id: {type: string}
         order_id: {type: string}
@@ -264,6 +271,52 @@ async fn a_failed_computed_expression_leaves_the_member_and_is_on_the_request_re
         json!("/types/orders/computed/total"),
         "{failed}"
     );
+    // On a list (whose items show `label`, not `total`), one failing alike on each
+    // item is noted once.
+    let mut w = world();
+    w["types"]["orders"]["computed"]["label"] = json!("sum(record.items, it.price * 'x')");
+    let h = support::described(SHOP, w, Vec::new());
+    new_order(&h, "Ada").await;
+    new_order(&h, "Bo").await;
+    let listed = send(&h, "GET", "/orders", None).await;
+    assert_eq!(
+        listed["orders"].as_array().map(Vec::len),
+        Some(2),
+        "{listed}"
+    );
+    let records = h.records();
+    let failed = &records.last().unwrap().request["expr_failed"];
+    assert_eq!(failed.as_array().map(Vec::len), Some(1), "{failed}");
+    assert_eq!(
+        failed[0]["pointer"],
+        json!("/types/orders/computed/label"),
+        "{failed}"
+    );
+}
+
+#[tokio::test]
+async fn a_create_effect_does_not_store_a_record_a_read_would_not_render() {
+    // An event requires its `kind`, which this effect does not set.
+    let mut w = world();
+    w["operations"]["updateOrder"]["effects"] =
+        json!([{"op": "create", "type": "events", "set": {"order_id": "record.id"}}]);
+    let h = support::described(SHOP, w, Vec::new());
+    let (id, _) = new_order(&h, "Ada").await;
+    send(
+        &h,
+        "PATCH",
+        &format!("/orders/{id}"),
+        Some(json!({"customer": "Bo"})),
+    )
+    .await;
+    assert!(events(&h).await.is_empty());
+    let records = h.records();
+    let failed = &records.last().unwrap().request["expr_failed"];
+    assert_eq!(
+        failed[0]["pointer"],
+        json!("/operations/updateOrder/effects/0"),
+        "{failed}"
+    );
 }
 
 #[tokio::test]
@@ -411,4 +464,80 @@ async fn seq_counters_are_session_state_kept_by_a_world_patch_cleared_by_a_reset
         number(h.stored("events", &format!("ev-{fresh}")).await),
         Some(json!(1))
     );
+}
+
+#[tokio::test]
+async fn a_list_item_cut_to_its_summary_computes_from_the_record_as_held() {
+    let h = shop();
+    let (id, _) = new_order(&h, "Ada").await;
+    new_line(&h, &id, 1).await;
+    // The summary leaves out `customer`, which `label` reads: it is read from the
+    // record as held, not from the item.
+    let listed = send(&h, "GET", "/orders", None).await;
+    let item = &listed["orders"][0];
+    assert!(item.get("customer").is_none(), "{listed}");
+    assert_eq!(item["label"], json!(format!("Ada #{id}")), "{listed}");
+    assert_eq!(item["line_count"], json!(1), "{listed}");
+    let records = h.records();
+    let last = &records.last().unwrap().request;
+    assert!(last.get("expr_failed").is_none(), "{last}");
+}
+
+/// [`world`] where creating and updating an order each add a line to it.
+fn world_adding_lines() -> Value {
+    let mut w = world();
+    let add_line = json!({"op": "create", "type": "lines",
+        "set": {"orderId": "record.id", "sku": "'auto'", "quantity": "1"}});
+    w["operations"]["createOrder"]["effects"] = json!([add_line.clone()]);
+    w["operations"]["updateOrder"]["effects"] = json!([add_line]);
+    w
+}
+
+#[tokio::test]
+async fn a_write_answer_computes_its_members_after_its_effects_wrote() {
+    let h = support::described(SHOP, world_adding_lines(), Vec::new());
+    let (id, created) = new_order(&h, "Ada").await;
+    // The create's effect added a line: its answer counts it, as a read does.
+    assert_eq!(created["line_count"], json!(1), "{created}");
+    let read = send(&h, "GET", &format!("/orders/{id}"), None).await;
+    assert_eq!(read["line_count"], json!(1), "{read}");
+    // So does an update's answer, its other members as the update left them.
+    let updated = send(
+        &h,
+        "PATCH",
+        &format!("/orders/{id}"),
+        Some(json!({"customer": "Bo"})),
+    )
+    .await;
+    assert_eq!(updated["line_count"], json!(2), "{updated}");
+    assert_eq!(updated["label"], json!(format!("Bo #{id}")), "{updated}");
+    assert_eq!(updated["status"], json!("draft"), "{updated}");
+}
+
+#[tokio::test]
+async fn a_create_effect_places_its_record_under_the_parent_its_path_names() {
+    // Lines name their order only by the path they are created under; the order's
+    // line count is a `derived` one, counting by that path.
+    let mut w = json!({
+        "types": {
+            "lines": {"parent": {"type": "orders", "path_param": "orderId"}},
+            "orders": {"derived": {"line_count": {"kind": "count", "of": "lines"}}}
+        },
+        "operations": {"createOrder": {"effects": [
+            {"op": "create", "type": "lines", "set": {"sku": "'auto'"}},
+            {"op": "create", "type": "lines", "set": {"sku": "'auto'"}}
+        ]}}
+    });
+    let h = support::described(SHOP, w.take(), Vec::new());
+    let (id, created) = new_order(&h, "Ada").await;
+    assert_eq!(created["line_count"], json!(2), "{created}");
+    let read = send(&h, "GET", &format!("/orders/{id}"), None).await;
+    assert_eq!(read["line_count"], json!(2), "{read}");
+    // Each minted its own id.
+    let lines = h.rt.state.list(&session(&h), "lines", 10).await.unwrap();
+    assert_eq!(lines.len(), 2);
+    assert_ne!(lines[0].id, lines[1].id);
+    let line = &lines[0].id;
+    let served = send(&h, "GET", &format!("/orders/{id}/lines/{line}"), None).await;
+    assert_eq!(served["sku"], json!("auto"), "{served}");
 }

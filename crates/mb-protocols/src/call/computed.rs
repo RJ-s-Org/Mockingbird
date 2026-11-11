@@ -7,7 +7,10 @@
 //! - a generated answer about a held record ([`fill`], after its writes).
 //!
 //! Each expression sees `record`, the record as it is answered (before its computed
-//! members are set), `request` and `now` of the call answering it; `it` is not bound.
+//! members are set; a list item as held, whatever the list's item schema leaves out),
+//! `request` and `now` of the call answering it; `it` is not bound. A write's answer is
+//! filled again once its operation's effects wrote ([`super::exec::commit`]), and a
+//! failed expression is noted once per call.
 //! A value is written as the member declares it ([`exprs::written_back`]); one its
 //! schema refuses, `null`, and a failed expression (logged and noted under
 //! `expr_failed`) leave the member as it was. An item the answer's schema refuses once
@@ -243,7 +246,7 @@ impl Target {
     /// member declares it; `None` when it cannot be written so, or its schema refuses
     /// it.
     fn decimal(&self, value: &Value) -> Option<Value> {
-        Decimal::parse(value)?
+        Decimal::read_back(value)?
             .to_value(&self.typed)
             .filter(|v| self.validator.is_valid(v))
     }
@@ -262,15 +265,17 @@ impl Target {
 /// `items_schema` is the schema each item answers to (a list's item schema): only
 /// the members it declares are set, each written as it types it, and an item it
 /// refuses once filled is put back as it was. With none, the members are typed by
-/// type `t`'s read schema and the caller checks the answer they end up in.
+/// type `t`'s read schema and the caller checks the answer they end up in. `held`,
+/// when given, is each item's record as stored (an item cut down to a list's summary):
+/// what `record` is bound to, else the item itself.
 pub(super) async fn fill_page(
     state: &mut StateAccess<'_>,
     at: (&CallPlan<'_>, &OperationCall),
     t: &str,
-    items: &mut [Value],
-    items_schema: Option<&Value>,
+    (items, items_schema): (&mut [Value], Option<&Value>),
+    held: Option<&[Value]>,
 ) -> Vec<Vec<String>> {
-    fill_items(state, at, (t, false), items, items_schema).await
+    fill_items(state, at, (t, false), (items, items_schema), held).await
 }
 
 /// [`fill_page`], each item taken for one this runtime created when `new` (a create
@@ -279,8 +284,8 @@ async fn fill_items(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
     (t, new): (&str, bool),
-    items: &mut [Value],
-    items_schema: Option<&Value>,
+    (items, items_schema): (&mut [Value], Option<&Value>),
+    held: Option<&[Value]>,
 ) -> Vec<Vec<String>> {
     let mut set: Vec<Vec<String>> = vec![Vec::new(); items.len()];
     let rt = state.rt;
@@ -338,11 +343,12 @@ async fn fill_items(
         true => entries.computed.iter().map(|e| &e.program).collect(),
         false => Vec::new(),
     };
-    for (item, set) in items.iter_mut().zip(set.iter_mut()) {
+    for (at, (item, set)) in items.iter_mut().zip(set.iter_mut()).enumerate() {
         if !item.is_object() {
             continue;
         }
-        let id = mb_mcm::member_at(item, field)
+        let record = held.and_then(|h| h.get(at)).filter(|r| r.is_object());
+        let id = mb_mcm::member_at(record.unwrap_or(item), field)
             .and_then(id_string)
             .map(|value| (bare(rt, t, None, &value), value));
         // A derived member is set on a record created in the session, or with a
@@ -359,7 +365,7 @@ async fn fill_items(
             continue;
         }
         host.parent = id.map(|(id, _)| id);
-        bound.record = item.clone();
+        bound.record = record.unwrap_or(item).clone();
         if !held_reading.is_empty() {
             exprs::resolve_held(state, &mut host, &held_reading, &bound).await;
         }
@@ -438,7 +444,7 @@ pub(super) async fn fill(
     t: &str,
     record: &mut Value,
 ) -> Vec<String> {
-    fill_page(state, at, t, std::slice::from_mut(record), None)
+    fill_page(state, at, t, (std::slice::from_mut(record), None), None)
         .await
         .pop()
         .unwrap_or_default()
@@ -475,7 +481,8 @@ async fn filled_as(
     }
     let mut data = stored.data.clone();
     let t = stored.resource_type.as_str();
-    let set = fill_items(state, at, (t, new), std::slice::from_mut(&mut data), None)
+    let one = (std::slice::from_mut(&mut data), None);
+    let set = fill_items(state, at, (t, new), one, None)
         .await
         .pop()
         .unwrap_or_default();

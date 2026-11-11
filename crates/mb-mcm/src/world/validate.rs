@@ -1946,7 +1946,8 @@ impl<'a> Ctx<'a> {
     /// reading what they declare ([`Self::check_expression`]: `record` is the record
     /// answered, `it` is not bound, `request` is whichever call answers it and is not
     /// checked against one), calling neither `seq` nor `mint`, which would change on
-    /// every answer.
+    /// every answer, and never the type's identity member, which would rename the
+    /// record in its answers.
     fn computed(
         &mut self,
         name: &str,
@@ -1960,9 +1961,24 @@ impl<'a> Ctx<'a> {
             it: Err("`it` is not bound in a computed member: read the record as `record`"),
             computed: true,
         };
+        let identity = self
+            .world
+            .types
+            .get(name)
+            .and_then(|t| t.identity.as_ref())
+            .and_then(|i| i.member.as_deref())
+            .unwrap_or("id");
         let mut out = BTreeMap::new();
         for (member, source) in computed {
             let p = path.join(member);
+            if member == identity {
+                self.refuse(
+                    &p,
+                    RefusalCode::Invalid,
+                    format!("`{member}` names the record: it is not computed"),
+                );
+                continue;
+            }
             if !self.check_member(record, Some(name), member, &p) {
                 continue;
             }
@@ -1992,6 +2008,22 @@ impl<'a> Ctx<'a> {
                 &path.join("type"),
                 RefusalCode::Unresolved,
                 format!("no operation has resource type `{t}` and no definition is named so"),
+            );
+            return None;
+        }
+        let embedded = self
+            .world
+            .types
+            .get(t)
+            .and_then(|d| d.parent.as_ref())
+            .is_some_and(|p| p.embedded.is_some());
+        if embedded {
+            self.refuse(
+                &path.join("type"),
+                RefusalCode::Invalid,
+                format!(
+                    "`{t}` is held inside its parent, never on its own: an effect does not write it"
+                ),
             );
             return None;
         }
@@ -2807,7 +2839,8 @@ mod tests {
             "email": "record.nickname",
             "currency": "it.currency",
             "list_id": "string(seq('x'))",
-            "id": "mint('[a-z]{4}')",
+            "meta.source": "mint('[a-z]{4}')",
+            "id": "'x'",
             "nickname": "'x'"
         }}}}));
         let v = validate(&w, &b);
@@ -2824,7 +2857,12 @@ mod tests {
             &at("list_id"),
             "seq() is not called in a computed member",
         );
-        refused_with(&v, &at("id"), "mint() is not called in a computed member");
+        refused_with(
+            &v,
+            &at("meta.source"),
+            "mint() is not called in a computed member",
+        );
+        refused_with(&v, &at("id"), "`id` names the record: it is not computed");
         refused_with(&v, &at("nickname"), "`nickname`");
         assert!(
             v.applied
@@ -2912,6 +2950,24 @@ mod tests {
             &v,
             "/operations/getMember/effects",
             "`effects` follow a write",
+        );
+        assert!(v.applied.operations["addMember"].effects.is_empty());
+    }
+
+    #[test]
+    fn an_effect_does_not_write_a_type_held_inside_its_parent() {
+        let b = members();
+        let w = world(json!({
+            "types": {"members": {"parent": {"type": "lists", "member": "list_id", "embedded": "currency"}}},
+            "operations": {"addMember": {"effects": [
+                {"op": "create", "type": "members", "set": {"email": "'x'"}}
+            ]}}
+        }));
+        let v = validate(&w, &b);
+        refused_with(
+            &v,
+            "/operations/addMember/effects/0/type",
+            "held inside its parent",
         );
         assert!(v.applied.operations["addMember"].effects.is_empty());
     }
