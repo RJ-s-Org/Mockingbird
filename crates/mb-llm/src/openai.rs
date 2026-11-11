@@ -616,7 +616,11 @@ impl OpenAiCompatible {
             return parse_reply_text(&String::from_utf8_lossy(&body), req.max_tokens);
         }
         let mut events = bytes.eventsource();
-        let mut reply = GatheredReply::new(prompt_bytes(req), self.repetition_span);
+        let mut reply = GatheredReply::new(
+            prompt_bytes(req),
+            self.repetition_span,
+            req.max_answer_bytes,
+        );
         let mut done = false;
         let mut any = false;
         while let Some(event) = events.next().await {
@@ -1115,12 +1119,14 @@ fn estimated_tokens(bytes: usize) -> u32 {
 enum CutReason {
     MaxTokens,
     Repetition,
+    AnswerCap,
 }
 
 fn count_cut(reason: CutReason) {
     let label = match reason {
         CutReason::MaxTokens => "max_tokens",
         CutReason::Repetition => "repetition",
+        CutReason::AnswerCap => "answer_cap",
     };
     metrics::counter!(CUT_REPLIES_METRIC, "reason" => label).increment(1);
 }
@@ -1166,11 +1172,14 @@ struct GatheredReply {
     content_guard: RepetitionGuard,
     reasoning_guard: RepetitionGuard,
     prompt_bytes: usize,
+    /// [`ChatRequest::max_answer_bytes`].
+    max_answer: Option<usize>,
 }
 
 impl GatheredReply {
-    fn new(prompt_bytes: usize, span: usize) -> Self {
+    fn new(prompt_bytes: usize, span: usize, max_answer: Option<usize>) -> Self {
         Self {
+            max_answer,
             provider: None,
             content: String::new(),
             reasoning: String::new(),
@@ -1224,6 +1233,28 @@ impl GatheredReply {
             self.content.push_str(text);
             if self.content_guard.push(text) {
                 return Err(self.repeated(false));
+            }
+            if let Some(max) = self.max_answer.filter(|max| self.content.len() > *max) {
+                // An answer looping when it passes its cap is a loop: stopped as
+                // one and retried, only sooner than the guard's span.
+                if self.content_guard.low_variety() {
+                    return Err(self.repeated(false));
+                }
+                count_cut(CutReason::AnswerCap);
+                let usage = self.usage.as_ref().map(usage_of).unwrap_or_else(|| Usage {
+                    prompt_tokens: estimated_tokens(self.prompt_bytes),
+                    completion_tokens: estimated_tokens(self.bytes()),
+                    reasoning_tokens: estimated_tokens(self.reasoning.len()),
+                });
+                return Err(LlmError::Truncated {
+                    message: format!(
+                        "{}stopped after {} bytes of answer, past the {max} an answer to its schema is expected to need",
+                        self.provider_prefix(),
+                        self.content.len()
+                    ),
+                    partial: self.content.clone(),
+                    usage,
+                });
             }
         }
         // Some gateways send the reasoning under both names: the first one

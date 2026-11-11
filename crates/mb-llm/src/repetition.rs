@@ -160,6 +160,13 @@ impl RepetitionGuard {
     pub fn bytes(&self) -> u64 {
         self.seen
     }
+
+    /// Whether the text ends in a low-variety stretch (its last window held at
+    /// most [`MAX_DISTINCT`] sequences), fired or not.
+    #[must_use]
+    pub fn low_variety(&self) -> bool {
+        self.low_from.is_some()
+    }
 }
 
 #[cfg(test)]

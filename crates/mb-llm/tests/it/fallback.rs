@@ -16,6 +16,7 @@ fn request() -> ChatRequest {
         response_format: ResponseFormat::JsonObject,
         temperature: 0.5,
         max_tokens: 64,
+        max_answer_bytes: None,
         timeout: Duration::from_secs(1),
     }
 }

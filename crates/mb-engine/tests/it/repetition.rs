@@ -163,9 +163,10 @@ fn a_looping_answer_is_stopped_and_the_retry_serves() {
     assert_eq!(out.body, Some(json!({"id": "g1", "label": "Gadget"})));
     assert_eq!(calls, 2);
     // The stopped attempt is charged (estimated: it never reached its usage
-    // chunk), far below the 16,384 tokens it was heading for.
+    // chunk), far below the 16,384 tokens it was heading for: the loop passed
+    // the answer cap (about 21 KB) before the guard's span.
     assert!(
-        out.usage.completion_tokens > 8000 && out.usage.completion_tokens < 9500,
+        out.usage.completion_tokens > 5000 && out.usage.completion_tokens < 6000,
         "{:?}",
         out.usage
     );
@@ -185,7 +186,7 @@ fn an_answer_that_keeps_looping_falls_back_with_the_reason() {
         "{reason}"
     );
     assert!(
-        out.usage.completion_tokens > 16_000 && out.usage.completion_tokens < 19_000,
+        out.usage.completion_tokens > 10_000 && out.usage.completion_tokens < 12_000,
         "{:?}",
         out.usage
     );
