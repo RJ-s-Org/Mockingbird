@@ -195,6 +195,24 @@ pub(crate) fn forwarded_headers(rt: &MockRuntime, headers: &HeaderMap) -> Map<St
     out
 }
 
+/// The credential headers [`forwarded_headers`] withholds (sensitive or one of the
+/// mock's credential headers), for world expressions only.
+pub(crate) fn credential_headers(rt: &MockRuntime, headers: &HeaderMap) -> mb_engine::Credentials {
+    let secret = &rt.credential_names().headers;
+    mb_engine::Credentials(
+        headers
+            .iter()
+            .filter(|(name, _)| is_sensitive(name.as_str()) || secret.contains(name.as_str()))
+            .filter_map(|(name, v)| {
+                Some((
+                    name.as_str().to_string(),
+                    Value::String(v.to_str().ok()?.into()),
+                ))
+            })
+            .collect(),
+    )
+}
+
 /// Headers kept in the request record (overrides included): never one any API-key
 /// scheme of the contract names ([`mb_mcm::Bundle::declares_api_key`]), whatever the
 /// data-plane auth mode, as the record is stored and exported.

@@ -29,8 +29,8 @@ use tracing::Instrument;
 use tracing::field::Empty;
 
 use crate::call::{
-    self, CallPlan, DEFAULT_SESSION, PlanError, PlanFailure, Presented, Report, forwarded_headers,
-    recorded_headers,
+    self, CallPlan, DEFAULT_SESSION, PlanError, PlanFailure, Presented, Report, credential_headers,
+    forwarded_headers, recorded_headers,
 };
 use crate::dp_auth::authenticate_contract;
 use crate::{MockRuntime, MountPrefix};
@@ -555,6 +555,7 @@ async fn answer(
     let call = OperationCall {
         operation_id: op.id.clone(),
         headers: forwarded_headers(rt, headers),
+        credentials: credential_headers(rt, headers),
         body: input,
         ..Default::default()
     };

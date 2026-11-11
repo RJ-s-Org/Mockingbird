@@ -108,6 +108,7 @@ fn served(
             let mut path_params = Map::new();
             path_params.insert("gadgetId".into(), json!("g1"));
             let call = OperationCall {
+                credentials: Default::default(),
                 operation_id: "getGadget".into(),
                 path_params,
                 query: Map::new(),

@@ -900,6 +900,7 @@ components:
 
     fn call(body: Option<Value>) -> crate::OperationCall {
         crate::OperationCall {
+            credentials: Default::default(),
             operation_id: String::new(),
             path_params: serde_json::Map::new(),
             query: serde_json::Map::new(),
@@ -1017,6 +1018,7 @@ mod expand_tests {
     #[test]
     fn expand_paths_name_each_step() {
         let call = crate::OperationCall {
+            credentials: Default::default(),
             operation_id: "x".into(),
             path_params: Default::default(),
             query: json!({"expand[]": ["line_items", "data.customer"]})

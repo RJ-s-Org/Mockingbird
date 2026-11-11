@@ -19,6 +19,7 @@ fn call() -> OperationCall {
     let mut path_params = Map::new();
     path_params.insert("orderId".into(), json!("o1"));
     OperationCall {
+        credentials: Default::default(),
         operation_id: "getOrder".into(),
         path_params,
         query: Map::new(),

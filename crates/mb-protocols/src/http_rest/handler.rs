@@ -24,8 +24,8 @@ use super::form;
 use super::problem::{problem, problem_body, render};
 use super::routing::RouteTable;
 use crate::call::{
-    self, DEFAULT_SESSION, PlanError, PlanFailure, Presented, Report, forwarded_headers,
-    public_query, recorded_headers,
+    self, DEFAULT_SESSION, PlanError, PlanFailure, Presented, Report, credential_headers,
+    forwarded_headers, public_query, recorded_headers,
 };
 use crate::limits::MAX_REQUEST_PARAMS;
 use crate::{MockRuntime, ScenarioRuntime};
@@ -484,6 +484,7 @@ async fn serve(
         path_params,
         query,
         headers: forwarded_headers(rt, headers),
+        credentials: credential_headers(rt, headers),
         body,
     };
 

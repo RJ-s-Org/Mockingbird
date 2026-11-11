@@ -120,6 +120,21 @@ pub struct OperationCall {
     pub headers: Map<String, Value>,
     /// The decoded request body, if any.
     pub body: Option<Value>,
+    /// The credential headers withheld from [`headers`](Self::headers).
+    pub credentials: Credentials,
+}
+
+/// Credential headers of a call (names lower case), kept apart from its other
+/// headers: only world expressions read them (`request.headers`), so a mock can
+/// refuse an unknown key. They never reach the model, the request record or a
+/// cache key, and `Debug` prints their names only.
+#[derive(Clone, Default, PartialEq)]
+pub struct Credentials(pub Map<String, Value>);
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.0.keys()).finish()
+    }
 }
 
 /// One root field of a GraphQL query answered by

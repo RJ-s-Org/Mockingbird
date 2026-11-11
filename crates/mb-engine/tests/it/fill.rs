@@ -68,6 +68,7 @@ async fn a_nullable_reference_or_optional_object_nothing_set_is_null_and_not_ask
             .to_string(),
     )]);
     let call = OperationCall {
+        credentials: Default::default(),
         operation_id: op.id.clone(),
         path_params: Map::new(),
         query: Map::new(),
@@ -125,6 +126,7 @@ async fn only_nullable_references_and_optional_objects_ask_no_model() {
     let schema = op.success_output().unwrap().schema.clone().unwrap();
     let (provider, engine) = scripted(vec![]);
     let call = OperationCall {
+        credentials: Default::default(),
         operation_id: op.id.clone(),
         path_params: Map::new(),
         query: Map::new(),

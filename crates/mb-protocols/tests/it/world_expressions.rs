@@ -617,3 +617,70 @@ async fn an_alternate_key_set_writes_is_refused_when_another_record_holds_it() {
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(h.stored_ids("members").await, vec!["m1".to_string()]);
 }
+
+/// Messages sent with a server token in a header the contract's security scheme
+/// names.
+const TOKENED: &str = r##"
+openapi: 3.0.0
+info: {title: Mail, version: "1"}
+components:
+  securitySchemes:
+    serverToken: {type: apiKey, in: header, name: X-Server-Token}
+  schemas:
+    Sent:
+      type: object
+      required: [id, to]
+      properties: {id: {type: string}, to: {type: string}}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties: {code: {type: string}, message: {type: string}}
+security: [{serverToken: []}]
+paths:
+  /messages:
+    post:
+      operationId: sendMessage
+      parameters: [{name: X-Server-Token, in: header, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {to: {type: string}}}}}}
+      responses:
+        "201": {description: sent, content: {application/json: {schema: {$ref: "#/components/schemas/Sent"}}}}
+        "401": {description: bad token, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+"##;
+
+#[tokio::test]
+async fn a_refusal_reads_a_credential_header_that_neither_the_record_nor_the_model_sees() {
+    let world = json!({"operations": {"sendMessage": {"kind": "create", "refuse": [
+        {"when": "request.headers['x-server-token'] != 'good-secret'", "status": 401,
+         "code": "10", "message": "Request does not contain a valid Server token."}
+    ]}}});
+    let h = support::described(TOKENED, world, vec![json!({"id": "s1", "to": "a@x.io"})]);
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/messages",
+            Some(json!({"to": "a@x.io"})),
+            &[("x-server-token", "wrong")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"]["code"], "10", "{body}");
+
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/messages",
+            Some(json!({"to": "a@x.io"})),
+            &[("x-server-token", "good-secret")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let records = format!("{:?}", h.records());
+    assert!(!records.contains("good-secret"), "{records}");
+    let prompts = format!("{:?}", h.provider.requests());
+    assert!(!prompts.contains("good-secret"), "{prompts}");
+}

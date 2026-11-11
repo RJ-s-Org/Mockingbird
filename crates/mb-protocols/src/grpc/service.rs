@@ -37,7 +37,8 @@ use super::GrpcError;
 use super::codec::DynamicCodec;
 use super::status::{Failure, oversized};
 use crate::call::{
-    self, CallPlan, DEFAULT_SESSION, Presented, Report, forwarded_headers, recorded_headers,
+    self, CallPlan, DEFAULT_SESSION, Presented, Report, credential_headers, forwarded_headers,
+    recorded_headers,
 };
 use crate::{ChaosDecision, MockRuntime, ScenarioRuntime};
 
@@ -345,6 +346,7 @@ impl CallState {
         OperationCall {
             operation_id: self.method.op_id.clone(),
             headers: forwarded_headers(self.rt(), headers),
+            credentials: credential_headers(self.rt(), headers),
             body,
             ..OperationCall::default()
         }

@@ -455,6 +455,7 @@ fn fake_call(engine: &Engine, bundle: &Bundle, op: &Operation) -> OperationCall 
     let mut path_params = fake_object(engine, bundle, op.input.path.as_ref());
     fit_path_id(engine, bundle, op, &mut path_params);
     OperationCall {
+        credentials: Default::default(),
         operation_id: op.id.clone(),
         path_params,
         query: fake_object(engine, bundle, op.input.query.as_ref()),
