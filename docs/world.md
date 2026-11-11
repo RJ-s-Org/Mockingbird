@@ -22,10 +22,14 @@ A later tier overrides an earlier one entry by entry. `get_world` reports the au
 ```sh
 mockingbird world show orders              # the active version: gaps first, then each entry
 mockingbird world show orders --version 2 --json
+mockingbird world show orders --operation getOrder --operation listOrders   # only these, with their gaps
+mockingbird world show orders --type order # the type, its operations, and their gaps
 mockingbird world schema                   # the format, as JSON Schema
 ```
 
-The MCP tool is `get_world {mock, version?}`, and `get_world_schema` answers the format's JSON Schema as `mockingbird world schema` prints it; the Admin API is `GET /api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world`, with `version` a number or `active`. The answer:
+On a large contract, narrow the answer to the operations an app uses: `--operation <id>` and `--type <resource type>` (each repeatable; `operations` and `types` arrays on `get_world`; `?operation=` and `?type=` on the Admin API) keep only the operations named, the types named and the operations of those types, and the gaps, refused entries and authors about them. Gaps and refusals about the description as a whole are kept. A name the version does not have gives an empty answer with `warnings` listing it, not an error.
+
+The MCP tool is `get_world {mock, version?, operations?, types?}`, and `get_world_schema` answers the format's JSON Schema as `mockingbird world schema` prints it; the Admin API is `GET /api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world`, with `version` a number or `active`. The answer:
 
 | Field | What it holds |
 | --- | --- |
@@ -35,6 +39,7 @@ The MCP tool is `get_world {mock, version?}`, and `get_world_schema` answers the
 | `revision` | The newest revision's number; `0` when only the heuristics wrote it (every version stored before world descriptions starts there). |
 | `refused` | Entries of the newest revision that did not validate; each falls back to tier 0. |
 | `gaps` | What the description leaves open. |
+| `warnings` | The `operation` and `type` filters naming nothing in the version; absent when there is none. |
 
 Gaps. The first three codes also mark the recorded calls of each operation they concern (see [Gaps in the request log](#gaps-in-the-request-log)). The last four point at behaviour the contract signals and the description does not state yet. `undescribed_param` is something the executor cannot answer from the records; the three marked `advisory: true` are checks: read the docs for each, and write an entry only when they state the behaviour, otherwise leave the gap.
 

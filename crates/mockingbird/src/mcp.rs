@@ -560,11 +560,13 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "get_world",
             title: "Show a contract version's world description",
-            description: "The world description of a contract version: how its types and operations behave (identity, targets, lifecycle, order, not_found, ...), the author of each entry set by a revision (unlisted entries are heuristic), the revision number (0 when only the heuristics wrote it), refused entries, and gaps to fix: what the description leaves open (no_identity, no_target, no_record, skipped_route, refused) and the behaviour the contract signals that it does not state yet (undescribed_param, and the advisory no_effect, no_unique and no_soft_delete, marked advisory: describe those only when the docs state the behaviour). The format is get_world_schema.",
+            description: "The world description of a contract version: how its types and operations behave (identity, targets, lifecycle, order, not_found, ...), the author of each entry set by a revision (unlisted entries are heuristic), the revision number (0 when only the heuristics wrote it), refused entries, and gaps to fix: what the description leaves open (no_identity, no_target, no_record, skipped_route, refused) and the behaviour the contract signals that it does not state yet (undescribed_param, and the advisory no_effect, no_unique and no_soft_delete, marked advisory: describe those only when the docs state the behaviour). The format is get_world_schema. On a large contract pass `operations` and/or `types` to get only the entries the app uses: the operations named, the types named and the operations of those types, with their gaps, refused entries and authors; names the version lacks are listed in `warnings`.",
             schema: obj(
                 json!({
                     "mock": mock(),
                     "version": n("Contract version; default the active one."),
+                    "operations": { "type": "array", "items": { "type": "string" }, "description": "Operation ids to narrow the answer to." },
+                    "types": { "type": "array", "items": { "type": "string" }, "description": "Resource types to narrow the answer to: each type's entry and the operations of that type." },
                 }),
                 &["mock"],
             ),
@@ -1513,10 +1515,26 @@ impl McpServer {
             }
             "get_world" => {
                 let version = version_arg(a)?;
+                let mut query = Vec::new();
+                for (arg, key) in [("operations", "operation"), ("types", "type")] {
+                    let names = match a.get(arg) {
+                        None | Some(Value::Null) => continue,
+                        Some(Value::Array(names)) => names,
+                        Some(_) => {
+                            return Err(ToolError(format!("{arg} must be an array of strings")));
+                        }
+                    };
+                    for name in names {
+                        let name = name.as_str().ok_or_else(|| {
+                            ToolError(format!("{arg} must be an array of strings"))
+                        })?;
+                        query.push((key, name.to_string()));
+                    }
+                }
                 self.ws(
                     Method::GET,
                     &["mocks", str_arg(a, "mock")?, "contracts", &version, "world"],
-                    &[],
+                    &query,
                     None,
                 )
                 .await

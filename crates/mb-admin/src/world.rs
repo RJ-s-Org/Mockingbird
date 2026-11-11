@@ -15,7 +15,8 @@
 //!
 //! `GET /api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world`
 //! ([`get_world`]) answers a version's effective description as a
-//! [`WorldView`]. The same path takes `PUT` ([`put_world`], a whole
+//! [`WorldView`], narrowed by `?operation=` and `?type=` ([`WorldFilter`]).
+//! The same path takes `PUT` ([`put_world`], a whole
 //! overlay) and `PATCH` ([`patch_world`], a JSON merge patch of the newest
 //! overlay), each adding a revision that holds only the entries that
 //! validate; `…/world/revisions[/{r}]` lists and reads revisions,
@@ -627,6 +628,10 @@ pub struct WorldView {
     /// What the description leaves open, including each refused entry.
     #[schema(value_type = Vec<GapSchema>)]
     pub gaps: Vec<Gap>,
+    /// The `operation` and `type` filters that name nothing in this version,
+    /// one line per kind. Absent when there is none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl WorldView {
@@ -638,7 +643,115 @@ impl WorldView {
             revision: eff.revision,
             refused: eff.refused,
             gaps: eff.gaps,
+            warnings: Vec::new(),
         }
+    }
+
+    /// Narrows the view to what `filter` names (nothing when it is empty):
+    /// the operations it names and those whose resource type it names, the
+    /// types it names, and the gaps, refused entries and authors about
+    /// either. Gaps and refusals about the description as a whole (neither
+    /// an operation nor a type) are kept. A name the version does not have
+    /// is listed in [`WorldView::warnings`].
+    fn narrow(&mut self, filter: &WorldFilter) {
+        if filter.operations.is_empty() && filter.types.is_empty() {
+            return;
+        }
+        let known_ops: BTreeSet<&str> = self
+            .world
+            .operations
+            .keys()
+            .map(String::as_str)
+            .chain(self.gaps.iter().filter_map(|g| g.operation.as_deref()))
+            .collect();
+        let known_types: BTreeSet<&str> = self
+            .world
+            .types
+            .keys()
+            .map(String::as_str)
+            .chain(
+                self.world
+                    .operations
+                    .values()
+                    .filter_map(|o| o.r#type.as_deref()),
+            )
+            .chain(self.gaps.iter().filter_map(|g| g.r#type.as_deref()))
+            .collect();
+        for (kind, asked, known) in [
+            ("operation", &filter.operations, &known_ops),
+            ("type", &filter.types, &known_types),
+        ] {
+            let unknown: Vec<&str> = asked
+                .iter()
+                .map(String::as_str)
+                .filter(|n| !known.contains(n))
+                .collect();
+            if !unknown.is_empty() {
+                self.warnings.push(format!(
+                    "no {kind} {} in contract version {}",
+                    unknown.join(", "),
+                    self.version
+                ));
+            }
+        }
+        // The operations kept: those named, and those of a named type.
+        let ops: BTreeSet<String> = self
+            .world
+            .operations
+            .iter()
+            .filter(|(_, d)| d.r#type.as_ref().is_some_and(|t| filter.types.contains(t)))
+            .map(|(id, _)| id.clone())
+            .chain(filter.operations.iter().cloned())
+            .collect();
+        let types = &filter.types;
+        self.world.operations.retain(|id, _| ops.contains(id));
+        self.world.types.retain(|t, _| types.contains(t));
+        self.gaps.retain(|g| match (&g.operation, &g.r#type) {
+            (None, None) => true,
+            (op, ty) => {
+                op.as_ref().is_some_and(|o| ops.contains(o))
+                    || ty.as_ref().is_some_and(|t| types.contains(t))
+            }
+        });
+        // `None`: a pointer about the description as a whole.
+        let keeps = |pointer: &str| -> Option<bool> {
+            let mut parts = pointer.strip_prefix('/')?.splitn(3, '/');
+            let section = parts.next()?;
+            let name = parts.next()?.replace("~1", "/").replace("~0", "~");
+            match section {
+                "operations" => Some(ops.contains(&name)),
+                "types" => Some(types.contains(&name)),
+                _ => None,
+            }
+        };
+        self.refused.retain(|r| keeps(&r.path).unwrap_or(true));
+        self.authors.retain(|p, _| keeps(p).unwrap_or(true));
+    }
+}
+
+/// Which entries of a world view to answer: `?operation=<id>` and
+/// `?type=<resource type>`, each repeatable. With neither, all of them.
+#[derive(Debug, Default)]
+pub struct WorldFilter {
+    /// Operation ids.
+    pub operations: BTreeSet<String>,
+    /// Resource types.
+    pub types: BTreeSet<String>,
+}
+
+impl WorldFilter {
+    /// The filter a query's `operation` and `type` pairs give; other keys are
+    /// ignored.
+    fn from_pairs(pairs: Vec<(String, String)>) -> Self {
+        let mut filter = Self::default();
+        for (key, value) in pairs {
+            match key.as_str() {
+                "operation" => filter.operations.insert(value),
+                "type" => filter.types.insert(value),
+                _ => false,
+            };
+        }
+        filter
     }
 }
 
@@ -674,9 +787,11 @@ pub(crate) async fn resolve_version(
         ("ws" = String, Path, description = "Workspace name"),
         ("mock" = String, Path, description = "Mock name"),
         ("version" = String, Path, description = "Contract version number, or `active`"),
+        ("operation" = Option<Vec<String>>, Query, explode, description = "Answer only this operation (repeatable), with its gaps, refused entries and authors"),
+        ("type" = Option<Vec<String>>, Query, explode, description = "Answer only this resource type (repeatable): its `types` entry, the operations of that type, and their gaps, refused entries and authors"),
     ),
     responses(
-        (status = 200, description = "The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0.", body = WorldView),
+        (status = 200, description = "The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`.", body = WorldView),
         (status = 400, description = "The version is neither a number nor `active`", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such mock or version, or no active version", body = Problem, content_type = "application/problem+json"),
     )
@@ -685,12 +800,15 @@ pub async fn get_world(
     State(st): State<AdminState>,
     access: WsAccess,
     Path(WorldPath { mock, version }): Path<WorldPath>,
+    Query(pairs): Query<Vec<(String, String)>>,
 ) -> ApiResult<Json<WorldView>> {
     access.require(Permission::Read)?;
     let m = st.mock(&access.ws, &mock).await?;
     let v = resolve_version(&st, &m, &version).await?;
     let eff = effective_world(st.store.as_ref(), m.id, v.version, &v.bundle).await?;
-    Ok(Json(WorldView::new(v.version, eff)))
+    let mut view = WorldView::new(v.version, eff);
+    view.narrow(&WorldFilter::from_pairs(pairs));
+    Ok(Json(view))
 }
 
 // ---------------------------------------------------------------------------
