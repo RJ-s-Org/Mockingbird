@@ -1182,13 +1182,13 @@ impl Engine {
 
     /// Answers every part with one LLM call: one object keyed by the parts'
     /// keys (a nullable part may be left out and reads as null, but not
-    /// every part: [`joint_checks`]), validated (and repaired) as a whole,
+    /// every part, when all of them may be null), validated (and repaired) as a whole,
     /// then split and finished per
     /// part. The call's usage is reported on the first part. Without a
     /// provider, for a part with a forced status or no schema, or when the
     /// joint answer stays invalid, every part is generated on its own. Of
-    /// nullable parts looking up the same thing, only the first found is
-    /// kept ([`one_per_lookup`]).
+    /// nullable parts called with the same arguments (lookups of one thing
+    /// under different types), only the first found is kept.
     pub async fn generate_joint(
         &self,
         bundle: &Bundle,
