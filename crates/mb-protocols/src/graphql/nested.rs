@@ -219,6 +219,7 @@ pub(crate) async fn from_state(
     }
     let mut walk = Walk {
         bundle: &rt.bundle,
+        narrowed: rt.narrowed(),
         held,
     };
     // A root selection carries no arguments of its own.
@@ -274,6 +275,7 @@ struct Page {
 
 struct Walk<'a> {
     bundle: &'a Bundle,
+    narrowed: &'a super::select::NarrowCache,
     /// By definition name, most recent first.
     held: HashMap<String, Vec<StoredResource>>,
 }
@@ -302,6 +304,19 @@ impl Walk<'_> {
                 {
                     let base = Some(&*value).filter(|v| typename_is(v, &ty));
                     *value = self.render(&ty, &record, sel, base);
+                } else if !sel.args.is_empty()
+                    && let Value::Object(obj) = value
+                    && !obj.contains_key("id")
+                    && sel.fields.get("id").is_none_or(|c| c.name == "id")
+                {
+                    // A record read by its arguments without its id
+                    // (`repository(owner:, name:) { issues { … } }`) gets
+                    // one, unseen by the client, so that it is stored and
+                    // what is listed under it is stored under it.
+                    obj.insert(
+                        "id".into(),
+                        json!(format!("mb_{:016x}", rand::random::<u64>())),
+                    );
                 }
                 self.object(schema, sel, value, parent, depth);
             }
@@ -335,6 +350,38 @@ impl Walk<'_> {
         }
     }
 
+    /// The id of an object of type `ty` answered without one, under
+    /// `parent`, from its lookup keys (`Issue.number`): the stored record's
+    /// under that parent with the same keys, else one made of them, so
+    /// that every answer naming it names the same record. `None` without
+    /// lookup keys or their values.
+    fn id_by_keys(
+        &self,
+        ty: &str,
+        sel: &Selection,
+        obj: &Map<String, Value>,
+        parent: &Parent,
+    ) -> Option<String> {
+        let keys = self.narrowed.lookup_keys(ty)?;
+        let mut values = Map::new();
+        for key in keys {
+            let value = sel
+                .fields
+                .iter()
+                .find(|(_, c)| c.name == *key)
+                .and_then(|(k, _)| obj.get(k))
+                .filter(|v| !v.is_null() && !v.is_object() && !v.is_array())?;
+            values.insert(key.clone(), value.clone());
+        }
+        if let Some(held) = self.held.get(ty).into_iter().flatten().find(|r| {
+            refs(r).contains(&parent.id.as_str()) && matches(&values, r) == (true, values.len())
+        }) {
+            return Some(held.id.clone());
+        }
+        let named: Vec<String> = values.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        Some(format!("mb_{ty}_{}_{}", parent.id, named.join("_")))
+    }
+
     /// The children of `value`, an object of `schema`.
     fn object(
         &mut self,
@@ -353,6 +400,13 @@ impl Walk<'_> {
         let Some(props) = def.get("properties").and_then(Value::as_object) else {
             return;
         };
+        if props.contains_key("id")
+            && !obj.contains_key("id")
+            && let Some(parent) = parent
+            && let Some(id) = self.id_by_keys(name, sel, obj, parent)
+        {
+            obj.insert("id".into(), json!(id));
+        }
         let own = match obj.get("id") {
             Some(Value::String(id)) if props.contains_key("id") => Some(Parent {
                 ty: name.to_string(),

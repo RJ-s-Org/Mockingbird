@@ -279,6 +279,78 @@ async fn stored_edges_page_with_cursors() {
     assert_eq!(prs["pageInfo"]["hasNextPage"], false);
 }
 
+/// A repository read without its id still holds what is listed under it:
+/// gh's `issue list` selects no `repository { id }`.
+#[tokio::test]
+async fn a_record_read_without_its_id_keeps_its_list() {
+    let list =
+        r#"{ repository(owner: "o", name: "r") { issues(first: 10) { nodes { id number } } } }"#;
+    let repo = |issues: Vec<Value>| json!({"__typename": "Repository", "issues": {"__typename": "IssueConnection", "totalCount": issues.len(), "nodes": issues}});
+    let base = serve(vec![
+        repo(vec![issue("I_1", 1, "Seeded", "OPEN")]),
+        json!({"__typename": "Repository", "id": "R_generated"}),
+        json!({"__typename": "CreateIssuePayload", "issue": issue("I_2", 2, "Created", "OPEN")}),
+        repo(vec![issue("I_7", 7, "Made up", "OPEN")]),
+    ])
+    .await;
+    gql(&base, list).await;
+    let repo_id = gql(&base, r#"{ repository(owner: "o", name: "r") { id } }"#).await;
+    let repo_id = repo_id["repository"]["id"].as_str().unwrap().to_string();
+    assert_ne!(repo_id, "R_generated");
+    gql_with(
+        &base,
+        &format!(
+            r#"mutation {{ createIssue(input: {{repositoryId: "{repo_id}", title: "Created"}}) {{ issue {{ id }} }} }}"#
+        ),
+        &[("x-mockingbird-seed", "1")],
+    )
+    .await;
+    let listed = gql(&base, list).await;
+    let mut ids: Vec<&str> = listed["repository"]["issues"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["I_1", "I_2"], "{listed}");
+}
+
+/// Items listed without their ids (gh's `issue list`) are stored under
+/// their parent by their lookup key (`number`), once each.
+#[tokio::test]
+async fn items_listed_without_ids_are_stored_by_their_lookup_keys() {
+    let list = r#"{ repository(owner: "o", name: "r") { id issues(first: 10) { nodes { number title } } } }"#;
+    let untitled =
+        |n: u64, title: &str| json!({"__typename": "Issue", "number": n, "title": title});
+    let repo = |issues: Vec<Value>| json!({"__typename": "Repository", "id": "R_1", "issues": {"__typename": "IssueConnection", "totalCount": issues.len(), "nodes": issues}});
+    let base = serve(vec![
+        repo(vec![untitled(1, "One"), untitled(2, "Two")]),
+        repo(vec![untitled(5, "Made up")]),
+        json!({"__typename": "Repository", "id": "R_1", "issue": untitled(9, "Made up")}),
+    ])
+    .await;
+    gql(&base, list).await;
+    let again = gql(&base, list).await;
+    let titles: Vec<&str> = again["repository"]["issues"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles.len(), 2, "{again}");
+    assert!(
+        titles.contains(&"One") && titles.contains(&"Two"),
+        "{again}"
+    );
+    let one = gql(
+        &base,
+        r#"{ repository(owner: "o", name: "r") { id issue(number: 2) { number title } } }"#,
+    )
+    .await;
+    assert_eq!(one["repository"]["issue"]["title"], "Two", "{one}");
+}
+
 const SHOP: &str = r#"
 interface Node { id: ID! }
 type Product implements Node { id: ID! handle: String! title: String! }
