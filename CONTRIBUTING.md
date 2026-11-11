@@ -50,11 +50,10 @@ npm run check:api     # the generated Admin API client matches the server
 npm run e2e           # Playwright; run `npx playwright install chromium` once
 ```
 
-A change to `crates/mb-protocols`, `crates/mb-engine`, `crates/mb-import`, `crates/mb-state`,
-`crates/mb-store`, `crates/mb-llm` or `scripts/llm-bench` also runs the replay gate (the `Replay
-gate` workflow, and `scripts/gate.sh`): the journeys suites against recorded LLM answers, offline,
-with no key and no spend, in a few seconds after the release build. It fails when a check the recording passed now fails although every LLM call of its
-journey was answered from the recording, as often as when recorded.
+The replay gate (the `Replay gate` workflow) runs nightly and on demand, not on pull requests or in
+`scripts/gate.sh`: the journeys suites against recorded LLM answers, offline, with no key and no
+spend. It fails when a check the recording passed now fails although every LLM call of its journey
+was answered from the recording. Run it by hand when a change may move the bench:
 
 ```sh
 cargo build --release -p mockingbird-cli
@@ -93,8 +92,8 @@ Project rules the reviewers check:
 - `mb-engine`, `mb-store` and `mb-state` stay free of axum; `mb-protocols` depends on
   neither `mb-store` nor `mb-auth`;
 - user-visible behaviour is documented in `docs/` (the README is the front page and stays
-  short), and noted in
-  `CHANGELOG.md` under `## [Unreleased]`.
+  short). Don't edit `CHANGELOG.md` in a pull request: the release writes it from
+  the merged pull request titles, so pull requests don't conflict over it.
 
 ## Commit style
 

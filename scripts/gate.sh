@@ -18,10 +18,8 @@
 #   - the console's typecheck, lint and tests when crates/mb-console/web changed
 #   - the bench's Python tests when scripts/llm-bench changed, after building the
 #     release binary their end-to-end replay test runs (MB_BENCH_BINARY)
-#   - the replay gate (scripts/llm-bench/replay.py: the journeys against recorded LLM
-#     answers, offline and free) when mb-protocols, mb-engine, mb-import, mb-state,
-#     mb-store, mb-llm, scripts/llm-bench or docs/benchmarks/world-cache changed, on that
-#     same release binary, on both world tiers (none and agent)
+#   (the replay gate is not part of the gate: it runs nightly, or by hand with
+#   scripts/llm-bench/replay.py gate)
 # A change to the root Cargo.toml, Cargo.lock, rust-toolchain.toml, clippy.toml,
 # deny.toml, .cargo/ or .config/ runs the full workspace. Transitive dependents are left
 # to main's CI, which runs everything (cargo-deny, docs and the slim build included).
@@ -103,23 +101,14 @@ fi
 # The bench's Python tests include an end-to-end replay test that runs the release
 # binary, so the binary is built first and handed to them: a stale one from an earlier
 # build would test the wrong engine.
-replay_paths='^(crates/mb-protocols/|crates/mb-engine/|crates/mb-import/|crates/mb-state/|crates/mb-store/|crates/mb-llm/|scripts/llm-bench/|docs/benchmarks/world-cache/)'
 target_dir="${CARGO_TARGET_DIR:-target}"
 [[ "$target_dir" == /* ]] || target_dir="$PWD/$target_dir"
 bench_binary="$target_dir/release/mockingbird"
-if grep -qE "$replay_paths" <<<"$changed"; then
+if grep -q '^scripts/llm-bench/' <<<"$changed"; then
   step "release binary for the bench"
   cargo build --release -p mockingbird-cli --locked
-fi
-
-if grep -q '^scripts/llm-bench/' <<<"$changed"; then
   step "bench: python tests"
   MB_BENCH_BINARY="$bench_binary" python3 -m unittest discover -s scripts/llm-bench -p 'test_*.py'
-fi
-
-if grep -qE "$replay_paths" <<<"$changed"; then
-  step "replay gate: journeys against recorded LLM answers"
-  python3 scripts/llm-bench/replay.py gate --binary "$bench_binary" --world none --world agent
 fi
 
 step "gate passed"

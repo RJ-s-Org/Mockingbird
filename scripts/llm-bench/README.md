@@ -349,7 +349,7 @@ python3 scripts/llm-bench/aggregate.py --out $OUT
 
 ## Replay gate
 
-A regression that is deterministic given the model's answers (a check answered from stored state going from pass to fail after an engine change) does not need a paid run to be found. `replay.py gate` runs the journeys suites against recorded LLM answers, offline and with no key, and compares each check with the recording's result. The `Replay gate` workflow runs it on every pull request that touches `crates/mb-protocols`, `crates/mb-engine`, `crates/mb-import`, `crates/mb-state`, `crates/mb-store`, `crates/mb-llm`, `scripts/llm-bench` or `docs/benchmarks/world-cache`, on both world tiers (`--world none --world agent`), and `scripts/gate.sh` runs it locally for the same paths (on the release binary it builds first, which the bench's Python tests also get as `MB_BENCH_BINARY`).
+A regression that is deterministic given the model's answers (a check answered from stored state going from pass to fail after an engine change) does not need a paid run to be found. `replay.py gate` runs the journeys suites against recorded LLM answers, offline and with no key, and compares each check with the recording's result. The `Replay gate` workflow runs it nightly and on demand, on both world tiers (`--world none --world agent`).
 
 ```sh
 cargo build --release -p mockingbird-cli
