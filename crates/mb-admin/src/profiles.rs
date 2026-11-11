@@ -32,8 +32,13 @@ pub struct ProfilePath {
     pub name: String,
 }
 
-/// Body keys that would carry a raw secret.
-const RAW_KEY_FIELDS: [&str; 2] = ["api_key", "apiKey"];
+/// Body keys accepted as aliases of `secret_ref` (the config file's name
+/// is `api_key`) when they hold a secret reference; a raw key in them is
+/// refused.
+const KEY_ALIAS_FIELDS: [&str; 2] = ["api_key", "apiKey"];
+
+/// The fields of a profile body, as named in rejections.
+const ACCEPTED_FIELDS: &str = "base_url and model (required), secret_ref (or its alias api_key: a secret reference such as env:OPENROUTER_API_KEY), output_mode, temperature, timeout_ms, max_tokens, fallback_profile, headers, extra_body, repetition_guard";
 
 /// How a profile's endpoint is asked for JSON: `none` (no
 /// `response_format`; the prompt alone asks for JSON), `json_object` (JSON
@@ -116,7 +121,8 @@ impl From<LlmProfile> for LlmProfileView {
     }
 }
 
-/// The full profile. A raw `api_key` is rejected: use `secret_ref`.
+/// The full profile. `api_key` is accepted as an alias of `secret_ref` when
+/// it holds a secret reference (`env:NAME`); a raw key is rejected.
 #[derive(Deserialize, ToSchema, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct PutProfile {
@@ -208,8 +214,7 @@ pub fn accepted_secret_refs(globs: &[String]) -> String {
 /// matching one of `allowed` (`server.api_secret_refs`). The rejection never echoes the
 /// value, which may be a pasted secret, and names the accepted forms.
 fn check_secret_ref(r: &str, allowed: &[String]) -> ApiResult<()> {
-    let rest = r.strip_prefix("env:").or_else(|| r.strip_prefix("file:"));
-    if !rest.is_some_and(|rest| !rest.trim().is_empty()) && !mb_store::is_vault_reference(r) {
+    if !is_secret_reference(r) {
         return Err(Problem::invalid(
             "Invalid secret reference",
             format!(
@@ -230,6 +235,54 @@ fn check_secret_ref(r: &str, allowed: &[String]) -> ApiResult<()> {
     Ok(())
 }
 
+/// Whether `r` has the form of a secret reference: `env:NAME` or
+/// `file:/path` with a non-empty remainder, or a well-formed
+/// `vault:<mount>/<path>#<field>`.
+fn is_secret_reference(r: &str) -> bool {
+    let rest = r.strip_prefix("env:").or_else(|| r.strip_prefix("file:"));
+    rest.is_some_and(|rest| !rest.trim().is_empty()) || mb_store::is_vault_reference(r)
+}
+
+/// Moves an `api_key` (or `apiKey`) holding a secret reference into
+/// `secret_ref`, the way the config file names it. A raw key, or a value
+/// that differs from a `secret_ref` also given, is refused; the rejection
+/// never echoes the value.
+fn take_key_alias(obj: &mut serde_json::Map<String, Value>, allowed: &[String]) -> ApiResult<()> {
+    for field in KEY_ALIAS_FIELDS {
+        let Some(value) = obj.remove(field) else {
+            continue;
+        };
+        let reference = match value {
+            Value::Null => continue,
+            Value::String(r) if is_secret_reference(&r) => r,
+            _ => {
+                return Err(Problem::invalid(
+                    "Raw API key not accepted",
+                    format!(
+                        "`{field}` must be a secret reference such as env:OPENROUTER_API_KEY, never the key itself: raw keys are never stored; export the key and pass its reference (accepted: {})",
+                        accepted_secret_refs(allowed)
+                    ),
+                ));
+            }
+        };
+        match obj.get("secret_ref") {
+            None | Some(Value::Null) => {
+                obj.insert("secret_ref".into(), Value::String(reference));
+            }
+            Some(Value::String(existing)) if *existing == reference => {}
+            Some(_) => {
+                return Err(Problem::invalid(
+                    INVALID_PROFILE,
+                    format!(
+                        "`{field}` is an alias of secret_ref; set one of them, not both with different values"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Title of the 422 for an invalid profile body.
 const INVALID_PROFILE: &str = "Invalid LLM profile";
 
@@ -243,7 +296,7 @@ fn validate(name: &str, p: &PutProfile) -> ApiResult<()> {
     if p.base_url.trim().is_empty() || p.model.trim().is_empty() {
         return Err(Problem::invalid(
             INVALID_PROFILE,
-            "base_url and model are required",
+            format!("base_url and model are required; accepted fields: {ACCEPTED_FIELDS}"),
         ));
     }
     if !(p.temperature.is_finite() && (0.0..=2.0).contains(&p.temperature)) {
@@ -387,7 +440,7 @@ pub async fn get_one(
         (status = 200, body = ProfileWriteResult),
         (status = 403, description = "Not an admin of the workspace, or not a sysadmin when setting or changing `secret_ref` or the `base_url` of a profile with one", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "Managed by config file", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Invalid profile, a raw `api_key`, or a `secret_ref` not allowed by `server.api_secret_refs`", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid profile, a raw key in `api_key`, or a `secret_ref` not allowed by `server.api_secret_refs`", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn put(
@@ -407,19 +460,24 @@ pub async fn put(
     if let Some(existing) = &existing {
         ensure_api_managed(&existing.source, format_args!("LLM profile {name:?}"))?;
     }
-    if let Some(obj) = body.as_object()
-        && let Some(field) = RAW_KEY_FIELDS.iter().find(|k| obj.contains_key(**k))
-    {
-        return Err(Problem::invalid(
-            "Raw API key not accepted",
-            format!(
-                "`{field}` is not accepted: raw keys are never stored; use secret_ref ({})",
-                accepted_secret_refs(&st.api_secret_refs)
-            ),
-        ));
+    let mut body = body;
+    if let Some(obj) = body.as_object_mut() {
+        take_key_alias(obj, &st.api_secret_refs)?;
+        if obj.contains_key("provider") {
+            return Err(Problem::invalid(
+                INVALID_PROFILE,
+                format!(
+                    "`provider` presets are expanded by the MCP tool put_llm_profile and by `mockingbird llm configure --apply`; the Admin API takes the profile itself: {ACCEPTED_FIELDS} (`mockingbird llm providers` lists each preset's base_url)"
+                ),
+            ));
+        }
     }
-    let body: PutProfile = serde_json::from_value(body)
-        .map_err(|e| Problem::invalid(INVALID_PROFILE, e.to_string()))?;
+    let body: PutProfile = serde_json::from_value(body).map_err(|e| {
+        Problem::invalid(
+            INVALID_PROFILE,
+            format!("{e}; accepted fields: {ACCEPTED_FIELDS}"),
+        )
+    })?;
     if let Some(r) = &body.secret_ref {
         check_secret_ref(r, &st.api_secret_refs)?;
     }

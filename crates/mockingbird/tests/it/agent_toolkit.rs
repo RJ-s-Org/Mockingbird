@@ -1795,3 +1795,68 @@ fn start_server_reviews_the_worlds_and_flags_same_host_mocks_without_shares() {
         std::panic::resume_unwind(panic);
     }
 }
+
+/// The profile shapes an agent writes from the config file save in one
+/// `put_llm_profile` call each; a literal key is refused without an echo.
+#[test]
+fn put_llm_profile_takes_the_config_files_shape_in_one_call() {
+    let dir = tempdir();
+    std::fs::copy(fixture(), dir.path().join("orders.yaml")).unwrap();
+    run_json(
+        dir.path(),
+        &["init", "--offline", "--contract", "orders.yaml"],
+    );
+    let (child, bound) = spawn_serve(
+        bin()
+            .current_dir(dir.path())
+            .env_remove("MB_LLM_API_KEY")
+            .args(["serve", "-c", "mockingbird.yaml", "--offline"])
+            .args(["--port", "0", "--admin-port", "0", "--grpc-port", "0"]),
+    );
+    let _server = KillOnDrop(child);
+    let mut mcp = McpClient::start(dir.path(), &bound.admin_url());
+
+    let base = || {
+        json!({
+            "base_url": "https://openrouter.ai/api/v1",
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+        })
+    };
+    let mut first = base();
+    first["provider"] = json!("openrouter");
+    first["api_key"] = json!("env:OPENROUTER_API_KEY");
+    let mut second = base();
+    second["provider"] = json!("openrouter");
+    second["secret_ref"] = json!("env:OPENROUTER_API_KEY");
+    let mut third = base();
+    third["secret_ref"] = json!("env:OPENROUTER_API_KEY");
+    third["output_mode"] = json!("json_schema");
+    third["timeout_ms"] = json!(30_000);
+    let short = json!({ "provider": "openrouter", "api_key": "env:OPENROUTER_API_KEY" });
+    for (i, profile) in [first, second, third, short].into_iter().enumerate() {
+        let name = format!("openrouter-{i}");
+        let saved = mcp.tool(
+            "put_llm_profile",
+            json!({ "name": name, "profile": profile }),
+        );
+        assert_eq!(saved["name"], name, "{saved}");
+        assert_eq!(saved["secret_ref"], "env:OPENROUTER_API_KEY", "{saved}");
+        assert_eq!(saved["base_url"], "https://openrouter.ai/api/v1", "{saved}");
+        assert_eq!(
+            saved["model"], "deepseek/deepseek-v4.1-flash-1017",
+            "{saved}"
+        );
+    }
+
+    let error = mcp.tool_error(
+        "put_llm_profile",
+        json!({ "name": "leaky", "profile": { "provider": "openrouter", "api_key": "sk-or-v1-literal" } }),
+    );
+    assert!(!error.contains("sk-or-v1-literal"), "{error}");
+    assert!(
+        error.contains("must be a secret reference such as env:OPENROUTER_API_KEY"),
+        "{error}"
+    );
+    let profiles = mcp.tool("list_llm_profiles", json!({}));
+    assert!(!profiles.to_string().contains("leaky"), "{profiles}");
+}
