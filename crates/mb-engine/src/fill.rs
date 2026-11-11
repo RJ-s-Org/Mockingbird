@@ -26,6 +26,30 @@ pub struct Filled {
     pub usage: Usage,
 }
 
+/// Whether [`Engine::fill`] answers `null` for the member `name` (`member`, its schema)
+/// with no model call: a nullable object or list that is a reference to another record,
+/// or is optional (not in `required`).
+fn nulled_by_fill(bundle: &Bundle, required: &[String], name: &str, member: &Value) -> bool {
+    admits_null(bundle, member)
+        && structured(bundle, member)
+        && (reference(bundle, member) || !required.iter().any(|r| r == name))
+}
+
+/// The members of `missing` [`Engine::fill`] answers `null` for with no model call (see
+/// its doc): what nothing else may fill in its place.
+#[must_use]
+pub fn fill_nulls(bundle: &Bundle, schema: &Value, missing: &[String]) -> Vec<String> {
+    let required = consistency::required_members(bundle, schema);
+    missing
+        .iter()
+        .filter(|m| {
+            consistency::property_schema(bundle, schema, m)
+                .is_some_and(|member| nulled_by_fill(bundle, &required, m, &member))
+        })
+        .cloned()
+        .collect()
+}
+
 impl Engine {
     /// Values for the `missing` members of a record whose `schema` declares them, the
     /// record holding `known` already. A member that may be null and holds a reference
@@ -74,16 +98,14 @@ impl Engine {
         let mut left_out = Vec::new();
         for member in &declared {
             let (name, schema) = member;
+            if nulled_by_fill(bundle, &required, name, schema) {
+                filled.members.insert((*name).to_string(), Value::Null);
+                continue;
+            }
             let optional = !required.iter().any(|r| r == name);
-            if structured(bundle, schema) {
-                if admits_null(bundle, schema) && (optional || reference(bundle, schema)) {
-                    filled.members.insert((*name).to_string(), Value::Null);
-                    continue;
-                }
-                if optional && holds_objects(bundle, schema) {
-                    left_out.push(*name);
-                    continue;
-                }
+            if optional && structured(bundle, schema) && holds_objects(bundle, schema) {
+                left_out.push(*name);
+                continue;
             }
             asked.push(member);
         }

@@ -617,10 +617,53 @@ async fn reconcile_money(
     super::ledger::reconcile(body, &stored);
 }
 
+/// Links the records of a create the executor answered (the objects of its
+/// answer the session holds) to the records its id arguments name, as
+/// [`store_answer`] links a generated answer's: `createIssue(input:
+/// {repositoryId})` makes the issue the repository's. A record whose member
+/// already names a record is left as it is; with no id argument nothing is
+/// read.
+async fn link_held(
+    rt: &MockRuntime,
+    plan: &call::CallPlan<'_>,
+    op: &mb_mcm::Operation,
+    selection: &super::select::Selection,
+    args: &serde_json::Map<String, Value>,
+    body: &Value,
+) {
+    let names_a_record = |(name, value): (&String, &Value)| {
+        value.as_str().is_some_and(|v| !v.is_empty())
+            && (name.ends_with("Id") || name.ends_with("_id"))
+    };
+    let nested = args.values().filter_map(Value::as_object).flatten();
+    if !args.iter().chain(nested).any(names_a_record) {
+        return;
+    }
+    let mut held = Vec::new();
+    for object in super::state::objects(&rt.bundle, op, selection, body, args) {
+        if let Some(record) =
+            call::stored(rt, &plan.session, &object.resource_type, &object.id).await
+        {
+            held.push(record);
+        }
+    }
+    let before: Vec<Value> = held.iter().map(|r| r.data.clone()).collect();
+    super::nested::link_args(rt, &plan.session, &mut held, args).await;
+    let linked: Vec<_> = held
+        .into_iter()
+        .zip(before)
+        .filter(|(record, was)| record.data != *was)
+        .map(|(record, _)| record)
+        .collect();
+    if !linked.is_empty() {
+        call::store_resources(rt, &plan.session, linked, true).await;
+    }
+}
+
 /// Stores the objects a generated 2xx answer holds (see [`super::state`]):
 /// a mutation's always, a query's under consistency unless the faker stood
 /// in for a failed LLM call. Answers from state or the cache are already
-/// stored.
+/// stored; a create answered from state is linked ([`link_held`]).
 async fn store_answer(
     rt: &MockRuntime,
     plan: &call::CallPlan<'_>,
@@ -633,6 +676,25 @@ async fn store_answer(
         return;
     };
     let seeding = mode == super::state::Store::Seed;
+    if matches!(generated.source, Source::State) {
+        // The executor stored its write; a create's new record is linked to
+        // the records its id arguments name. An update or action wrote what it
+        // meant to, a reference it cleared included.
+        let creates = rt
+            .described()
+            .op(&op.id)
+            .and_then(|d| d.kind)
+            .or_else(|| mb_mcm::world::OpKind::of(op))
+            == Some(mb_mcm::world::OpKind::Create);
+        if creates
+            && !seeding
+            && (200..300).contains(&generated.status)
+            && let (Some(body), Some(Value::Object(args))) = (&generated.body, &call.body)
+        {
+            link_held(rt, plan, op, selection, args, body).await;
+        }
+        return;
+    }
     if !(200..300).contains(&generated.status)
         || matches!(generated.source, Source::State | Source::Cache)
         || (seeding && (!rt.consistency || call::transient_fallback(generated)))

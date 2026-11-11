@@ -78,6 +78,12 @@ pub struct Bundle {
     /// OpenAPI 3 or Swagger 2.0 import looked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_names: Option<Vec<ApiKeyName>>,
+    /// The contract was inferred by Mockingbird's smart import (from documentation
+    /// pages, text or recorded traffic; `info.x-mockingbird-inferred: true` in an
+    /// OpenAPI document), so its request schemas are guesses: requests are validated
+    /// leniently unless the mock asks for strict validation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inferred: bool,
 }
 
 /// A name an API-key security scheme carries a key under.
@@ -1510,6 +1516,7 @@ mod resolve_tests {
             channels: vec![],
             webhooks: vec![],
             api_key_names: None,
+            inferred: false,
         }
     }
 

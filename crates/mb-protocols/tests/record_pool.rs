@@ -371,3 +371,104 @@ async fn a_type_whose_lists_show_a_summary_of_its_record_is_still_pooled() {
         "a summary: {listed}"
     );
 }
+
+#[tokio::test]
+async fn a_create_takes_what_it_did_not_send_from_a_pool_record_with_no_model_call() {
+    let (contract, mut w) = writable();
+    w["operations"]["createWidget"] = json!({"kind": "create", "type": "widgets"});
+    let contract = contract.replace(
+        "      required: [id, name]\n      properties:\n        id: {type: string}\n        name: {type: string}\n",
+        "      required: [id, name, color, url]\n      properties:\n        id: {type: string}\n        name: {type: string}\n        color: {type: string}\n        url: {type: string}\n",
+   )
+    .replace(
+        "requestBody: {content: {application/json: {schema: {$ref: \"#/components/schemas/Widget\"}}}}",
+        "requestBody: {content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}}}}}}",
+    );
+    let colored = |i: usize| {
+        json!({"id": format!("wdg{i}"), "name": format!("Widget {i}"), "color": format!("color-{i}"),
+               "url": format!("https://example.test/widgets/wdg{i}")})
+    };
+    let batch = json!({"records": (1..=5).map(colored).collect::<Vec<_>>()});
+    let h = support::described(&contract, w, vec![batch]);
+    mb_protocols::fill_record_pool(Arc::downgrade(&h.rt), 60_000).await;
+    assert_eq!(h.rt.pool.sizes().get("widgets"), Some(&5));
+    let calls = h.provider.requests().len();
+    let (status, _, made) = h
+        .send("POST", "/widgets", Some(json!({"name": "Brand new"})), &[])
+        .await;
+    assert!(status.is_success(), "{made}");
+    assert_eq!(h.provider.requests().len(), calls, "no model call: {made}");
+    assert_eq!(made["name"], "Brand new", "the request wins: {made}");
+    let id = made["id"].as_str().unwrap();
+    assert!(
+        !id.starts_with('w') || !(1..=5).any(|i| id == format!("w{i}")),
+        "a new id: {made}"
+    );
+    let color = made["color"].as_str().unwrap();
+    assert!(color.starts_with("color-"), "from a pool record: {made}");
+    assert_eq!(
+        made["url"],
+        format!("https://example.test/widgets/{id}"),
+        "{made}"
+    );
+    assert_eq!(pool_note(&h), Some(json!(1)));
+    // Stored as answered.
+    let (_, _, read) = h.send("GET", &format!("/widgets/{id}"), None, &[]).await;
+    assert_eq!(read, made);
+}
+
+#[tokio::test]
+async fn a_create_leaves_its_state_nulls_and_partly_sent_members_out_of_the_pool() {
+    let (contract, mut w) = writable();
+    let contract = contract
+        .replace(
+            "      required: [id, name]\n      properties:\n        id: {type: string}\n        name: {type: string}\n",
+            "      required: [id, name, color, status, dims]\n      properties:\n        id: {type: string}\n        name: {type: string}\n        color: {type: string}\n        status: {type: string, enum: [active, archived]}\n        meta: {type: object, nullable: true, properties: {note: {type: string}}}\n        dims: {type: object, required: [w, h], properties: {w: {type: integer}, h: {type: integer}}}\n",
+        )
+        .replace(
+            "requestBody: {content: {application/json: {schema: {$ref: \"#/components/schemas/Widget\"}}}}",
+            "requestBody: {content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}, dims: {type: object, properties: {w: {type: integer}}}}}}}}",
+        );
+    w["operations"]["createWidget"] = json!({"kind": "create", "type": "widgets"});
+    w["types"]["widgets"]["lifecycle"] =
+        json!({"member": "status", "states": ["active", "archived"]});
+    let pooled = |i: usize| {
+        json!({"id": format!("wdg{i}"), "name": format!("Widget {i}"), "color": format!("color-{i}"),
+               "status": "archived", "meta": {"note": "old"}, "dims": {"w": 9, "h": 9}})
+    };
+    let batch = json!({"records": (1..=5).map(pooled).collect::<Vec<_>>()});
+    // The model's fill: the state and the rest of the dims the request sent part of.
+    let fill = json!({"status": "active", "dims": {"h": 2}});
+    let h = support::described(&contract, w, vec![batch, fill]);
+    mb_protocols::fill_record_pool(Arc::downgrade(&h.rt), 60_000).await;
+    assert_eq!(h.rt.pool.sizes().get("widgets"), Some(&5));
+    let calls = h.provider.requests().len();
+    let (status, _, made) = h
+        .send(
+            "POST",
+            "/widgets",
+            Some(json!({"name": "New", "dims": {"w": 1}})),
+            &[],
+        )
+        .await;
+    assert!(status.is_success(), "{made}");
+    assert!(
+        made["color"].as_str().unwrap().starts_with("color-"),
+        "from the pool: {made}"
+    );
+    assert!(
+        made.get("meta").is_none_or(Value::is_null),
+        "fill's null, not the pool's: {made}"
+    );
+    assert_eq!(made["dims"]["w"], 1, "the request's: {made}");
+    // One fill call, for the state and the dims the request sent part of; never for
+    // what the pool record gave.
+    let requests = h.provider.requests();
+    assert_eq!(requests.len(), calls + 1, "{made}");
+    let asked = format!("{:?}", requests.last().unwrap().response_format);
+    assert!(
+        asked.contains("status") && asked.contains("dims"),
+        "{asked}"
+    );
+    assert!(!asked.contains("color"), "{asked}");
+}

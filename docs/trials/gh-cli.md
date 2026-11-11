@@ -168,3 +168,45 @@ New in run 5:
 - **Engine bug:** `issue view --comments` fails with `parsing time "garnet"`. The comment is served from state, and a field no record holds (the comment's `createdAt`) is filled by the faker. GitHub's custom `DateTime` scalar is compiled as an unconstrained value (`{"description": "GraphQL scalar DateTime"}`), so the faker writes a word. Fix in the importer: map date and time scalars to `format: date-time`.
 - `createIssue` (145 s) and `closeIssue` (33 s) still take the fill path (failure 4). Model-served latency over 23 calls: p50 2.0 s, p95 31.6 s.
 - OpenRouter: the key's daily counter is $1.23 across every trial sharing it. This session's calls stay well under $1.
+
+### Run 6: shared state, and every command as a test would run it (2026-11-11)
+
+The bar for this run: a mock for testing need not be realistic, but every `gh` command a test would run must give the expected outcome. Same `gh` build, `deepseek/deepseek-v4.1-flash-1017` through OpenRouter, and the trial4 config and worlds, with these changes the agent made through the world format:
+
+- Both mocks have `shares: github`, so REST and GraphQL read one store. GraphQL `pullrequest` has `same_as: [pulls]` and REST `pulls` has `same_as: [pullrequest]`.
+- `createIssue` sets `number: "seq('issue') + 1000"` and `url: "'https://github.com/fernwood-labs/trellis/issues/' + string(seq('issue-url') + 1000)"`. `createPullRequest` does the same with `pr` and 2000. A create's `set` sees only the request and the minted id, so it cannot read a filled `number` (`string() cannot convert a null`). Two counters, each read once per call, stay equal.
+- `addComment` sets `isMinimized: "false"`. A random `true` made `gh issue view --comments` hide the comment.
+
+The binary was `main` at `ae6f8849`, plus #462 and #464, both armed to merge.
+
+| Stateful check | Run 5 | Run 6 |
+| --- | --- | --- |
+| Created issue is listed | yes | yes: `issue list` shows #1001, `Router panics on empty path` |
+| `issue view` matches it | yes | yes |
+| The comment shows | in `--json` only | yes: `issue view --comments` prints it, and so does `--json comments` |
+| Closed shows closed | yes | yes: `--state closed` lists #1001 `CLOSED`, `--state open` is empty, and `gh api graphql … issue(number: 1001)` gives `CLOSED` |
+| REST sees it | no | yes: `gh api repos/…/issues/1001` gives the same title, `closed` |
+
+**5 of 5**, and **all 20 commands exit 0 with the expected outcome**:
+- `issue create` prints `…/issues/1001`, and the later commands use that number.
+- `pr create` prints `…/pull/2001`. `pr list` lists #2001 `fix-empty-path`, and `pr view` and `pr view --json` show its title, branches and body.
+- `gh api repos/…/pulls/2001` gives `fix-empty-path`, `open` and the same title.
+
+Content outside what a test checks is still made up: the comment's URL names issue #128, and other issues and PRs are generated.
+
+What it took. Each fix had one review round and CI. Several are generic GraphQL fixes the trial exposed:
+
+| PR | Fix |
+| --- | --- |
+| #431 | GraphQL date and time scalars import as `format: date-time`, `date` or `time` |
+| #437, #464 | `shares`: mocks of one API keep one store, types matched by name or `same_as`. #464 fixes the overlay dropping `same_as` |
+| #440, #451 | Of several records a lookup names, the one other records refer to answers. The referrers are counted only when a lookup has more than one candidate |
+| #449 | A partial record still gets its lifecycle's initial state |
+| #454, #459 | A type read through a union or interface (`node(id:): Node`) is its own definition, so `closeIssue`'s transition to `CLOSED` applies. A GraphQL create fills only the type's own scalars (#454 alone made `createIssue` answer 2.5 MB after 32 s) |
+| #457 | A create of a type read only below another (pull requests) keeps its input, whatever the mutation selects |
+| #458, #461 | A shared record is reshaped into this mock's types, nested members included. An owner reference left empty does not hide it |
+| #460 | A create the executor answers is linked to the records its id arguments name, so `repository { issues }` lists it |
+| #462 | A stored reference by id (`headRepository: {id}`) is answered as the record it names |
+| #463 | A generated create's `set` reaches a GraphQL record that holds only its selection |
+
+Model-served latency over 25 calls: p50 2.0 s, p95 3.5 s for GraphQL, and p50 3.7 s for REST. The slowest command was a REST read at 11.5 s. `createIssue` now takes 3.4 s, down from 145 s. One run used 127k prompt and 10k completion tokens, about $0.01. All runs this session stayed well under the $2 cap.

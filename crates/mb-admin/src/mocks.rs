@@ -640,6 +640,7 @@ pub async fn create(
                     graphql_path: None,
                     faker_seed: body.faker_seed,
                     shares: None,
+                    strict_requests: false,
                 },
                 hosts: body.hosts,
                 webhooks: body.webhooks,

@@ -378,6 +378,11 @@ pub struct MockBehavior {
     /// and GraphQL over one store): sessions are kept under it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shares: Option<String>,
+    /// Validate requests strictly even when the contract was inferred by the smart
+    /// import, whose request schemas are guesses and are otherwise validated
+    /// leniently (see `mb_mcm::Bundle::inferred`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strict_requests: bool,
 }
 
 /// A mock's path rewrite: `strip_prefix` is removed from the path below the

@@ -240,7 +240,7 @@ pub(super) async fn run(
     // Its tokens' first values; a token none can be minted for is filled as any member.
     let seed = crate::call::header_ids::MintSeed::new(rt, &plan.session, call);
     initial_token(rt, (seed, t), &mut data);
-    issue_aliases(rt, (seed, t, op), response_schema, &mut data);
+    let issued = issue_aliases(rt, (seed, t, op), response_schema, &mut data);
     let tokens = token_members(rt, t);
     owned.retain(|m| !tokens.contains(m) || mb_mcm::member_at(&data, m).is_some());
     // A request member that does not fit the record's is never stored as sent: the
@@ -344,25 +344,62 @@ pub(super) async fn run(
     // A member a read never shows (`writeOnly`) is the client's to send, never filled.
     missing.retain(|(_, member)| !write_only(rt.bundle(), member));
     let mut usage = mb_llm::Usage::default();
+    let mut from_pool = false;
     if !missing.is_empty()
         && let Value::Object(known) = &mut data
     {
-        let names: Vec<String> = missing.iter().map(|(name, _)| name.clone()).collect();
-        let filled = plan
-            .engine
-            .fill(
-                rt.bundle(),
-                &fill_schema(&missing, &required),
-                known,
-                &names,
-                FillContext { op, call },
-            )
-            .await;
-        usage = filled.usage;
-        fill_into(known, filled.members);
+        let mut names: Vec<String> = missing.iter().map(|(name, _)| name.clone()).collect();
+        // From the mock's record pool, when it holds the type: a pool record's values
+        // for the members nothing set at all (one the request sent part of is the
+        // model's to complete), but those fill answers null with no model call and the
+        // record's state (its lifecycle member, a soft-delete mark), which a create
+        // decides. The model fills only what is left.
+        let nulls = mb_engine::fill_nulls(rt.bundle(), &fill_schema(&missing, &required), &names);
+        let state_member = rt
+            .described()
+            .type_desc(t)
+            .and_then(|d| d.lifecycle.as_ref())
+            .map(|l| l.member.clone());
+        let poolable: Vec<String> = names
+            .iter()
+            .filter(|name| {
+                !known.contains_key(*name)
+                    && !nulls.contains(name)
+                    && state_member.as_ref() != Some(*name)
+                    && !crate::world_gaps::SOFT_DELETE_MEMBERS
+                        .contains(&name.to_ascii_lowercase().as_str())
+            })
+            .cloned()
+            .collect();
+        if let Some(pooled) = super::pool::create_fill(rt, (t, field), &key, &poolable) {
+            names.retain(|name| !pooled.contains_key(name));
+            fill_into(known, pooled);
+            from_pool = true;
+        }
+        if !names.is_empty() {
+            let asked: Vec<(String, Value)> = missing
+                .iter()
+                .filter(|(name, _)| names.contains(name))
+                .cloned()
+                .collect();
+            let filled = plan
+                .engine
+                .fill(
+                    rt.bundle(),
+                    &fill_schema(&asked, &required),
+                    known,
+                    &names,
+                    FillContext { op, call },
+                )
+                .await;
+            usage = filled.usage;
+            fill_into(known, filled.members);
+        }
         settle_filled(rt, (field, &shape.schemas), (&missing, &required), known);
     }
-    unique_keys(state, (seed, t), &filled_keys, &mut data)
+    // Issued values name their record as alternate keys do: unique among the type's.
+    let drawn: Vec<(String, Value)> = filled_keys.into_iter().chain(issued).collect();
+    unique_keys(state, (seed, t), &drawn, &mut data)
         .instrument(state_span())
         .await;
 
@@ -383,6 +420,9 @@ pub(super) async fn run(
     if let Some(why) = unreadable(rt, t, &data, filled.as_ref().map(|f| &f.data)) {
         invalid(rt, plan, &why);
         return Ran::Filled(usage);
+    }
+    if from_pool {
+        plan.exprs.pooled(1);
     }
     let answer = filled
         .and_then(|f| written(rt, plan, call, (&key, &f.data), response_schema))
@@ -784,16 +824,18 @@ pub(in crate::call) fn issued_aliases(rt: &crate::MockRuntime, t: &str) -> Vec<S
 }
 
 /// Mints on `record` each of [`issued_aliases`] the create `op` answers beside the
-/// record and the request did not send, drawn as its answer declares it.
+/// record and the request did not send, drawn as its answer declares it; answers each
+/// minted member with its declared schema, for [`unique_keys`] to keep it unique.
 fn issue_aliases(
     rt: &crate::MockRuntime,
     (seed, t, op): (crate::call::header_ids::MintSeed<'_>, &str, &Operation),
     response_schema: Option<&Value>,
     record: &mut Value,
-) {
+) -> Vec<(String, Value)> {
+    let mut minted = Vec::new();
     let bundle = rt.bundle();
     let Some(answer) = response_schema.or_else(|| op.success_output()?.schema.as_ref()) else {
-        return;
+        return minted;
     };
     let held = op
         .identity
@@ -811,8 +853,10 @@ fn issue_aliases(
             .filter(|v| fits(rt, &declared, v))
         {
             mb_mcm::set_member_at(record, &member, value);
+            minted.push((member, declared));
         }
     }
+    minted
 }
 
 /// Settles what fill wrote of `missing` on `record`: a required member (in `required`)
@@ -979,7 +1023,7 @@ impl Shape {
             || schema_members(rt, answered.as_ref())
                 .iter()
                 .all(|m| typed.iter().any(|d| d == m));
-        let mut schemas = read_schemas(rt, t);
+        let mut schemas: Vec<Value> = fill_shapes(rt, t).into_iter().map(|(s, _)| s).collect();
         schemas.extend(answered.filter(|_| answers_record));
         let schemas: Vec<Value> = schemas.iter().map(|s| non_null(bundle, s)).collect();
         Self {
@@ -1283,7 +1327,148 @@ fn read_shapes(rt: &crate::MockRuntime, t: &str) -> Vec<(Value, bool)> {
             schemas.push((shape.items, true));
         }
     }
+    // A type nothing reads at the top (GraphQL's records read only below another
+    // type: a repository's pull requests) is read as the scalar members of the
+    // definition named for it, none required: what an input sends is kept, and
+    // fill writes no nested record a read never asked for.
+    let bundle = rt.bundle();
+    if schemas.is_empty()
+        && let Some(name) = bundle
+            .defs
+            .keys()
+            .find(|d| d.as_str() == t)
+            .or_else(|| bundle.defs.keys().find(|d| d.eq_ignore_ascii_case(t)))
+        && let Some(schema) = scalar_members(bundle, name, false)
+    {
+        schemas.push((schema, false));
+    }
     schemas
+}
+
+/// [`read_shapes`] as a create fills and checks the record: a GraphQL record
+/// holds its own scalars, and what a selection asks below it is another record
+/// (its repository, its comments), answered from state or generated. So a
+/// create's fill writes no nested record of another type (GitHub's `Issue`
+/// reaches hundreds), and its check asks for none. Child records a request
+/// sends are still seen by [`unkept`], which reads the whole shapes.
+fn fill_shapes(rt: &crate::MockRuntime, t: &str) -> Vec<(Value, bool)> {
+    let bundle = rt.bundle();
+    let mut schemas = read_shapes(rt, t);
+    if graphql(bundle) {
+        for (schema, _) in &mut schemas {
+            if let Some(name) = own_def(bundle, schema)
+                && let Some(scalars) = scalar_members(bundle, &name, true)
+            {
+                *schema = scalars;
+            }
+        }
+    }
+    schemas
+}
+
+/// Whether `bundle` is a GraphQL schema's.
+fn graphql(bundle: &mb_mcm::Bundle) -> bool {
+    bundle
+        .operations
+        .iter()
+        .any(|op| matches!(op.binding, mb_mcm::Binding::Graphql { .. }))
+}
+
+/// The definition `schema` is, through a `$ref` and a nullable `anyOf`.
+fn own_def(bundle: &mb_mcm::Bundle, schema: &Value) -> Option<String> {
+    let mut schema = schema;
+    for _ in 0..8 {
+        if let Some(name) = schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+        {
+            return bundle
+                .defs
+                .get(name)
+                .filter(|d| d.get("properties").is_some())
+                .map(|_| name.to_owned());
+        }
+        let branches: Vec<&Value> = schema
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|b| b.get("type").and_then(Value::as_str) != Some("null"))
+            .collect();
+        match branches.as_slice() {
+            [one] => schema = one,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// An object schema of the scalar members of definition `name`: a string,
+/// number, integer or boolean, an `enum` or a `const`, a custom scalar (a
+/// definition with no members, items or alternatives: GraphQL's `URI`), or a
+/// list of them, through `$ref`s and a nullable `anyOf`. Required where the
+/// definition requires them when `required`, else none; `None` when there is
+/// no such member.
+fn scalar_members(bundle: &mb_mcm::Bundle, name: &str, required: bool) -> Option<Value> {
+    fn scalar(bundle: &mb_mcm::Bundle, schema: &Value, depth: usize) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        if schema.get("enum").is_some() || schema.get("const").is_some() {
+            return true;
+        }
+        if let Some(def) = schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+            .and_then(|n| bundle.defs.get(n))
+        {
+            return scalar(bundle, def, depth + 1);
+        }
+        let branches: Vec<&Value> = ["anyOf", "oneOf"]
+            .iter()
+            .filter_map(|k| schema.get(*k).and_then(Value::as_array))
+            .flatten()
+            .filter(|b| b.get("type").and_then(Value::as_str) != Some("null"))
+            .collect();
+        if let [one] = branches.as_slice() {
+            return scalar(bundle, one, depth + 1);
+        }
+        if !branches.is_empty() || schema.get("allOf").is_some() {
+            return false;
+        }
+        match schema.get("type").and_then(Value::as_str) {
+            Some("string" | "integer" | "number" | "boolean") => true,
+            Some("array") => schema
+                .get("items")
+                .is_some_and(|items| scalar(bundle, items, depth + 1)),
+            Some(_) => false,
+            None => schema.get("properties").is_none() && schema.get("items").is_none(),
+        }
+    }
+    let def = bundle.defs.get(name)?;
+    let props = def.get("properties")?.as_object()?;
+    let kept: Map<String, Value> = props
+        .iter()
+        .filter(|(_, schema)| scalar(bundle, schema, 0))
+        .map(|(m, schema)| (m.clone(), schema.clone()))
+        .collect();
+    if kept.is_empty() {
+        return None;
+    }
+    let mut out = serde_json::json!({"type": "object", "properties": kept});
+    let names: Vec<&Value> = def
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|m| m.as_str().is_some_and(|m| kept.contains_key(m)))
+        .collect();
+    if required && !names.is_empty() {
+        out["required"] = serde_json::json!(names);
+    }
+    Some(out)
 }
 
 /// The members `schemas` declare, each with the first schema declaring it.
@@ -1312,13 +1497,8 @@ pub(super) fn unread(
     record: &Value,
 ) -> Vec<(String, Value)> {
     let owned = server_owned(rt, t, field, Some(record));
-    gaps(
-        rt,
-        (t, &read_schemas(rt, t)),
-        record,
-        &owned,
-        Unsent::Required,
-    )
+    let schemas: Vec<Value> = fill_shapes(rt, t).into_iter().map(|(s, _)| s).collect();
+    gaps(rt, (t, &schemas), record, &owned, Unsent::Required)
 }
 
 /// The deepest an object member's own requirements are followed.
@@ -1593,7 +1773,7 @@ pub(in crate::call) fn unreadable(
 ) -> Option<String> {
     let engine = &rt.engine;
     let bundle = rt.bundle();
-    for (schema, item) in read_shapes(rt, t) {
+    for (schema, item) in fill_shapes(rt, t) {
         let as_read = |value: &Value| match item {
             true => crate::call::lists::projected(bundle, Some(&schema), value, 0),
             false => value.clone(),

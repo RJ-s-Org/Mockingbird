@@ -7,31 +7,10 @@ name: Replay gate
 # free instead of in a paid bench run. Both tiers run: none (no world description) and
 # agent (each mock's description read from docs/benchmarks/world-cache, never authored).
 # See scripts/llm-bench/README.md#replay-gate.
+# Nightly and on demand only: it is a benchmark regression floor, not a per-change gate.
 on:
-  push:
-    branches: [main]
-    paths:
-      - crates/mb-protocols/**
-      - crates/mb-engine/**
-      - crates/mb-import/**
-      - crates/mb-state/**
-      - crates/mb-store/**
-      - crates/mb-llm/**
-      - scripts/llm-bench/**
-      - docs/benchmarks/world-cache/**
-      - .github/workflows/replay-gate.yml
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - crates/mb-protocols/**
-      - crates/mb-engine/**
-      - crates/mb-import/**
-      - crates/mb-state/**
-      - crates/mb-store/**
-      - crates/mb-llm/**
-      - scripts/llm-bench/**
-      - docs/benchmarks/world-cache/**
-      - .github/workflows/replay-gate.yml
+  schedule:
+    - cron: "41 4 * * *"
   workflow_dispatch:
 
 permissions:
@@ -39,14 +18,13 @@ permissions:
 
 concurrency:
   group: replay-gate-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   replay:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ${{ vars.CI_RUNNER_LARGE || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:

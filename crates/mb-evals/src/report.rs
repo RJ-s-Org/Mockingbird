@@ -596,7 +596,7 @@ impl Tally {
             Source::Patched | Source::Repaired => self.stats.repaired += 1,
             Source::Fallback => self.stats.fallback += 1,
             // `Engine::generate` never answers from state or the cache.
-            Source::State | Source::Cache | Source::Rejected => {}
+            Source::State | Source::Cache | Source::Rejected | Source::Example => {}
         }
         self.latencies.push(latency_ms);
     }

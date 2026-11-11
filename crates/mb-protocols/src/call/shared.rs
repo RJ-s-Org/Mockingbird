@@ -119,6 +119,46 @@ pub(crate) fn reshape(
     defs: &Map<String, Value>,
     data: &Value,
 ) -> Value {
+    reshape_at(props, defs, data, 0)
+}
+
+/// The properties of the object `schema` is, through `$ref`s and a nullable
+/// `anyOf`, among `defs`.
+fn object_props<'a>(
+    defs: &'a Map<String, Value>,
+    schema: &'a Value,
+) -> Option<&'a Map<String, Value>> {
+    let mut schema = schema;
+    for _ in 0..4 {
+        if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+            return Some(props);
+        }
+        if let Some(name) = schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+        {
+            schema = defs.get(name)?;
+            continue;
+        }
+        schema = schema
+            .get("anyOf")
+            .and_then(Value::as_array)?
+            .iter()
+            .find(|b| b.get("type").and_then(Value::as_str) != Some("null"))?;
+    }
+    None
+}
+
+/// [`reshape`] `depth` objects down: an object member is reshaped as its own
+/// schema declares it (a GraphQL `repository: {id: "R_1"}` where REST's
+/// repository id is a number loses its id), to four levels.
+fn reshape_at(
+    props: &Map<String, Value>,
+    defs: &Map<String, Value>,
+    data: &Value,
+    depth: usize,
+) -> Value {
     let mut out = Map::new();
     for (key, value) in data.as_object().into_iter().flatten() {
         let Some((name, schema)) = [key.clone(), snake(key), camel(key)]
@@ -127,9 +167,63 @@ pub(crate) fn reshape(
         else {
             continue;
         };
-        out.insert(name, fit_enum(schema, defs, value));
+        let mut value = fit_enum(schema, defs, value);
+        // A value of another JSON type than the member holds (GraphQL's `"I_1"`
+        // id where REST's is a number) is left out for fill to write.
+        if !of_type(schema, defs, &value) {
+            continue;
+        }
+        if value.is_object()
+            && depth < 4
+            && let Some(inner) = object_props(defs, schema)
+        {
+            value = reshape_at(inner, defs, &value, depth + 1);
+        }
+        out.insert(name, value);
     }
     Value::Object(out)
+}
+
+/// Whether `value` is of a JSON type `schema` allows (through a `$ref` and the
+/// branches of an `anyOf`/`oneOf`); true where it declares none.
+fn of_type(schema: &Value, defs: &Map<String, Value>, value: &Value) -> bool {
+    fn allows(schema: &Value, defs: &Map<String, Value>, value: &Value, depth: usize) -> bool {
+        if depth > 8 {
+            return true;
+        }
+        if let Some(def) = schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+            .and_then(|n| defs.get(n))
+        {
+            return allows(def, defs, value, depth + 1);
+        }
+        let branches: Vec<&Value> = ["anyOf", "oneOf"]
+            .iter()
+            .filter_map(|k| schema.get(*k).and_then(Value::as_array))
+            .flatten()
+            .collect();
+        if !branches.is_empty() {
+            return branches.iter().any(|b| allows(b, defs, value, depth + 1));
+        }
+        let types: Vec<&str> = match schema.get("type") {
+            Some(Value::String(t)) => vec![t.as_str()],
+            Some(Value::Array(ts)) => ts.iter().filter_map(Value::as_str).collect(),
+            _ => return true,
+        };
+        types.iter().any(|t| match *t {
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "number" => value.is_number(),
+            "string" => value.is_string(),
+            "boolean" => value.is_boolean(),
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "null" => value.is_null(),
+            _ => true,
+        })
+    }
+    allows(schema, defs, value, 0)
 }
 
 /// `value` as the enum `schema` lists spells it, when only its case differs.

@@ -5,7 +5,9 @@
 //! [`super::computed`]'s, through the same [`SessionHost`].
 //!
 //! - The bindings: `request` is `{body, path, query, headers}` (header names lower
-//!   case), `record` the target as stored before the call (`null` without one), `now`
+//!   case), `record` the target as stored before the call (`null` without one; in a
+//!   create's `set`, the record as built: the request with its minted identity, or
+//!   the identity an entry of the same `set` gives, evaluated first), `now`
 //!   the request time as RFC 3339 text: the seeded time ([`mb_engine::seed::SEEDED_NOW`])
 //!   when the call's draws are seeded, as the engine's dates are, else the clock.
 //! - The session ([`SessionHost`]): `held(type, id)` finds a held record by its key
@@ -64,7 +66,8 @@ pub(crate) struct CallExprs {
     notes: Mutex<Notes>,
     /// The call's `set` values, once evaluated: each member and its value (`None`
     /// when its expression failed or gave `null`).
-    set: Mutex<Option<SetValues>>,
+    /// The values, and for a create the record id they were evaluated against.
+    set: Mutex<Option<(Option<Value>, SetValues)>>,
 }
 
 #[derive(Debug, Default)]
@@ -596,22 +599,45 @@ pub(super) async fn refusal(
 /// The members `plan`'s operation sets on the record it stores, each with its value
 /// (`None` when its expression failed or gave `null`: the member is left as the
 /// engine makes it), evaluated once per call against `before`, the target as stored
-/// before it.
+/// before it; for a create (`building`), the record as built so far, an entry setting
+/// the type's identity member evaluated first and bound into it, so the others read
+/// the record's id (`'https://x/' + record.id`).
 pub(super) async fn set_values(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
-    before: Option<&Value>,
+    (before, building): (Option<&Value>, bool),
 ) -> SetValues {
+    let rt = state.rt;
+    // A create's identity member: its `set` entry is evaluated first, and the values
+    // are kept for the record id they read.
+    let identity = building
+        .then_some(plan.op.resource_type.as_deref())
+        .flatten()
+        .map(|t| identity_member(rt, t));
+    let id_of = |record: Option<&Value>| {
+        identity
+            .as_ref()
+            .and_then(|m| mb_mcm::member_at(record?, m).cloned())
+    };
     let kept = plan
         .exprs
         .set
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    if let Some(kept) = kept {
-        return kept;
+    // A create the executor gave up on is generated with another id: what read the
+    // executor's record is evaluated again, but not the identity entry (its draws
+    // stay the call's).
+    let mut kept_identity: Option<(String, Option<Value>)> = None;
+    if let Some((read_id, values)) = kept {
+        if identity.is_none() || read_id == id_of(before) {
+            return values;
+        }
+        kept_identity = identity
+            .as_ref()
+            .and_then(|m| values.into_iter().find(|(member, ..)| member == m))
+            .map(|(member, value, _)| (member, value));
     }
-    let rt = state.rt;
     let Some(ops) = rt
         .described()
         .expressions(&plan.op.id)
@@ -620,7 +646,7 @@ pub(super) async fn set_values(
         return Vec::new();
     };
     let mut host = host(state, rt, (plan, call), ops).await;
-    let bound = Bound::new(rt, call, before);
+    let mut bound = Bound::new(rt, call, before);
     if ops.reads_held {
         let programs: Vec<&Program> = ops
             .set
@@ -632,30 +658,54 @@ pub(super) async fn set_values(
             .collect();
         resolve_held(state, &mut host, &programs, &bound).await;
     }
-    let values: SetValues =
-        ops.set
-            .iter()
-            .map(|entry| {
-                let value = match &entry.value {
-                    SetValue::Literal(v) => Some(v.clone()),
-                    // As `changes` always read it: a JSON pointer, an explicit `null`
-                    // sent included.
-                    SetValue::Pointer(p) => call
-                        .body
-                        .as_ref()
-                        .and_then(|b| b.pointer(p.as_str()))
-                        .cloned(),
-                    SetValue::Expr(p) => eval(plan, rt, (p, &entry.pointer), &bound, &mut host)
-                        .filter(|v| !v.is_null()),
-                };
-                (entry.member.clone(), value, entry.from_changes)
-            })
-            .collect();
+    let value_of = |entry: &mb_mcm::world::SetEntry, bound: &Bound, host: &mut SessionHost<'_>| {
+        match &entry.value {
+            SetValue::Literal(v) => Some(v.clone()),
+            // As `changes` always read it: a JSON pointer, an explicit `null` sent
+            // included.
+            SetValue::Pointer(p) => call
+                .body
+                .as_ref()
+                .and_then(|b| b.pointer(p.as_str()))
+                .cloned(),
+            SetValue::Expr(p) => {
+                eval(plan, rt, (p, &entry.pointer), bound, host).filter(|v| !v.is_null())
+            }
+        }
+    };
+    // A create's identity entry first: the others read the record by its id.
+    let mut first: Option<(usize, Option<Value>)> = None;
+    if let Some(identity) = &identity
+        && let Some(i) = ops.set.iter().position(|e| e.member == *identity)
+    {
+        let value = match kept_identity.take() {
+            Some((_, value)) => value,
+            None => value_of(&ops.set[i], &bound, &mut host),
+        };
+        if let Some(v) = &value
+            && bound.record.is_object()
+        {
+            mb_mcm::set_member_at(&mut bound.record, identity, v.clone());
+        }
+        first = Some((i, value));
+    }
+    let values: SetValues = ops
+        .set
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let value = match &first {
+                Some((at, value)) if *at == i => value.clone(),
+                _ => value_of(entry, &bound, &mut host),
+            };
+            (entry.member.clone(), value, entry.from_changes)
+        })
+        .collect();
     *plan
         .exprs
         .set
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(values.clone());
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((id_of(before), values.clone()));
     host.store_counters(state).await;
     values
 }

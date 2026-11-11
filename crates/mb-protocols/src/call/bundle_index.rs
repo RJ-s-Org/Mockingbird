@@ -118,6 +118,43 @@ pub(super) fn record_schema_of(
     }
 }
 
+/// Of a polymorphic `schema` (a union or an interface, nullable or not), the
+/// alternative that is type `t`'s own definition: `Issue` of a place typed `Node`
+/// for `issue`. A member read from the polymorphic schema would be another
+/// alternative's (`Node`'s first `state` is a deployment's). `None` when `schema`
+/// names no such alternative.
+fn own_alternative(bundle: &mb_mcm::Bundle, schema: &Value, t: &str) -> Option<Value> {
+    /// The definition named `t` among the alternatives of a union or interface
+    /// definition `schema` reaches; `in_union` once below one. A nullable place
+    /// of one type (`anyOf: [Issue, null]`) names no alternative.
+    fn find(
+        bundle: &mb_mcm::Bundle,
+        schema: &Value,
+        t: &str,
+        in_union: bool,
+        depth: usize,
+    ) -> Option<String> {
+        if depth > 8 {
+            return None;
+        }
+        if let Some(name) = def_name(schema) {
+            if in_union && name.eq_ignore_ascii_case(t) {
+                return Some(name.to_owned());
+            }
+            let def = bundle.defs.get(name)?;
+            let union = def.get("anyOf").is_some() || def.get("oneOf").is_some();
+            return find(bundle, def, t, in_union || union, depth + 1);
+        }
+        ["anyOf", "oneOf"]
+            .iter()
+            .filter_map(|k| schema.get(*k).and_then(Value::as_array))
+            .flatten()
+            .find_map(|alternative| find(bundle, alternative, t, in_union, depth + 1))
+    }
+    let name = find(bundle, schema, t, false, 0)?;
+    Some(serde_json::json!({"$ref": format!("#/$defs/{name}")}))
+}
+
 /// The [`BundleIndex::record_schemas`] of `bundle`, from the reads by path chosen.
 pub(super) fn record_schemas_of(
     bundle: &mb_mcm::Bundle,
@@ -386,7 +423,10 @@ impl BundleIndex {
             detail_reads,
             other_shapes: shapes
                 .into_iter()
-                .map(|(t, (_, i, schema))| (t, (i, schema)))
+                .map(|(t, (_, i, schema))| {
+                    let schema = own_alternative(bundle, &schema, &t).unwrap_or(schema);
+                    (t, (i, schema))
+                })
                 .collect(),
             referrers,
             effect_types,
@@ -974,5 +1014,50 @@ impl MockRuntime {
     #[cfg(any(test, feature = "events"))]
     pub(crate) fn channel(&self, id: &str) -> Option<&mb_mcm::Channel> {
         self.bundle.channels.get(self.index.channel(id)?)
+    }
+}
+
+#[cfg(test)]
+mod own_alternative_tests {
+    use serde_json::json;
+
+    use super::own_alternative;
+
+    /// Two implementers of `Node` with a `state` each; `Deployment` sorts first.
+    const SDL: &str = r#"
+interface Node { id: ID! }
+enum DeploymentState { ACTIVE INACTIVE }
+enum IssueState { OPEN CLOSED }
+type Deployment implements Node { id: ID! state: DeploymentState! }
+type Issue implements Node { id: ID! state: IssueState! }
+union Searchable = Deployment | Issue
+type Query { node(id: ID!): Node search: [Searchable] }
+"#;
+
+    #[test]
+    fn a_polymorphic_place_narrows_to_the_type_s_own_definition() {
+        let bundle = mb_import::compile(SDL.as_bytes()).unwrap();
+        let issue = json!({"$ref": "#/$defs/Issue"});
+        let nullable_node = json!({"anyOf": [{"$ref": "#/$defs/Node"}, {"type": "null"}]});
+        assert_eq!(
+            own_alternative(&bundle, &nullable_node, "issue"),
+            Some(issue.clone())
+        );
+        let union = json!({"$ref": "#/$defs/Searchable"});
+        assert_eq!(
+            own_alternative(&bundle, &union, "issue"),
+            Some(issue.clone())
+        );
+        // A place of one type, nullable or not, is left as it is.
+        assert_eq!(own_alternative(&bundle, &issue, "issue"), None);
+        let nullable_issue = json!({"anyOf": [issue.clone(), {"type": "null"}]});
+        assert_eq!(own_alternative(&bundle, &nullable_issue, "issue"), None);
+        let nullable_union = json!({"anyOf": [union, {"type": "null"}]});
+        assert_eq!(
+            own_alternative(&bundle, &nullable_union, "issue"),
+            Some(issue)
+        );
+        // A type no alternative is.
+        assert_eq!(own_alternative(&bundle, &nullable_node, "repository"), None);
     }
 }

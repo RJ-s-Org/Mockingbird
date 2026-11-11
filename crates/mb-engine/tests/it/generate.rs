@@ -3497,7 +3497,7 @@ async fn echoed_integers_are_clamped_not_redrawn() {
     // The query's `page` 3 breaks `maximum: 2`: clamped, not redrawn.
     assert_eq!(body["page"], 2);
 
-    // Out of bounds: the echoed path id is clamped to its bound.
+    // Out of bounds: the record still carries the id its path named, past the bound.
     let (provider, engine) = scripted(vec![answer(821_766)]);
     let out = engine
         .generate(&bundle, op, &series_call(821_766, 3), ctx())
@@ -3505,7 +3505,7 @@ async fn echoed_integers_are_clamped_not_redrawn() {
         .unwrap();
     assert_eq!(out.source, Source::Patched, "{:?}", out.fallback_reason);
     assert_eq!(provider.requests().len(), 1, "no repair call");
-    assert_eq!(out.body.unwrap()["id"], 300_000);
+    assert_eq!(out.body.unwrap()["id"], 821_766);
 
     // Not an echo: refilled within the bounds as before.
     let (_p, engine) = scripted(vec![answer(821_766)]);
@@ -3626,11 +3626,9 @@ async fn non_json_text_responses_come_from_the_example_or_the_faker() {
         .unwrap();
     assert_eq!(out.content_type.as_deref(), Some("text/csv"));
     assert_eq!(out.body, Some(json!("a,b\n1,2\n")));
-    assert_eq!(out.source, Source::Fallback);
-    assert_eq!(
-        out.fallback_reason.as_deref(),
-        Some(mb_engine::NON_JSON_MEDIA_REASON)
-    );
+    // The declared example is the contract's own answer: not a fallback.
+    assert_eq!(out.source, Source::Example);
+    assert_eq!(out.fallback_reason, None);
 
     let text = bundle.operation("getText").unwrap();
     let out = engine
