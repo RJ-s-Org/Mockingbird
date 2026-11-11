@@ -1011,6 +1011,7 @@ pub(crate) async fn complete(
     // A new record whose id no draw could free: the answer is served, and
     // nothing else comes of it.
     let mut unstored = false;
+    let mut set_moved_identity = false;
     let mut header_id: Option<Value> = None;
     // A bulk create's request records, with the ids minted for them.
     let mut request_records: Vec<Value> = Vec::new();
@@ -1291,9 +1292,52 @@ pub(crate) async fn complete(
                 // What the description sets on a created record holds on one the
                 // executor left to generation too: in the answer, and so in what is
                 // stored from it.
+                let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+                let before = mb_mcm::member_at(body, field).cloned();
                 transitions::apply_on_create(&mut state, (plan, call), body)
                     .instrument(state_span())
                     .await;
+                set_moved_identity = mb_mcm::member_at(body, field) != before.as_ref();
+            }
+            // A `set` that gave the record another identity is checked again: a record
+            // held under it is not stored over. The answer is the refusal of a repeat
+            // the contract declares, else the held record, as an idempotent create.
+            if set_moved_identity {
+                let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+                let set_id = generated
+                    .body
+                    .as_ref()
+                    .and_then(|b| mb_mcm::member_at(b, field))
+                    .and_then(id_string);
+                let held = match set_id {
+                    Some(id) => state.get(session, t, &id).await,
+                    None => None,
+                };
+                let repeated = held.map(|held| {
+                    if owners::in_create_collection(rt, session, op, state_call, &held) {
+                        Repeated::Here(held)
+                    } else {
+                        Repeated::Elsewhere(held.id)
+                    }
+                });
+                match repeated {
+                    Some(Repeated::Here(held)) => {
+                        unstored = true;
+                        drop_all_effects(rt, op, &held.id, &mut generated);
+                        match plan.engine.refuse_repeat(rt.bundle(), op, call, &generated) {
+                            Some(mut refusal) => {
+                                refusal.effect_outcomes =
+                                    std::mem::take(&mut generated.effect_outcomes);
+                                refusal.dropped_effects = generated.dropped_effects;
+                                answered = None;
+                                generated = refusal;
+                            }
+                            None => generated.body = Some(held.data),
+                        }
+                    }
+                    Some(Repeated::Elsewhere(_)) => unstored = true,
+                    None => {}
+                }
             }
             // What the description says an update or action sets on its target shows
             // in the answer's record too.

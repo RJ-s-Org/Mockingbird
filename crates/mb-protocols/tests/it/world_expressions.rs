@@ -444,6 +444,32 @@ async fn a_create_that_generates_still_applies_set() {
     assert_eq!(stored["tier"], "gold");
 }
 
+/// A generated create whose `set` identity names a record the session holds is not
+/// stored over it: the held record keeps what it had.
+#[tokio::test]
+async fn a_generated_create_never_stores_over_a_held_record_its_set_identity_names() {
+    let h = members(
+        add_member(json!({"id": "md5(lower(request.body.email))"})),
+        vec![json!({"id": "gen1", "email": "a@x.io", "name": "New"})],
+    );
+    let id = "a43c564056190dca51f9f4a6fae36c30";
+    h.hold(
+        "members",
+        &[json!({"id": id, "email": "a@x.io", "name": "Orig"})],
+    )
+    .await;
+    let (_, _, body) = h
+        .send(
+            "POST",
+            "/members",
+            Some(json!({"email": "A@x.io", "name": "New"})),
+            &[("x-mockingbird-seed", "7")],
+        )
+        .await;
+    let stored = h.stored("members", id).await.expect("the held record");
+    assert_eq!(stored["name"], "Orig", "{body}");
+}
+
 #[tokio::test]
 async fn held_finds_a_record_past_the_first_page_of_the_type() {
     let h = members(
