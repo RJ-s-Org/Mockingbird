@@ -1119,12 +1119,14 @@ fn estimated_tokens(bytes: usize) -> u32 {
 enum CutReason {
     MaxTokens,
     Repetition,
+    AnswerCap,
 }
 
 fn count_cut(reason: CutReason) {
     let label = match reason {
         CutReason::MaxTokens => "max_tokens",
         CutReason::Repetition => "repetition",
+        CutReason::AnswerCap => "answer_cap",
     };
     metrics::counter!(CUT_REPLIES_METRIC, "reason" => label).increment(1);
 }
@@ -1233,11 +1235,11 @@ impl GatheredReply {
                 return Err(self.repeated(false));
             }
             if let Some(max) = self.max_answer.filter(|max| self.content.len() > *max) {
-                count_cut(CutReason::MaxTokens);
+                count_cut(CutReason::AnswerCap);
                 let usage = self.usage.as_ref().map(usage_of).unwrap_or_else(|| Usage {
                     prompt_tokens: estimated_tokens(self.prompt_bytes),
                     completion_tokens: estimated_tokens(self.bytes()),
-                    ..Usage::default()
+                    reasoning_tokens: estimated_tokens(self.reasoning.len()),
                 });
                 return Err(LlmError::Truncated {
                     message: format!(

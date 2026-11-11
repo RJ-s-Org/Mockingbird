@@ -2681,7 +2681,7 @@ impl Engine {
             response_format: format.clone(),
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
-            max_answer_bytes: answer_cap(format),
+            max_answer_bytes: answer_cap(format, self.config.output_budget),
             timeout: self.config.timeout,
         };
         let span = llm_span();
@@ -2729,15 +2729,20 @@ const ANSWER_CAP_FACTOR: f64 = 4.0;
 const MIN_ANSWER_CAP: usize = 8 * 1024;
 
 /// Most bytes of answer text to read for `format`: [`ANSWER_CAP_FACTOR`] times
-/// the estimated size of an answer to its schema, at least [`MIN_ANSWER_CAP`].
-/// Past it the model is running on (a URL repeating its fragment), and the text
-/// so far is salvaged as a truncated reply. `None` without a schema, or for one
-/// too large to estimate.
-fn answer_cap(format: &ResponseFormat) -> Option<usize> {
+/// the larger of the estimated answer to its schema and `output_budget` (the
+/// completion tokens answers are shaped to), at least [`MIN_ANSWER_CAP`]. Past
+/// it the model is running on (a URL repeating its fragment), and the text so
+/// far is salvaged as a truncated reply. `None` without a schema, for one too
+/// large to estimate, or with the output budget off (`0`): long answers are then
+/// expected.
+fn answer_cap(format: &ResponseFormat, output_budget: u32) -> Option<usize> {
     let ResponseFormat::JsonSchema { schema, .. } = format else {
         return None;
     };
-    let tokens = budget::estimated_tokens(schema)?;
+    if output_budget == 0 {
+        return None;
+    }
+    let tokens = budget::estimated_tokens(schema)?.max(f64::from(output_budget));
     // Compact JSON runs about 3.5 bytes a token.
     let bytes = (tokens * 3.5 * ANSWER_CAP_FACTOR).ceil();
     Some((bytes as usize).max(MIN_ANSWER_CAP))
@@ -5494,22 +5499,33 @@ mod answer_cap_tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn the_cap_is_a_few_times_the_estimated_answer_and_never_below_the_floor() {
-        let small = ResponseFormat::JsonSchema {
+    fn schema(schema: Value) -> ResponseFormat {
+        ResponseFormat::JsonSchema {
             name: "s".into(),
-            schema: json!({"type": "object", "properties": {"id": {"type": "string"}}}),
-        };
-        assert_eq!(answer_cap(&small), Some(MIN_ANSWER_CAP));
-        let props: serde_json::Map<String, Value> = (0..400)
+            schema,
+        }
+    }
+
+    #[test]
+    fn the_cap_is_a_few_times_the_output_budget_or_the_estimate_whichever_is_larger() {
+        let small = schema(json!({"type": "object", "properties": {"id": {"type": "string"}}}));
+        // 4 x 1500 tokens x 3.5 bytes.
+        assert_eq!(answer_cap(&small, 1500), Some(21_000));
+        let props: serde_json::Map<String, Value> = (0..2000)
             .map(|i| (format!("member_{i}"), json!({"type": "string"})))
             .collect();
-        let large = ResponseFormat::JsonSchema {
-            name: "l".into(),
-            schema: json!({"type": "object", "properties": props}),
-        };
-        let cap = answer_cap(&large).unwrap_or_default();
-        assert!(cap > MIN_ANSWER_CAP, "{cap}");
-        assert_eq!(answer_cap(&ResponseFormat::JsonObject), None);
+        let large = schema(json!({"type": "object", "properties": props}));
+        assert!(answer_cap(&large, 1500).unwrap_or_default() > 21_000);
+        assert_eq!(answer_cap(&ResponseFormat::JsonObject, 1500), None);
+    }
+
+    /// With the output budget off, answers may be any size: a page of 10 charges or
+    /// a map of 20 users is never cut.
+    #[test]
+    fn no_cap_with_the_output_budget_off() {
+        let users = schema(json!({"type": "object", "additionalProperties": {"type": "object"}}));
+        assert_eq!(answer_cap(&users, 0), None);
+        // A 10 KB map of users fits the default cap.
+        assert!(answer_cap(&users, 1500).unwrap_or_default() > 10_000);
     }
 }

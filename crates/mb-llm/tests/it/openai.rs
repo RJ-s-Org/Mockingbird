@@ -1749,4 +1749,8 @@ async fn an_answer_past_its_cap_is_stopped_with_its_text() {
     assert!(partial.starts_with("{\"url\""), "{partial}");
     assert!(message.contains("past the 1000"), "{message}");
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    // No usage chunk arrived: the tokens are estimated, the reasoning's among them.
+    let usage = err.spent();
+    assert_eq!(usage.reasoning_tokens, 1000);
+    assert!(usage.completion_tokens > 1000 + 250, "{usage:?}");
 }

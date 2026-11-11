@@ -198,9 +198,10 @@ pub enum LlmError {
     /// The answer is not the JSON the client expects.
     #[error("LLM response decode error: {0}")]
     Decode(String),
-    /// The provider stopped at `max_tokens` (`finish_reason: "length"`), so
-    /// the output is cut short. Retrying with the same limit would truncate
-    /// again; a caller may salvage `partial` instead.
+    /// The output is cut short: the provider stopped at `max_tokens`
+    /// (`finish_reason: "length"`), or the client stopped a streamed answer past
+    /// [`ChatRequest::max_answer_bytes`]. Retrying with the same limit would
+    /// truncate again; a caller may salvage `partial` instead.
     #[error("LLM output truncated: {message}")]
     Truncated {
         /// What was cut, and where.
