@@ -114,3 +114,49 @@ The drawer shows one line, Fern Tee, M / Heather Moss, quantity 2. The variant w
 | 29 | 24 `llm`, 1 `repaired`, 4 `state` | 0 | 0.8–15.4 s, median 1.8 s | 134k / 22.7k |
 
 Still open: the line price ($28.00) is not the product page's ($32.00), and the cart id ignores the persona's `?key=` format. The first "Add to cart" after the cart is created waits about 10 s in the app before its server action reaches the mock; a second click goes through at once (both runs).
+
+## Run 4: built by the agent through the skills (2026-11-10)
+
+Binary from `main` (lane-2 build, `mockingbird 0.1.0`), model `deepseek/deepseek-v4.1-flash-1017` on OpenRouter (`api_key: env:OPENROUTER_API_KEY`). The mock was built only the way the skills say: `mockingbird init --provider openrouter --contract …`, `agent install claude-code`, `mocks.shopify.graphql_path: /graphql.json` (the per-mock path that replaced the global one), `hosts`, `proxy.images`, a persona, then `world show` and a `world:` overlay file for the gaps the app touches:
+
+```yaml
+operations:
+  Mutation.cartLinesAdd:    { kind: action, type: cart, target: { member: cartId }, answer: { record: /cart } }
+  Mutation.cartLinesUpdate: { kind: action, type: cart, target: { member: cartId }, answer: { record: /cart } }
+  Mutation.cartLinesRemove: { kind: action, type: cart, target: { member: cartId }, answer: { record: /cart } }
+  Query.menu:         { target: { member: handle } }
+  Query.pageByHandle: { target: { member: handle } }
+  Query.products:     { kind: list, type: product, answer: { records: /edges }, order: { member: title } }
+```
+
+Self-test (curl with `Host: fernwood-goods.myshopify.com`): `cartCreate` → `cartLinesAdd` (Fern Tee M ×2, $56) → `cart(id)` from `state` in 3 ms → `cartLinesUpdate` → `cartLinesRemove` → empty cart from `state`. Config and world file: `mockingbird-trials/commerce/mb4/`.
+
+### What works
+
+- `next build` through `mockingbird run`: 29 s, 6 Storefront calls (menus ×2, two homepage collections, `collections`, `products`), exit 0.
+- Every page answers 200: `/` (prerendered), `/search`, `/search/apparel`, `/search/camp-gear`, `/product/fern-tee`, `/about`, `/shipping-returns`, `/search?q=mug` (one result, a mug), `/search?sort=price-asc` (in price order). Menus and pages read the same as the persona describes; `pageByHandle` and `menu` answer from `state` (0–1 ms) after the first call.
+- Cart in the browser pane: size M, Add to cart → the drawer shows Fern Tee, M, $28.00, the variant and price the product page showed (`cartLinesAdd`, `llm`, 6.2 s). Remove → "Your cart is empty", and stays empty after a reload. Every `cart(id)` read is `state` (0–11 ms).
+- 0 fallbacks.
+
+### Failures
+
+| # | Class | Failure | Repro: request → expected → got |
+| --- | --- | --- | --- |
+| 1 | Engine bug | `cartLinesUpdate` does not store the line's new quantity; cart totals and the line disagree | after adding a line with quantity 2: `cartLinesUpdate(cartId, lines: [{id: <line>, quantity: 3}])` → line quantity 3, total 84.00 → `totalQuantity: 3`, `cost 84.00`, line `quantity: 2`. The request log shows the `cartline` effect `rejected: "no schema to check against"` (lines live inside the cart, not as their own stored type). In the app: "+" shows 2 / $56 until a reload, then the line reads 1 × $28.00 while the total says $56.00. |
+| 2 | Engine bug | `cartCreate` is never answered by the executor (`exec_fallback: render_failed`), so an empty cart costs a full model call | `mutation { cartCreate { cart { …app's cart fragment… } } }` → an empty cart rendered locally → `llm`, 25.7k prompt tokens, 12.9 s. This is the ~10 s wait on the first Add to cart seen in every run. |
+| 3 | Inexpressible | Lists and collections are not stored, so a product page disagrees with the listing that linked to it | `/search/apparel` lists `fernwood-organic-tee` at 32.00 (`gid…/Product/8123456789012`); `product(handle: "fernwood-organic-tee")` → that product → a new one, 34.00, `gid…/8123456789045`. The records sit at `products.edges[].node`; `answer.records` is one JSON pointer and cannot name `edges/*/node` (`/edges` is accepted but stores nothing readable: `product(id: <listed id>)` is `llm`, not `state`). `Query.collection`/`Query.products` stay `no_target`/`no_identity`. |
+| 4 | Engine bug | A `target: {member: handle}` on a read whose type's identity is `id` writes the handle into `id` | world `Query.product: {target: {member: handle}}`, then `product(handle: "fern-tee") { id }` → `gid://shopify/Product/…` → `"fern-tee"`; a later `product(handle:)` for a product stored from a list is generated again. Reverted for the app run. |
+| 5 | Model answer | One gid for many products | `gid://shopify/Product/8123456789012` is used for 7 different handles across lists (ridge tee, classic tee, trail tee, organic tee, logo tee, mug, tote); the persona's example id was copied. Only harmless because of #3. |
+| 6 | Model answer | Homepage three-item grid missing | `collection(handle: "hidden-homepage-featured-items") { products(first: 100) }` → 3 products (persona says 3; the grid renders nothing below 3) → 2, both runs. |
+| 7 | Model answer | Thin catalog | every list (`products(first: 100)`, each collection) answers 2 products; `/search` shows 2 items. |
+| 8 | Skills/MCP gap | Expressions are referenced but not documented | the world schema says `set`, `computed`, `effects` and `refuse` take "a CEL subset, see docs/world.md"; neither `docs/world.md` nor the `mockingbird-world` skill describes expressions, so the agent cannot write cart arithmetic (line cost = quantity × price, totals) and leaves it to the model. |
+| 9 | Skills/MCP gap | GraphQL heuristics point every mutation at its `*Payload` type | `world show` on the Storefront contract: 112 gaps, 36 of them `no_identity` on `CartLinesAddPayload`-style types; each cart mutation had to be retyped to `cart` with `target: cartId`, `answer: /cart`. The skill doesn't mention the payload pattern. |
+| 10 | Skills/MCP gap | Direct calls to a mock with `hosts` 404 | `curl localhost:45080/api/2023-01/graphql.json` → the mock → 404 "no mock is mounted … for host 127.0.0.1" until `Host: fernwood-goods.myshopify.com` is sent; the skill's `curl localhost:8080/<mock>` example doesn't say so. |
+
+### Numbers
+
+| Calls | Sources | Fallbacks | Model-served latency | Tokens (prompt / completion) | OpenRouter spend |
+| --- | --- | --- | --- | --- | --- |
+| 80 (build, pages, cart, self-test) | 42 `llm`, 37 `state`, 1 `cache` | 0 | p50 2.8 s, p95 17.5 s, max 18.3 s (n = 42) | 268k / 27k | ≈ $0.02 (at OpenRouter's listed $0.006/M prompt, $0.50/M completion for `-1017`) |
+
+The slow tail is list generation (`products` sorted by price 17.6 s, a 2-product collection 17.5 s) and `cartLinesUpdate` (18.3 s).
