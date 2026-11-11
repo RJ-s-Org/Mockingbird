@@ -243,8 +243,11 @@ async fn leader_gain_starts_watch() {
     let data = node.data.clone().unwrap();
     assert_eq!(node.reconciles.load(Ordering::SeqCst), 0);
 
+    // Deadlines are generous: under a loaded machine the reconcile (migrations on a
+    // file database) and the watch's rebuild take seconds, and each wait returns as
+    // soon as it holds.
     leader_tx.send(true).unwrap();
-    wait_until("the new leader reconciles", Duration::from_secs(3), || {
+    wait_until("the new leader reconciles", Duration::from_secs(30), || {
         node.reconciles.load(Ordering::SeqCst) == 1
     })
     .await;
@@ -257,11 +260,13 @@ async fn leader_gain_starts_watch() {
     )
     .unwrap();
     let url = format!("{data}/orders/orders/o1");
-    wait_status(&url, 200, Duration::from_secs(5)).await;
+    wait_status(&url, 200, Duration::from_secs(30)).await;
 
-    // Losing leadership stops the watch: a later change is not applied.
+    // Losing leadership stops the watch: a later change is not applied. The task
+    // that drops the watch must run first; nothing shows when it has, so it gets
+    // ample time.
     leader_tx.send(false).unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
     std::fs::write(
         dir.path().join("mockingbird.yaml"),
         sqlite_config(dir.path(), ""),
