@@ -158,7 +158,7 @@ The six patterns below cover most of what documentation asks for. Each is generi
            param: order_by
            by: "value.split(',').map(s, s.startsWith('-') ? {'member': s.substring(1), 'desc': true} : {'member': s, 'desc': false})"
    ```
-   For `order_by=rating:desc` it is `[{'member': value.split(':')[0], 'desc': value.endsWith(':desc')}]`. Without the parameter the list keeps its `order`.
+   For `order_by=rating:desc` it is `{'member': value.split(':')[0], 'desc': value.endsWith(':desc')}` (one map or a list of them). A bracketed sort (`sort[0][field]=rating&sort[0][dir]=desc`) arrives parsed: `{'member': request.query.sort['0'].field, 'desc': request.query.sort['0'].dir == 'desc'}`. Without the parameter, and on ties, the list keeps its `order`.
 
 Check every expression you write on the mock. `patch_world` refuses one that does not compile (code `invalid`, the message quoting the error at its line and column) or that reads a member, parameter or type the contract does not have (`unresolved`): fix it at the pointer it names. An expression that fails when it runs (a type mismatch, a `null` it did not expect) never fails the call; the engine answers as it would without it, and `call_mock`'s answer lists it under `expr_failed` (`[{pointer, error}]`; the request record keeps it too). When you see `expr_failed`, fix the expression at that pointer and call again. When the answer has `expr_failed_unknown: true` instead, `call_mock` could not read the call's request record; read it with `list_requests {mock, session, include_bodies: true}`.
 
