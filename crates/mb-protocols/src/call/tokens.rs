@@ -137,14 +137,110 @@ pub(super) struct Tokens {
 
 /// Whether this call keeps and honours tokens.
 pub(super) fn applies(rt: &MockRuntime, plan: &CallPlan<'_>) -> bool {
-    rt.consistency
-        && plan.engine.has_provider()
-        && plain(plan)
-        && matches!(plan.op.binding, Binding::Http { .. })
+    kept_by(rt, plan)
         && matches!(
             plan.op.kind,
             OperationKind::Command(Effect::Update | Effect::Delete)
         )
+}
+
+/// Whether `plan`'s writes, its own and its effects' ([`for_effect`]), keep tokens.
+fn kept_by(rt: &MockRuntime, plan: &CallPlan<'_>) -> bool {
+    rt.consistency
+        && plan.engine.has_provider()
+        && plain(plan)
+        && matches!(plan.op.binding, Binding::Http { .. })
+}
+
+/// What the session keeps of one record's tokens (see [`Tokens`]).
+struct Kept {
+    confirmed: Vec<String>,
+    headers: Map<String, Value>,
+    seen: Map<String, Value>,
+    tracked: Vec<String>,
+    kept: bool,
+}
+
+/// What the session keeps of `t` `id`'s tokens.
+async fn kept_of(state: &mut StateAccess<'_>, session: &SessionKey, t: &str, id: &str) -> Kept {
+    let doc = state.get(session, INTERNAL_TYPE, &key(t, id)).await;
+    let part = |name: &str| doc.as_ref().and_then(|d| d.data.get(name));
+    let list = |name: &str| -> Vec<String> {
+        part(name)
+            .and_then(|c| serde_json::from_value(c.clone()).ok())
+            .unwrap_or_default()
+    };
+    let object = |name: &str| {
+        part(name)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default()
+    };
+    Kept {
+        confirmed: list("confirmed"),
+        headers: object("headers"),
+        seen: object("seen"),
+        tracked: list("tracked"),
+        kept: doc.is_some(),
+    }
+}
+
+/// What an effect's update of stored `target` advances, as an update sending no token
+/// would ([`check`]): its described token, and the member `If-Match` was seen paired
+/// with for it, each minted anew ([`advance`]) unless the effect sets it (`set`).
+/// Nothing when `plan` keeps no tokens. The effect stores the record with
+/// [`advance`]'s values, then [`after_update`] confirms them, as the executor's update
+/// does: a later write sending the old value is stale.
+pub(super) async fn for_effect(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    target: &StoredResource,
+    set: &[&str],
+) -> Tokens {
+    let rt = state.rt;
+    if !kept_by(rt, plan) {
+        return Tokens::default();
+    }
+    let t = target.resource_type.as_str();
+    let Kept {
+        confirmed,
+        headers,
+        seen,
+        tracked,
+        kept,
+    } = kept_of(state, &plan.session, t, &target.id).await;
+    let mut headers_after = headers.clone();
+    let mut advancing: Vec<String> = Vec::new();
+    let described = described(rt, t);
+    let paired = headers.get(IF_MATCH).and_then(Value::as_str);
+    let members = described
+        .as_ref()
+        .and_then(|(member, _, _)| member.as_deref())
+        .into_iter()
+        .chain(paired);
+    for member in members {
+        let held = member_at(&target.data, member).is_some_and(|v| as_text(v).is_some());
+        if held && !set.contains(&member) && !advancing.iter().any(|m| m == member) {
+            advancing.push(member.to_string());
+        }
+    }
+    if let Some((Some(member), Some(header), _)) = &described
+        && advancing.contains(member)
+    {
+        headers_after.insert(header.clone(), Value::String(member.clone()));
+    }
+    Tokens {
+        mintable: advancing.clone(),
+        advancing,
+        confirmed,
+        headers,
+        seen: seen.clone(),
+        headers_after,
+        seen_after: seen,
+        tracked: tracked.clone(),
+        tracked_after: tracked,
+        kept,
+    }
 }
 
 /// A string or an integer as text.
@@ -644,23 +740,13 @@ pub(super) async fn check(
     let rt = state.rt;
     let op = plan.op;
     let t = target.resource_type.as_str();
-    let doc = state
-        .get(&plan.session, INTERNAL_TYPE, &key(t, &target.id))
-        .await;
-    let part = |name: &str| doc.as_ref().and_then(|d| d.data.get(name));
-    let confirmed: Vec<String> = part("confirmed")
-        .and_then(|c| serde_json::from_value(c.clone()).ok())
-        .unwrap_or_default();
-    let object = |name: &str| {
-        part(name)
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default()
-    };
-    let (pairs, seen) = (object("headers"), object("seen"));
-    let tracked_body: Vec<String> = part("tracked")
-        .and_then(|c| serde_json::from_value(c.clone()).ok())
-        .unwrap_or_default();
+    let Kept {
+        confirmed,
+        headers: pairs,
+        seen,
+        tracked: tracked_body,
+        kept,
+    } = kept_of(state, &plan.session, t, &target.id).await;
     let body = match call.body.as_ref() {
         Some(Value::Object(members)) => Some(members),
         _ => None,
@@ -901,7 +987,7 @@ pub(super) async fn check(
         seen_after,
         tracked: tracked_body,
         tracked_after,
-        kept: doc.is_some(),
+        kept,
     })
 }
 

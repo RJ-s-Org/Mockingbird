@@ -599,6 +599,8 @@ pub(super) async fn answer(
     records.sort_by_key(|r| placed.get(r.id.as_str()).copied().unwrap_or(usize::MAX));
     let field = item_identity(bundle, op, &envelope);
     let mut items = Vec::new();
+    // The record as held, beside its item, only for computed members to read.
+    let computes = crate::call::computed::describes(rt, t);
     for r in &records {
         if !placed.contains_key(r.id.as_str())
             && !lists::in_collection(rt, (plan, call), t, &field, r)
@@ -610,7 +612,12 @@ pub(super) async fn answer(
             filters.iter().all(|(_, f)| lists::holds_wanted(i, f))
         });
         if kept {
-            items.push((item, r.data.clone()));
+            let held = if computes {
+                r.data.clone()
+            } else {
+                Value::Null
+            };
+            items.push((item, held));
         }
     }
     page(

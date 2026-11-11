@@ -44,8 +44,11 @@ paths:
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
     patch:
       operationId: updateOrder
+      parameters: [{name: If-Match, in: header, schema: {type: string}}]
       requestBody: {content: {application/json: {schema: {type: object, properties: {customer: {type: string}}}}}}
-      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+        "412": {description: stale, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
   /orders/{orderId}/lines:
     parameters: [{name: orderId, in: path, required: true, schema: {type: string}}]
     post:
@@ -85,6 +88,7 @@ components:
         line_count: {type: integer}
         total: {type: number}
         label: {type: string}
+        etag: {type: string, readOnly: true}
     OrderSummary:
       type: object
       required: [id]
@@ -384,10 +388,10 @@ async fn effects_do_not_cascade() {
 }
 
 #[tokio::test]
-async fn effects_are_skipped_when_the_target_was_refused_or_not_written() {
+async fn a_refused_call_runs_no_effect() {
     let h = shop();
     let (order, _) = new_order(&h, "Ada").await;
-    // Refused: nothing is written, so no effect runs.
+    // Refused by the description: nothing is written, so no effect runs.
     let (status, _, body) = h
         .send(
             "POST",
@@ -397,32 +401,118 @@ async fn effects_are_skipped_when_the_target_was_refused_or_not_written() {
         )
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    assert!(events(&h).await.is_empty());
-    let read = send(&h, "GET", &format!("/orders/{order}"), None).await;
-    assert_eq!(read["status"], json!("draft"), "{read}");
-    // Generated (a seeded call), whatever write memory keeps of it: the executor wrote
-    // no target, so no effect runs.
+    // Refused by a generated answer (a forced error status): nothing is stored either.
     let (status, _, body) = h
-        .seeded(
+        .send(
             "POST",
             &format!("/orders/{order}/lines"),
             Some(json!({"sku": "s", "quantity": 1})),
-            &[],
+            &[("x-mockingbird-status", "422")],
         )
         .await;
-    assert!(status.is_success(), "{body}");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert!(events(&h).await.is_empty());
-    // An update of an order the session does not hold generates: no effect.
+    let read = send(&h, "GET", &format!("/orders/{order}"), None).await;
+    assert_eq!(read["status"], json!("draft"), "{read}");
+}
+
+/// A line of order `o1` with id `id`, as a model answers its create.
+fn line_answer(id: &str) -> Value {
+    json!({"effects": [], "response": {"id": id, "orderId": "o1", "sku": "s", "quantity": 1}})
+}
+
+#[tokio::test]
+async fn a_generated_create_that_is_stored_runs_its_effects() {
+    // A forced status takes the create past the executor to generation; the answer it
+    // generates is stored, and the operation's effects run on it as stored.
+    let h = support::described(SHOP, world(), vec![line_answer("l2")]);
+    h.hold(
+        "orders",
+        &[json!({"id": "o1", "customer": "Ada", "status": "draft"})],
+    )
+    .await;
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/orders/o1/lines",
+            Some(json!({"sku": "s", "quantity": 1})),
+            &[("x-mockingbird-status", "201")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(h.stored("lines", "l2").await.is_some());
+    let event = h.stored("events", "ev-l2").await;
+    assert_eq!(event.map(|e| e["kind"].clone()), Some(json!("line_added")));
+    let order = h.stored("orders", "o1").await.unwrap();
+    assert_eq!(order["status"], json!("open"), "{order}");
+}
+
+#[tokio::test]
+async fn a_generated_call_that_stores_nothing_runs_no_effect() {
+    // A delete of a line the session does not hold is generated, and removes nothing:
+    // its effect (deleting the line's event) does not run.
+    let h = shop();
+    h.hold(
+        "orders",
+        &[json!({"id": "o1", "customer": "Ada", "status": "draft"})],
+    )
+    .await;
+    h.hold("events", &[json!({"id": "ev-lx", "kind": "line_added"})])
+        .await;
+    let (status, _, body) = h.send("DELETE", "/orders/o1/lines/lx", None, &[]).await;
+    assert!(status.is_success(), "{status} {body}");
+    assert!(h.stored("events", "ev-lx").await.is_some());
+}
+
+#[tokio::test]
+async fn an_effect_update_advances_its_records_described_token() {
+    let mut w = world();
+    w["types"]["orders"]["concurrency"] =
+        json!({"member": "etag", "header": "If-Match", "conflict": 412});
+    // A line also creates an order, which starts with a token of its own.
+    let created_order = json!({"op": "create", "type": "orders",
+        "set": {"id": "'o-' + record.id", "customer": "'auto'"}});
+    w["operations"]["createLine"]["effects"]
+        .as_array_mut()
+        .unwrap()
+        .push(created_order);
+    let h = support::described(SHOP, w, Vec::new());
+    let (order, created) = new_order(&h, "Ada").await;
+    let before = created["etag"].as_str().unwrap().to_string();
+    // The line's effect moves the order from draft to open: its etag advances.
+    let line = new_line(&h, &order, 1).await;
+    let read = send(&h, "GET", &format!("/orders/{order}"), None).await;
+    assert_eq!(read["status"], json!("open"), "{read}");
+    let after = read["etag"].as_str().unwrap().to_string();
+    assert_ne!(after, before, "{read}");
+    // A write sending the etag the order had before the effect is stale.
+    let quoted = format!("\"{before}\"");
     let (status, _, body) = h
         .send(
             "PATCH",
-            "/orders/elsewhere",
-            Some(json!({"customer": "C"})),
-            &[],
+            &format!("/orders/{order}"),
+            Some(json!({"customer": "Bo"})),
+            &[("If-Match", quoted.as_str())],
         )
         .await;
-    assert!(status.is_success(), "{body}");
-    assert!(events(&h).await.is_empty());
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    // The current one passes.
+    let quoted = format!("\"{after}\"");
+    let (status, _, body) = h
+        .send(
+            "PATCH",
+            &format!("/orders/{order}"),
+            Some(json!({"customer": "Bo"})),
+            &[("If-Match", quoted.as_str())],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // A create effect's record starts its token at its first value.
+    let other = h.stored("orders", &format!("o-{line}")).await.unwrap();
+    assert!(
+        other["etag"].as_str().is_some_and(|e| !e.is_empty()),
+        "{other}"
+    );
 }
 
 #[tokio::test]
