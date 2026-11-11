@@ -204,12 +204,304 @@ pub(crate) fn response_prompt_schema(
     schema: &Value,
     expand: &HashSet<String>,
 ) -> Value {
+    with_content_required(answer_schema(bundle, schema, expand))
+}
+
+/// [`response_prompt_schema`] before [`with_content_required`].
+fn answer_schema(bundle: &Bundle, schema: &Value, expand: &HashSet<String>) -> Value {
     crate::encoded::hint(prompt_schema_expanding(
         bundle,
         schema,
         expand,
         RESPONSE_SCHEMA_BUDGET,
     ))
+}
+
+/// `doc` (a prompt's schema of an answer, with its `$defs`) with the members that
+/// carry an answer's content required, since some models write only what a schema
+/// requires (a search's items with an `id` and nothing else): in every object, its
+/// object and array members; in a list's items, at any depth, every member; at the
+/// answer's top level, its scalars too (a status `code` the client checks), but for
+/// those named for paging ([`PAGING_WORDS`]), so the model never has to make up a
+/// next-page cursor or a has-more flag. A member marked `writeOnly` is not required, nor an
+/// object member whose definition can hold itself (it could never end). The answer's
+/// size stays within the output budget: the estimate counts optional members, and
+/// shaping leaves out those that do not fit. For the prompt only: validation keeps
+/// the contract's schema.
+pub(crate) fn with_content_required(mut doc: Value) -> Value {
+    let Some(mut defs) = doc
+        .as_object_mut()
+        .and_then(|root| root.remove("$defs"))
+        .filter(Value::is_object)
+    else {
+        require_content(&mut doc, Place::Root, &Value::Null, &HashSet::new());
+        return doc;
+    };
+    let recursive = recursive_defs(&defs);
+    // A definition is required in full where a list's items reach it.
+    let mut in_items: HashMap<String, bool> = HashMap::new();
+    let mut queue: Vec<(String, bool)> = Vec::new();
+    collect_refs(&doc, false, &mut queue);
+    while let Some((name, items)) = queue.pop() {
+        match in_items.get(&name) {
+            Some(seen) if *seen || !items => continue,
+            _ => {}
+        }
+        in_items.insert(name.clone(), items);
+        if let Some(def) = defs.get(&name) {
+            collect_refs(def, items, &mut queue);
+        }
+    }
+    let shapes = defs.clone();
+    let root = ref_name(&doc).map(str::to_string);
+    require_content(&mut doc, Place::Root, &shapes, &recursive);
+    if let Some(map) = defs.as_object_mut() {
+        for (name, def) in map.iter_mut() {
+            let place = match in_items.get(name) {
+                Some(true) => Place::Items,
+                Some(false) if root.as_deref() == Some(name.as_str()) => Place::Root,
+                Some(false) => Place::Envelope,
+                None => continue,
+            };
+            require_content(def, place, &shapes, &recursive);
+        }
+    }
+    if let Some(root) = doc.as_object_mut() {
+        root.insert("$defs".to_string(), defs);
+    }
+    doc
+}
+
+/// The subschemas of a schema node: its members, items and parts, each with whether
+/// it is inside a list's items given `items` for the node.
+fn subschemas(node: &Value, items: bool) -> Vec<(&Value, bool)> {
+    let mut out = Vec::new();
+    if let Some(props) = node.get("properties").and_then(Value::as_object) {
+        out.extend(props.values().map(|p| (p, items)));
+    }
+    match node.get("items") {
+        Some(Value::Array(tuple)) => out.extend(tuple.iter().map(|p| (p, true))),
+        Some(single) => out.push((single, true)),
+        None => {}
+    }
+    if let Some(extra) = node.get("additionalProperties").filter(|v| v.is_object()) {
+        out.push((extra, items));
+    }
+    for key in ["allOf", "anyOf", "oneOf"] {
+        if let Some(parts) = node.get(key).and_then(Value::as_array) {
+            out.extend(parts.iter().map(|p| (p, items)));
+        }
+    }
+    out
+}
+
+/// The definition a `$ref` node names.
+fn ref_name(node: &Value) -> Option<&str> {
+    node.get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|r| r.strip_prefix("#/$defs/"))
+}
+
+/// Every `$ref` under `node` (itself included), with whether it is inside a list's
+/// items.
+fn collect_refs(node: &Value, items: bool, out: &mut Vec<(String, bool)>) {
+    if let Some(name) = ref_name(node) {
+        out.push((name.to_string(), items));
+    }
+    for (sub, sub_items) in subschemas(node, items) {
+        collect_refs(sub, sub_items, out);
+    }
+}
+
+/// The definitions that can reach themselves through `$ref`s.
+fn recursive_defs(defs: &Value) -> HashSet<String> {
+    let Some(map) = defs.as_object() else {
+        return HashSet::new();
+    };
+    let edges: HashMap<&str, Vec<String>> = map
+        .iter()
+        .map(|(name, def)| {
+            let mut refs = Vec::new();
+            collect_refs(def, false, &mut refs);
+            (name.as_str(), refs.into_iter().map(|(n, _)| n).collect())
+        })
+        .collect();
+    let mut out = HashSet::new();
+    for start in map.keys() {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut stack: Vec<&str> = edges
+            .get(start.as_str())
+            .map(|e| e.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        while let Some(next) = stack.pop() {
+            if next == start {
+                out.insert(start.clone());
+                break;
+            }
+            if seen.insert(next)
+                && let Some(more) = edges.get(next)
+            {
+                stack.extend(more.iter().map(String::as_str));
+            }
+        }
+    }
+    out
+}
+
+/// Whether a member's schema is an object or an array (through `$ref`s and
+/// nullable `anyOf`/`oneOf` parts), and whether it names a definition in
+/// `recursive`.
+fn member_kind(member: &Value, defs: &Value, recursive: &HashSet<String>) -> (bool, bool, bool) {
+    let mut object = false;
+    let mut array = false;
+    let mut cycles = false;
+    let mut stack = vec![member];
+    let mut hops = 0;
+    while let Some(node) = stack.pop() {
+        hops += 1;
+        if hops > 32 {
+            break;
+        }
+        if let Some(name) = ref_name(node) {
+            cycles |= recursive.contains(name);
+            if let Some(def) = defs.get(name) {
+                stack.push(def);
+            }
+            continue;
+        }
+        let types: Vec<&str> = match node.get("type") {
+            Some(Value::String(t)) => vec![t.as_str()],
+            Some(Value::Array(ts)) => ts.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        object |= types.contains(&"object") || node.get("properties").is_some();
+        array |= types.contains(&"array") || node.get("items").is_some();
+        for key in ["allOf", "anyOf", "oneOf"] {
+            if let Some(parts) = node.get(key).and_then(Value::as_array) {
+                stack.extend(parts);
+            }
+        }
+    }
+    (object, array, cycles)
+}
+
+/// Words of a top-level member's name that make it paging state, which
+/// [`with_content_required`] leaves optional.
+const PAGING_WORDS: &[&str] = &[
+    "cursor",
+    "token",
+    "next",
+    "prev",
+    "previous",
+    "page",
+    "offset",
+    "after",
+    "before",
+    "more",
+    "continuation",
+    "marker",
+    "scroll",
+    "truncated",
+];
+
+/// Whether a member called `name` is paging state: one of its words (split at `_`,
+/// `-` and case changes) is one of [`PAGING_WORDS`].
+fn paging(name: &str) -> bool {
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    for c in name.chars() {
+        if (c == '_' || c == '-' || c == '.' || c.is_uppercase()) && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        if c.is_alphanumeric() {
+            word.extend(c.to_lowercase());
+        }
+    }
+    words.push(word);
+    words.iter().any(|w| PAGING_WORDS.contains(&w.as_str()))
+}
+
+/// Where a schema node is in an answer, for [`with_content_required`].
+#[derive(Clone, Copy, PartialEq)]
+enum Place {
+    /// The answer's top-level object.
+    Root,
+    /// Inside a list's items.
+    Items,
+    /// Any other object.
+    Envelope,
+}
+
+/// [`with_content_required`] on `node` (at `place`) and its inline subschemas (not
+/// the definitions it names).
+fn require_content(node: &mut Value, place: Place, defs: &Value, recursive: &HashSet<String>) {
+    if let Some(props) = node.get("properties").and_then(Value::as_object) {
+        let wanted: Vec<String> = props
+            .iter()
+            .filter(|(_, member)| member.get("writeOnly") != Some(&Value::Bool(true)))
+            .filter(|(name, member)| {
+                let (object, array, cycles) = member_kind(member, defs, recursive);
+                let scalar = match place {
+                    Place::Items => true,
+                    Place::Root => !paging(name),
+                    Place::Envelope => false,
+                };
+                // An array may be empty; an object that can hold itself never ends.
+                array || (object && !cycles) || (scalar && !object && !cycles)
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        if !wanted.is_empty()
+            && let Some(obj) = node.as_object_mut()
+        {
+            let required = obj
+                .entry("required")
+                .or_insert_with(|| Value::Array(Vec::new()));
+            if let Value::Array(list) = required {
+                for name in wanted {
+                    if !list.iter().any(|r| r.as_str() == Some(name.as_str())) {
+                        list.push(Value::String(name));
+                    }
+                }
+            }
+        }
+    }
+    let Some(obj) = node.as_object_mut() else {
+        return;
+    };
+    // Below the top level, an object is an envelope unless a list's items hold it.
+    let nested = if place == Place::Items {
+        Place::Items
+    } else {
+        Place::Envelope
+    };
+    if let Some(Value::Object(props)) = obj.get_mut("properties") {
+        for member in props.values_mut() {
+            require_content(member, nested, defs, recursive);
+        }
+    }
+    match obj.get_mut("items") {
+        Some(Value::Array(tuple)) => {
+            for item in tuple {
+                require_content(item, Place::Items, defs, recursive);
+            }
+        }
+        Some(single) => require_content(single, Place::Items, defs, recursive),
+        None => {}
+    }
+    if let Some(extra) = obj
+        .get_mut("additionalProperties")
+        .filter(|v| v.is_object())
+    {
+        require_content(extra, nested, defs, recursive);
+    }
+    for key in ["allOf", "anyOf", "oneOf"] {
+        if let Some(Value::Array(parts)) = obj.get_mut(key) {
+            for part in parts {
+                require_content(part, place, defs, recursive);
+            }
+        }
+    }
 }
 
 /// Most members [`with_echoes_required`] adds to one answer's `required` lists.
@@ -760,6 +1052,103 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn required(node: &Value) -> Vec<&str> {
+        let mut names: Vec<&str> = node["required"]
+            .as_array()
+            .map(|r| r.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        names.sort_unstable();
+        names
+    }
+
+    #[test]
+    fn a_lists_items_require_every_member_and_its_envelope_only_its_content() {
+        let doc = with_content_required(json!({
+            "type": "object",
+            "properties": {
+                "features": {"type": "array", "items": {"$ref": "#/$defs/Feature"}},
+                "routes": {"type": "array", "items": {"type": "object", "properties": {
+                    "distance": {"type": "number"}
+                }}},
+                "summary": {"type": "object", "properties": {"note": {"type": "string"}}},
+                "code": {"type": "string", "example": "Ok"},
+                "next_cursor": {"type": "string"},
+                "has_more": {"type": "boolean"},
+                "nextPageToken": {"type": "string"}
+            },
+            "$defs": {"Feature": {"type": "object", "required": ["id"], "properties": {
+                "id": {"type": "string"},
+                "name": {"type": "string"},
+                "geometry": {"type": "object", "properties": {
+                    "coordinates": {"type": "array", "items": {"type": "number"}},
+                    "kind": {"type": "string"}
+                }},
+                "secret": {"type": "string", "writeOnly": true}
+            }}}
+        }));
+        // Top-level scalars are required, but no made-up cursor or has-more flag.
+        assert_eq!(required(&doc), ["code", "features", "routes", "summary"]);
+        assert!(required(&doc["properties"]["summary"]).is_empty());
+        assert_eq!(
+            required(&doc["properties"]["routes"]["items"]),
+            ["distance"]
+        );
+        let feature = &doc["$defs"]["Feature"];
+        assert_eq!(required(feature), ["geometry", "id", "name"]);
+        assert_eq!(
+            required(&feature["properties"]["geometry"]),
+            ["coordinates", "kind"]
+        );
+    }
+
+    #[test]
+    fn a_member_that_can_hold_itself_is_not_required() {
+        let doc = with_content_required(json!({
+            "$ref": "#/$defs/Node",
+            "$defs": {"Node": {"type": "object", "properties": {
+                "name": {"type": "string"},
+                "parent": {"anyOf": [{"$ref": "#/$defs/Node"}, {"type": "null"}]},
+                "children": {"type": "array", "items": {"$ref": "#/$defs/Node"}}
+            }}}
+        }));
+        // Reached from a list's items, the definition requires its scalars; the
+        // array may be empty, but the object member could never end.
+        assert_eq!(required(&doc["$defs"]["Node"]), ["children", "name"]);
+    }
+
+    #[test]
+    fn paging_state_goes_by_the_words_of_its_name() {
+        for name in [
+            "next_cursor",
+            "nextPageToken",
+            "has_more",
+            "hasNextPage",
+            "offset",
+            "after",
+            "continuation-token",
+        ] {
+            assert!(paging(name), "{name}");
+        }
+        for name in [
+            "code",
+            "status",
+            "total_count",
+            "first_name",
+            "message",
+            "tokenizer",
+        ] {
+            assert!(!paging(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_schema_without_definitions_is_required_in_place() {
+        let doc = with_content_required(json!({"type": "array", "items": {
+            "type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "integer"}}
+        }}));
+        assert_eq!(required(&doc["items"]), ["a", "b"]);
+    }
+
     #[test]
     fn a_schema_within_budget_is_unchanged() {
         let doc = json!({"$ref": "#/$defs/A", "$defs": {"A": {"type": "object", "description": "x".repeat(500)}}});
@@ -912,7 +1301,7 @@ components:
     fn sent(bundle: &Bundle, op_id: &str, body: Option<Value>) -> Value {
         let op = bundle.operation(op_id).unwrap();
         let schema = op.success_output().unwrap().schema.clone().unwrap();
-        let doc = response_prompt_schema(bundle, &schema, &HashSet::new());
+        let doc = answer_schema(bundle, &schema, &HashSet::new());
         with_echoes_required(bundle, op, 201, &call(body), doc)
     }
 
@@ -947,7 +1336,7 @@ components:
         let bundle = mb_import::compile(ECHOES.as_bytes()).unwrap();
         let op = bundle.operation("listItems").unwrap();
         let schema = op.success_output().unwrap().schema.clone().unwrap();
-        let doc = response_prompt_schema(&bundle, &schema, &HashSet::new());
+        let doc = answer_schema(&bundle, &schema, &HashSet::new());
         let out = with_echoes_required(&bundle, op, 200, &call(None), doc.clone());
         assert_eq!(names(&out), ["entries"], "{out}");
         // Not for an error answer.

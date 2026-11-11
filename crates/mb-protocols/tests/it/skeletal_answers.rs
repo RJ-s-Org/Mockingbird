@@ -325,12 +325,11 @@ async fn the_prompt_schema_requires_what_the_answer_is_sure_to_need() {
         !create_required.contains(&"passcode".to_string()),
         "a writeOnly member is never asked for: {create}"
     );
-    assert!(
-        !create_required.contains(&"color".to_string()),
-        "not sent: {create}"
-    );
+    // A top-level member the request did not send is asked for too: the answer's
+    // content, which some models leave out unless required.
+    assert!(create_required.contains(&"color".to_string()), "{create}");
 
     h.send("GET", "/gadgets", None).await;
     let list = root_record(&h.schema_sent(1));
-    assert_eq!(required(&list), ["gadgets"], "{list}");
+    assert_eq!(required(&list), ["count", "gadgets"], "{list}");
 }
