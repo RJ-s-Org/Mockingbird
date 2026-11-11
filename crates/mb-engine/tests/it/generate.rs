@@ -3361,6 +3361,59 @@ async fn base64_fields_are_encoded_locally() {
     assert_eq!(body["avatar"], "aGk=");
 }
 
+/// A `content` declared beside `encoding` is asked for as plain text, and a
+/// model then says so (`encoding: "utf-8"`, the `gh` trial's README): the
+/// server encodes it and makes `encoding` say `"base64"`. An `encoding` whose
+/// enum does not admit base64 names no base64 field.
+#[tokio::test]
+async fn declared_content_is_encoded_whatever_encoding_the_model_wrote() {
+    let bundle = compile(CONTENTS.as_bytes()).unwrap();
+    let op = bundle.operation("getReadme").unwrap();
+    let (_, engine) = scripted(vec![
+        Ok(json!({"name": "README.md", "encoding": "utf-8", "content": "# Trellis — a router", "avatar": "aGk="}).to_string()),
+    ]);
+    let body = engine
+        .generate(&bundle, op, &call("getReadme"), ctx())
+        .await
+        .unwrap()
+        .body
+        .unwrap();
+    assert_eq!(body["encoding"], "base64", "{body}");
+    assert_eq!(
+        decode64(body["content"].as_str().unwrap()),
+        "# Trellis — a router".as_bytes()
+    );
+
+    // Any answer, served by the protocols through `encode_base64`: a stored one.
+    let stored = json!({"name": "README.md", "encoding": "utf-8", "content": "plain", "avatar": "raw bytes"});
+    let served = engine
+        .serve_stored(&bundle, op, &stored, None)
+        .map(|r| engine.encode_base64(&bundle, op, None, r))
+        .unwrap();
+    let body = served.body.unwrap();
+    assert_eq!(body["encoding"], "base64");
+    assert_eq!(decode64(body["content"].as_str().unwrap()), b"plain");
+    assert_eq!(decode64(body["avatar"].as_str().unwrap()), b"raw bytes");
+
+    let text_only = compile(
+        CONTENTS
+            .replace(
+                "encoding: {type: string}",
+                "encoding: {type: string, enum: [utf-8, latin1]}",
+            )
+            .as_bytes(),
+    )
+    .unwrap();
+    let op = text_only.operation("getReadme").unwrap();
+    let stored =
+        json!({"name": "README.md", "encoding": "utf-8", "content": "# plain", "avatar": "aGk="});
+    let served = engine
+        .serve_stored(&text_only, op, &stored, None)
+        .map(|r| engine.encode_base64(&text_only, op, None, r))
+        .unwrap();
+    assert_eq!(served.body.unwrap(), stored);
+}
+
 /// Plaid-style lists: items identified by `<singular>_id`, and the list
 /// members of a schema whose items are objects, `allOf` included.
 #[test]

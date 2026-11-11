@@ -18,6 +18,7 @@ mod support;
 mod alternate_keys;
 mod api;
 mod backends;
+mod base64_fields;
 mod call;
 mod concurrency;
 mod concurrency_evidence;

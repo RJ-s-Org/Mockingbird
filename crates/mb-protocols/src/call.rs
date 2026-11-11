@@ -434,7 +434,9 @@ pub(crate) async fn generate_pending(
             pending.target.as_ref(),
             &pending.earlier,
         );
-        return Ok(answer);
+        return Ok(plan
+            .engine
+            .encode_base64(&rt.bundle, plan.op, response_schema, answer));
     }
     Ok(complete(rt, plan, call, pending, generated, response_schema).await)
 }
@@ -517,8 +519,28 @@ fn graphql_marks(
 }
 
 /// Reads the call's state and answers what needs no generation: an unknown
-/// id (404), a stored resource, a cached answer.
+/// id (404), a stored resource, a cached answer. An answer's base64 fields are
+/// valid base64 whatever made it (see [`mb_engine::Engine::encode_base64`]), as
+/// are [`complete`]'s.
 pub(crate) async fn prepare<'a>(
+    rt: &'a MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    response_schema: Option<&Value>,
+) -> Prepared<'a> {
+    match prepare_state(rt, plan, call, response_schema).await {
+        Prepared::Answered(answer) => Prepared::Answered(Box::new(plan.engine.encode_base64(
+            &rt.bundle,
+            plan.op,
+            response_schema,
+            *answer,
+        ))),
+        pending @ Prepared::Pending(_) => pending,
+    }
+}
+
+/// [`prepare`] but for the base64 fields of its answer.
+async fn prepare_state<'a>(
     rt: &'a MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,
@@ -1963,6 +1985,10 @@ pub(crate) async fn complete(
     ))]
     crate::webhooks::emit::emit_effects(rt, op, &generated.effect_outcomes, session);
 
+    // Whatever made it, a base64 field is served (and cached) as valid base64.
+    let generated = plan
+        .engine
+        .encode_base64(&rt.bundle, op, response_schema, generated);
     // Seeded first, then cached: a later list never clears a cached one.
     // A fallback is cached too: repeats are answered with it at once, except
     // that a timed-out one is retried by the next repeat (see `prepare`), so

@@ -1530,6 +1530,63 @@ impl Engine {
         })
     }
 
+    /// `response`, an answer of `op` about to be served, whatever made it, with its
+    /// base64 fields valid base64: a `format: byte` or
+    /// `contentEncoding: base64` field, or the `content` beside an `encoding` of
+    /// `"base64"` (or one its schema declares, which then says `"base64"`), that does
+    /// not decode is encoded from its text. Only a JSON 2xx body is looked at, by the
+    /// narrowed `response_schema` when given, else by its status's schema; the change
+    /// is kept when the body validates after it or did not before it either. Nothing is
+    /// copied or validated when no field needs it.
+    #[must_use]
+    pub fn encode_base64(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        response_schema: Option<&Value>,
+        response: GeneratedResponse,
+    ) -> GeneratedResponse {
+        if !(200..300).contains(&response.status) || response.body.is_none() {
+            return response;
+        }
+        let Some(variant) = op.output_for_status(response.status) else {
+            return response;
+        };
+        if media::is_non_json(op, variant) {
+            return response;
+        }
+        let Some(schema) = response_schema.or(variant.schema.as_ref()) else {
+            return response;
+        };
+        let Some(patched) = response
+            .body
+            .as_ref()
+            .and_then(|body| encoded::patch(bundle, schema, body))
+        else {
+            return response;
+        };
+        let validator = match response_schema {
+            Some(narrowed) => self.schema_validator(bundle, narrowed),
+            None => self.validator(bundle, op, response.status, schema),
+        };
+        let Ok(validator) = validator else {
+            return response;
+        };
+        let keep = validator.is_valid(&patched)
+            || response
+                .body
+                .as_ref()
+                .is_some_and(|body| !validator.is_valid(body));
+        if !keep {
+            return response;
+        }
+        tracing::info!(operation = %op.id, source = response.source.as_str(), "encoded base64 fields from their text");
+        GeneratedResponse {
+            body: Some(patched),
+            ..response
+        }
+    }
+
     /// The violations (see [`SchemaValidator::violations`]) of `stored` against the
     /// schema [`Engine::serve_stored`] checks it by: `op`'s success variant's, or the
     /// narrowed `response_schema` when given. Empty when `stored` would be served;
@@ -2123,7 +2180,6 @@ impl Engine {
             schema,
             op,
         } = target;
-        let response = encode_base64(validator, bundle, schema, response);
         // A create reflects the defaults of what its body leaves out; a scenario's
         // `set` still beats them.
         let defaulted = prompt::with_body_defaults(bundle, op, call);
@@ -2179,7 +2235,10 @@ impl Engine {
             response
         };
         let response = with_http_status(validator, bundle, schema, response);
-        apply_scenario(validator, op, call, ctx, response)
+        let response = apply_scenario(validator, op, call, ctx, response);
+        // Last, so nothing above (a reflected request, a persona format, a
+        // scenario's `set`) leaves a base64 field undecodable.
+        encode_base64(validator, bundle, schema, response)
     }
 
     /// A 2xx body whose values break a format the persona declares, patched
@@ -3367,8 +3426,8 @@ fn apply_scenario(
 }
 
 /// A 2xx body whose base64 fields do not decode, with those fields
-/// encoded from their text (see [`encoded`]), kept only if it still
-/// validates.
+/// encoded from their text (see [`encoded`]), kept when it validates or the
+/// body did not validate before either (only base64 fields changed).
 fn encode_base64(
     validator: &SchemaValidator,
     bundle: &Bundle,
@@ -3382,7 +3441,7 @@ fn encode_base64(
         return response;
     };
     if let Some(patched) = encoded::patch(bundle, schema, body)
-        && validator.is_valid(&patched)
+        && (validator.is_valid(&patched) || !validator.is_valid(body))
     {
         tracing::info!("encoded base64 fields from their text");
         response.body = Some(patched);
