@@ -3036,3 +3036,147 @@ async fn a_generated_record_reusing_another_records_id_gets_its_own() {
     assert_ne!(cap_variant, reused, "{}", cap.body);
     assert_ne!(cap_variant, ids[1], "{}", cap.body);
 }
+
+const CART_EDGES: &str = r#"
+type CartLine { id: ID! quantity: Int! }
+type CartLineEdge { node: CartLine! }
+type CartLineConnection { edges: [CartLineEdge!]! }
+type Cart { id: ID! totalQuantity: Int! lines(first: Int): CartLineConnection! }
+type CartLinesUpdatePayload { cart: Cart }
+input CartLineUpdateInput { id: ID! quantity: Int }
+type Query { cart(id: ID!): Cart }
+type Mutation { cartLinesUpdate(cartId: ID!, lines: [CartLineUpdateInput!]!): CartLinesUpdatePayload }
+"#;
+
+/// The same, with the cart's lines in a connection (`lines.edges[].node`) and an answer
+/// that contradicts the effect: the effect's value stands, and the rest of the answer
+/// (a line state did not hold) is kept.
+#[tokio::test]
+async fn an_effect_on_a_line_in_a_connection_inside_the_target_cart_changes_it_there() {
+    let cart = "gid://shopify/Cart/c1";
+    let line = "gid://shopify/CartLine/1";
+    let edges = |q: u32| json!({"__typename": "CartLineConnection", "edges": [{"__typename": "CartLineEdge", "node": {"__typename": "CartLine", "id": line, "quantity": q}}]});
+    let provider = scripted(vec![json!({
+        // The answer also holds a line state does not (`l2`), which must stay.
+        "response": {"__typename": "CartLinesUpdatePayload", "cart": {"__typename": "Cart", "id": cart, "totalQuantity": 4, "lines": {
+            "__typename": "CartLineConnection", "edges": [
+                {"__typename": "CartLineEdge", "node": {"__typename": "CartLine", "id": line, "quantity": 1}},
+                {"__typename": "CartLineEdge", "node": {"__typename": "CartLine", "id": "l2", "quantity": 1}},
+            ]}}},
+        "effects": [
+            {"type": "cart", "id": cart, "set": {"totalQuantity": 3}},
+            {"type": "cartline", "id": line, "set": {"quantity": 3}},
+        ],
+    })]);
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let rt = MockRuntime::new(
+        "shop",
+        Arc::new(compile(CART_EDGES.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        state.clone(),
+    );
+    let base = serve(rt).await;
+    let session = [("x-mockingbird-session", "s1")];
+    let key = mb_state::SessionKey {
+        workspace: "default".into(),
+        mock: "shop".into(),
+        session: "s1".into(),
+    };
+    let held = mb_state::StoredResource {
+        resource_type: "cart".into(),
+        id: cart.into(),
+        data: json!({"__typename": "Cart", "id": cart, "totalQuantity": 1, "lines": edges(1)}),
+    };
+    mb_state::StateStore::upsert(state.as_ref(), &key, held)
+        .await
+        .unwrap();
+    let q = "{ totalQuantity lines(first: 5) { edges { node { id quantity } } } }";
+    let updated = post(
+        &base,
+        json!({
+            "query": format!("mutation($c: ID!, $l: [CartLineUpdateInput!]!) {{ cartLinesUpdate(cartId: $c, lines: $l) {{ cart {q} }} }}"),
+            "variables": {"c": cart, "l": [{"id": line, "quantity": 3}]},
+        }),
+        &session,
+    )
+    .await;
+    assert!(updated.body.get("errors").is_none(), "{}", updated.body);
+    let read = post(
+        &base,
+        json!({"query": "query($c: ID!) { cart(id: $c) { totalQuantity lines { edges { node { id quantity } } } } }", "variables": {"c": cart}}),
+        &session,
+    )
+    .await;
+    let lines = &read.body["data"]["cart"]["lines"]["edges"];
+    assert_eq!(lines[0]["node"]["quantity"], 3, "{}", read.body);
+    assert_eq!(lines[1]["node"]["id"], "l2", "{}", read.body);
+}
+
+const ASSIGN: &str = r#"
+type User { id: ID! name: String! }
+type Issue { id: ID! title: String! assignee: User }
+type IssuePayload { issue: Issue }
+type Query { issue(id: ID!): Issue user(id: ID!): User }
+type Mutation { issueAssign(issueId: ID!, userId: ID!): IssuePayload }
+"#;
+
+/// An effect naming a record only by its id (`assignee: {id}`) stands over the answer
+/// as it was stored: the record it names, not the stub.
+#[tokio::test]
+async fn an_effects_stub_stands_over_the_answer_as_the_record_it_names() {
+    let issue = json!({"__typename": "Issue", "id": "i1", "title": "Bug", "assignee": null});
+    let user = json!({"__typename": "User", "id": "u1", "name": "Ana"});
+    let provider = scripted(vec![json!({
+        "response": {"__typename": "IssuePayload", "issue": {"__typename": "Issue", "id": "i1", "title": "Bug",
+                     "assignee": {"__typename": "User", "id": "u1", "name": "Ana"}}},
+        "effects": [{"type": "issue", "id": "i1", "set": {"assignee": {"id": "u1"}}}],
+    })]);
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let rt = MockRuntime::new(
+        "shop",
+        Arc::new(compile(ASSIGN.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        state.clone(),
+    );
+    let base = serve(rt).await;
+    let session = [("x-mockingbird-session", "s1")];
+    let key = mb_state::SessionKey {
+        workspace: "default".into(),
+        mock: "shop".into(),
+        session: "s1".into(),
+    };
+    for (t, id, data) in [("issue", "i1", issue), ("user", "u1", user)] {
+        let held = mb_state::StoredResource {
+            resource_type: t.into(),
+            id: id.into(),
+            data,
+        };
+        mb_state::StateStore::upsert(state.as_ref(), &key, held)
+            .await
+            .unwrap();
+    }
+    let assigned = post(
+        &base,
+        json!({"query": r#"mutation { issueAssign(issueId: "i1", userId: "u1") { issue { id title assignee { id name } } } }"#}),
+        &session,
+    )
+    .await;
+    assert!(assigned.body.get("errors").is_none(), "{}", assigned.body);
+    let read = post(
+        &base,
+        json!({"query": r#"{ issue(id: "i1") { assignee { id name } } }"#}),
+        &session,
+    )
+    .await;
+    assert_eq!(
+        read.body["data"]["issue"]["assignee"]["name"], "Ana",
+        "{}",
+        read.body
+    );
+}

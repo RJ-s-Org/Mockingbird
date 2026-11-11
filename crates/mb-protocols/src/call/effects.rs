@@ -123,6 +123,71 @@ async fn within_own(
     None
 }
 
+/// Lays what each applied effect of `effects` stored into `objects`, an answer's records
+/// about to be stored over the session's (`outcomes` says what became of each effect,
+/// with the record as it merged): at each member the effect asked for and was let set,
+/// the value as stored (a stub filled, a null removed), on the record it names, or on
+/// the item with its id that a record holds (a cart's line). Only those values:
+/// whatever else the answer holds (a line it added) stays. A record one effect wrote
+/// and another was refused on is left as the answer has it.
+pub(crate) fn lay_effects(
+    objects: &mut [StoredResource],
+    effects: &[ResourceEffect],
+    outcomes: &[EffectOutcome],
+) {
+    for effect in effects {
+        let named = |o: &&EffectOutcome| {
+            o.effect.resource_type == effect.resource_type && o.effect.id == effect.id
+        };
+        if outcomes.iter().filter(named).any(|o| o.rejected.is_some()) {
+            continue;
+        }
+        let Some((outcome, merged)) = outcomes
+            .iter()
+            .filter(named)
+            .find_map(|o| Some((o, o.merged.as_ref()?)))
+        else {
+            continue;
+        };
+        let let_set = |key: &str| {
+            let top = key.split('.').next().unwrap_or(key);
+            outcome.applied.iter().any(|a| a == key || a == top)
+        };
+        // The record itself, or the target an item effect went into.
+        let direct = merged.get("id").and_then(Value::as_str) == Some(effect.id.as_str());
+        let mut target = merged.clone();
+        let item = if direct {
+            None
+        } else {
+            holding(&mut target, &effect.id, MAX_ENTITY_DEPTH).map(|i| i.clone())
+        };
+        for object in objects.iter_mut() {
+            if direct && object.resource_type == effect.resource_type && object.id == effect.id {
+                for key in effect.set.keys().filter(|k| let_set(k)) {
+                    match mb_mcm::member_at(merged, key) {
+                        Some(value) => {
+                            mb_mcm::set_member_at(&mut object.data, key, value.clone());
+                        }
+                        None => {
+                            if let Value::Object(members) = &mut object.data {
+                                members.remove(key);
+                            }
+                        }
+                    }
+                }
+            } else if let Some(stored) = &item
+                && let Some(answered) = holding(&mut object.data, &effect.id, MAX_ENTITY_DEPTH)
+            {
+                for key in effect.set.keys() {
+                    if let Some(value) = stored.get(key) {
+                        answered.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The object within `value` whose `id` is `id`, at most `depth` levels down.
 fn holding<'v>(value: &'v mut Value, id: &str, depth: usize) -> Option<&'v mut Map<String, Value>> {
     if depth == 0 {

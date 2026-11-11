@@ -670,6 +670,11 @@ async fn store_answer(
         }
         _ => None,
     };
+    // What the answer's effects asked for stands over the answer, which is stored
+    // after them (a cart line's new quantity).
+    if !seeding {
+        call::lay_effects(&mut objects, &generated.effects, &generated.effect_outcomes);
+    }
     if !objects.is_empty() {
         call::store_resources(rt, &plan.session, objects, !seeding).await;
     }
