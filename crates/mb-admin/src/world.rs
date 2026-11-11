@@ -24,7 +24,8 @@
 //! `…/world/diff` compares two. A write with `If-Match: <revision>` applies
 //! only on top of that revision (else a 412 `revision_conflict`).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{LazyLock, Mutex, PoisonError};
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -82,7 +83,9 @@ pub struct EffectiveWorld {
     /// The newest revision's number; `0` when there is none.
     pub revision: i64,
     /// The newest revision's entries that did not validate, which fall back
-    /// to tier 0.
+    /// to tier 0, then the entries of the mock's `world:` file refused when
+    /// the config was last applied to this version (see
+    /// [`record_file_refusals`]).
     pub refused: Vec<Refusal>,
     /// What the description leaves open, including each refused entry.
     pub gaps: Vec<Gap>,
@@ -105,12 +108,13 @@ pub async fn effective_world(
 ) -> Result<EffectiveWorld, StoreError> {
     let base = tier0(bundle);
     let Some(latest) = store.latest_world_revision(mock_id, version).await? else {
-        let gaps = gaps(bundle, &base, &[]);
+        let refused = with_file_refusals(Vec::new(), mock_id, version);
+        let gaps = gaps(bundle, &base, &refused);
         return Ok(EffectiveWorld {
             world: base,
             authors: BTreeMap::new(),
             revision: 0,
-            refused: Vec::new(),
+            refused,
             gaps,
         });
     };
@@ -137,6 +141,7 @@ pub async fn effective_world(
         .into_iter()
         .map(|(pointer, origin)| (pointer, origin.author))
         .collect();
+    let refused = with_file_refusals(refused, mock_id, version);
     let gaps = gaps(bundle, &world, &refused);
     Ok(EffectiveWorld {
         world,
@@ -145,6 +150,45 @@ pub async fn effective_world(
         refused,
         gaps,
     })
+}
+
+/// The entries of each config-file mock's `world:` file refused when the
+/// config was last applied, by mock id: the contract version they were
+/// validated against, and the refusals. Only the node that applies the
+/// config (the leader) holds them.
+static FILE_REFUSALS: LazyLock<Mutex<FileRefusals>> = LazyLock::new(Mutex::default);
+
+/// Per mock id: the contract version, and its `world:` file's refusals.
+type FileRefusals = HashMap<Uuid, (i64, Vec<Refusal>)>;
+
+/// Records the entries of `mock_id`'s `world:` file that `version` refused
+/// as the config was applied, replacing those of the previous load; an
+/// empty `refused` clears them. [`effective_world`] of that version lists
+/// them under `refused` (and its gaps), since the stored revision holds only
+/// the entries that validate.
+pub fn record_file_refusals(mock_id: Uuid, version: i64, refused: Vec<Refusal>) {
+    let mut all = FILE_REFUSALS.lock().unwrap_or_else(PoisonError::into_inner);
+    if refused.is_empty() {
+        all.remove(&mock_id);
+    } else {
+        all.insert(mock_id, (version, refused));
+    }
+}
+
+/// `refused` followed by the recorded file refusals of `mock_id`'s
+/// `version` whose pointer it does not already name.
+fn with_file_refusals(mut refused: Vec<Refusal>, mock_id: Uuid, version: i64) -> Vec<Refusal> {
+    let all = FILE_REFUSALS.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((v, file)) = all.get(&mock_id)
+        && *v == version
+    {
+        for r in file {
+            if !refused.iter().any(|e| e.path == r.path) {
+                refused.push(r.clone());
+            }
+        }
+    }
+    refused
 }
 
 /// The world description a runtime of `mock_id`'s contract `version` serves,
@@ -621,8 +665,9 @@ pub struct WorldView {
     pub authors: BTreeMap<String, Author>,
     /// The newest revision's number; `0` when there is none.
     pub revision: i64,
-    /// The newest revision's entries that did not validate; they fall back
-    /// to tier 0.
+    /// The newest revision's entries that did not validate, and the
+    /// entries of a config-file mock's `world:` file refused when the config
+    /// was last loaded; they fall back to tier 0.
     #[schema(value_type = Vec<RefusalSchema>)]
     pub refused: Vec<Refusal>,
     /// What the description leaves open, including each refused entry.

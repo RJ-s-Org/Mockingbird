@@ -654,9 +654,14 @@ pub struct DoctorArgs {
 }
 
 /// `mockingbird doctor`: what is set up and what is missing (the config,
-/// the LLM key, a server answering at `admin_url`), as JSON.
-pub async fn doctor(args: &DoctorArgs, admin_url: &str) -> Value {
+/// the LLM key, a server answering at `admin_url`), as JSON. Its
+/// `warnings` name each config mock whose world description the server
+/// (asked with `token` as the bearer) reports refused entries for, such as
+/// those of a `world:` file refused as the config was last loaded.
+pub async fn doctor(args: &DoctorArgs, admin_url: &str, token: Option<&str>) -> Value {
     let mut problems: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut loaded = None;
     let shell_env = crate::shell_env::imported();
     let not_set_here = if shell_env.is_some() {
         "not set in this MCP server process: export it where your agent starts, or in your shell profile, then restart the agent"
@@ -671,6 +676,7 @@ pub async fn doctor(args: &DoctorArgs, admin_url: &str) -> Value {
         None => json!({ "found": false }),
         Some(path) => match file_config::load(path) {
             Ok(cfg) => {
+                let cfg = &*loaded.insert(cfg);
                 let mut profiles = Vec::new();
                 for (name, p) in &cfg.llm.profiles {
                     let secrets = crate::providers::secret_status(p);
@@ -728,6 +734,8 @@ pub async fn doctor(args: &DoctorArgs, admin_url: &str) -> Value {
         problems.push(format!(
             "no Admin API at {admin_url}: start one with `mockingbird server start -c mockingbird.yaml`"
         ));
+    } else if let Some(cfg) = &loaded {
+        warnings.extend(world_refusal_warnings(cfg, admin_url, token).await);
     }
     if config_path.is_none() {
         problems.push("no mockingbird.yaml here: create one with `mockingbird init`".into());
@@ -758,7 +766,75 @@ pub async fn doctor(args: &DoctorArgs, admin_url: &str) -> Value {
         "shell_env": shell_env.map(|names| json!({ "imported": names })),
         "key_store": key_store,
         "problems": problems,
+        "warnings": warnings,
     })
+}
+
+/// One warning per mock of `cfg` with a `world:` file whose active world
+/// description at `admin_url` has refused entries, naming their pointers.
+/// A mock the server cannot answer for is skipped.
+async fn world_refusal_warnings(
+    cfg: &file_config::FileConfig,
+    admin_url: &str,
+    token: Option<&str>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for (name, mock) in cfg.mocks.iter().filter(|(_, m)| m.world.is_some()) {
+        let Ok(mut url) = reqwest::Url::parse(admin_url) else {
+            return warnings;
+        };
+        if let Ok(mut path) = url.path_segments_mut() {
+            path.pop_if_empty().extend([
+                "api",
+                "v1",
+                "workspaces",
+                &mock.workspace,
+                "mocks",
+                name,
+                "contracts",
+                "active",
+                "world",
+            ]);
+        }
+        let mut req = http().get(url);
+        if let Some(token) = token {
+            req = req.bearer_auth(token);
+        }
+        let Ok(resp) = req.send().await else {
+            continue;
+        };
+        if !resp.status().is_success() {
+            continue;
+        }
+        let Ok(view) = resp.json::<Value>().await else {
+            continue;
+        };
+        let pointers: Vec<&str> = view["refused"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|r| match r["path"].as_str().unwrap_or_default() {
+                "" => "the document",
+                p => p,
+            })
+            .collect();
+        if !pointers.is_empty() {
+            let label = crate::registry::mock_label(&mock.workspace, name);
+            let show = if mock.workspace == mb_store::DEFAULT_WORKSPACE {
+                format!("mockingbird world show {name}")
+            } else {
+                format!(
+                    "mockingbird --workspace {} world show {name}",
+                    mock.workspace
+                )
+            };
+            warnings.push(format!(
+                "mock {label:?}: world entries refused at {}; `{show}` says why",
+                pointers.join(", ")
+            ));
+        }
+    }
+    warnings
 }
 
 #[cfg(test)]

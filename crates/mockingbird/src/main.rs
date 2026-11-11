@@ -73,7 +73,12 @@ async fn run(invocation: Invocation) -> ExitCode {
         Command::Init(args) => print_json(onboard::init(&args)),
         Command::Llm(cmd) => llm(&cli.admin_url, cli.token.as_deref(), &cli.workspace, cmd).await,
         Command::Server(cmd) => server_cmd(cmd).await,
-        Command::Doctor(args) => print_json(Ok(daemon::doctor(&args, &cli.admin_url).await)),
+        Command::Doctor(args) => print_json(Ok(daemon::doctor(
+            &args,
+            &cli.admin_url,
+            cli.token.as_deref(),
+        )
+        .await)),
         Command::Mcp(args) => mcp::run(args, &cli.admin_url, cli.token.as_deref(), &cli.workspace)
             .await
             .map_err(Failure::Other),
