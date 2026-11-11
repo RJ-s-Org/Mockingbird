@@ -9,8 +9,8 @@
 //! - `list.sort` applies when the request sends its parameter, in the query (a deep
 //!   object parameter, `sort[0][field]=price`, as the object its keys make) or as a
 //!   member of the body: `by`, with `value` the parameter as sent, gives
-//!   `[{member, desc?}]` (or one such map), and the items are ordered by those members in turn, as `order`
-//!   orders them: numbers by value, date-times by time, text by text, an item not
+//!   `[{member, desc?}]` (or one such map), and the items are ordered by those
+//!   members in turn, as `order` orders them: numbers by value, date-times by time, text by text, an item not
 //!   holding the member (or holding `null`) last either way, and items that compare
 //!   equal kept in their order. A `by` that fails, gives no members, or gives one the
 //!   items' schema does not declare (and no item holds) is noted under `expr_failed`,

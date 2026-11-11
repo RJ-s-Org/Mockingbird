@@ -51,8 +51,8 @@
 //!
 //! It falls back, and the call is generated as before, for:
 //! - `undescribed_param`: a query parameter that is no described filter, scope,
-//!   paging or sort parameter, no name-matched filter, no page size and none the description
-//!   `ignores`, unless its value asks nothing (blank, its declared `default`, or the
+//!   paging or sort parameter, no name-matched filter, no page size and none the
+//!   description `ignores`, unless its value asks nothing (blank, its declared `default`, or the
 //!   first page of a page position); or a member of a request body (a list asked by a
 //!   POST, a SOAP or gRPC request) that no described parameter names or holds, looked
 //!   into where one names a member below it ([`list_query::body_pointer`]), unless it
@@ -203,12 +203,17 @@ async fn answer(
     // A list asked by a body (a POST query, a SOAP request) reads the members the
     // description names; another that asks something is undescribed.
     let body_asks = call.body.as_ref().and_then(|body| {
-        let mut body = body.clone();
         // The sort parameter, sent as a body member, is read.
-        if let (Some(param), Some(members)) = (sort_param, body.as_object_mut()) {
-            members.remove(param);
+        match (sort_param, body.as_object()) {
+            (Some(param), Some(members)) if members.contains_key(param) => {
+                let mut body = body.clone();
+                if let Some(members) = body.as_object_mut() {
+                    members.remove(param);
+                }
+                unread(bundle, op, q.as_ref(), &body, "")
+            }
+            _ => unread(bundle, op, q.as_ref(), body, ""),
         }
-        unread(bundle, op, q.as_ref(), &body, "")
     });
     if let Some((on, _)) = undescribed {
         return Err(Stop::on("undescribed_param", on));
