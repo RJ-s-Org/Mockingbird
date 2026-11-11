@@ -567,6 +567,48 @@ fn implementors(schema: &Schema) -> BTreeMap<&str, Vec<&str>> {
     out
 }
 
+/// The string format a custom scalar's values take when its name or its
+/// description says it holds a date or a time: `DateTime`, `Timestamp`,
+/// `ISO8601DateTime` → `date-time`; `Date`, `ISO8601Date` → `date`; `Time`
+/// → `time`; otherwise a description naming ISO 8601 or RFC 3339. A
+/// description of seconds or milliseconds since the epoch keeps the scalar
+/// untyped: those values are numbers.
+fn date_format(name: &str, description: Option<&str>) -> Option<&'static str> {
+    let description = description.unwrap_or_default().to_lowercase();
+    if ["unix", "epoch", "seconds since", "milliseconds"]
+        .iter()
+        .any(|w| description.contains(w))
+    {
+        return None;
+    }
+    let name: String = name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_lowercase();
+    if name.contains("datetime") || name.ends_with("timestamp") {
+        return Some("date-time");
+    }
+    if name.ends_with("date") {
+        return Some("date");
+    }
+    if name.ends_with("time") {
+        return Some("time");
+    }
+    let standard = ["iso-8601", "iso 8601", "iso8601", "rfc 3339", "rfc3339"]
+        .iter()
+        .any(|w| description.contains(w));
+    if !standard {
+        None
+    } else if description.contains("time") {
+        Some("date-time")
+    } else if description.contains("date") {
+        Some("date")
+    } else {
+        None
+    }
+}
+
 fn def_schema(
     schema: &Schema,
     implementors: &BTreeMap<&str, Vec<&str>>,
@@ -575,7 +617,12 @@ fn def_schema(
 ) -> Value {
     let mut obj = match &def.kind {
         Kind::Scalar => {
-            return json!({ "description": format!("GraphQL scalar {name}") });
+            let mut out = json!({ "description": format!("GraphQL scalar {name}") });
+            if let Some(format) = date_format(name, def.description.as_deref()) {
+                out["type"] = json!("string");
+                out["format"] = json!(format);
+            }
+            return out;
         }
         Kind::Object { fields, .. } => fields_schema(schema, fields, Some(name)),
         Kind::Interface { fields, .. } => match implementors.get(name) {
