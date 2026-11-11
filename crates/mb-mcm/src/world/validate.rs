@@ -340,11 +340,20 @@ struct Ctx<'a> {
 
 impl<'a> Ctx<'a> {
     fn new(world: &'a World, bundle: &'a Bundle) -> Self {
+        // A type the description both describes and gives an operation of
+        // the contract is known too, so one write can introduce a new type.
+        // An operation's type alone (a typo) stays unknown.
+        let named = world.operations.iter().filter_map(|(id, d)| {
+            d.r#type.as_deref().filter(|t| {
+                world.types.contains_key(*t) && bundle.operations.iter().any(|o| &o.id == id)
+            })
+        });
         let types = bundle
             .operations
             .iter()
             .filter_map(|o| o.resource_type.as_deref())
             .chain(bundle.defs.keys().map(String::as_str))
+            .chain(named)
             .collect();
         Self {
             bundle,
@@ -3597,6 +3606,39 @@ mod tests {
             paths(&v),
             vec![("/operations/GetZone/answer/record", RefusalCode::Invalid)]
         );
+    }
+
+    #[test]
+    fn a_type_named_by_an_operation_of_the_same_write_is_known() {
+        let mut b = bundle(&[(
+            "listAccounts",
+            "POST",
+            "/accounts/get",
+            json!({"type": "object", "properties": {"accounts": {"type": "array",
+                "items": {"type": "object", "properties": {"account_id": {"type": "string"}}}}}}),
+        )]);
+        typed(&mut b, "listAccounts", "accounts_get", None, "id");
+        let w = world(json!({
+            "types": {"account": {"identity": {"member": "account_id"}}},
+            "operations": {"listAccounts": {"kind": "list", "type": "account",
+                "answer": {"records": "/accounts"}}}
+        }));
+        let v = validate(&w, &b);
+        assert_eq!(v.refused, vec![]);
+        assert_eq!(v.applied, w);
+
+        // An operation the contract does not have introduces nothing.
+        let w = world(json!({
+            "types": {"ghost": {"identity": {"member": "id"}}},
+            "operations": {"nope": {"type": "ghost"}}
+        }));
+        let v = validate(&w, &b);
+        refused_with(&v, "/types/ghost", "no operation has resource type `ghost`");
+
+        // An operation's type that no `types` entry describes is a typo.
+        let w = world(json!({"operations": {"listAccounts": {"type": "acount"}}}));
+        let v = validate(&w, &b);
+        refused_with(&v, "/operations/listAccounts/type", "`acount`");
     }
 
     #[test]
