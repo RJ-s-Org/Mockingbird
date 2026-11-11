@@ -354,11 +354,18 @@ pub(crate) async fn generate_pending(
         .instrument(state_span())
         .await;
     let repeat = pending.retry && write_memory::answers_no_body(plan);
+    // A read in another language restates its held record in that language: it is shown
+    // that record and the writes it must still reflect, not the session's other records
+    // and answers, which only lengthen its prompt.
+    let restated = pending.target.as_ref().filter(|_| pending.variant);
     let (related, created_since): (&[StoredResource], &[StoredResource]) = if repeat {
         (&[], &[])
+    } else if let Some(held) = restated {
+        (std::slice::from_ref(held), &pending.created_since)
     } else {
         (&pending.related, &pending.created_since)
     };
+    let session_answers = |values| if restated.is_some() { &[][..] } else { values };
     let ctx = GenerationContext {
         related,
         target,
@@ -367,9 +374,9 @@ pub(crate) async fn generate_pending(
         response_schema,
         earlier_requests: &pending.earlier.told,
         earlier_own_body: pending.earlier.own.as_ref(),
-        earlier_answers: &pending.earlier_answers,
-        earlier_writes: &pending.earlier_writes,
-        earlier_origins: &pending.earlier_origins,
+        earlier_answers: session_answers(&pending.earlier_answers[..]),
+        earlier_writes: session_answers(&pending.earlier_writes[..]),
+        earlier_origins: session_answers(&pending.earlier_origins[..]),
         served_cursors: &pending.served_cursors,
         created_since,
         alongside: &pending.alongside,

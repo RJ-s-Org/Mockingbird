@@ -126,3 +126,92 @@ async fn a_write_ends_the_kept_variants() {
     let (_, _, french) = h.send("GET", "/tv/549?language=fr-FR", None, &[]).await;
     assert_eq!(french["name"], "Renamed");
 }
+
+/// The user message of each LLM call so far.
+fn prompts(h: &support::DescribedHarness) -> Vec<String> {
+    h.provider
+        .requests()
+        .iter()
+        .map(|r| r.messages.last().unwrap().content.clone())
+        .collect()
+}
+
+const LINKED: &str = r##"
+openapi: 3.0.0
+info: {title: Shows, version: "1"}
+paths:
+  /genre/tv/list:
+    get:
+      operationId: listGenres
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  genres: {type: array, items: {type: object, properties: {id: {type: integer}, name: {type: string}}}}
+  /network/{network_id}:
+    get:
+      operationId: getNetwork
+      parameters:
+        - {name: network_id, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Network"}}}}
+  /tv/{tv_id}:
+    get:
+      operationId: getShow
+      parameters:
+        - {name: tv_id, in: path, required: true, schema: {type: integer}}
+        - {name: language, in: query, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Show"}}}}
+components:
+  schemas:
+    Network:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+    Show:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        overview: {type: string}
+        network_id: {type: integer}
+"##;
+
+/// A read in another language restates the stored record: its prompt holds that record
+/// and the language asked for, not the session's other records and earlier answers.
+#[tokio::test]
+async fn a_variant_read_is_shown_only_its_stored_record() {
+    let h = support::harness(
+        LINKED,
+        vec![
+            json!({"genres": [{"id": 18, "name": "Drama"}, {"id": 80, "name": "Crime"}]}),
+            json!({"id": 6, "name": "Studio Seventy-Seven"}),
+            json!({"id": 549, "name": "Law & Order", "overview": "Detectives and prosecutors.",
+                   "network_id": 6}),
+            json!({"id": 549, "name": "New York Police Judiciaire",
+                   "overview": "Inspecteurs et procureurs.", "network_id": 6}),
+        ],
+        &options(),
+        |rt| rt,
+    );
+    h.send("GET", "/genre/tv/list", None, &[]).await;
+    h.send("GET", "/network/6", None, &[]).await;
+    h.send("GET", "/tv/549", None, &[]).await;
+    let (_, _, french) = h.send("GET", "/tv/549?language=fr-FR", None, &[]).await;
+    assert_eq!(french["name"], "New York Police Judiciaire");
+    let prompts = prompts(&h);
+    assert_eq!(prompts.len(), 4);
+    let variant = &prompts[3];
+    assert!(variant.contains("fr-FR"), "{variant}");
+    assert!(variant.contains("Detectives and prosecutors."), "{variant}");
+    assert!(!variant.contains("Studio Seventy-Seven"), "{variant}");
+    assert!(!variant.contains("Drama"), "{variant}");
+}
