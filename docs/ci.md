@@ -239,9 +239,9 @@ When a cap stops it, `scan.complete` is `false`, `scan.stopped` names the
 cap, and the summary and a last `next_steps` entry say the list may be
 incomplete. Within one process (an MCP server), a scan is reused while
 the modification times of the root and the two levels below it are
-unchanged (`scan.cached`); a scan the time budget stopped is not reused,
-and nor is any scan of a root with more than 20,000 entries at those
-levels.
+unchanged (`scan.cached`); a scan the time budget stopped is reused for
+60 s only, and no scan of a root with more than 20,000 entries at those
+levels is reused.
 
 The answer, as JSON:
 
@@ -256,9 +256,12 @@ The answer, as JSON:
   `operations`), the `sources` naming it (up to three files) and the
   catalog `examples` whose mocks list it. Several `specs` for one host
   (versions of one product) are all needed, not alternatives: import each
-  into its own mock listing the host, give those mocks one
-  `mocks.<name>.shares` group, and a distinct `route_prefix` each (with
-  `path_rewrite.add_prefix` to keep the path);
+  into its own mock listing the host, with `route_prefix` and
+  `path_rewrite.add_prefix` set to the same value, its version path (say
+  `/v2`): `path_rewrite` applies below `route_prefix`, so the prefix alone
+  would cut the version off the path the contract sees. Leave such mocks
+  without a common `mocks.<name>.shares` group, so the versions' records
+  stay apart, unless the descriptions are views of the same records;
 - `claimed`: the hosts found that a mock lists;
 - `next_steps`: one per registrable domain, about 500 characters each
   (domains with a mocked host first, then those with a description or

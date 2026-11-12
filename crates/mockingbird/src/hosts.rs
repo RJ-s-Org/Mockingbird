@@ -20,9 +20,9 @@
 //! The walk skips version control, build outputs (outside dependencies),
 //! the mock's own folder and contract files, and symlinks, and stops at
 //! [`Limits`] (files, bytes per file, bytes in all, wall-clock time),
-//! saying so in [`ScanStats::stopped`]. A scan that ran to the end or
-//! stopped at a size limit is cached per project root while the
-//! modification times near the root are unchanged.
+//! saying so in [`ScanStats::stopped`]. A scan is cached per project root
+//! while the modification times near the root are unchanged (one the time
+//! budget stopped, for a minute).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -314,7 +314,7 @@ struct RawScan {
     /// Host to the app's files with a URL literal naming it.
     literals: BTreeMap<String, Vec<String>>,
     stats: ScanStats,
-    /// The time budget stopped it (such a scan is not cached).
+    /// The time budget stopped it (such a scan is cached for a minute only).
     timed_out: bool,
 }
 
@@ -808,7 +808,7 @@ fn domain_step(domain: &str, hosts: &[&UnclaimedHost], mocked: &[&str]) -> Strin
             format!(" in {dir}/")
         };
         let versions = if several {
-            " (n) = n versioned descriptions, all needed: one mock each listing the host, one mocks.<name>.shares group, distinct route_prefix."
+            " (n) = n versioned descriptions, all needed: one mock each listing the host, with route_prefix plus path_rewrite.add_prefix set to the same value (its version path, e.g. /v2)."
         } else {
             ""
         };
@@ -873,36 +873,47 @@ fn domain_step(domain: &str, hosts: &[&UnclaimedHost], mocked: &[&str]) -> Strin
     step
 }
 
-/// Scans cached per (root, skips) with their [`fingerprint`].
-type Cache = HashMap<(PathBuf, Skip), (SystemTime, Arc<RawScan>)>;
+/// Scans cached per (root, skips) with their [`fingerprint`] and when they
+/// were stored.
+type Cache = HashMap<(PathBuf, Skip), (SystemTime, Instant, Arc<RawScan>)>;
+
+/// How long a scan the time budget stopped is reused: a project that
+/// always takes longer than the budget is not rescanned on every call,
+/// and one that only ran slow once gets a full scan soon.
+const TIMED_OUT_TTL: Duration = Duration::from_secs(60);
+
+/// Whether a cached scan stored at `stored` may answer at `now`: always
+/// while the fingerprint holds, or for [`TIMED_OUT_TTL`] when the time
+/// budget stopped it.
+fn reusable(timed_out: bool, stored: Instant, now: Instant) -> bool {
+    !timed_out || now.saturating_duration_since(stored) < TIMED_OUT_TTL
+}
 
 /// Projects kept in the cache.
 const CACHE_ENTRIES: usize = 16;
 
-/// [`scan`], from the cache while the root's [`fingerprint`] holds. A
-/// scan the time budget stopped is not cached (the next one may get
-/// further); one stopped at a size limit is.
+/// [`scan`], from the cache while the root's [`fingerprint`] holds (a scan
+/// the time budget stopped, for [`TIMED_OUT_TTL`] only).
 fn cached_scan(root: &Path, skip: &Skip, limits: Limits) -> RawScan {
     static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let key = (root.to_path_buf(), skip.clone());
     let print = fingerprint(root, skip);
     if let (Ok(cache), Some(print)) = (cache.lock(), print)
-        && let Some((at, scan)) = cache.get(&key)
+        && let Some((at, stored, scan)) = cache.get(&key)
         && *at == print
+        && reusable(scan.timed_out, *stored, Instant::now())
     {
         let mut scan = (**scan).clone();
         scan.stats.cached = true;
         return scan;
     }
     let scan = scan(root, skip, limits);
-    if let (Ok(mut cache), Some(print)) = (cache.lock(), print)
-        && !scan.timed_out
-    {
+    if let (Ok(mut cache), Some(print)) = (cache.lock(), print) {
         if cache.len() >= CACHE_ENTRIES {
             cache.clear();
         }
-        cache.insert(key, (print, Arc::new(scan.clone())));
+        cache.insert(key, (print, Instant::now(), Arc::new(scan.clone())));
     }
     scan
 }
@@ -1677,7 +1688,7 @@ mod tests {
         );
         assert_eq!(
             a.next_steps[0],
-            "vendor-one.com: 1 host without a mock (mocked: api). 1 with a bundled description in node_modules/@vendor-one/sdk/specs/: checks (2). import_contract each. (n) = n versioned descriptions, all needed: one mock each listing the host, one mocks.<name>.shares group, distinct route_prefix."
+            "vendor-one.com: 1 host without a mock (mocked: api). 1 with a bundled description in node_modules/@vendor-one/sdk/specs/: checks (2). import_contract each. (n) = n versioned descriptions, all needed: one mock each listing the host, with route_prefix plus path_rewrite.add_prefix set to the same value (its version path, e.g. /v2)."
         );
     }
 
@@ -1905,7 +1916,7 @@ mod tests {
     }
 
     #[test]
-    fn a_scan_the_clock_stopped_is_not_cached() {
+    fn a_scan_the_clock_stopped_is_cached_for_a_minute() {
         let dir = project();
         let root = dir.path().canonicalize().unwrap();
         let skip = Skip::default();
@@ -1913,9 +1924,18 @@ mod tests {
             budget: Duration::ZERO,
             ..Limits::default()
         };
-        assert!(cached_scan(&root, &skip, quick).timed_out);
+        let first = cached_scan(&root, &skip, quick);
+        assert!(first.timed_out && !first.stats.cached);
         let second = cached_scan(&root, &skip, quick);
-        assert!(!second.stats.cached);
+        assert!(second.stats.cached, "reused within the minute");
+        let now = Instant::now();
+        let stored = now.checked_sub(TIMED_OUT_TTL).unwrap();
+        assert!(!reusable(true, stored, now), "expired after the minute");
+        assert!(reusable(true, now, now));
+        assert!(
+            reusable(false, stored, now),
+            "a complete scan does not expire"
+        );
         // A size-capped scan is cached.
         let small = Limits {
             max_files: 2,
