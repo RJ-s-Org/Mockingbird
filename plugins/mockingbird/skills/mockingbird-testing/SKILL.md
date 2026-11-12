@@ -22,7 +22,7 @@ mockingbird seed-fixtures --mock orders --session ci tests/fixtures/orders.json
 
 ## Assert on content, not status alone
 
-Some apps answer a failed upstream call with status 200: an error card (`Something went wrong`), a tool result with `isError: true`, a page saying "not found". `verify` counts the mock's statuses, not the app's, and a check of the app's status codes passes on these. Make the `verify --run` command check what the app returned (no error markers, the field the flow needs is present).
+Some apps answer a failed upstream call with status 200: an error card (`Something went wrong`), a tool result with `isError: true`, a page saying "not found". `verify` checks the mock's request log and the run command's exit code, never the app's output, and a test that only asserts status 200 passes on these. Make the `verify --run` command check what the app returned (no error markers, the field the flow needs is present) and exit non-zero when it is wrong.
 
 ## Assert on what the client sent
 
