@@ -325,9 +325,11 @@ type Mutation { addComment(input: AddCommentInput!): AddCommentPayload }
         session: "s1".into(),
     };
     let held = store.export(&key).await.unwrap();
+    // The model's `Notice` takes no `set`. (Its answer does not fit, so the faker may
+    // answer instead: a record of its own type, which takes the `set`.)
     let set = held
         .iter()
-        .filter(|r| r.resource_type == "issuecomment")
+        .filter(|r| r.resource_type == "issuecomment" && r.id == "IC_1")
         .any(|r| r.data["isMinimized"] == false);
     assert!(!set, "{held:?}");
 }

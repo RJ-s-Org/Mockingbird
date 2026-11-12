@@ -641,6 +641,39 @@ fn nullable_lists_are_never_null() {
     assert_eq!(at_limit, json!([]));
 }
 
+/// For a client's selection (a GraphQL query, `FakerHints::objects`), a nullable
+/// object (`repository: Repository`, imported as `anyOf` with `null`), an interface
+/// and an `allOf` composite are drawn as objects; a nullable scalar may still be null.
+/// Elsewhere a nullable object stays nullable.
+#[test]
+fn nullable_objects_of_a_selection_are_drawn_as_objects() {
+    let selected = Faker::default().with_hints(mb_engine::FakerHints {
+        objects: true,
+        ..Default::default()
+    });
+    let draws_of = |faker: &Faker, schema: &Value| -> Vec<Value> {
+        (0..200)
+            .map(|seed| faker.fake(schema, &mut StdRng::seed_from_u64(seed)))
+            .collect()
+    };
+    let named = |key: &str| json!({"type": "object", "properties": {key: {"type": "string"}}, "required": [key]});
+    let object = json!({"anyOf": [named("name"), {"type": "null"}]});
+    let union = json!({"anyOf": [{"anyOf": [named("login"), named("name")]}, {"type": "null"}]});
+    let composite = json!({"oneOf": [{"allOf": [named("id"), named("name")]}, {"type": "null"}]});
+    for schema in [&object, &union, &composite] {
+        for v in draws_of(&selected, schema) {
+            assert!(v.is_object(), "{schema}: {v}");
+        }
+    }
+    let scalar = json!({"anyOf": [{"type": "string"}, {"type": "null"}]});
+    assert!(draws_of(&selected, &scalar).iter().any(Value::is_null));
+    assert!(
+        draws_of(&Faker::default(), &object)
+            .iter()
+            .any(Value::is_null)
+    );
+}
+
 #[test]
 fn unconstrained_strings_stay_short_and_new_formats_parse() {
     for v in draws(json!({"type": "string", "minLength": 10}), 50) {
@@ -890,7 +923,10 @@ fn echoed_values_fill_same_named_root_fields() {
     let mut echoes = serde_json::Map::new();
     echoes.insert("login".into(), json!("octocat"));
     echoes.insert("page".into(), json!("3"));
-    let faker = Faker::default().with_hints(mb_engine::FakerHints { echoes });
+    let faker = Faker::default().with_hints(mb_engine::FakerHints {
+        echoes,
+        ..Default::default()
+    });
     let schema = json!({"type": "object", "required": ["login", "page", "owner"], "properties": {
         "login": {"type": "string"}, "page": {"type": "integer"},
         "owner": {"type": "object", "required": ["login"], "properties": {"login": {"type": "string"}}}}});

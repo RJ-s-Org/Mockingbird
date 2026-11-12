@@ -1137,7 +1137,13 @@ impl Walk<'_> {
             &self.bundle.defs,
             sel,
         );
-        match Faker::new(4).fake(&schema, &mut rand::rng()) {
+        match Faker::new(4)
+            .with_hints(mb_engine::FakerHints {
+                objects: true,
+                ..Default::default()
+            })
+            .fake(&schema, &mut rand::rng())
+        {
             Value::Object(obj) => obj,
             _ => Map::new(),
         }

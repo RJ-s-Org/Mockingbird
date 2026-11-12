@@ -24,7 +24,10 @@ impl TokenBudget for Budget {
 fn faker_debug_names_hints_without_their_values() {
     let mut echoes = Map::new();
     echoes.insert("api_key".into(), json!(SECRET));
-    let faker = Faker::new(4).with_hints(FakerHints { echoes });
+    let faker = Faker::new(4).with_hints(FakerHints {
+        echoes,
+        ..FakerHints::default()
+    });
     let text = format!("{faker:?}");
     assert!(text.contains("api_key"), "{text}");
     assert!(!text.contains(SECRET), "{text}");
