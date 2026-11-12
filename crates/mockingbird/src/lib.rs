@@ -62,6 +62,7 @@ pub mod report;
 pub mod run;
 pub mod runtime;
 pub mod server;
+pub mod shares;
 pub mod shell_env;
 pub mod snapshot;
 pub mod telemetry;

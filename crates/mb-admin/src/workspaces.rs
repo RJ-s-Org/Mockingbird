@@ -292,8 +292,16 @@ pub async fn delete(
         ensure_no_file_resources(&st, ws, &mocks).await?;
         // Session state goes first, so a failed reset (503) leaves the
         // workspace in place for a retry.
-        for mock in &mocks {
-            st.state.reset_mock(ws, &mock.name).await?;
+        // Sessions held under a `shares` group go too.
+        let mut holders: std::collections::BTreeSet<String> =
+            mocks.iter().map(|m| m.name.clone()).collect();
+        holders.extend(
+            mocks
+                .iter()
+                .filter_map(|m| (st.shares_group)(&m.name, &mocks).map(|g| g.group)),
+        );
+        for holder in &holders {
+            st.state.reset_mock(ws, holder).await?;
         }
     }
     if st.store.delete_workspace(ws, force).await? {

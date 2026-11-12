@@ -2268,6 +2268,20 @@ export interface components {
             resources: number;
             session: string;
         };
+        /** @description The group a mock keeps its sessions under. */
+        SharesGroup: {
+            /**
+             * @description The mock sets no `shares`: it joined the default group of the mocks of
+             *     its workspace whose hosts share a registrable domain with its own.
+             */
+            default: boolean;
+            /**
+             * @description The group's name: the one the mock's `shares` gives, or the registrable
+             *     domain (`github.com`) of its default group.
+             * @example github.com
+             */
+            group: string;
+        };
         /**
          * @description Where a resource is managed. `file` resources are read-only here.
          * @enum {string}
@@ -2550,6 +2564,7 @@ export interface components {
              * @description The newest revision's number; `0` when there is none.
              */
             revision: number;
+            shares?: components["schemas"]["SharesGroup"] | null;
             /** @description How a read by path of an id the session does not hold is answered, per type. */
             unknown_ids: components["schemas"]["UnknownIdsView"];
             /**
@@ -3931,7 +3946,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. `unknown_ids` gives each type read by a path parameter its answer to an id the session does not hold (`404` or `generate`) and why. */
+            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. `unknown_ids` gives each type read by a path parameter its answer to an id the session does not hold (`404` or `generate`) and why. `shares` names the group the mock keeps its sessions under and whether it is the default one of its domain. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6712,7 +6727,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. `unknown_ids` gives each type read by a path parameter its answer to an id the session does not hold (`404` or `generate`) and why. */
+            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. `unknown_ids` gives each type read by a path parameter its answer to an id the session does not hold (`404` or `generate`) and why. `shares` names the group the mock keeps its sessions under and whether it is the default one of its domain. */
             200: {
                 headers: {
                     [name: string]: unknown;

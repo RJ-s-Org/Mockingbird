@@ -691,6 +691,11 @@ pub struct WorldView {
     pub gaps_left_out: Option<usize>,
     /// How a read by path of an id the session does not hold is answered, per type.
     pub unknown_ids: UnknownIdsView,
+    /// The `shares` group the mock keeps its sessions under, so the other mocks
+    /// in it read the records it stores: the one its `shares` names, or the
+    /// default group of the mocks whose hosts share its registrable domain
+    /// (`default: true`). `null` when it is in none.
+    pub shares: Option<crate::SharesGroup>,
 }
 
 /// How a mock answers a read by path of an id the session does not hold.
@@ -755,7 +760,12 @@ impl UnknownIdsView {
 }
 
 impl WorldView {
-    fn new(version: i64, eff: EffectiveWorld, unknown_ids: UnknownIdsView) -> Self {
+    fn new(
+        version: i64,
+        eff: EffectiveWorld,
+        unknown_ids: UnknownIdsView,
+        shares: Option<crate::SharesGroup>,
+    ) -> Self {
         Self {
             version,
             world: eff.world,
@@ -766,6 +776,7 @@ impl WorldView {
             warnings: Vec::new(),
             gaps_left_out: None,
             unknown_ids,
+            shares,
         }
     }
 
@@ -1017,7 +1028,7 @@ pub(crate) async fn resolve_version(
         ("called" = Option<bool>, Query, description = "Answer only what the mock's request log (any session) names: the operations called, the types they touch, the gaps naming one of those operations, or naming no operation and one of those types, or skipping a route of one of those types, and their refused entries and authors; gaps about the description as a whole are kept. `gaps_left_out` counts the gaps left out. Combines with `operation` and `type`"),
     ),
     responses(
-        (status = 200, description = "The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. `unknown_ids` gives each type read by a path parameter its answer to an id the session does not hold (`404` or `generate`) and why.", body = WorldView),
+        (status = 200, description = "The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. `unknown_ids` gives each type read by a path parameter its answer to an id the session does not hold (`404` or `generate`) and why. `shares` names the group the mock keeps its sessions under and whether it is the default one of its domain.", body = WorldView),
         (status = 400, description = "The version is neither a number nor `active`, or `called` is not a boolean", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such mock or version, or no active version", body = Problem, content_type = "application/problem+json"),
     )
@@ -1045,7 +1056,8 @@ pub async fn get_world(
         m.behavior.consistency == mb_store::Consistency::On,
     );
     let unknown_ids = UnknownIdsView::new(&types, m.behavior.unknown_ids);
-    let mut view = WorldView::new(v.version, eff, unknown_ids);
+    let shares = st.group_of(&access.ws, &m.name).await?;
+    let mut view = WorldView::new(v.version, eff, unknown_ids, shares);
     // Read from the whole view, before `narrow` drops the gaps whose types
     // it takes.
     let called = if filter.called {

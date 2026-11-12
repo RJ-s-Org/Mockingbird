@@ -1606,3 +1606,257 @@ async fn profile_used_through_the_policy_rebuilds_its_mocks() {
     call(&router, "GET", "localhost", "/a/orders", None).await;
     assert_eq!(secrets.take(), counts(&[("env:R", 1)]));
 }
+
+/// A REST contract and a GraphQL schema of one API, for the `shares` groups.
+const SHARED_REST: &str = r##"
+openapi: 3.0.3
+info: {title: notes, version: "1"}
+paths:
+  /notes:
+    post:
+      operationId: createNote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [title], properties: {title: {type: string}}}
+      responses:
+        "201":
+          description: created
+          content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}
+  /notes/{number}:
+    get:
+      operationId: getNote
+      parameters: [{name: number, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200":
+          description: the note
+          content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}
+        "404": {description: missing}
+components:
+  schemas:
+    Note:
+      type: object
+      required: [number, title]
+      properties:
+        number: {type: integer}
+        title: {type: string}
+"##;
+
+const SHARED_SDL: &str = r#"
+type Note { id: ID! number: Int! title: String! }
+type Query { noteByNumber(number: Int!): Note }
+type Mutation { createNote(title: String!): Note }
+"#;
+
+/// A mock at `prefix` answering for `hosts`, with `shares` set as given, serving
+/// `source`.
+async fn create_sharing(
+    store: &Arc<dyn ControlStore>,
+    name: &str,
+    prefix: &str,
+    hosts: &[&str],
+    shares: Option<&str>,
+    source: &str,
+) -> Mock {
+    let mock = store
+        .create_mock(
+            DEFAULT_WORKSPACE,
+            NewMock {
+                name: name.into(),
+                route_prefix: Some(prefix.into()),
+                persona: None,
+                llm_profile: None,
+                header_overrides: true,
+                source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
+                data_plane_auth: Default::default(),
+                hosts: hosts.iter().map(|h| h.to_string()).collect(),
+                behavior: MockBehavior {
+                    shares: shares.map(str::to_owned),
+                    ..Default::default()
+                },
+                webhooks: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    activate(store, &mock, source).await;
+    mock
+}
+
+/// Creates a note over REST on `rest_host`, then reads its number over GraphQL on
+/// `gql_host`: the title read back.
+async fn note_across(router: &axum::Router, rest_host: &str, gql_host: &str) -> Value {
+    let (status, made) = call(
+        router,
+        "POST",
+        rest_host,
+        "/notes",
+        Some(json!({"title": "Over REST"})),
+    )
+    .await;
+    assert_eq!(status, 201, "{made}");
+    let number = made["number"].as_u64().unwrap();
+    let (status, read) = call(
+        router,
+        "POST",
+        gql_host,
+        "/graphql",
+        Some(json!({"query": format!("{{ noteByNumber(number: {number}) {{ number title }} }}")})),
+    )
+    .await;
+    assert_eq!(status, 200, "{read}");
+    read["data"]["noteByNumber"]["title"].clone()
+}
+
+/// A REST mock and a GraphQL mock of one registrable domain that set no `shares`
+/// join its default group: a record created over one is read over the other.
+#[tokio::test]
+async fn mocks_of_one_domain_share_sessions_by_default() {
+    let store = store().await;
+    let host = "api.example.test";
+    create_sharing(&store, "rest", "/", &[host], None, SHARED_REST).await;
+    create_sharing(&store, "gql", "/graphql", &[host], None, SHARED_SDL).await;
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps(store.clone())).await.unwrap();
+    let title = note_across(&registry.router(), host, host).await;
+    assert_eq!(title, "Over REST");
+}
+
+/// `shares: none` keeps a mock out of its domain's default group.
+#[tokio::test]
+async fn shares_none_keeps_a_mock_out_of_the_default_group() {
+    let store = store().await;
+    let host = "api.example.test";
+    create_sharing(&store, "rest", "/", &[host], None, SHARED_REST).await;
+    create_sharing(&store, "gql", "/graphql", &[host], Some("none"), SHARED_SDL).await;
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps(store.clone())).await.unwrap();
+    let title = note_across(&registry.router(), host, host).await;
+    assert_ne!(title, "Over REST");
+}
+
+/// Mocks of different registrable domains share nothing.
+#[tokio::test]
+async fn mocks_of_different_domains_do_not_share() {
+    let store = store().await;
+    create_sharing(
+        &store,
+        "rest",
+        "/",
+        &["api.example.test"],
+        None,
+        SHARED_REST,
+    )
+    .await;
+    create_sharing(
+        &store,
+        "gql",
+        "/graphql",
+        &["api.other.test"],
+        None,
+        SHARED_SDL,
+    )
+    .await;
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps(store.clone())).await.unwrap();
+    let title = note_across(&registry.router(), "api.example.test", "api.other.test").await;
+    assert_ne!(title, "Over REST");
+}
+
+/// A mock added beside a mounted one of its domain regroups both: the mounted one
+/// is rebuilt into the default group too.
+#[tokio::test]
+async fn adding_a_mock_of_the_domain_regroups_the_mounted_one() {
+    let store = store().await;
+    let host = "api.example.test";
+    create_sharing(&store, "rest", "/", &[host], None, SHARED_REST).await;
+    let deps = deps(store.clone());
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    create_sharing(&store, "gql", "/graphql", &[host], None, SHARED_SDL).await;
+    registry.reload_mock(&deps, DEFAULT_WORKSPACE, "gql").await;
+    let title = note_across(&registry.router(), host, host).await;
+    assert_eq!(title, "Over REST");
+}
+
+/// The session holders a REST create on `host` through `router` writes under.
+async fn holder_of_a_create(deps: &RuntimeDeps, router: &axum::Router, host: &str) -> Vec<String> {
+    let (status, made) = call(router, "POST", host, "/notes", Some(json!({"title": "t"}))).await;
+    assert_eq!(status, 201, "{made}");
+    let mut holders = Vec::new();
+    for holder in ["rest", "example.test"] {
+        if !deps
+            .state
+            .sessions(DEFAULT_WORKSPACE, holder)
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            holders.push(holder.to_owned());
+        }
+    }
+    holders
+}
+
+/// A mounted mock leaves its domain's default group when the other member is
+/// deleted, moves to another domain or opts out (`shares: none`): it is rebuilt
+/// under its own name.
+#[tokio::test]
+async fn a_peer_deleted_moved_away_or_opting_out_regroups_the_mounted_mock() {
+    for change in ["delete", "move", "none"] {
+        let store = store().await;
+        let host = "api.example.test";
+        create_sharing(&store, "rest", "/", &[host], None, SHARED_REST).await;
+        let gql = create_sharing(&store, "gql", "/graphql", &[host], None, SHARED_SDL).await;
+        let deps = deps(store.clone());
+        let registry = MockRegistry::new();
+        registry.reload_all(&deps).await.unwrap();
+        if change == "delete" {
+            store.delete_mock(DEFAULT_WORKSPACE, "gql").await.unwrap();
+        } else {
+            let mut changed = gql.clone();
+            if change == "move" {
+                changed.hosts = vec!["api.other.test".into()];
+            } else {
+                changed.behavior.shares = Some("none".into());
+            }
+            store.update_mock(&changed).await.unwrap();
+        }
+        registry.reload_mock(&deps, DEFAULT_WORKSPACE, "gql").await;
+        assert_eq!(
+            holder_of_a_create(&deps, &registry.router(), host).await,
+            ["rest"],
+            "{change}"
+        );
+    }
+}
+
+/// Mocks changed together and rebuilt in one batch end in the group the stored
+/// mocks give, whichever was built first: two that opted out of their domain's
+/// group and both drop `shares: none`.
+#[tokio::test]
+async fn mocks_rebuilt_in_one_batch_end_in_their_group() {
+    let store = store().await;
+    let host = "api.example.test";
+    let none = Some("none");
+    let rest = create_sharing(&store, "rest", "/", &[host], none, SHARED_REST).await;
+    let gql = create_sharing(&store, "gql", "/graphql", &[host], none, SHARED_SDL).await;
+    let deps = deps(store.clone());
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    assert_ne!(
+        note_across(&registry.router(), host, host).await,
+        "Over REST"
+    );
+    for mut m in [rest, gql] {
+        m.behavior.shares = None;
+        store.update_mock(&m).await.unwrap();
+    }
+    // Both name no profile: one batch rebuilds them together.
+    registry.reload_default_profile_mocks(&deps).await;
+    let title = note_across(&registry.router(), host, host).await;
+    assert_eq!(title, "Over REST");
+}

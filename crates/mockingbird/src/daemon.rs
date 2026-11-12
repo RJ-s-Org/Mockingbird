@@ -548,7 +548,12 @@ pub fn default_profile_env_names(config: &Path) -> Vec<String> {
 /// binary cannot be located or started, or the server exits before it is
 /// ready.
 pub async fn start(args: &StartArgs) -> anyhow::Result<Value> {
-    let (info, child) = start_child(args).await?;
+    let (mut info, child) = start_child(args).await?;
+    // Which `shares` group each mock of the config keeps its sessions in, and
+    // the mocks of one host in none together: the CLI and MCP answers alike.
+    if let Some(config) = &args.config {
+        crate::shares::add_start_notice(&mut info, config);
+    }
     if let Ok(mut started) = STARTED.lock() {
         started.push(child);
     }

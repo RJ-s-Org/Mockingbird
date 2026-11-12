@@ -63,6 +63,7 @@ mod profiles;
 mod requests;
 mod scenarios;
 mod sessions;
+mod shares;
 mod webhook;
 pub mod webhook_deliveries;
 mod workspaces;
@@ -88,6 +89,7 @@ pub use openapi::{ApiDoc, openapi_document};
 use problem::ApiResult;
 pub use problem::Problem;
 pub use scenarios::{invalid_scenario_set, undeclared_scenario_status};
+pub use shares::{SHARES_NONE, SharesGroup, SharesGroupOf, named_group};
 pub use webhook::{WebhookSink, signature};
 pub use workspaces::{CreateWorkspace, DeleteParams, PatchWorkspace, WorkspaceView};
 pub use world::{WORLD_MOUNT_WAIT, WorldMount, WorldMounts};
@@ -149,6 +151,10 @@ pub struct AdminState {
     pub world_mounts: Option<Arc<dyn WorldMounts>>,
     /// How long a world write waits for that ([`WORLD_MOUNT_WAIT`]).
     pub world_mount_wait: std::time::Duration,
+    /// Works out the `shares` group a mock keeps its sessions under from its
+    /// workspace's mocks, as the server's running mocks do: the session
+    /// endpoints reach its sessions under it. [`named_group`] by default.
+    pub shares_group: SharesGroupOf,
 }
 
 impl std::fmt::Debug for AdminState {
@@ -199,6 +205,7 @@ impl AdminState {
             ext: Extensions::default(),
             world_mounts: None,
             world_mount_wait: WORLD_MOUNT_WAIT,
+            shares_group: named_group,
         }
     }
 }
