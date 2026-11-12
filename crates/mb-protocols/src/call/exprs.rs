@@ -241,6 +241,8 @@ pub(super) struct SessionHost<'r> {
     /// and whether a call moved them.
     counters: Option<Map<String, Value>>,
     counted: bool,
+    /// How many ids `mint` drew: an identity that drew one is redrawn when held.
+    minted: u32,
     /// The children of the record a computed member is answered for, by child type
     /// ([`super::computed`]), and that record's bare id.
     pub(super) children: HashMap<String, Children>,
@@ -308,6 +310,7 @@ impl<'r> SessionHost<'r> {
             asked: Vec::new(),
             counters: None,
             counted: false,
+            minted: 0,
             children: HashMap::new(),
             parent: None,
         }
@@ -464,6 +467,7 @@ impl Host for SessionHost<'_> {
         if self.probing {
             return None;
         }
+        self.minted = self.minted.saturating_add(1);
         let seed = MintSeed::new(self.rt, self.session, self.call);
         let schema = json!({"type": "string", "pattern": pattern});
         draw_id_as(self.rt, (seed, "expr", pattern), &schema)
@@ -755,7 +759,28 @@ pub(super) async fn set_values(
         let value = match kept_identity.take() {
             Some((_, value)) => value,
             // A `null` identity names no record: the minted one stays.
-            None => value_of(&ops.set[i], &bound, &mut host).filter(|v| !v.is_null()),
+            None => {
+                let t = plan.op.resource_type.as_deref().unwrap_or_default();
+                let mut value = None;
+                // An id `mint()` drew that the session holds (a runtime built anew
+                // counts its draws from zero) is drawn again, as the executor's are;
+                // when each draw is held, the executor's minted one stays.
+                for _ in 0..records::MINT_ATTEMPTS {
+                    let minted = host.minted;
+                    let drawn = value_of(&ops.set[i], &bound, &mut host).filter(|v| !v.is_null());
+                    let held = match drawn.as_ref().and_then(id_string) {
+                        Some(id) if host.minted != minted => {
+                            records::held_by_key(state, &plan.session, t, &id).await
+                        }
+                        _ => None,
+                    };
+                    if held.is_none() {
+                        value = drawn;
+                        break;
+                    }
+                }
+                value
+            }
         };
         if let Some(v) = &value
             && bound.record.is_object()

@@ -351,8 +351,8 @@ fn items(doc: Option<&Value>, at: Option<&Pointer>) -> Vec<Value> {
 }
 
 /// How many ids are drawn for one record before giving up on one the session does not
-/// hold.
-const MINT_ATTEMPTS: u32 = 8;
+/// hold (a world `mint()` identity's too, see [`super::exprs::set_values`]).
+pub(super) const MINT_ATTEMPTS: u32 = 8;
 
 /// Gives each record [`created`] finds for `op`'s create (of type `t`) that holds no
 /// identity value one, drawn as a header-named create's id is
