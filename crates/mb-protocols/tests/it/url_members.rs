@@ -576,4 +576,141 @@ components:
             format!("https://tracker.test/acme/roadmap/merge/{number}")
         );
     }
+
+    /// A neutral tracker with no world description and no `shares` group: projects
+    /// are looked up by owner and name, tickets hold an absolute link and a path.
+    const LOOKUP_SDL: &str = r#"
+"""An RFC 3986, RFC 3987, and RFC 6570 (level 4) compliant URI string."""
+scalar URI
+type User { id: ID! login: String! }
+type Project { id: ID! owner: User! name: String! url: URI }
+type Ticket { id: ID! number: Int! title: String! url: URI! resourcePath: URI! }
+input CreateTicketInput { projectId: ID! title: String! }
+type CreateTicketPayload { ticket: Ticket }
+type Query { project(owner: String!, name: String!): Project node(id: ID!): Ticket }
+type Mutation { createTicket(input: CreateTicketInput!): CreateTicketPayload }
+"#;
+
+    /// Creates a ticket under project `P_1` (owned by `acme`, named `roadmap`, holding
+    /// `project_url` when given) on a mock served at host `tracker.test` with only its
+    /// inferred world; the model answers `answer` when given (a seeded call), else the
+    /// executor fills the record. The ticket's `url`, `resourcePath` and `number`, as
+    /// answered and as held.
+    async fn create_ticket(project_url: Option<&str>, answer: Option<Value>) -> (Value, Value) {
+        let bundle = compile(LOOKUP_SDL.as_bytes()).unwrap();
+        let base = mb_mcm::world::tier0(&bundle);
+        let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+        let key = SessionKey {
+            workspace: "default".into(),
+            mock: "tracker".into(),
+            session: "s1".into(),
+        };
+        let mut project = json!({"__typename": "Project", "id": "P_1", "name": "roadmap",
+            "owner": {"__typename": "User", "id": "U_1", "login": "acme"}});
+        if let Some(url) = project_url {
+            project["url"] = json!(url);
+        }
+        store
+            .upsert(
+                &key,
+                StoredResource {
+                    resource_type: "project".into(),
+                    id: "P_1".into(),
+                    data: project,
+                },
+            )
+            .await
+            .unwrap();
+        let seeded = answer.is_some();
+        let provider = answer.map(|a| {
+            Arc::new(mb_llm::ScriptedProvider::new(vec![Ok(a.to_string())]))
+                as Arc<dyn mb_llm::Provider>
+        });
+        let mut rt = MockRuntime::new(
+            "tracker",
+            Arc::new(bundle),
+            Arc::new(Engine::new(provider, EngineConfig::default())),
+            Arc::clone(&store),
+        )
+        .with_world(&base, &base, 1);
+        rt.hosts = vec!["tracker.test".into()];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = mb_protocols::graphql::try_router(Arc::new(rt)).unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let query = r#"mutation { createTicket(input: {projectId: "P_1", title: "Router panics"}) {
+            ticket { id number url resourcePath } } }"#;
+        let mut request = reqwest::Client::new()
+            .post(format!("http://{addr}/graphql"))
+            .header("content-type", "application/json")
+            .header("x-mockingbird-session", "s1");
+        if seeded {
+            request = request.header("x-mockingbird-seed", "1");
+        }
+        let body: Value = request
+            .body(json!({ "query": query }).to_string())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(body.get("errors").is_none(), "{body}");
+        let ticket = body["data"]["createTicket"]["ticket"].clone();
+        let id = ticket["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{body}"))
+            .to_owned();
+        let held = store.get(&key, "ticket", &id).await.unwrap().unwrap();
+        (ticket, held.data)
+    }
+
+    /// The links a ticket numbered `number` should hold under `parent_path`: the
+    /// absolute `url` on the mock's host and the same path as `resourcePath`.
+    fn assert_links(ticket: &Value, held: &Value, parent_path: &str) {
+        let number = ticket["number"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("{ticket}"));
+        let path = format!("{parent_path}/tickets/{number}");
+        let url = format!("https://tracker.test{path}");
+        for record in [ticket, held] {
+            assert_eq!(record["url"], url.as_str(), "{record}");
+            assert_eq!(record["resourcePath"], path.as_str(), "{record}");
+        }
+    }
+
+    /// A parent holding no link has its own built first, from the arguments its type
+    /// is looked up by (`project(owner:, name:)`), on the mock's host: the created
+    /// record's drawn relative links become absolute ones under it, ending with its
+    /// number, and its path-like link the same path.
+    #[tokio::test]
+    async fn a_parent_holding_no_link_has_its_own_built_from_its_lookup() {
+        let drawn = json!({
+            "__typename": "CreateTicketPayload",
+            "ticket": {"__typename": "Ticket", "id": "T_1", "number": 43,
+                "title": "Router panics", "url": "/harbor/nectar", "resourcePath": "/sable/sable"}
+        });
+        let (ticket, held) = create_ticket(None, Some(drawn)).await;
+        assert_eq!(ticket["number"], 43, "{ticket}");
+        assert_links(&ticket, &held, "/acme/roadmap");
+        // The executor's record, filled with no model, the same.
+        let (ticket, held) = create_ticket(None, None).await;
+        assert_links(&ticket, &held, "/acme/roadmap");
+    }
+
+    /// A parent holding a link keeps the placement under it.
+    #[tokio::test]
+    async fn a_parent_s_held_link_is_still_what_the_record_goes_under() {
+        let held_url = "https://tracker.test/orgs/acme/roadmap";
+        let drawn = json!({
+            "__typename": "CreateTicketPayload",
+            "ticket": {"__typename": "Ticket", "id": "T_1", "number": 43,
+                "title": "Router panics", "url": "/harbor/nectar", "resourcePath": "/sable/sable"}
+        });
+        let (ticket, held) = create_ticket(Some(held_url), Some(drawn)).await;
+        assert_links(&ticket, &held, "/orgs/acme/roadmap");
+        let (ticket, held) = create_ticket(Some(held_url), None).await;
+        assert_links(&ticket, &held, "/orgs/acme/roadmap");
+    }
 }
