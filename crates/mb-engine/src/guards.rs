@@ -449,6 +449,9 @@ impl Engine {
         }
         self.scrub_seeded(&mut value, checks.pii_seed("answer", 0));
         validator.mend_member_names(&mut value);
+        if checks.cut_lists && crate::prompt::without_cut_list_notes(&mut value, 0) {
+            tracing::info!("took out list notes the answer copied from its prompt");
+        }
         if let Some(fill) = fill
             && let Some(filled) = self.fill_budgeted(validator, &value, fill, checks.seed)
         {
@@ -573,6 +576,9 @@ pub(crate) struct Checks<'a> {
     /// the call (see [`crate::Engine::repair_seed`]). `None` draws them at
     /// random.
     pub seed: Option<u64>,
+    /// The prompt showed a target trimmed, its long lists ending in a
+    /// [`crate::prompt::cut_list_note`]: one the answer copies is taken out.
+    pub cut_lists: bool,
 }
 
 impl Checks<'_> {

@@ -259,6 +259,40 @@ async fn an_embed_read_is_shown_its_record_s_nested_values() {
     );
 }
 
+/// A model copying the note that ends a list its prompt showed cut into the parts it
+/// generates is answered without it: the prompt says the note is no data, and the
+/// answer has it taken out, so the parts it generates are kept.
+#[tokio::test]
+async fn a_copied_cut_list_note_is_never_served() {
+    let note = mb_engine::prompt::cut_list_note(4);
+    let mut answer = movie_details(1005, "en-US");
+    for pointer in ["/credits/cast", "/release_dates/results", "/genres"] {
+        if let Some(Value::Array(items)) = answer.pointer_mut(pointer) {
+            items.push(json!(note));
+        }
+    }
+    answer["external_ids"]["imdb_id"] = json!("tt1112223");
+    let h = held(vec![answer]).await;
+    let body = generated(&h, &format!("/3/movie/1005?language=en-US&{ALL_PARTS}")).await;
+    let prompt = last_prompt(&h.provider);
+    // The prompt showed a list cut, and says its note is no data.
+    assert!(prompt.contains(" more not shown"), "{prompt}");
+    assert!(prompt.contains("never copy it into the answer"), "{prompt}");
+
+    // The asked parts are the model's, without the note; the stored values stand.
+    assert!(!body.to_string().contains("more not shown"), "{body}");
+    assert_eq!(body["external_ids"]["imdb_id"], "tt1112223", "{body}");
+    assert_eq!(
+        body["release_dates"],
+        movie_details(1005, "en-US")["release_dates"],
+        "{body}"
+    );
+    let stored = held_movie(1005, "en-US");
+    for member in ["genres", "credits"] {
+        assert_eq!(body[member], stored[member], "{member}: {body}");
+    }
+}
+
 /// Posts by authors; a post's read can embed its comments.
 const BLOG: &str = r##"
 openapi: 3.0.0

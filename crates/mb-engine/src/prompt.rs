@@ -19,6 +19,42 @@ use crate::{GenerationContext, MessageContext, OperationCall, StreamContext};
 /// Maximum number of related resources included in a prompt.
 pub const MAX_RELATED: usize = 20;
 
+/// The note that ends a list a prompt shows cut to its first items
+/// ([`GenerationContext::shown_target`]), `more` items left out. Not data: an answer
+/// that copies it has it taken out before it is checked.
+pub fn cut_list_note(more: usize) -> String {
+    format!("… {more} more not shown")
+}
+
+/// Whether `text` is a [`cut_list_note`].
+pub(crate) fn is_cut_list_note(text: &str) -> bool {
+    text.strip_prefix("… ")
+        .and_then(|rest| rest.strip_suffix(" more not shown"))
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `value` without the [`cut_list_note`]s its lists hold; whether it held any.
+pub(crate) fn without_cut_list_notes(value: &mut Value, depth: usize) -> bool {
+    if depth > 32 {
+        return false;
+    }
+    match value {
+        Value::Array(items) => {
+            let before = items.len();
+            items.retain(|item| !item.as_str().is_some_and(is_cut_list_note));
+            let mut removed = items.len() != before;
+            for item in items {
+                removed |= without_cut_list_notes(item, depth + 1);
+            }
+            removed
+        }
+        Value::Object(members) => members.values_mut().fold(false, |removed, member| {
+            without_cut_list_notes(member, depth + 1) | removed
+        }),
+        _ => false,
+    }
+}
+
 /// Maximum bytes of serialized request body included in a prompt.
 pub const MAX_BODY_BYTES: usize = 8 * 1024;
 
@@ -1028,6 +1064,15 @@ must follow them.\n{}\n</scenario>",
             None => data(shown),
         };
         let _ = writeln!(s, "<existing_resource>\n{shown}\n</existing_resource>");
+        if ctx.shown_target.is_some() && ctx.restates.is_none() {
+            let _ = writeln!(
+                s,
+                "<existing_resource> is shown trimmed: a long text may be cut (ending in `…`) \
+and a long list cut to its first items, then a note such as `\"{}\"`. That note is not data: \
+never copy it into the answer.",
+                cut_list_note(3)
+            );
+        }
         if let Some(representation) = ctx.restates {
             let _ = writeln!(
                 s,

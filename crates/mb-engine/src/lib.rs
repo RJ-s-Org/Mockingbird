@@ -1175,6 +1175,7 @@ impl Engine {
                             effects_envelope,
                             refusals: &refusals,
                             seed: self.repair_seed(bundle, &op.id, [call]),
+                            cut_lists: ctx.shown_target.is_some(),
                         },
                         &mut usage,
                     )
@@ -1359,6 +1360,7 @@ impl Engine {
                     effects_envelope: false,
                     refusals: &[],
                     seed: self.repair_seed(bundle, "query", parts.iter().map(|p| p.call)),
+                    cut_lists: false,
                 },
                 &mut usage,
             )
