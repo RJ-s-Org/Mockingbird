@@ -641,6 +641,32 @@ fn nullable_lists_are_never_null() {
     assert_eq!(at_limit, json!([]));
 }
 
+/// A nullable object (GraphQL's `repository: Repository`, imported as `anyOf` with
+/// `null`) or interface is drawn as an object; a nullable scalar may still be null.
+#[test]
+fn nullable_objects_are_drawn_as_objects() {
+    let object = json!({"anyOf": [
+        {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+        {"type": "null"}
+    ]});
+    for v in draws(object, 200) {
+        assert!(v.is_object(), "{v}");
+    }
+    // A nullable interface: a union of object types, or null.
+    let union = json!({"anyOf": [
+        {"anyOf": [
+            {"type": "object", "properties": {"login": {"type": "string"}}, "required": ["login"]},
+            {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+        ]},
+        {"type": "null"}
+    ]});
+    for v in draws(union, 200) {
+        assert!(v.is_object(), "{v}");
+    }
+    let scalar = json!({"anyOf": [{"type": "string"}, {"type": "null"}]});
+    assert!(draws(scalar, 200).iter().any(Value::is_null));
+}
+
 #[test]
 fn unconstrained_strings_stay_short_and_new_formats_parse() {
     for v in draws(json!({"type": "string", "minLength": 10}), 50) {
