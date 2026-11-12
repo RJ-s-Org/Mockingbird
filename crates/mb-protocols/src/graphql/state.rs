@@ -274,6 +274,20 @@ impl Walk<'_> {
                     && let Some(props) = props
                 {
                     let mut data = by_field_name(value, sel);
+                    // A member looked up by its own arguments (`repository(name:)`) is
+                    // another record for each value, stored under its own type: the
+                    // parent does not hold it, or a read asking for another one would
+                    // be answered with this one.
+                    if let Value::Object(fields) = &mut data {
+                        for child in sel.fields.values() {
+                            if let Some(field) = props.get(&child.name)
+                                && super::select::lookup_argument(field, &self.bundle.defs, child)
+                                    .is_some()
+                            {
+                                fields.remove(&child.name);
+                            }
+                        }
+                    }
                     if let (Some(parent), Value::Object(fields)) = (parent, &mut data) {
                         link_parent(props, parent, fields);
                     }

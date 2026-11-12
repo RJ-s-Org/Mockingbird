@@ -529,6 +529,20 @@ async fn generate_in(
                             Err(Failure::new(404, detail))
                         }
                         Ok(mut generated) => {
+                            // A nested lookup answers the value it was asked for
+                            // (`repository(name: "linux")` → `name: "linux"`).
+                            if was_narrowed
+                                && op.kind == OperationKind::Query
+                                && (200..300).contains(&generated.status)
+                                && generated.source != Source::State
+                                && plan.scenario.is_none()
+                                && let (Some(body), Some(schema)) = (
+                                    generated.body.as_mut(),
+                                    op.success_output().and_then(|o| o.schema.as_ref()),
+                                )
+                            {
+                                super::select::echo_lookups(&rt.bundle, schema, selection, body);
+                            }
                             if was_narrowed
                                 && rt.consistency
                                 && op.kind == OperationKind::Query
