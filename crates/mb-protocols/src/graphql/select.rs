@@ -427,7 +427,7 @@ fn properties(value: &Value, defs: &Map<String, Value>, sel: &Selection) -> Map<
 /// which clients read as "not found". Only the prompt says so; the schema
 /// still allows `null`, so a scenario, the world or stored state can still
 /// answer one.
-fn lookup_argument<'a>(
+pub(crate) fn lookup_argument<'a>(
     schema: &Value,
     defs: &Map<String, Value>,
     child: &'a Selection,
@@ -491,21 +491,25 @@ fn echo_in(
                 let (Some(member), Some(field)) = (obj.get_mut(key), props.get(&child.name)) else {
                     continue;
                 };
-                if let (Value::Object(found), Some(arg)) =
-                    (&mut *member, lookup_argument(field, &bundle.defs, child))
-                    && let Some(given) = child.args.get(arg)
-                {
-                    let fits = |held: &Value| match (held, given) {
-                        (Value::String(_), Value::String(_))
-                        | (Value::Number(_), Value::Number(_)) => Some(given.clone()),
-                        (Value::String(_), Value::Number(n)) => Some(Value::String(n.to_string())),
-                        _ => None,
-                    };
-                    for (k, grandchild) in &child.fields {
-                        if grandchild.name == arg
-                            && let Some(echo) = found.get(k).and_then(fits)
-                        {
-                            found.insert(k.clone(), echo);
+                if let Value::Object(found) = &mut *member {
+                    for arg in lookup_arguments(field, &bundle.defs, child) {
+                        let Some(given) = child.args.get(arg) else {
+                            continue;
+                        };
+                        let fits = |held: &Value| match (held, given) {
+                            (Value::String(_), Value::String(_))
+                            | (Value::Number(_), Value::Number(_)) => Some(given.clone()),
+                            (Value::String(_), Value::Number(n)) => {
+                                Some(Value::String(n.to_string()))
+                            }
+                            _ => None,
+                        };
+                        for (k, grandchild) in &child.fields {
+                            if grandchild.name == arg
+                                && let Some(echo) = found.get(k).and_then(fits)
+                            {
+                                found.insert(k.clone(), echo);
+                            }
                         }
                     }
                 }
@@ -514,6 +518,31 @@ fn echo_in(
         }
         _ => {}
     }
+}
+
+/// Every argument of `child` that [`lookup_argument`] would take: a field looked up by
+/// two of its own values (`metafield(namespace:, key:)`) answers both.
+fn lookup_arguments<'a>(
+    schema: &Value,
+    defs: &Map<String, Value>,
+    child: &'a Selection,
+) -> Vec<&'a str> {
+    let Some(props) = super::nested::def_ref(schema)
+        .and_then(|name| defs.get(name)?.get("properties")?.as_object())
+    else {
+        return Vec::new();
+    };
+    child
+        .args
+        .iter()
+        .filter(|(name, value)| {
+            matches!(value, Value::String(_) | Value::Number(_))
+                && props
+                    .get(*name)
+                    .is_some_and(|p| super::nested::is_scalar(p, defs) && !is_enum(p, defs))
+        })
+        .map(|(name, _)| name.as_str())
+        .collect()
 }
 
 /// Whether a scalar property schema is an enum (through a nullable `anyOf`

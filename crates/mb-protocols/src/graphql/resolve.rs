@@ -534,7 +534,8 @@ async fn generate_in(
                             if was_narrowed
                                 && op.kind == OperationKind::Query
                                 && (200..300).contains(&generated.status)
-                                && !matches!(generated.source, Source::State | Source::Cache)
+                                && generated.source != Source::State
+                                && plan.scenario.is_none()
                                 && let (Some(body), Some(schema)) = (
                                     generated.body.as_mut(),
                                     op.success_output().and_then(|o| o.schema.as_ref()),

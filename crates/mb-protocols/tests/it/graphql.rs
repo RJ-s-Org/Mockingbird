@@ -3280,6 +3280,78 @@ type Query { user(login: String!): User }
     assert_eq!(user["other"]["stars"], 5, "{}", read.body);
 }
 
+/// A parent read once does not answer a later lookup of another value with the record
+/// it held (aliased or not), and a lookup answered `null` stays `null`.
+#[tokio::test]
+async fn a_held_parent_does_not_answer_another_lookup() {
+    const SDL: &str = r#"
+type Repo { id: ID! name: String! stars: Int! }
+type User { id: ID! login: String! repository(name: String!): Repo }
+type Query { user(login: String!): User }
+"#;
+    let user = |extra: Value| {
+        let mut u = json!({"__typename": "User", "id": "U_1", "login": "t"});
+        u.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        u
+    };
+    let repo = |id: &str, name: &str, stars: u32| json!({"__typename": "Repo", "id": id, "name": name, "stars": stars});
+    let provider = scripted(vec![
+        user(json!({"repository": repo("R_1", "git", 1)})),
+        user(json!({"r": {"__typename": "Repo", "n": "alpha", "stars": 9}})),
+        user(json!({"repository": repo("R_3", "beta", 7)})),
+        user(json!({"repository": null})),
+    ]);
+    let base = serve(MockRuntime::new(
+        "gh",
+        Arc::new(compile(SDL.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    ))
+    .await;
+    let session = [("x-mockingbird-session", "s1")];
+    let q = |body: &str| json!({"query": format!(r#"{{ user(login: "t") {{ {body} }} }}"#)});
+    let git = post(
+        &base,
+        q(r#"repository(name: "git") { id name stars }"#),
+        &session,
+    )
+    .await;
+    assert_eq!(
+        git.body["data"]["user"]["repository"]["name"], "git",
+        "{}",
+        git.body
+    );
+    let aliased = post(
+        &base,
+        q(r#"r: repository(name: "linux") { n: name stars }"#),
+        &session,
+    )
+    .await;
+    let r = &aliased.body["data"]["user"]["r"];
+    assert_eq!(r["n"], "linux", "{}", aliased.body);
+    assert_eq!(r["stars"], 9, "{}", aliased.body);
+    let plain = post(
+        &base,
+        q(r#"repository(name: "curl") { name stars }"#),
+        &session,
+    )
+    .await;
+    let r = &plain.body["data"]["user"]["repository"];
+    assert_eq!(r["name"], "curl", "{}", plain.body);
+    assert_eq!(r["stars"], 7, "{}", plain.body);
+    let none = post(&base, q(r#"repository(name: "nope") { name }"#), &session).await;
+    assert!(
+        none.body["data"]["user"]["repository"].is_null(),
+        "{}",
+        none.body
+    );
+}
+
 const VARIANTS: &str = r#"
 type ProductVariant { id: ID! title: String! product: Product }
 type Product { id: ID! handle: String! title: String! variants: [ProductVariant!]! }
