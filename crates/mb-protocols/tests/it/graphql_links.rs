@@ -147,7 +147,8 @@ async fn an_executor_create_is_linked_to_the_record_its_id_argument_names() {
     assert!(held.data["milestone"].is_null(), "{}", held.data);
 }
 
-/// A link a model wrote in a record a mutation's payload nests (`ticketEdge.node.url`)
+/// A link a model wrote in a record a mutation's payload nests (`ticketEdge.node.url`;
+/// a mutation the executor does not answer, as a create held through an edge now is)
 /// that no client can follow is served as a URL: `https//…` (its colon missing) with
 /// its scheme mended, and a drawn word or a mended link on a placeholder host rebuilt as
 /// the record's own link (the mock's host, its plural type name and its number). A
@@ -158,11 +159,11 @@ async fn a_nested_record_s_unfollowable_link_is_served_as_a_url() {
     const TICKETS: &str = r#"
 type Ticket { id: ID! number: Int! title: String! url: String! }
 type TicketEdge { node: Ticket! }
-type AddTicketPayload { ticketEdge: TicketEdge! related: [Ticket!]! }
+type PreviewTicketPayload { ticketEdge: TicketEdge! related: [Ticket!]! }
 type Query { ticket(number: Int!): Ticket }
-type Mutation { addTicket(title: String!): AddTicketPayload }
+type Mutation { previewTicket(title: String!): PreviewTicketPayload }
 "#;
-    let answer = json!({"__typename": "AddTicketPayload",
+    let answer = json!({"__typename": "PreviewTicketPayload",
         "ticketEdge": {"__typename": "TicketEdge", "node": {"__typename": "Ticket",
             "id": "T_9", "number": 9, "title": "Router panics",
             "url": "https//tracker.test/acme/roadmap/tickets/412#comment-3521"}},
@@ -184,7 +185,7 @@ type Mutation { addTicket(title: String!): AddTicketPayload }
     );
     rt.hosts = vec!["tracker.test".into()];
     let router = graphql::try_router(Arc::new(rt)).unwrap();
-    let query = r#"mutation { addTicket(title: "Router panics") {
+    let query = r#"mutation { previewTicket(title: "Router panics") {
         ticketEdge { node { id number url } } related { id url } } }"#;
     let req = axum::http::Request::builder()
         .method("POST")
@@ -201,7 +202,7 @@ type Mutation { addTicket(title: String!): AddTicketPayload }
         .unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body.get("errors").is_none(), "{body}");
-    let payload = &body["data"]["addTicket"];
+    let payload = &body["data"]["previewTicket"];
     assert_eq!(
         payload["ticketEdge"]["node"]["url"],
         "https://tracker.test/acme/roadmap/tickets/412#comment-3521",
