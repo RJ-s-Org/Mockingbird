@@ -20,7 +20,7 @@ const SEEDS: u64 = 16;
 const UNSATISFIABLE: &[(&str, &str)] = &[];
 
 /// Spec files: everything under `examples/apis` except hidden files, the
-/// per-example config, README and example request.
+/// per-example config, README, example request and world description.
 fn contracts() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/apis");
     let mut out = Vec::new();
@@ -37,7 +37,8 @@ fn contracts() -> Vec<PathBuf> {
             } else if !matches!(
                 name.as_str(),
                 "mockingbird.yaml" | "README.md" | "example.json"
-            ) {
+            ) && !name.ends_with(".world.yaml")
+            {
                 out.push(path);
             }
         }

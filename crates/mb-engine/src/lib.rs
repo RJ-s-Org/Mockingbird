@@ -306,7 +306,7 @@ pub struct GenerationContext<'a> {
     pub answer_records: Option<&'a mb_mcm::world::Pointer>,
     /// The representation a read asks its target in (`language=fr-FR`), when that is
     /// not the one the target was stored in: the answer is the target itself, with its
-    /// text in that representation (see [`restate`]).
+    /// text in that representation (see `restate`).
     pub restates: Option<&'a str>,
 }
 
