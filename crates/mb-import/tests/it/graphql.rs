@@ -181,6 +181,77 @@ fn resource_id_argument_is_the_input_field() {
     );
 }
 
+/// A query field with no id argument is looked up by its only argument when that names
+/// a scalar field of its type.
+#[test]
+fn a_lookup_argument_is_the_input_field() {
+    let sdl = br#"
+      scalar URI
+      enum Kind { A B }
+      type User { id: ID! login: String! name: String url: URI! kind: Kind! }
+      type Repository { id: ID! name: String! owner: User! }
+      type Query {
+        user(login: String!): User
+        resource(url: URI!): User
+        byKind(kind: Kind!): User
+        repository(owner: String!, name: String!): Repository
+        either(login: String, nick: String): User
+        two(login: String, name: String): User
+        flagged(login: String!, cached: Boolean): User
+        users(login: String!): [User!]!
+      }
+      schema { query: Query }
+    "#;
+    let b = compile(sdl).unwrap();
+    let input = |id: &str| {
+        b.operation(id)
+            .unwrap()
+            .identity
+            .as_ref()
+            .and_then(|i| i.input_field.clone())
+    };
+    assert_eq!(input("Query.user").as_deref(), Some("login"));
+    assert_eq!(input("Query.resource").as_deref(), Some("url"));
+    // Another argument may change the answer.
+    assert_eq!(input("Query.flagged"), None);
+    // An enum, a required argument naming no field of its own, a list answer.
+    assert_eq!(input("Query.byKind"), None);
+    assert_eq!(input("Query.repository"), None);
+    assert_eq!(input("Query.users"), None);
+    assert_eq!(input("Query.either"), None);
+    assert_eq!(input("Query.two"), None);
+}
+
+/// A type with no `id` is keyed by the member its query looks it up by.
+#[test]
+fn a_type_with_no_id_is_keyed_by_its_lookup_member() {
+    let sdl = br#"
+      type User { login: String! name: String }
+      type Query { user(login: String!): User }
+      schema { query: Query }
+    "#;
+    let b = compile(sdl).unwrap();
+    assert_eq!(
+        b.operation("Query.user").unwrap().identity,
+        Some(Identity {
+            path_param: None,
+            field: "login".into(),
+            input_field: Some("login".into()),
+            path_field: None,
+            record: None,
+        })
+    );
+    // Two lookups by different members key the type by neither.
+    let sdl = br#"
+      type Topic { name: String! slug: String! }
+      type Query { topic(name: String!): Topic topicBySlug(slug: String!): Topic }
+      schema { query: Query }
+    "#;
+    let b = compile(sdl).unwrap();
+    assert_eq!(b.operation("Query.topic").unwrap().identity, None);
+    assert_eq!(b.operation("Query.topicBySlug").unwrap().identity, None);
+}
+
 #[test]
 fn schema_block_renames_root_types() {
     let sdl = br#"

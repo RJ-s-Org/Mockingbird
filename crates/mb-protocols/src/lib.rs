@@ -77,9 +77,18 @@ mod base_url;
     allow(dead_code)
 )]
 mod call;
-pub use call::exec_pool::{MIN_POOL_TOKENS, POOL_SIZE, RecordPool, fill as fill_record_pool};
+pub use call::exec_pool::{
+    MIN_POOL_TOKENS, POOL_SIZE, RecordPool, fill as fill_record_pool, warm_validators,
+};
 pub use call::shared::{SharedEntry, SharedTypes};
 pub mod chaos;
+#[cfg(any(
+    feature = "http-rest",
+    feature = "graphql",
+    feature = "grpc",
+    feature = "soap"
+))]
+mod detach;
 #[cfg_attr(
     not(any(
         feature = "http-rest",

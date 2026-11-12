@@ -18,7 +18,7 @@ use super::ca::LocalCa;
 use super::env::{options_for, proxy_env};
 use super::forward::{forward, forward_client};
 use super::{HostClaims, ProxyState};
-use crate::file_config::{self, FileConfig, Unmapped};
+use crate::file_config::{self, FileConfig, Unmapped, VendorSubdomains};
 use crate::registry::request_host;
 
 /// How often a standalone proxy refreshes the claimed hosts.
@@ -56,7 +56,7 @@ pub enum ProxyCommand {
 #[derive(clap::Args, Debug)]
 pub struct ProxyEnvArgs {
     /// Config file whose `server.host`, `proxy.port` and `proxy.ca_dir`
-    /// apply.
+    /// apply [default: ./mockingbird.yaml when it exists].
     #[arg(short = 'c', long)]
     pub config: Option<PathBuf>,
     /// The proxy's port [default: proxy.port, else 8888].
@@ -70,7 +70,8 @@ pub struct ProxyEnvArgs {
 
 #[derive(clap::Args, Debug, Default)]
 pub struct ProxyRunArgs {
-    /// Config file whose `server` and `proxy` sections apply.
+    /// Config file whose `server` and `proxy` sections apply [default:
+    /// ./mockingbird.yaml when it exists].
     #[arg(short = 'c', long)]
     pub config: Option<PathBuf>,
     /// Bind address [default: proxy.host, else 127.0.0.1]; off loopback the
@@ -87,6 +88,10 @@ pub struct ProxyRunArgs {
     /// pass].
     #[arg(long, value_enum)]
     pub unmapped: Option<Unmapped>,
+    /// What to do with unmapped hosts of a mocked host's registrable domain
+    /// [default: proxy.vendor_subdomains, else block].
+    #[arg(long, value_enum)]
+    pub vendor_subdomains: Option<VendorSubdomains>,
     /// A host (or `host/path-prefix`) answered with placeholder images
     /// (repeatable; adds to proxy.images).
     #[arg(long = "image-host")]
@@ -102,6 +107,7 @@ pub struct StandaloneOptions {
     pub admin_url: String,
     pub ca_dir: PathBuf,
     pub unmapped: Unmapped,
+    pub vendor_subdomains: VendorSubdomains,
     pub images: Vec<String>,
 }
 
@@ -112,6 +118,13 @@ struct RemoteClaims(RwLock<HashSet<String>>);
 impl HostClaims for RemoteClaims {
     fn claims(&self, host: &str) -> bool {
         self.0.read().is_ok_and(|hosts| hosts.contains(host))
+    }
+
+    fn hosts(&self) -> Vec<String> {
+        self.0
+            .read()
+            .map(|hosts| hosts.iter().cloned().collect())
+            .unwrap_or_default()
     }
 }
 
@@ -189,7 +202,14 @@ pub async fn run_standalone(
     });
     let ca = LocalCa::load_or_create(&opts.ca_dir)
         .with_context(|| format!("loading the local CA in {}", opts.ca_dir.display()))?;
-    let state = ProxyState::new(claims, upstream, Arc::new(ca), opts.unmapped, opts.images)?;
+    let state = ProxyState::new(
+        claims,
+        upstream,
+        Arc::new(ca),
+        opts.unmapped,
+        opts.vendor_subdomains,
+        opts.images,
+    )?;
     let served = super::serve(listener, state, stop).await;
     refresher.abort();
     served.map_err(|e| anyhow!("proxy: {e}"))
@@ -235,7 +255,8 @@ pub async fn run(args: ProxyArgs, admin_url: &str) -> anyhow::Result<()> {
         return super::browser::run(browser).await;
     }
     if let Some(ProxyCommand::Env(env)) = args.cmd {
-        let vars = proxy_env(&options_for(env.config.as_deref(), env.port)?)?;
+        let config = super::env::config_or_local(env.config.as_deref());
+        let vars = proxy_env(&options_for(config.as_deref(), env.port)?)?;
         if env.json {
             println!("{}", serde_json::to_string_pretty(&vars)?);
         } else {
@@ -244,8 +265,8 @@ pub async fn run(args: ProxyArgs, admin_url: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     let run = args.run;
-    let mut cfg = match &run.config {
-        Some(path) => file_config::load(path)?,
+    let mut cfg = match super::env::config_or_local(run.config.as_deref()) {
+        Some(path) => file_config::load(&path)?,
         None => FileConfig::default(),
     };
     file_config::apply_env(&mut cfg)?;
@@ -276,6 +297,7 @@ pub async fn run(args: ProxyArgs, admin_url: &str) -> anyhow::Result<()> {
         admin_url: admin_url.to_owned(),
         ca_dir: cfg.proxy.effective_ca_dir()?,
         unmapped,
+        vendor_subdomains: run.vendor_subdomains.unwrap_or(cfg.proxy.vendor_subdomains),
         images,
     };
     let addr = SocketAddr::new(host, port);

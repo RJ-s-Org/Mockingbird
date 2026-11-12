@@ -14,6 +14,7 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
@@ -285,6 +286,26 @@ impl NarrowCache {
     }
 }
 
+/// `sel` with `names`, top-level members of its object, selected where it leaves them
+/// out: a read by a lookup argument (`user(login:)`) generates the record's key and the
+/// member it was looked up by, which the stored record needs whatever the client reads.
+pub(crate) fn with_members(sel: &Selection, names: &[&str]) -> Selection {
+    let mut out = sel.clone();
+    for name in names {
+        let selected = out.fields.values().any(|c| c.names().any(|n| n == *name));
+        if !selected && !out.fields.contains_key(*name) {
+            out.fields.insert(
+                (*name).to_string(),
+                Selection {
+                    name: (*name).to_string(),
+                    ..Selection::default()
+                },
+            );
+        }
+    }
+    out
+}
+
 /// `sel` with the lookup keys (see [`LookupKeys`]) of the record a create
 /// answers added: the answer's own object when its type has an `id`, else
 /// each selected member of the payload that has one
@@ -377,10 +398,16 @@ fn properties(value: &Value, defs: &Map<String, Value>, sel: &Selection) -> Map<
         if let Value::Object(obj) = &mut narrowed
             && !child.args.is_empty()
         {
-            let note = format!(
+            let mut note = format!(
                 "Queried with arguments {}",
                 Value::Object(child.args.clone())
             );
+            if let Some(key) = lookup_argument(schema, defs, child) {
+                let _ = write!(
+                    note,
+                    ": it looks up the one with this `{key}`, which exists; answer it, not null"
+                );
+            }
             let description = match obj.get("description").and_then(Value::as_str) {
                 Some(d) => format!("{d} {note}"),
                 None => note,
@@ -390,6 +417,45 @@ fn properties(value: &Value, defs: &Map<String, Value>, sel: &Selection) -> Map<
         out.insert(key.clone(), narrowed);
     }
     out
+}
+
+/// The argument by which `child`, a field whose schema is `schema`, looks
+/// one record up, if it does: the field returns one object (not a list) and
+/// a string or number argument names a non-enum scalar field of that object
+/// (`repository(name: "deno")` → `name`). The model is told the record
+/// exists: left to itself it often answers such a nullable lookup `null`,
+/// which clients read as "not found". Only the prompt says so; the schema
+/// still allows `null`, so a scenario, the world or stored state can still
+/// answer one.
+fn lookup_argument<'a>(
+    schema: &Value,
+    defs: &Map<String, Value>,
+    child: &'a Selection,
+) -> Option<&'a str> {
+    let props = super::nested::def_ref(schema)
+        .and_then(|name| defs.get(name)?.get("properties")?.as_object())?;
+    child.args.iter().find_map(|(name, value)| {
+        (matches!(value, Value::String(_) | Value::Number(_))
+            && props
+                .get(name)
+                .is_some_and(|p| super::nested::is_scalar(p, defs) && !is_enum(p, defs)))
+        .then_some(name.as_str())
+    })
+}
+
+/// Whether a scalar property schema is an enum (through a nullable `anyOf`
+/// or a `$ref`).
+fn is_enum(schema: &Value, defs: &Map<String, Value>) -> bool {
+    if schema.get("enum").is_some() {
+        return true;
+    }
+    if let Some(def) = super::nested::def_ref(schema).and_then(|n| defs.get(n)) {
+        return def.get("enum").is_some();
+    }
+    schema
+        .get("anyOf")
+        .and_then(Value::as_array)
+        .is_some_and(|branches| branches.iter().any(|b| b.get("enum").is_some()))
 }
 
 /// A body keyed by field names (generated in full) re-keyed by response
@@ -421,7 +487,7 @@ pub(crate) fn rekey(value: Value, sel: &Selection) -> Value {
 /// A narrowed body (keyed by response key) made whole. The engine overlays
 /// the stored `target` of a read and the forced `identity` field by field
 /// name; here each generated key takes its field's member of `target`
-/// (re-keyed below), and each key reading the identity field takes the
+/// (re-keyed below, and merged over what was generated there), and each key reading the identity field takes the
 /// body's member under that name. Then every child with `shares` gets a
 /// copy of the shared key's value (recursively, through lists).
 pub(crate) fn settle(
@@ -434,7 +500,14 @@ pub(crate) fn settle(
         if let Some(Value::Object(stored)) = target {
             for (key, child) in sel.generated() {
                 if let Some(member) = child.names().find_map(|n| stored.get(n)) {
-                    obj.insert(key.clone(), rekey(member.clone(), child));
+                    // Over what was generated: a wider selection keeps what the stored
+                    // member lacks below it.
+                    let stored = rekey(member.clone(), child);
+                    let value = match obj.remove(key) {
+                        Some(generated) => mb_engine::merge_stored(&stored, generated),
+                        None => stored,
+                    };
+                    obj.insert(key.clone(), value);
                 }
             }
         }
@@ -556,6 +629,46 @@ mod tests {
         .as_object()
         .cloned()
         .unwrap_or_default()
+    }
+
+    /// A lookup by a value of its record tells the model the record exists;
+    /// the schema still allows `null`.
+    #[test]
+    fn a_lookup_by_a_value_of_its_record_is_said_to_exist() {
+        let mut defs = defs();
+        defs["User"]["properties"]["repo"] =
+            json!({"anyOf": [{"$ref": "#/$defs/Repo"}, {"type": "null"}]});
+        defs["Repo"]["properties"]["kind"] = json!({"enum": ["PUBLIC", "PRIVATE"]});
+        let narrowed = |args: Value| {
+            let child = aliased("repo", args, sel([("stars", leaf())]));
+            narrow(
+                &json!({"$ref": "#/$defs/User"}),
+                &defs,
+                &sel([("repo", child)]),
+            )["properties"]["repo"]
+                .clone()
+        };
+        let by_name = narrowed(json!({"name": "deno"}));
+        let note = by_name["description"].as_str().unwrap();
+        assert!(
+            note.contains("one with this `name`, which exists"),
+            "{note}"
+        );
+        let branches = by_name["anyOf"].as_array().unwrap();
+        assert!(branches.iter().any(|b| b["type"] == "null"), "{by_name}");
+        // Not lookups: an argument naming no field, a null, a list, an
+        // object, an enum member.
+        for args in [
+            json!({"first": 1}),
+            json!({"name": null}),
+            json!({"name": ["a"]}),
+            json!({"name": {"eq": "a"}}),
+            json!({"kind": "PUBLIC"}),
+        ] {
+            let out = narrowed(args.clone());
+            let note = out["description"].as_str().unwrap();
+            assert!(!note.contains("which exists"), "{args}: {note}");
+        }
     }
 
     #[test]

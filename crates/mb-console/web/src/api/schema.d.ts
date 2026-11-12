@@ -2013,7 +2013,10 @@ export interface components {
             /** @description A configured broker's name; `null` picks automatically. */
             broker?: string | null;
         };
-        /** @description The full profile. A raw `api_key` is rejected: use `secret_ref`. */
+        /**
+         * @description The full profile. `api_key` is accepted as an alias of `secret_ref` when
+         *     it holds a secret reference (`env:NAME`); a raw key is rejected.
+         */
         PutProfile: {
             /** @description OpenAI-compatible base URL. */
             base_url: string;
@@ -2851,7 +2854,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid profile, a raw `api_key`, or a `secret_ref` not allowed by `server.api_secret_refs` */
+            /** @description Invalid profile, a raw key in `api_key`, or a `secret_ref` not allowed by `server.api_secret_refs` */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -5617,7 +5620,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid profile, a raw `api_key`, or a `secret_ref` not allowed by `server.api_secret_refs` */
+            /** @description Invalid profile, a raw key in `api_key`, or a `secret_ref` not allowed by `server.api_secret_refs` */
             422: {
                 headers: {
                     [name: string]: unknown;

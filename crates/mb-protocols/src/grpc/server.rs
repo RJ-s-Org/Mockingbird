@@ -210,9 +210,11 @@ impl GrpcServer {
     /// published mocks by service; anything else is `UNIMPLEMENTED`, and a
     /// request that is not `application/grpc*` is a `415`.
     pub fn router(self: &Arc<Self>) -> Router {
-        Router::new()
-            .fallback(dispatch)
-            .with_state(Arc::clone(self))
+        crate::detach::detached(
+            Router::new()
+                .fallback(dispatch)
+                .with_state(Arc::clone(self)),
+        )
     }
 
     /// `(service, mock)` for every published service, sorted.

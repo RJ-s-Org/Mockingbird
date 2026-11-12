@@ -93,6 +93,10 @@ mockingbird llm test -c mockingbird.yaml --profile openrouter
 
 Finally serve (`mockingbird server start -c mockingbird.yaml`) and check a response header: `X-Mockingbird-Source: llm`. On `fallback`, `X-Mockingbird-Fallback-Reason` says why.
 
+Ports: other projects' Mockingbird servers often hold the defaults (8080, 9090, 50051, proxy 8888). `init` / `init_config` and `server start -c` / `start_server {config}` replace each taken default port that nothing sets explicitly with a free one, write it into `mockingbird.yaml`, and list it under `ports_chosen`. Read the ports from there, never assume 9090. Every command that reads the config, including the MCP tools, `proxy env` and `run`, then finds this project's server. A port set explicitly is never changed. When one is taken, the start fails, naming the other Mockingbird server's config and folder if it is one. Leave that server running and choose another port; do not stop it.
+
 ## Profile fields
 
 A profile in `mockingbird.yaml` (`llm.profiles.<name>`): `base_url`, `model`, `api_key` (secret reference `env:NAME` or `file:/path`), `output_mode` (`none`, `json_object` or `json_schema` (default)), `timeout`, `temperature`, `max_tokens`, `fallback` (another profile tried on failure), `extra_body` (JSON merged into each request, e.g. OpenRouter `reasoning` settings), `headers` (values may embed `${env:NAME}`; credential-like names must). `llm.default_profile` applies to mocks without `llm_profile`.
+
+Into a running server, `put_llm_profile` takes the same shape in one call: `{name: "openrouter", profile: {provider: "openrouter", model: "deepseek/deepseek-v4.1-flash-1017", api_key: "env:OPENROUTER_API_KEY"}}`. `provider` fills `base_url`, the default model, `output_mode`, headers and the key's reference from the preset where the profile leaves them out; `api_key` (or `secret_ref`) is a reference, never the key itself. Over the API the timeout is `timeout_ms` and the fallback `fallback_profile`.

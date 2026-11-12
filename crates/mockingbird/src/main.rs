@@ -260,6 +260,9 @@ async fn server_cmd(cmd: ServerCommand) -> Result<(), Failure> {
                 Err(e) => {
                     print_json(Ok(daemon::start_error(&e)))?;
                     eprintln!("error: {e:#}");
+                    if e.downcast_ref::<daemon::BindError>().is_some() {
+                        eprintln!("{}", daemon::BIND_HINT);
+                    }
                     return Err(Failure::Silent);
                 }
             };

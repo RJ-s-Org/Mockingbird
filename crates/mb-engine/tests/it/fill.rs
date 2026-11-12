@@ -103,7 +103,11 @@ async fn a_nullable_reference_or_optional_object_nothing_set_is_null_and_not_ask
             &schema,
             &known,
             &missing,
-            FillContext { op, call: &call },
+            FillContext {
+                op,
+                call: &call,
+                sent: None,
+            },
         )
         .await;
     assert_eq!(filled.members["status"], "requires_payment_method");
@@ -151,7 +155,11 @@ async fn only_nullable_references_and_optional_objects_ask_no_model() {
             &schema,
             &Map::new(),
             &missing,
-            FillContext { op, call: &call },
+            FillContext {
+                op,
+                call: &call,
+                sent: None,
+            },
         )
         .await;
     for member in ["latest_charge", "shipping", "discounts"] {
@@ -187,7 +195,11 @@ async fn an_optional_object_that_may_not_be_null_is_left_out() {
             &schema,
             &Map::new(),
             &missing,
-            FillContext { op, call: &call },
+            FillContext {
+                op,
+                call: &call,
+                sent: None,
+            },
         )
         .await;
     assert_eq!(filled.members["status"], "open");
@@ -238,7 +250,11 @@ async fn an_optional_object_the_request_sent_is_asked() {
             &schema,
             &Map::new(),
             &missing,
-            FillContext { op, call: &call },
+            FillContext {
+                op,
+                call: &call,
+                sent: None,
+            },
         )
         .await;
     assert_eq!(filled.members["items"], items);
@@ -279,7 +295,11 @@ async fn a_failed_call_leaves_a_sent_optional_object_absent() {
             &schema,
             &Map::new(),
             &missing,
-            FillContext { op, call: &call },
+            FillContext {
+                op,
+                call: &call,
+                sent: None,
+            },
         )
         .await;
     assert!(
@@ -317,9 +337,346 @@ async fn a_failed_call_leaves_a_nullable_object_null() {
             &schema,
             &Map::new(),
             &missing,
-            FillContext { op, call: &call },
+            FillContext {
+                op,
+                call: &call,
+                sent: None,
+            },
         )
         .await;
     assert_eq!(filled.members["next_action"], Value::Null);
     assert!(filled.members["status"].is_string(), "{:?}", filled.members);
+}
+
+const STRUCTURED: &str = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /messages:
+    post:
+      operationId: createMessage
+      responses:
+        "201":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Message"}
+components:
+  schemas:
+    Message:
+      type: object
+      required: [sid, to, status, segments, sent, created_at, due_date, owner_id, html_url, price, body, meta, replies]
+      properties:
+        sid: {type: string, pattern: "^SM[0-9a-f]{8}$"}
+        to: {type: string, pattern: "^\\+1[0-9]{10}$"}
+        status: {type: string, enum: [queued, sent]}
+        segments: {type: integer, minimum: 1}
+        sent: {type: boolean}
+        created_at: {type: string}
+        due_date: {type: string}
+        owner_id: {type: string}
+        ownerId: {type: string}
+        html_url: {type: string}
+        contact: {type: string, format: email}
+        price: {type: number, nullable: true}
+        body: {type: string}
+        meta:
+          type: object
+          required: [kind, labels]
+          properties:
+            kind: {type: string, enum: [a, b]}
+            labels: {type: array, items: {type: string}}
+        replies: {type: array, items: {type: object, properties: {text: {type: string}}}}
+"##;
+
+/// What holds free text: a plain string not named as an id, a link or a moment, and
+/// any object or list holding one; ids, enums, numbers, booleans, formatted and
+/// patterned strings do not.
+#[test]
+fn free_text_is_a_plain_string_not_named_for_an_id_a_link_or_a_moment() {
+    let bundle = compile(STRUCTURED.as_bytes()).unwrap();
+    let op = bundle.operation("createMessage").unwrap();
+    let schema = op.success_output().unwrap().schema.clone().unwrap();
+    let schema = bundle.resolve(&schema).clone();
+    let props = schema["properties"].as_object().unwrap();
+    let mut free: Vec<&str> = props
+        .iter()
+        .filter(|(name, member)| mb_engine::free_text(&bundle, name, member))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    free.sort_unstable();
+    assert_eq!(free, vec!["body", "meta", "replies"]);
+}
+
+/// With only structured members missing (and free text the request sent under
+/// another spelling) no model call is made: the faker writes them, a request value of
+/// the same name (case and separators aside) echoed where it fits, and a plain string
+/// named for a moment as a date-time or date.
+#[tokio::test]
+async fn structured_members_are_filled_with_no_model_call() {
+    let bundle = compile(STRUCTURED.as_bytes()).unwrap();
+    let op = bundle.operation("createMessage").unwrap();
+    let schema = op.success_output().unwrap().schema.clone().unwrap();
+    let (provider, engine) = scripted(vec![]);
+    let call = OperationCall {
+        credentials: Default::default(),
+        operation_id: op.id.clone(),
+        path_params: Map::new(),
+        query: Map::new(),
+        headers: Map::new(),
+        body: Some(json!({"To": "+14155550100", "Body": "down"})),
+    };
+    let missing: Vec<String> = [
+        "sid",
+        "to",
+        "status",
+        "segments",
+        "sent",
+        "created_at",
+        "due_date",
+        "owner_id",
+        "ownerId",
+        "html_url",
+        "contact",
+        "price",
+        "body",
+        "replies",
+    ]
+    .map(String::from)
+    .to_vec();
+    let filled = engine
+        .fill(
+            &bundle,
+            &schema,
+            &Map::new(),
+            &missing,
+            FillContext {
+                op,
+                call: &call,
+                sent: None,
+            },
+        )
+        .await;
+    assert!(provider.requests().is_empty());
+    let m = &filled.members;
+    assert_eq!(m["to"], "+14155550100", "{m:?}");
+    // Free text the request sent under another spelling of the name is echoed.
+    assert_eq!(m["body"], "down", "{m:?}");
+    // A list of objects the request sent nothing for holds none.
+    assert_eq!(m["replies"], json!([]), "{m:?}");
+    assert!(m["sid"].as_str().unwrap().starts_with("SM"), "{m:?}");
+    assert!(["queued", "sent"].contains(&m["status"].as_str().unwrap()));
+    assert!(m["segments"].as_i64().unwrap() >= 1);
+    assert!(m["sent"].is_boolean());
+    let created = m["created_at"].as_str().unwrap();
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(created).is_ok(),
+        "{created}"
+    );
+    let due = m["due_date"].as_str().unwrap();
+    assert!(
+        chrono::NaiveDate::parse_from_str(due, "%Y-%m-%d").is_ok(),
+        "{due}"
+    );
+    assert!(m["contact"].as_str().unwrap().contains('@'), "{m:?}");
+    for member in ["owner_id", "ownerId", "html_url"] {
+        assert!(m[member].is_string(), "{member}: {m:?}");
+    }
+}
+
+/// With free text missing beside structured members, the model is asked for the
+/// free text alone, an object's for its free-text members alone (the faker writes
+/// the rest of it).
+#[tokio::test]
+async fn only_free_text_is_asked_of_the_model() {
+    let bundle = compile(STRUCTURED.as_bytes()).unwrap();
+    let op = bundle.operation("createMessage").unwrap();
+    let schema = op.success_output().unwrap().schema.clone().unwrap();
+    let (provider, engine) = scripted(vec![Ok(json!({
+        "body": "Your check is down.",
+        "meta": {"labels": ["ops"]},
+        "status": "sent"
+    })
+    .to_string())]);
+    let call = OperationCall {
+        credentials: Default::default(),
+        operation_id: op.id.clone(),
+        path_params: Map::new(),
+        query: Map::new(),
+        headers: Map::new(),
+        body: None,
+    };
+    let missing: Vec<String> = ["body", "meta", "status", "created_at"]
+        .map(String::from)
+        .to_vec();
+    let filled = engine
+        .fill(
+            &bundle,
+            &schema,
+            &Map::new(),
+            &missing,
+            FillContext {
+                op,
+                call: &call,
+                sent: None,
+            },
+        )
+        .await;
+    assert_eq!(filled.members["body"], "Your check is down.");
+    assert_eq!(filled.members["meta"]["labels"], json!(["ops"]));
+    let sent = provider.requests();
+    let ResponseFormat::JsonSchema { schema, .. } = &sent[0].response_format else {
+        panic!("no schema sent");
+    };
+    let mut asked: Vec<&String> = schema["properties"].as_object().unwrap().keys().collect();
+    asked.sort();
+    // An enum rides along on a call made anyway.
+    assert_eq!(asked, vec!["body", "meta", "status"]);
+    assert_eq!(filled.members["status"], "sent");
+    let meta: Vec<&String> = schema["properties"]["meta"]["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect();
+    assert_eq!(meta, vec!["labels"], "{schema}");
+    assert!(
+        ["a", "b"].contains(&filled.members["meta"]["kind"].as_str().unwrap()),
+        "{:?}",
+        filled.members
+    );
+    assert!(filled.members["status"].is_string());
+}
+
+const CARDS: &str = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /cards:
+    post:
+      operationId: createCard
+      responses:
+        "201":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Card"}
+components:
+  schemas:
+    Card:
+      type: object
+      required: [id, detail, lines, deleted, closed_at, state]
+      properties:
+        id: {type: string}
+        deleted: {type: boolean}
+        closed_at: {type: string, format: date-time, nullable: true}
+        state: {type: string, enum: [open, closed]}
+        lines: {type: array, items: {type: object, properties: {text: {type: string}}}}
+        detail:
+          nullable: true
+          allOf: [{$ref: "#/components/schemas/Detail"}]
+    Detail:
+      type: object
+      required: [note, kind, pay]
+      properties:
+        note: {type: string}
+        kind: {type: string, enum: [a, b]}
+        pay:
+          oneOf:
+            - {type: object, required: [card], properties: {card: {type: string}}, additionalProperties: false}
+            - {type: object, required: [bank], properties: {bank: {type: string}}, additionalProperties: false}
+"##;
+
+fn card_call(op: &mb_mcm::Operation, body: Option<Value>) -> OperationCall {
+    OperationCall {
+        credentials: Default::default(),
+        operation_id: op.id.clone(),
+        path_params: Map::new(),
+        query: Map::new(),
+        headers: Map::new(),
+        body,
+    }
+}
+
+/// An object is asked for its free text alone (through a nullable `allOf` of a
+/// `$ref`, drawn as an object even where the faker would draw `null`); a union it
+/// was asked whole stays as written, and the faker writes the rest (the enum `kind`). A fresh record's
+/// boolean is false, its nullable scalar null and, with a call made, its enum the
+/// model's.
+#[tokio::test]
+async fn an_object_is_asked_for_its_free_text_and_keeps_nothing_unasked() {
+    let bundle = compile(CARDS.as_bytes()).unwrap();
+    let op = bundle.operation("createCard").unwrap();
+    let schema = op.success_output().unwrap().schema.clone().unwrap();
+    let (provider, engine) = scripted(vec![Ok(json!({
+        "detail": {"note": "Paid at the desk.", "pay": {"card": "visa"}},
+        "state": "open"
+    })
+    .to_string())]);
+    let call = card_call(op, None);
+    let missing: Vec<String> = ["detail", "lines", "deleted", "closed_at", "state"]
+        .map(String::from)
+        .to_vec();
+    let filled = engine
+        .fill(
+            &bundle,
+            &schema,
+            &Map::new(),
+            &missing,
+            FillContext {
+                op,
+                call: &call,
+                sent: None,
+            },
+        )
+        .await;
+    let m = &filled.members;
+    assert_eq!(m["detail"]["note"], "Paid at the desk.", "{m:?}");
+    assert!(
+        ["a", "b"].contains(&m["detail"]["kind"].as_str().unwrap()),
+        "{m:?}"
+    );
+    assert_eq!(m["detail"]["pay"], json!({"card": "visa"}), "{m:?}");
+    assert_eq!(m["lines"], json!([]), "{m:?}");
+    assert_eq!(m["deleted"], false, "{m:?}");
+    assert_eq!(m["closed_at"], Value::Null, "{m:?}");
+    assert_eq!(m["state"], "open", "{m:?}");
+    let sent = provider.requests();
+    let ResponseFormat::JsonSchema { schema, .. } = &sent[0].response_format else {
+        panic!("no schema sent");
+    };
+    let text = schema.to_string();
+    assert!(!text.contains("\"kind\""), "{text}");
+    assert!(
+        !text.contains("\"lines\"") && !text.contains("\"deleted\""),
+        "{text}"
+    );
+}
+
+/// A list the request sent inside a wrapper (the record the executor read) is asked of
+/// the model, which carries the sent items over, not emptied.
+#[tokio::test]
+async fn a_list_sent_inside_a_wrapper_is_asked() {
+    let bundle = compile(CARDS.as_bytes()).unwrap();
+    let op = bundle.operation("createCard").unwrap();
+    let schema = op.success_output().unwrap().schema.clone().unwrap();
+    let lines = json!([{"text": "one"}]);
+    let (provider, engine) = scripted(vec![Ok(json!({"lines": lines}).to_string())]);
+    let call = card_call(op, Some(json!({"card": {"lines": [{"text": "one"}]}})));
+    let record = json!({"lines": [{"text": "one"}]});
+    let missing: Vec<String> = vec!["lines".into()];
+    let filled = engine
+        .fill(
+            &bundle,
+            &schema,
+            &Map::new(),
+            &missing,
+            FillContext {
+                op,
+                call: &call,
+                sent: record.as_object(),
+            },
+        )
+        .await;
+    assert_eq!(filled.members["lines"], lines);
+    assert_eq!(provider.requests().len(), 1);
 }

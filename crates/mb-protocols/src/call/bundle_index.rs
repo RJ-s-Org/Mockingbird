@@ -43,10 +43,17 @@ pub(crate) struct BundleIndex {
     /// item schema, else a singleton read's success schema (`/user`), or the record
     /// it holds where its identity says (`{item, request_id}`'s `item`).
     pub(super) other_shapes: HashMap<String, (usize, Value)>,
+    /// Per resource type an operation acts on (or a definition is of) with neither a
+    /// read by path nor another shape, its own definition as a `$ref` (see
+    /// [`own_def`]): what an effect on such a record is checked against. A GraphQL
+    /// type read only nested or through an interface has it, as does a REST type only
+    /// created.
+    pub(super) def_schemas: HashMap<String, Value>,
     /// Per resource type, the types whose answers have a reference field of
     /// it (see [`reference_targets`]), sorted and deduplicated.
     pub(super) referrers: HashMap<String, Vec<String>>,
-    /// The types an effect can name, those with a read to check against, sorted.
+    /// The types an effect can name, those with a read or a definition to check
+    /// against, sorted.
     pub(super) effect_types: Vec<String>,
     /// Per path with no parameters whose `GET` answers a single object (see
     /// [`answers_a_list`]), that operation's position.
@@ -374,8 +381,6 @@ impl BundleIndex {
         let record_schemas = record_schemas_of(bundle, &detail_reads);
         let mut effect_types: Vec<String> =
             detail_reads.keys().chain(shapes.keys()).cloned().collect();
-        effect_types.sort_unstable();
-        effect_types.dedup();
         #[cfg(any(test, feature = "events"))]
         let mut channel_by_id = HashMap::with_capacity(bundle.channels.len());
         #[cfg(any(test, feature = "events"))]
@@ -391,6 +396,12 @@ impl BundleIndex {
                 (def, t)
             })
             .collect();
+        let def_schemas = def_schemas_of(bundle, &types_by_def, |t| {
+            detail_reads.contains_key(t) || shapes.contains_key(t)
+        });
+        effect_types.extend(def_schemas.keys().cloned());
+        effect_types.sort_unstable();
+        effect_types.dedup();
         let lookup_members = lookup_members(bundle, &types_by_def, &list_members_of);
         // Each list counts under its items' type, as [`BundleIndex::item_type`] finds it.
         let mut unscoped_counts: HashMap<String, usize> = HashMap::new();
@@ -428,6 +439,7 @@ impl BundleIndex {
                     (t, (i, schema))
                 })
                 .collect(),
+            def_schemas,
             referrers,
             effect_types,
             single_reads,
@@ -866,6 +878,90 @@ pub(super) fn rank_defs(
     }
 }
 
+/// Per resource type of `bundle` (one an operation acts on, or one `types_by_def` maps
+/// a definition to) for which `has_read` is false, a `$ref` to its own definition, when
+/// it has one (see [`own_def`]).
+pub(super) fn def_schemas_of(
+    bundle: &mb_mcm::Bundle,
+    types_by_def: &HashMap<String, String>,
+    has_read: impl Fn(&str) -> bool,
+) -> HashMap<String, Value> {
+    let types: HashSet<&str> = bundle
+        .operations
+        .iter()
+        .filter_map(|op| op.resource_type.as_deref())
+        .chain(types_by_def.values().map(String::as_str))
+        .filter(|t| !has_read(t))
+        .collect();
+    types
+        .into_iter()
+        .filter_map(|t| {
+            let def = own_def(bundle, types_by_def, t)?;
+            Some((
+                t.to_string(),
+                serde_json::json!({ "$ref": format!("#/$defs/{def}") }),
+            ))
+        })
+        .collect()
+}
+
+/// The definition records of resource type `t` are, of those `types_by_def` maps to
+/// `t` and those whose name has `t`'s stem (`Ticket` for `ticket`, `Refund` for
+/// `refunds`, see [`effects::type_stem`]). Of several, deterministically: an object
+/// definition (one declaring `properties`) before a union or an interface (a
+/// `oneOf`/`anyOf`), then one whose name is the type's (`Ticket` for `ticket`, any
+/// case), then one `types_by_def` maps to it, then the first by name.
+pub(super) fn own_def<'b>(
+    bundle: &'b mb_mcm::Bundle,
+    types_by_def: &HashMap<String, String>,
+    t: &str,
+) -> Option<&'b str> {
+    let alnum = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let stem = effects::type_stem(t);
+    let own_name = alnum(t);
+    bundle
+        .defs
+        .iter()
+        .filter(|(name, _)| {
+            types_by_def.get(*name).map(String::as_str) == Some(t)
+                || effects::type_stem(name) == stem
+        })
+        .filter(|(_, schema)| is_object_def(schema) || is_union_def(schema))
+        .min_by_key(|(name, schema)| {
+            (
+                !is_object_def(schema),
+                alnum(name) != own_name,
+                types_by_def.get(*name).map(String::as_str) != Some(t),
+                name.as_str(),
+            )
+        })
+        .map(|(name, _)| name.as_str())
+}
+
+/// Whether `schema`, a definition, declares an object's members (directly or in an
+/// `allOf`), with no union at its top.
+fn is_object_def(schema: &Value) -> bool {
+    let declares = |s: &Value| s.get("properties").is_some_and(Value::is_object);
+    !is_union_def(schema)
+        && (declares(schema)
+            || schema
+                .get("allOf")
+                .and_then(Value::as_array)
+                .is_some_and(|parts| !parts.is_empty()))
+}
+
+/// Whether `schema`, a definition, is a union or an interface: a `oneOf` or `anyOf`.
+fn is_union_def(schema: &Value) -> bool {
+    ["oneOf", "anyOf"]
+        .iter()
+        .any(|k| schema.get(*k).and_then(Value::as_array).is_some())
+}
+
 /// Per resource type: the best rank seen, the read's position and the schema.
 pub(super) type TypeShapes = HashMap<String, (u8, usize, Value)>;
 
@@ -1059,5 +1155,53 @@ type Query { node(id: ID!): Node search: [Searchable] }
         );
         // A type no alternative is.
         assert_eq!(own_alternative(&bundle, &nullable_node, "repository"), None);
+    }
+
+    /// Of the definitions a type's stem or `types_by_def` names, an object one before a
+    /// union, then the one named as the type, then one `types_by_def` maps to it, then
+    /// the first by name; a type with a read gets none.
+    #[test]
+    fn a_type_with_no_read_takes_its_own_definition() {
+        use super::{def_schemas_of, own_def};
+        use std::collections::HashMap;
+        let obj = json!({"type": "object", "properties": {"id": {"type": "string"}}});
+        let union = json!({"oneOf": [{"$ref": "#/$defs/Ticket"}]});
+        let mut bundle = mb_import::compile("type Query { x: Int }".as_bytes()).unwrap();
+        bundle.operations.clear();
+        bundle.defs.clear();
+        let none = HashMap::new();
+        // An object definition before a union of the same stem.
+        bundle.defs.insert("Tickets".into(), union.clone());
+        bundle.defs.insert("Ticket".into(), obj.clone());
+        assert_eq!(own_def(&bundle, &none, "ticket"), Some("Ticket"));
+        // The one named as the type before another of its stem.
+        bundle.defs.insert("Tickets".into(), obj.clone());
+        assert_eq!(own_def(&bundle, &none, "tickets"), Some("Tickets"));
+        assert_eq!(own_def(&bundle, &none, "ticket"), Some("Ticket"));
+        // Then one `types_by_def` maps to the type, then the first by name.
+        bundle.defs.remove("Ticket");
+        bundle.defs.insert("ticket_s".into(), obj.clone());
+        let mapped = HashMap::from([("ticket_s".to_string(), "Ticket-x".to_string())]);
+        bundle.defs.insert("TicketX".into(), obj.clone());
+        assert_eq!(own_def(&bundle, &mapped, "Ticket-x"), Some("TicketX"));
+        bundle.defs.remove("TicketX");
+        assert_eq!(own_def(&bundle, &mapped, "Ticket-x"), Some("ticket_s"));
+        assert_eq!(own_def(&bundle, &none, "ticket"), Some("Tickets"));
+        // An enum or a scalar definition is no record's; no definition, no schema.
+        bundle.defs.insert("Status".into(), json!({"enum": ["a"]}));
+        assert_eq!(own_def(&bundle, &none, "status"), None);
+        assert_eq!(own_def(&bundle, &none, "refunds"), None);
+        // Only a type with no read gets one.
+        bundle.defs.insert("Refund".into(), obj);
+        let by_def = HashMap::from([
+            ("Refund".to_string(), "refunds".to_string()),
+            ("Tickets".to_string(), "tickets".to_string()),
+        ]);
+        let schemas = def_schemas_of(&bundle, &by_def, |t| t == "tickets");
+        assert_eq!(
+            schemas.get("refunds"),
+            Some(&json!({"$ref": "#/$defs/Refund"}))
+        );
+        assert_eq!(schemas.get("tickets"), None);
     }
 }

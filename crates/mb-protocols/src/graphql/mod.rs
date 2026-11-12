@@ -93,7 +93,9 @@ pub fn try_router(rt: Arc<MockRuntime>) -> Result<Router, GraphqlError> {
         schema,
         connections: Arc::new(AtomicUsize::new(0)),
     });
-    Ok(Router::new().fallback(handle).with_state(state))
+    Ok(crate::detach::detached(
+        Router::new().fallback(handle).with_state(state),
+    ))
 }
 
 /// The `extensions.code` of a field error standing for HTTP `status`.

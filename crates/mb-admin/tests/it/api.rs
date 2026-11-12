@@ -1066,7 +1066,7 @@ async fn profiles_never_return_secret_values() {
         problem["detail"]
             .as_str()
             .unwrap()
-            .contains("use secret_ref"),
+            .contains("must be a secret reference"),
         "{problem}"
     );
     assert!(!r.text.contains("sk-123"), "{}", r.text);
@@ -1302,6 +1302,118 @@ async fn validation_problems_have_specific_titles() {
         description.contains(DEFAULT_SECRET_REF_FORMS),
         "{description}"
     );
+}
+
+#[tokio::test]
+async fn api_key_is_an_alias_of_secret_ref_when_it_holds_a_reference() {
+    let h = harness().await;
+    let put = |body: Value| {
+        let h = &h;
+        async move { h.json(Method::PUT, "/api/v1/llm-profiles/p", body).await }
+    };
+    let base = json!({ "base_url": "https://openrouter.ai/api/v1", "model": "m" });
+    let with = |extra: Value| {
+        let mut body = base.clone();
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        body
+    };
+
+    // The config file's name for the key, holding a reference: one call.
+    for field in ["api_key", "apiKey"] {
+        let mut extra = serde_json::Map::new();
+        extra.insert(field.into(), json!("env:OPENROUTER_API_KEY"));
+        let r = put(with(Value::Object(extra))).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+        assert_eq!(
+            r.json()["secret_ref"],
+            "env:OPENROUTER_API_KEY",
+            "{}",
+            r.text
+        );
+    }
+    // Both names with the same reference are fine; null is no key.
+    let r = put(with(json!({
+        "api_key": "env:OPENROUTER_API_KEY",
+        "secret_ref": "env:OPENROUTER_API_KEY",
+    })))
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    let r = put(with(json!({ "api_key": null }))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    assert_eq!(r.json()["secret_ref"], Value::Null, "{}", r.text);
+
+    // api_key and apiKey with different references are refused too.
+    let p = put(with(json!({
+        "api_key": "env:OPENROUTER_API_KEY",
+        "apiKey": "env:MB_LLM_KEY",
+    })))
+    .await
+    .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        p["detail"]
+            .as_str()
+            .unwrap()
+            .contains("api_key, apiKey and secret_ref"),
+        "{p}"
+    );
+    // Different values under the two names are refused.
+    let p = put(with(json!({
+        "api_key": "env:OPENROUTER_API_KEY",
+        "secret_ref": "env:MB_LLM_KEY",
+    })))
+    .await
+    .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(p["title"], "Invalid LLM profile", "{p}");
+
+    // A literal key is refused, never echoed, and the rejection says to use
+    // a reference.
+    for literal in [
+        json!("sk-or-v1-literal"),
+        json!(4242424242u64),
+        json!("env:"),
+    ] {
+        let r = put(with(json!({ "api_key": literal.clone() }))).await;
+        let shown = literal.to_string();
+        let shown = shown.trim_matches('"');
+        if shown != "env:" {
+            assert!(!r.text.contains(shown), "{}", r.text);
+        }
+        let p = r.assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(p["title"], "Raw API key not accepted", "{p}");
+        let detail = p["detail"].as_str().unwrap();
+        assert!(detail.contains("env:OPENROUTER_API_KEY"), "{detail}");
+        assert!(detail.contains(DEFAULT_SECRET_REF_FORMS), "{detail}");
+    }
+    // The alias is held to server.api_secret_refs like secret_ref.
+    let p = put(with(json!({ "api_key": "env:HOME" })))
+        .await
+        .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(p["title"], "Secret reference not allowed", "{p}");
+
+    // `provider` names where presets are expanded and the accepted fields.
+    let p = put(with(json!({ "provider": "openrouter" })))
+        .await
+        .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    let detail = p["detail"].as_str().unwrap();
+    assert!(detail.contains("put_llm_profile"), "{detail}");
+    assert!(
+        detail.contains("secret_ref (or its alias api_key"),
+        "{detail}"
+    );
+
+    // An unknown or missing field names the accepted fields.
+    for body in [with(json!({ "timeout": "30s" })), json!({ "model": "m" })] {
+        let p = put(body)
+            .await
+            .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = p["detail"].as_str().unwrap();
+        assert!(
+            detail.contains("accepted fields: base_url and model"),
+            "{detail}"
+        );
+    }
 }
 
 #[tokio::test]

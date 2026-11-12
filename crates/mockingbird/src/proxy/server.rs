@@ -11,6 +11,7 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use mb_protocols::http_rest::problem;
+use serde_json::json;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tower::ServiceExt as _;
@@ -103,6 +104,32 @@ fn blocked(host: &str) -> Response {
     )
 }
 
+/// The `type` of the problem answered for a blocked vendor sibling.
+pub const VENDOR_SUBDOMAIN_PROBLEM: &str = "urn:mockingbird:proxy:vendor-subdomain";
+
+/// 502 problem+json for `host`, unmapped but sharing a registrable domain
+/// with the mocked `mapped` hosts: naming them and how to fix it.
+fn sibling_blocked(host: &str, mapped: &[String]) -> Response {
+    let detail = format!(
+        "{host} is not served by any mock, but shares its domain with mocked {}; it is blocked so test traffic does not reach the real vendor. Add {host} to a mock's hosts (e.g. a mock for that product), or set proxy.vendor_subdomains: pass to send it to the real host.",
+        mapped.join(", ")
+    );
+    let body = json!({
+        "type": VENDOR_SUBDOMAIN_PROBLEM,
+        "title": "Vendor host not mocked",
+        "status": 502,
+        "detail": detail,
+        "host": host,
+        "mapped_hosts": mapped,
+    });
+    (
+        axum::http::StatusCode::BAD_GATEWAY,
+        [(header::CONTENT_TYPE, "application/problem+json")],
+        body.to_string(),
+    )
+        .into_response()
+}
+
 async fn handle(state: Arc<ProxyState>, req: Request) -> Response {
     if req.method() == Method::CONNECT {
         return connect(state, req);
@@ -123,7 +150,11 @@ async fn handle(state: Arc<ProxyState>, req: Request) -> Response {
     if state.claims.claims(&host) {
         return serve_mapped(&state, req).await;
     }
-    state.note_unmapped(&host);
+    let siblings = state.blocking_siblings(&host);
+    state.note_unmapped(&host, &siblings);
+    if !siblings.is_empty() {
+        return sibling_blocked(&host, &siblings);
+    }
     if state.unmapped == Unmapped::Block {
         return blocked(&host);
     }
@@ -149,7 +180,8 @@ async fn serve_mapped(state: &ProxyState, req: Request) -> Response {
 }
 
 /// Answers a `CONNECT`: intercepts a mapped host (TLS with a leaf from the
-/// local CA, then the data plane), tunnels or blocks any other.
+/// local CA, then the data plane), tunnels or blocks any other (always
+/// blocking a vendor sibling unless `proxy.vendor_subdomains` is `pass`).
 fn connect(state: Arc<ProxyState>, req: Request) -> Response {
     let Some(authority) = req.uri().authority().cloned() else {
         return problem(400, "Invalid CONNECT", "CONNECT needs a host:port target");
@@ -160,7 +192,11 @@ fn connect(state: Arc<ProxyState>, req: Request) -> Response {
     let port = authority.port_u16().unwrap_or(443);
     let mapped = state.is_mapped(&host);
     if !mapped {
-        state.note_unmapped(&host);
+        let siblings = state.blocking_siblings(&host);
+        state.note_unmapped(&host, &siblings);
+        if !siblings.is_empty() {
+            return sibling_blocked(&host, &siblings);
+        }
         if state.unmapped == Unmapped::Block {
             return blocked(&host);
         }

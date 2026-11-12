@@ -124,6 +124,10 @@ SSE (an OpenAPI operation answering `text/event-stream`):
 curl -N localhost:8080/ticks -H 'X-Mockingbird-Stream-Items: 3'
 ```
 
+## GraphQL nested lookups
+
+A field below the root that returns one object, with a string or number argument naming a scalar, non-enum field of that object (`repository(name: "deno")`, where `Repository` has a `name`), is described to the model as a record that exists, so it is answered rather than `null` (which clients read as "not found"). Only the prompt says so: the schema still allows `null`, so a scenario, the world description or stored state can answer one. Fields returning a list, an interface or a union are not lookups.
+
 ## Streaming
 
 SSE responses, GraphQL subscriptions and gRPC server- and bidi-streaming calls are generated as a stream of items, each validated as it completes (repaired once, or replaced by faker output). The number of items comes from, in order:
@@ -144,6 +148,12 @@ The root fields of one query are generated together, in one call. Two root field
 - of several found, the one answered from session state or a scenario is kept, else the first in the query, and the others answer `null`.
 
 Fields that share only an argument value (`book(id: 1)` and `author(id: 1)`), aliases of one field, and fields returning an interface or a union are answered on their own.
+
+## GraphQL reads by a lookup argument
+
+A query root field that returns one object and takes one argument, named as a scalar field of that type and of the same scalar type, is looked up by it: `user(login: String!)` by `User.login`, `topic(name:)` by `Topic.name`. A field with another argument (`rate(currency:, date:)`, which may change the answer), and an enum, list, `Boolean` or `Float` argument, look nothing up. This needs no world description; a world's `target: {member: …}` still sets it.
+
+Such a read is generated with the type's key and that member, whether or not the query selects them, and the answer is stored under its key with the argument's value in that member. A later read with the same value is answered from session state with no model call, whatever its variables. A read that selects fields the stored record lacks, at any depth (a user's stored `repositories` read again with their `languages`), is generated, and the record is merged into the answer at every depth: the values it holds stand, the generated answer fills what it lacks, and list items pair by `id`, else in order. A type with no `id` field is stored under the lookup member's value instead (`user(login: "octocat")` as `user` `octocat`), when every such query field of that type looks it up by the same member.
 
 ## Override mapping per protocol
 

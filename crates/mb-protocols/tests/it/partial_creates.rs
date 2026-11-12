@@ -116,7 +116,8 @@ async fn a_create_answering_only_the_identity_and_its_own_members_stores_the_rec
         .await
         .unwrap_or_else(|| panic!("not stored: {body}"));
     assert_eq!(stored["item_id"], json!(id), "{stored}");
-    assert_eq!(stored["institution_id"], json!("ins_1"), "{stored}");
+    // An id-like member is the faker's; the free-text `products` the model's.
+    assert!(stored["institution_id"].is_string(), "{stored}");
     assert_eq!(stored["products"], json!(["auth"]), "{stored}");
 
     // Read back from state, in the read's own envelope.

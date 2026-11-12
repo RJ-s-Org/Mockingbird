@@ -991,6 +991,7 @@ async fn build_app_inner(
                 data.clone(),
                 Arc::new(ca),
                 cfg.proxy.unmapped,
+                cfg.proxy.vendor_subdomains,
                 cfg.proxy.images.clone(),
             )?)
         }

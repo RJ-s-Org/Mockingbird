@@ -712,21 +712,24 @@ async fn read_by_number_under_404(worlds: Option<&(mb_mcm::world::World, mb_mcm:
     rest_rt.unknown_ids = mb_protocols::UnknownIds::NotFound;
     let rest_router = http_rest::router(Arc::new(rest_rt));
 
-    gql(
+    // Unseeded, as `gh` sends it: the executor creates the record, and its
+    // `number` may be drawn locally, so the read asks for what the create answered.
+    let made = gql(
         &gql_router,
         r#"mutation { createPullRequest(title: "Over GraphQL") { id number } }"#,
         false,
     )
     .await;
+    let number = made["createPullRequest"]["number"].as_u64().unwrap();
     let read = rest(
         &rest_router,
         "GET",
-        "/repos/fernwood/trellis/pulls/128",
+        &format!("/repos/fernwood/trellis/pulls/{number}"),
         None,
     )
     .await;
     assert_eq!(read["title"], "Over GraphQL", "{read}");
-    assert_eq!(read["number"], 128, "{read}");
+    assert_eq!(read["number"], number, "{read}");
 }
 
 /// A type of the group named like the reading one turns inference off for it:
@@ -836,31 +839,31 @@ async fn a_mock_leaving_the_group_takes_its_types_with_it() {
 }
 
 /// A `number` is unique only under its repository: each repository's read finds
-/// its own pull request #5 (the one whose `repository` names it), not the first one
-/// numbered 5. (A read is scoped by the path parameter nearest its target, here the
-/// repository's name, so two repositories of one name under two owners are not told
-/// apart.)
+/// its own pull request #5, not the first one numbered 5, whether the repositories'
+/// names differ or only their owners (`a/r` and `b/r`, told apart by the whole
+/// owner chain of the path).
 #[tokio::test]
 async fn each_owner_reads_its_own_record_of_a_shared_number() {
     let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     let types = SharedTypes::default();
-    let sdl = PULLS_SDL
-        .replace(
-            "type PullRequest { id: ID! number: Int!",
-            "type Repository { id: ID! name: String! }\ntype PullRequest { id: ID! repository: Repository number: Int!",
-        );
+    let sdl = PULLS_SDL.replace(
+        "type PullRequest { id: ID! number: Int!",
+        "type User { id: ID! login: String! }\ntype Repository { id: ID! name: String! owner: User }\ntype PullRequest { id: ID! repository: Repository number: Int!",
+    );
     let rest_contract = PULLS.replace(
         "        number: {type: integer}\n",
         "        number: {type: integer}\n        repository: {type: object, properties: {name: {type: string}}}\n",
     );
-    let in_repo = |repo: &str| {
-        json!({"__typename": "PullRequest", "id": format!("PR_{repo}5"), "number": 5,
-               "title": format!("In {repo}"), "state": "OPEN",
-               "repository": {"__typename": "Repository", "id": format!("R_{repo}"), "name": repo}})
+    let repos = [("a", "one"), ("b", "two"), ("a", "r"), ("b", "r")];
+    let in_repo = |owner: &str, repo: &str| {
+        json!({"__typename": "PullRequest", "id": format!("PR_{owner}_{repo}5"), "number": 5,
+               "title": format!("In {owner}/{repo}"), "state": "OPEN",
+               "repository": {"__typename": "Repository", "id": format!("R_{owner}_{repo}"), "name": repo,
+                              "owner": {"__typename": "User", "id": format!("U_{owner}"), "login": owner}}})
     };
     let gh = joined(
         ("github-graphql", &sdl),
-        vec![in_repo("one"), in_repo("two")],
+        repos.iter().map(|(o, r)| in_repo(o, r)).collect(),
         &state,
         &types,
         None,
@@ -874,15 +877,18 @@ async fn each_owner_reads_its_own_record_of_a_shared_number() {
         None,
     );
     let rest_router = http_rest::router(rest_rt);
-    for repo in ["one", "two"] {
+    for (owner, repo) in repos {
         gql(
             &gql_router,
-            &format!(r#"mutation {{ createPullRequest(title: "In {repo}") {{ id number }} }}"#),
+            &format!(
+                r#"mutation {{ createPullRequest(title: "In {owner}/{repo}") {{ id number }} }}"#
+            ),
             true,
         )
         .await;
     }
-    for (owner, repo) in [("b", "two"), ("a", "one")] {
+    // Later owners first, so the first record numbered 5 is never the one asked for.
+    for (owner, repo) in [("b", "two"), ("a", "one"), ("b", "r"), ("a", "r")] {
         let read = rest(
             &rest_router,
             "GET",
@@ -890,7 +896,7 @@ async fn each_owner_reads_its_own_record_of_a_shared_number() {
             None,
         )
         .await;
-        assert_eq!(read["title"], format!("In {repo}"), "{read}");
+        assert_eq!(read["title"], format!("In {owner}/{repo}"), "{read}");
     }
 }
 

@@ -113,7 +113,7 @@ fn header_value(
     if declared_string && (lower.ends_with("-id") || lower.ends_with("_id")) {
         return token(rng, 22);
     }
-    match Faker::default().fake(&bundle.with_defs(schema), rng) {
+    match Faker::default().fake(&bundle.with_reachable_defs(schema), rng) {
         Value::String(s) => s,
         Value::Null => String::new(),
         other => other.to_string(),

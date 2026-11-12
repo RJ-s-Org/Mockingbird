@@ -162,7 +162,11 @@ async fn update(
                 &create::fill_schema(&missing, &names),
                 known,
                 &names,
-                FillContext { op, call },
+                FillContext {
+                    op,
+                    call,
+                    sent: None,
+                },
             )
             .await;
         usage = filled.usage;

@@ -111,7 +111,11 @@ pub(super) async fn by_shared(
                 id: record.id.clone(),
                 data,
             };
-            if owner.is_none_or(|o| key_fits(rt, session, &own, o)) {
+            // The nearest parameter names the repository alone (`r`): the whole chain
+            // (`a/r`) tells two owners' repositories of one name apart.
+            if owner.is_none_or(|o| {
+                key_fits(rt, session, &own, o) && chain_fits(&chain_of(o), &record.data)
+            }) {
                 return Some(StoredResource {
                     resource_type: t.to_string(),
                     id: id.to_string(),
@@ -121,6 +125,81 @@ pub(super) async fn by_shared(
         }
     }
     None
+}
+
+/// The values of the path parameters `owner`'s collection is under, outermost first:
+/// `[a, r]` of `/repos/a/r/pulls`.
+fn chain_of(owner: &Owner) -> Vec<String> {
+    let template = path_segments(&owner.collection.template);
+    let path = path_segments(&owner.collection.path);
+    template
+        .iter()
+        .zip(&path)
+        .filter(|(t, _)| t.starts_with('{') && t.ends_with('}'))
+        .map(|(_, v)| (*v).to_string())
+        .collect()
+}
+
+/// Bounds the walk of a record for the owners it shows.
+const CHAIN_DEPTH: usize = 4;
+
+/// Whether `data` (a record another mock stored) is under the owner `chain` names,
+/// as far as it shows: when it names the repository (`chain`'s last value) under an
+/// owner, in a path (`a/r`, `https://github.com/a/r/pull/5`) or an object holding
+/// it as its `name` beside an `owner` (`{name: r, owner: {login: a}}`), one of those
+/// owners must be the chain's. A record that names none fits.
+fn chain_fits(chain: &[String], data: &Value) -> bool {
+    let [.., parent, name] = chain else {
+        return true;
+    };
+    let mut shown: Vec<String> = Vec::new();
+    owners_shown(data, name, 0, &mut shown);
+    shown.is_empty() || shown.iter().any(|o| o == parent)
+}
+
+/// The owners `value` shows repository `name` under (see [`chain_fits`]).
+fn owners_shown(value: &Value, name: &str, depth: usize, out: &mut Vec<String>) {
+    if depth > CHAIN_DEPTH {
+        return;
+    }
+    match value {
+        Value::String(text) if !text.contains(char::is_whitespace) => {
+            let path = text.split_once("://").map_or(text.as_str(), |(_, rest)| {
+                rest.split_once('/').map_or("", |(_, p)| p)
+            });
+            let segments: Vec<&str> = path
+                .split(['/', '?', '#'])
+                .filter(|s| !s.is_empty())
+                .collect();
+            for pair in segments.windows(2) {
+                if pair[1] == name {
+                    out.push(pair[0].to_string());
+                }
+            }
+        }
+        Value::Object(members) => {
+            if members.get("name").and_then(Value::as_str) == Some(name)
+                && let Some(owner) = members.get("owner")
+            {
+                let login = match owner {
+                    Value::String(login) => Some(login.as_str()),
+                    owner => ["login", "name", "slug"]
+                        .iter()
+                        .find_map(|k| owner.get(*k).and_then(Value::as_str)),
+                };
+                out.extend(login.map(str::to_string));
+            }
+            for v in members.values() {
+                owners_shown(v, name, depth + 1, out);
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                owners_shown(v, name, depth + 1, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The properties of the object `schema` is (through a `$ref` and a nullable
@@ -736,6 +815,26 @@ mod tests {
         // A name alone is not enough: one has a `number`, the other none.
         assert!(!linked(&issues, &record_type(&["IssueComment"], &["id"])));
         assert!(!linked(&pulls, &record_type(&["Pull"], &["id"])));
+    }
+
+    #[test]
+    fn a_record_fits_the_owner_chain_it_shows() {
+        let chain = ["a".to_string(), "r".to_string()];
+        let fits = |data: Value| chain_fits(&chain, &data);
+        assert!(fits(json!({"number": 5})));
+        assert!(fits(json!({"url": "https://github.com/a/r/pull/5"})));
+        assert!(!fits(json!({"url": "https://github.com/b/r/pull/5"})));
+        assert!(fits(json!({"full_name": "a/r"})));
+        assert!(!fits(
+            json!({"repository": {"name": "r", "owner": {"login": "b"}}})
+        ));
+        assert!(fits(
+            json!({"repository": {"name": "r", "owner": {"login": "a"}}})
+        ));
+        // Prose with a slash is no path.
+        assert!(fits(json!({"title": "fix b/r and more"})));
+        // A one-parameter chain says nothing beyond the nearest parameter.
+        assert!(chain_fits(&chain[1..], &json!({"full_name": "b/r"})));
     }
 
     #[test]

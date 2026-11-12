@@ -136,24 +136,20 @@ fn exec(fallback: Option<&str>) -> ExecLine {
 #[tokio::test]
 async fn a_held_record_is_read_by_the_executor() {
     let (capture, _guard) = Capture::install();
-    // The one answer is the create's fill of `size`.
-    let h = support::harness(
-        CONTRACT,
-        vec![json!({"size": 3})],
-        &HarnessOptions::default(),
-        |rt| rt,
-    );
-    let (status, _, body) = h
+    // The create fills `size`, a number, with no model call.
+    let h = support::harness(CONTRACT, vec![], &HarnessOptions::default(), |rt| rt);
+    let (status, _, created) = h
         .send("POST", "/widgets", Some(json!({"name": "a"})), &[])
         .await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    let id = body["id"].as_str().unwrap().to_owned();
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert!(created["size"].is_i64(), "{created}");
+    let id = created["id"].as_str().unwrap().to_owned();
     let (status, headers, body) = h.send("GET", &format!("/widgets/{id}"), None, &[]).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(source(&headers), "state", "{body}");
-    assert_eq!(body, json!({"id": id, "name": "a", "size": 3}));
+    assert_eq!(body, created);
     assert_eq!(capture.of("getWidget"), vec![exec(None)]);
-    assert_eq!(h.provider.requests().len(), 1, "the read made no LLM call");
+    assert!(h.provider.requests().is_empty(), "no LLM call");
 }
 
 #[tokio::test]
@@ -2167,8 +2163,8 @@ async fn a_path_less_rpc_read_names_its_target_by_a_body_member() {
 #[tokio::test]
 async fn a_create_stores_and_answers_the_request_s_record_with_a_minted_id() {
     let (capture, _guard) = Capture::install();
-    // The fill's answer: a value for what the request left out, required (`size`) or
-    // not (`color`); an id and a name it never takes.
+    // The fill's answer: a value for the free text the request left out (`color`);
+    // an id, a number (`size`, the faker's) and a name it never takes.
     let h = support::harness(
         CREATES,
         vec![json!({"id": "w-model", "size": 3, "color": "teal", "name": "not sent"})],
@@ -2182,9 +2178,10 @@ async fn a_create_stores_and_answers_the_request_s_record_with_a_minted_id() {
     assert_eq!(source(&headers), "state", "{body}");
     let id = body["id"].as_str().unwrap().to_owned();
     assert_ne!(id, "w-model", "the id is minted, never filled");
+    assert!(body["size"].is_i64(), "{body}");
     assert_eq!(
         body,
-        json!({"id": id, "name": "a", "size": 3, "color": "teal"}),
+        json!({"id": id, "name": "a", "size": body["size"], "color": "teal"}),
         "the request's values stand; fill writes only what it left out"
     );
     assert_eq!(
@@ -2832,8 +2829,9 @@ async fn a_record_created_under_its_parent_is_listed_there_only() {
 #[tokio::test]
 async fn a_create_fills_what_its_reads_require_so_they_are_answered_from_state() {
     let (capture, _guard) = Capture::install();
-    // The fill's answer: the members the read (`size`) and the list (`color`) require,
-    // which neither the request nor the create's answer holds.
+    // The fill's answer: the members the read (`size`, a number the faker writes) and
+    // the list (`color`, free text the model writes) require, which neither the
+    // request nor the create's answer holds.
     let h = support::described(
         JOURNEY,
         json!({}),
@@ -2846,15 +2844,18 @@ async fn a_create_fills_what_its_reads_require_so_they_are_answered_from_state()
     assert_eq!(source(&headers), "state", "{body}");
     let id = body["id"].as_str().unwrap().to_owned();
     assert_eq!(body, json!({"id": id, "name": "a"}));
-    let prompt = &h.provider.requests()[0].messages[0].content;
-    assert!(
-        prompt.contains("size") && prompt.contains("color"),
-        "{prompt}"
-    );
+    let mb_llm::ResponseFormat::JsonSchema { schema, .. } =
+        &h.provider.requests()[0].response_format
+    else {
+        panic!("no schema asked");
+    };
+    let asked: Vec<&String> = schema["properties"].as_object().unwrap().keys().collect();
+    assert_eq!(asked, ["color"], "{schema}");
     let (status, headers, read) = h.send("GET", &format!("/things/{id}"), None, &[]).await;
     assert_eq!(status, StatusCode::OK, "{read}");
     assert_eq!(source(&headers), "state", "{read}");
-    let stored = json!({"id": id, "name": "a", "size": 4, "color": "teal"});
+    assert!(read["size"].is_i64(), "{read}");
+    let stored = json!({"id": id, "name": "a", "size": read["size"], "color": "teal"});
     assert_eq!(read, stored, "the record as stored");
     assert_eq!(capture.of("getThing"), vec![line("getThing", "read", None)]);
     let (_, headers, listed) = h.send("GET", "/things", None, &[]).await;
@@ -4139,7 +4140,8 @@ async fn a_minted_id_fits_the_lists_that_read_its_record() {
 #[tokio::test]
 async fn unsent_optional_members_are_filled_but_a_reference_the_request_could_send() {
     let (capture, _guard) = Capture::install();
-    // The fill's answer: the optional members, and an `org_id` it never takes.
+    // The fill's answer: the optional members (the free-text `stage`; `probability` is
+    // the faker's), and an `org_id` it never takes.
     let h = support::harness(
         GATED,
         vec![json!({"stage": "open", "probability": 50, "org_id": 7, "tag_ids": [1]})],
@@ -4152,7 +4154,9 @@ async fn unsent_optional_members_are_filled_but_a_reference_the_request_could_se
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(source(&headers), "state", "{body}");
     let id = body["id"].as_str().unwrap().to_owned();
-    let record = json!({"id": id, "title": "big", "stage": "open", "probability": 50});
+    assert!(body["probability"].is_number(), "{body}");
+    let record =
+        json!({"id": id, "title": "big", "stage": "open", "probability": body["probability"]});
     assert_eq!(body, record, "no organization the request did not name");
     let t = type_of(&h, "getDeal");
     assert_eq!(h.stored(&t, &id).await, Some(record));
@@ -4756,7 +4760,16 @@ async fn a_nullable_boolean_fill_leaves_null_stays_null() {
         .send("POST", "/workspaces", Some(json!({"name": "w"})), &[])
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+    // A nullable scalar nothing set is null, with no model call for it.
     assert_eq!(body["locked"], json!(null), "{body}");
+    let requests = h.provider.requests();
+    let asked_locked = requests.iter().any(|r| match &r.response_format {
+        mb_llm::ResponseFormat::JsonSchema { schema, .. } => {
+            schema["properties"].get("locked").is_some()
+        }
+        _ => false,
+    });
+    assert!(!asked_locked, "{requests:?}");
 }
 
 #[tokio::test]

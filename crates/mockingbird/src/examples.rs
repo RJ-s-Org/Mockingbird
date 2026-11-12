@@ -50,7 +50,7 @@ pub const EXAMPLES: &[Example] = &[
         ]
     ),
     example!("square", ["square.openapi.yaml"]),
-    example!("plaid", ["plaid.openapi.yaml"]),
+    example!("plaid", ["plaid.openapi.yaml", "plaid.world.yaml"]),
     example!("github-rest", ["github-rest.openapi.yaml"]),
     example!("github-graphql", ["github.graphql"]),
     example!("shopify-admin-graphql", ["shopify-admin.graphql"]),

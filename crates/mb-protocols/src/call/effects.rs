@@ -293,9 +293,40 @@ fn record_world_gaps(request: &mut Value, gaps: &[String]) {
     }
 }
 
-/// Whether resource type `t` has a schema an effect on it is checked against.
+/// Whether resource type `t` has a schema an effect on it is checked against: a read
+/// by path, another shape (a list's items, a singleton read), or, with neither, its
+/// own definition (see [`BundleIndex::def_schemas`] and
+/// [`write_memory::effect_schema`]).
 pub(super) fn has_schema(index: &BundleIndex, t: &str) -> bool {
-    index.detail_reads.contains_key(t) || index.other_shapes.contains_key(t)
+    index.detail_reads.contains_key(t)
+        || index.other_shapes.contains_key(t)
+        || index.def_schemas.contains_key(t)
+}
+
+/// [`added_violation`] of an effect's change of a record of type `t`, `before` to
+/// `after`: a type with no read is checked against its own definition (see
+/// [`BundleIndex::def_schemas`]), the violations `after` has and `before` has not;
+/// the first of them, or `None` (a definition that does not compile adds one, at
+/// the root). Only effects take this check: a type with no read
+/// adds no violation to the executor's writes, transitions or lifecycle states.
+pub(super) fn effect_violation(
+    rt: &MockRuntime,
+    t: &str,
+    before: &Value,
+    after: &Value,
+) -> Option<(String, String)> {
+    if type_check(rt, t).is_some() {
+        return added_violation(rt, t, before, after);
+    }
+    let schema = rt.index().def_schemas.get(t)?;
+    let found = |v: &Value| rt.engine.schema_violations(rt.bundle(), schema, v);
+    // A definition that does not compile checks nothing, and an unchecked effect is
+    // not applied.
+    let (Some(before), Some(after)) = (found(before), found(after)) else {
+        return Some((String::new(), "$ref".to_owned()));
+    };
+    let before: HashSet<(String, String)> = before.into_iter().collect();
+    after.into_iter().find(|v| !before.contains(v))
 }
 
 /// Whether `t` is a resource type of the contract's: one an operation acts on, or a
@@ -799,7 +830,7 @@ pub(super) fn merge_members(
     data: &mut Map<String, Value>,
     set: Map<String, Value>,
 ) {
-    let place = Place::of(rt, write_memory::read_schema(rt, t));
+    let place = Place::of(rt, write_memory::effect_schema(rt, t));
     for (key, value) in set {
         if let Some(merged) = merge_at(rt, data.get(&key), &value, place.property(&key)) {
             data.insert(key, merged);
@@ -884,7 +915,7 @@ pub(super) fn dotted_as_paths(
     if !set.keys().any(|k| k.contains('.')) {
         return set.clone();
     }
-    let record = Place::of(rt, write_memory::read_schema(rt, t));
+    let record = Place::of(rt, write_memory::effect_schema(rt, t));
     let mut out = Map::new();
     for (key, value) in set {
         match dotted_path(rt, &record, key) {
@@ -974,7 +1005,7 @@ pub(super) async fn fill_stubs(
     value: &mut Value,
     keys: &[String],
 ) {
-    let record = Place::of(rt, write_memory::read_schema(rt, t));
+    let record = Place::of(rt, write_memory::effect_schema(rt, t));
     // First what the stubs name, then the records under it.
     let mut named: Vec<(String, String)> = Vec::new();
     if let Value::Object(members) = &*value {
@@ -1138,7 +1169,7 @@ pub(super) async fn apply_effect(
     };
     // A null the member's schema does not admit (in the variant of a union the record
     // is) removes an optional member; on a required one, the effect is refused.
-    let record = Place::of_held(rt, write_memory::read_schema(rt, t), Some(&held.data));
+    let record = Place::of_held(rt, write_memory::effect_schema(rt, t), Some(&held.data));
     let mut requested = requested;
     let mut removed = Vec::new();
     let mut refused = false;
@@ -1182,7 +1213,7 @@ pub(super) async fn apply_effect(
     }
     // Refused when it adds a violation: it breaks a record that fit, or gives one held
     // in an earlier, incomplete shape a violation it did not have.
-    if let Some((path, keyword)) = added_violation(rt, t, &held.data, &stored.data) {
+    if let Some((path, keyword)) = effect_violation(rt, t, &held.data, &stored.data) {
         tracing::info!(
             mock = %rt.name,
             resource_type = %t,
@@ -1225,7 +1256,7 @@ fn wrong_member(
     keys: &[String],
     set: &Map<String, Value>,
 ) -> Option<String> {
-    let record = Place::of_held(rt, write_memory::read_schema(rt, t), Some(before));
+    let record = Place::of_held(rt, write_memory::effect_schema(rt, t), Some(before));
     let at = |value: &'_ Value, path: &[String]| -> Option<Value> {
         path.iter()
             .try_fold(value, |v, k| v.get(k.as_str()))
@@ -1305,7 +1336,7 @@ pub(super) fn mended_set(
     t: &str,
     set: &Map<String, Value>,
 ) -> Map<String, Value> {
-    let Some(schema) = write_memory::read_schema(rt, t) else {
+    let Some(schema) = write_memory::effect_schema(rt, t) else {
         return set.clone();
     };
     let bundle = rt.bundle();

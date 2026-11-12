@@ -42,8 +42,8 @@ pub fn router_and_skipped(rt: Arc<MockRuntime>) -> (Router, Vec<RouteError>) {
     let skipped = state.skipped().to_vec();
     let router = Router::new()
         .fallback(handler::handle)
-        .with_state(Arc::new(state))
-        .layer(cors());
+        .with_state(Arc::new(state));
+    let router = crate::detach::detached(router).layer(cors());
     (router, skipped)
 }
 
