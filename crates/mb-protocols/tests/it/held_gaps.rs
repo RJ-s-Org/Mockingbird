@@ -549,3 +549,43 @@ async fn another_mock_s_record_completes_alike_on_every_read() {
     assert_eq!(third["additions"], first["additions"], "{third}");
     assert_eq!(provider.requests().len(), 1);
 }
+
+/// An optional embedded record and an optional list of objects the held record holds
+/// only part of (a GraphQL create's `repository: {id}`) are completed below the top,
+/// with no model too; a list of scalars stays as held.
+#[tokio::test]
+async fn an_optional_embedded_record_held_in_part_is_completed_offline() {
+    let contract = ISSUES.replace(
+        "        comments: {type: integer, minimum: 0}\n",
+        "        comments: {type: integer, minimum: 0}\n        repository: {$ref: \"#/components/schemas/Repository\"}\n        labels: {type: array, items: {$ref: \"#/components/schemas/Label\"}}\n        topics: {type: array, items: {type: string}}\n    Repository:\n      type: object\n      required: [id, name, archive_url]\n      properties:\n        id: {type: integer}\n        name: {type: string}\n        archive_url: {type: string}\n    Label:\n      type: object\n      required: [name, color]\n      properties:\n        name: {type: string}\n        color: {type: string}\n",
+    );
+    let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store
+        .upsert(
+            &session("issues"),
+            StoredResource {
+                resource_type: "issues".into(),
+                id: "7".into(),
+                data: json!({"number": 7, "title": "Stored title", "repository": {"id": 5},
+                             "labels": [{"name": "bug"}], "topics": ["router"]}),
+            },
+        )
+        .await
+        .unwrap();
+    let rt = MockRuntime::new(
+        "issues",
+        Arc::new(compile(contract.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::clone(&store),
+    );
+    let router = http_rest::router(Arc::new(rt));
+
+    let (source, read) = get(&router, "/issues/7").await;
+    assert_eq!(source, "state", "{read}");
+    assert_eq!(read["title"], "Stored title", "{read}");
+    assert_eq!(read["repository"]["id"], 5, "{read}");
+    assert!(read["repository"]["archive_url"].is_string(), "{read}");
+    assert_eq!(read["labels"][0]["name"], "bug", "{read}");
+    assert!(read["labels"][0]["color"].is_string(), "{read}");
+    assert_eq!(read["topics"], json!(["router"]), "{read}");
+}

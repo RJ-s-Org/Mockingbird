@@ -7,8 +7,8 @@
 //! replace every stored value with the model's (the head branch the client pushed
 //! included). So a read of the executor (not a GraphQL selection, see
 //! [`super::selected_held`]) completes the record instead, at the top and below it
-//! (an object or a list's items it holds), against the record schema of the read's
-//! answer ([`super::create::gaps`], what that schema requires only):
+//! (an object or a list's items it holds, required or not), against the record schema
+//! of the read's answer ([`super::create::gaps`], what that schema requires only):
 //!
 //! - a member that may be `null` is `null`: nothing says what it holds;
 //! - every other one is written as a create's fill writes it ([`mb_engine::Engine::fill`]:
