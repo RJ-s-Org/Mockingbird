@@ -305,9 +305,9 @@ pub(super) async fn run(
 
     // The members nobody else decides, then the initial state.
     let mut owned = server_owned(rt, t, field, request);
-    for name in nulled {
-        if !owned.contains(&name) {
-            owned.push(name);
+    for name in &nulled {
+        if !owned.contains(name) {
+            owned.push(name.clone());
         }
     }
     if let Some((member, value)) = initial(rt, t, request) {
@@ -369,6 +369,38 @@ pub(super) async fn run(
         }
         key = named;
     }
+    // A member the description computes below the top (`cost.totalAmount.amount`) is
+    // written in the objects above it, opened as the schema declares them; what else
+    // those hold is preset and filled as any member's, the computed one never.
+    let nested = nested_owned(rt, t);
+    // One under a member the client sent as null is not opened: that member stays null.
+    let opened: Vec<&[String]> = nested
+        .iter()
+        .filter(|steps| steps.first().is_some_and(|top| !nulled.contains(top)))
+        .filter(|steps| {
+            shape
+                .schemas
+                .iter()
+                .any(|schema| open_above(rt.bundle(), schema, &mut data, steps))
+        })
+        .map(Vec::as_slice)
+        .collect();
+    let plain = plain_owned(rt, t);
+    let released: Vec<String> = opened
+        .iter()
+        .filter_map(|steps| steps.first())
+        .filter(|top| {
+            *top != field
+                && !plain.contains(*top)
+                && !set.contains(*top)
+                && nested
+                    .iter()
+                    .filter(|steps| steps.first() == Some(*top))
+                    .all(|steps| opened.contains(&steps.as_slice()))
+        })
+        .cloned()
+        .collect();
+    owned.retain(|m| !released.contains(m));
     // A member the request did not send whose schema decides its value (a `const`, a
     // one-value `enum`: GraphQL's `__typename`; a `default`) takes it, at any depth.
     let fits = |schema: &Value, value: &Value| fits(rt, schema, value);
@@ -424,6 +456,14 @@ pub(super) async fn run(
     }
     let unsent = Unsent::All(request_schema.as_ref(), Some(&sent));
     let mut missing = gaps(rt, (t, &shape.schemas), &data, &owned, unsent);
+    // What an opened object lacks is filled, but the computed member in it: `without`
+    // takes each out in turn, the gap dropped once nothing is left of it.
+    missing.retain_mut(|(name, schema)| {
+        !opened
+            .iter()
+            .filter(|steps| steps.first() == Some(name))
+            .any(|steps| without(schema, &steps[1..]))
+    });
     let required: Vec<String> = missing.iter().map(|(name, _)| name.clone()).collect();
     if let Value::Object(known) = &data {
         for (name, member) in &shape.members {
@@ -804,6 +844,102 @@ fn server_owned(
         }
     }
     owned
+}
+
+/// The members of type `t` the description derives or computes below the record's top
+/// (`cost.totalAmount.amount`), each as its steps.
+fn nested_owned(rt: &crate::MockRuntime, t: &str) -> Vec<Vec<String>> {
+    rt.described()
+        .type_desc(t)
+        .into_iter()
+        .flat_map(|d| d.derived.keys().chain(d.computed.keys()))
+        .filter(|m| m.contains('.'))
+        .map(|m| m.split('.').map(str::to_owned).collect())
+        .collect()
+}
+
+/// The members of type `t` the description derives or computes at the record's top.
+fn plain_owned(rt: &crate::MockRuntime, t: &str) -> Vec<String> {
+    rt.described()
+        .type_desc(t)
+        .into_iter()
+        .flat_map(|d| d.derived.keys().chain(d.computed.keys()))
+        .filter(|m| !m.contains('.'))
+        .cloned()
+        .collect()
+}
+
+/// Opens in `record` the objects above the member at `steps` (`cost` and
+/// `cost.totalAmount` for `cost.totalAmount.amount`) where record schema `schema`
+/// declares each an object, an empty one for each it lacks. Whether each is an object
+/// `record` now holds; nothing is opened unless all can be.
+fn open_above(
+    bundle: &mb_mcm::Bundle,
+    schema: &Value,
+    record: &mut Value,
+    steps: &[String],
+) -> bool {
+    let Some((_, above)) = steps.split_last() else {
+        return false;
+    };
+    if above.is_empty() {
+        return false;
+    }
+    // Every step first: an object the schema declares, held as one or not at all.
+    let mut at_schema = schema.clone();
+    let mut at = Some(&*record);
+    for step in above {
+        let Some(member) = property_schema(bundle, &at_schema, step) else {
+            return false;
+        };
+        let member = non_null(bundle, &member);
+        if !holds_object(bundle, &member) {
+            return false;
+        }
+        at = match at {
+            Some(Value::Object(held)) => held.get(step.as_str()),
+            Some(_) => return false,
+            None => None,
+        };
+        if at.is_some_and(|v| !v.is_object()) {
+            return false;
+        }
+        at_schema = member;
+    }
+    let mut at = record;
+    for step in above {
+        let Some(held) = at.as_object_mut() else {
+            return false;
+        };
+        at = held
+            .entry(step.clone())
+            .or_insert_with(|| Value::Object(Map::new()));
+    }
+    true
+}
+
+/// Takes the member at `steps` out of `gap`, an object schema of what a member lacks
+/// ([`lacking`]), and the objects above it left with nothing. Whether nothing is left
+/// of `gap`.
+fn without(gap: &mut Value, steps: &[String]) -> bool {
+    let Some((first, rest)) = steps.split_first() else {
+        return true;
+    };
+    let Some(Value::Object(properties)) = gap.get_mut("properties") else {
+        return false;
+    };
+    let gone = properties
+        .get_mut(first.as_str())
+        .is_some_and(|below| rest.is_empty() || without(below, rest));
+    if !gone {
+        return false;
+    }
+    properties.remove(first.as_str());
+    let empty = properties.is_empty();
+    if let Some(Value::Array(required)) = gap.get_mut("required") {
+        required.retain(|r| r.as_str() != Some(first.as_str()));
+    }
+    empty
 }
 
 /// The lifecycle member of type `t` and the described `initial` state a created record

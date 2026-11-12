@@ -26,6 +26,7 @@ mod concurrency_evidence;
 mod concurrency_regressions;
 mod concurrency_regressions2;
 mod contract_types;
+mod create_nested_computed;
 mod create_refusals;
 mod create_refusals_enforced;
 mod create_render_errors;
