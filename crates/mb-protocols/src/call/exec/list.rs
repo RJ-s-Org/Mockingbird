@@ -437,7 +437,7 @@ fn unread(
     let members = body.as_object()?;
     members.iter().find_map(|(name, value)| {
         let here = format!("{at}/{}", name.replace('~', "~0").replace('/', "~1"));
-        if !asks(value) || q.is_some_and(|q| q.reads_body(&here)) {
+        if !list_query::asks(value) || q.is_some_and(|q| q.reads_body(&here)) {
             return None;
         }
         if value.is_object() && q.is_some_and(|q| q.reads_below(&here)) {
@@ -450,18 +450,6 @@ fn unread(
         }
         Some(here.trim_start_matches('/').to_owned())
     })
-}
-
-/// Whether body member value `value` asks something of the list: not `null`, blank,
-/// or an empty object or array.
-fn asks(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::String(text) => !text.trim().is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(members) => !members.is_empty(),
-        _ => true,
-    }
 }
 
 /// Whether the call's path names the parent of type `t` by its described link: the

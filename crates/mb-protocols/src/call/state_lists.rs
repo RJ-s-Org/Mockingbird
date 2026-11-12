@@ -183,8 +183,9 @@ fn described_list_of(rt: &MockRuntime, t: &str) -> bool {
 }
 
 /// Whether `call` asks for nothing of the list but a page: each query parameter is
-/// the described paging's, or one that pages the list by its name, and its body holds
-/// nothing but the described paging's members.
+/// the described paging's, one that pages the list by its name or one the description
+/// `ignores`, and its body holds nothing but the described paging's members and those
+/// it `ignores` with no described parameter below them ([`ListQuery::ignores_whole`]).
 fn asks_only_a_page(rt: &MockRuntime, op: &Operation, call: &OperationCall, q: &ListQuery) -> bool {
     let bundle = rt.bundle();
     // An issued scope names the collection, not a part of it.
@@ -206,16 +207,11 @@ fn asks_only_a_page(rt: &MockRuntime, op: &Operation, call: &OperationCall, q: &
         .and_then(Value::as_object)
         .is_none_or(|members| {
             members.iter().all(|(name, value)| {
-                let asks_nothing = match value {
-                    Value::Null => true,
-                    Value::String(text) => text.trim().is_empty(),
-                    Value::Array(items) => items.is_empty(),
-                    Value::Object(inner) => inner.is_empty(),
-                    _ => false,
-                };
-                asks_nothing
+                let pointer = format!("/{}", name.replace('~', "~0").replace('/', "~1"));
+                !list_query::asks(value)
                     || issued.as_deref() == Some(name.as_str())
-                    || paged(&format!("/{}", name.replace('~', "~0").replace('/', "~1")))
+                    || q.ignores_whole(&pointer)
+                    || paged(&pointer)
             })
         });
     if !body_pages_only {
@@ -228,7 +224,7 @@ fn asks_only_a_page(rt: &MockRuntime, op: &Operation, call: &OperationCall, q: &
     let paging = runs::Paging::of(rt.bundle(), op, size.as_deref());
     call.query
         .keys()
-        .all(|param| q.pages_with(param) || paging.pages_list(param))
+        .all(|param| q.pages_with(param) || q.ignores(param) || paging.pages_list(param))
 }
 
 /// Marks the collection list `call` names as listed, with the ids of the items of
