@@ -191,43 +191,58 @@ mockingbird verify -c mockingbird.yaml --run "npm test"
 
 - **How it runs.** As `mockingbird run` does: the config's server is used
   when it answers, else one is started for the run (`--offline`,
-  `--state-dir`) and stopped after it; the command gets the proxy
-  environment and the CA preloads for every runtime. It runs with `sh -c`
-  (`cmd /C` on Windows) from the project root of the config (as
-  [below](#hosts-the-project-can-call)), with no stdin; the CLI echoes its output on stderr as it
-  comes and passes Ctrl-C on to it. Only the command the user or agent
-  passed is run.
+  `--state-dir`, default `$MB_STATE_DIR` else `.mockingbird`) and stopped
+  after it; the command gets the proxy environment and the CA preloads for
+  every runtime. It runs with `sh -c` (`cmd /C`, the line passed as
+  written, on Windows) from the project root of the config (as
+  [below](#hosts-the-project-can-call)), with no stdin, in a process group
+  of its own. When it ends, whatever it left running in that group (a
+  server it started in the background) is stopped too. The CLI echoes its
+  output on stderr as it comes. Ctrl-C or SIGTERM to the CLI stops the
+  command's process group and still prints the report, with the command
+  marked `interrupted`. Only the command the user or agent passed is run.
 - **The window.** Before the command starts, the newest request-log id of
   every mock (in every workspace the token sees) and the proxy's
   unmapped-host counts are read. Afterwards, once the request log has
   settled (at most 3 s), only newer entries and the growth of those counts
   are examined, so earlier traffic does not count. Requests other clients
-  send to the same server while the command runs do count.
-- **What fails**, each with a `next_step`:
+  send to the same server while the command runs do count. A mock whose
+  log could not be read beforehand is left out, and `notes` say so; they
+  also say when a mock's log no longer reaches back to the command's start
+  (`observability.request_log_retention`) or dropped records while it ran.
+- **What fails**, each with a `next_step`, each request counted once:
 
   | `kind` | When |
   |---|---|
   | `unmatched_route` | a request reached a mock but matched no operation of its contract (404 or 405) |
-  | `error_status` | a mock answered 4xx or 5xx: the `operation`, `status`, the problem's detail read from the recorded response, and the `request_id`; the next step names `get_world` and `get_request` |
   | `fallback` | an answer fell back to the faker because the LLM call or a replay failed, with the reason (an offline mock's faker answers are not fallbacks) |
+  | `error_status` | a mock answered 5xx, rejected a request in validation (`source: rejected`), or, when the command failed, answered another 4xx: the `operation`, `status`, `source` (absent for a problem the mock answered itself: a scenario, a forced status, a world rule such as `refuse` or an unknown id), the problem's detail read from the recorded response, and the `request_id`; the next step names `get_world` and `get_request`, and for a 4xx says to ignore it if the test expected that status |
   | `blocked_host` | the proxy blocked a host no mock claims (the same step as [`report`](#report-and-verify)'s) |
-  | `unclaimed_hosts` | the project can call a host that a bundled description or catalog example serves and no mock lists ([below](#hosts-the-project-can-call)) |
-  | `check` | an assertion given beside `--run` (`--called`, `--no-unmapped`, `--exact-replay`) fails on the window |
+  | `unclaimed_hosts` | the command reached a host that a bundled description or catalog example serves and no mock lists ([below](#hosts-the-project-can-call)) |
+  | `check` | an assertion given beside `--run` (`--called`, `--no-unmapped`, `--no-client-errors`, `--exact-replay`) fails on the window |
 
-  Hosts the proxy passed to the real API (`proxy.unmapped: pass`) are
-  listed under `notes`.
+  When the command exits 0, a 4xx that matched an operation and passed
+  validation is taken as a status the test expected (a lookup of a
+  missing record, a refused action): it is listed under `notes`, not
+  failed on. Also under `notes`: hosts the proxy passed to the real API
+  (`proxy.unmapped: pass`), and the project's unclaimed hosts when the
+  command called none of them.
 - **Exit code** 1 when the command exits non-zero, is stopped at the
-  timeout, or any failure is found; 0 otherwise.
-- **Caps.** `--timeout` (default `10m`; the command's process group is
-  then stopped), the last 60 lines of output (each cut to 400
-  characters), 5,000 request-log entries examined (newest first;
-  `window.truncated` says when the cap stopped the reading), 20 recorded
-  responses read for problem details, and 50 failures listed
-  (`more_failures` counts the rest).
+  timeout or interrupted, or any failure is found; 0 otherwise.
+- **Caps.** `--timeout` (default `10m`; the MCP tool's `timeout_secs`
+  defaults to 300 and is capped at 1800), after which the command's
+  process group is stopped; the last 60 lines of output (each cut to 400
+  characters); 5,000 request-log entries examined (newest first;
+  `window.truncated` says when the cap stopped the reading); 20 recorded
+  responses read for problem details; and 50 failures listed
+  (`more_failures` counts the rest). The MCP server stops a running
+  command when its client disconnects (stdin closes); it does not act on
+  a client's cancel notification, so the timeout bounds a call that is
+  given up on.
 
 `--format text` (the default) prints a status line, each failure with a
-`Next:` line, and the output's last lines when the command failed;
-`--format json` prints:
+`Next:` line, the notes, and the output's last lines when the command
+failed; `--format json` prints:
 
 ```json
 {
@@ -239,14 +254,17 @@ mockingbird verify -c mockingbird.yaml --run "npm test"
     {"kind": "unmatched_route", "mock": "orders", "status": 404, "count": 1, "request_id": 1,
      "detail": "orders: GET /nope matched no operation of its contract (answered 404, once)",
      "next_step": "Mock `orders` has no operation for GET /nope: ..."},
-    {"kind": "error_status", "mock": "orders", "operation": "listOrders", "status": 400, "count": 1, "request_id": 2,
-     "detail": "orders: listOrders answered 400 (once): Invalid request: query/status: enum: ...",
+    {"kind": "error_status", "mock": "orders", "operation": "listOrders", "status": 400, "source": "rejected",
+     "count": 1, "request_id": 2,
+     "detail": "orders: listOrders answered 400 (once; source rejected: the request failed the contract's validation): Invalid request: query/status: enum: ...",
      "next_step": "Mock `orders` answered 400 to operation listOrders. If the app's call is right, the mock is wrong: check its world (get_world {mock: orders}) and this request (get_request {mock: orders, id: 2}; ...) ..."}
-  ]
+  ],
+  "notes": ["orders: getOrder answered 404 (once; no source: ...); the command passed, so it is taken as a status the test expected"]
 }
 ```
 
-`markdown` and `junit` are not available with `--run`.
+`markdown` and `junit` are not available with `--run`; `--timeout`,
+`--offline` and `--state-dir` need `--run`.
 
 The MCP `start_server` and `server_status` answers name the app's test
 commands in one `next_steps` line, found from the project root and its
@@ -254,13 +272,16 @@ folders up to two levels down (dependencies, build outputs and hidden
 folders skipped; at most 4,000 directory entries looked at and 8
 commands listed): `package.json` `scripts.test` (`npm test`, or `pnpm` /
 `yarn` beside their lock file; npm's placeholder script is left out) and
-end-to-end scripts (`test:e2e`, `e2e`, ...: `npm run <name>`); a Makefile
-`test` target (else a `test-*` or `e2e` one); pytest (`pytest.ini`,
+other test scripts (`test:e2e`, `test-integration`, `e2e`, ...: `npm run
+<name>`; not watch, lint, type check or format scripts); a Makefile `test`
+target (else a `test-*`, `test_*` or `e2e` one); pytest (`pytest.ini`,
 `[tool.pytest…]` in `pyproject.toml`, `[tool:pytest]` in `setup.cfg`,
-`conftest.py`, or `tests/test_*.py`); RSpec (`spec/` with `.rspec` or a
-Gemfile naming rspec: `bundle exec rspec`, else `rspec`); `go test ./...`
-(`go.mod` with a `*_test.go` file); `cargo test` (`Cargo.toml`). A command
-of a subfolder reads `cd <dir> && <command>`.
+`[pytest]` in `tox.ini`, `conftest.py`, or `tests/test_*.py`); RSpec
+(`spec/` with `.rspec` or a Gemfile naming rspec: `bundle exec rspec`,
+else `rspec`); `go test ./...` (`go.mod` with a `*_test.go` file);
+`cargo test` (`Cargo.toml`). A command of a subfolder reads `cd <dir> &&
+<command>`; a subfolder's `cargo test` or pytest is left out below a
+folder that has one (a Cargo workspace, a pytest rootdir).
 
 ## Hosts the project can call
 

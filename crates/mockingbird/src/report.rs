@@ -99,16 +99,17 @@ pub struct VerifyArgs {
     /// fails or any of those is found.
     #[arg(long, value_name = "COMMAND")]
     pub run: Option<String>,
-    /// How long the `--run` command may take; it is stopped (and fails)
-    /// past it.
-    #[arg(long, default_value = "10m")]
-    pub timeout: humantime::Duration,
+    /// How long the `--run` command may take before it and what it
+    /// started are stopped (and it fails) [default: 10m].
+    #[arg(long, requires = "run")]
+    pub timeout: Option<humantime::Duration>,
     /// Faker only, no LLM, for a server `--run` starts.
     #[arg(long, requires = "run")]
     pub offline: bool,
-    /// Where a server `--run` starts keeps its pid and log.
-    #[arg(long, env = "MB_STATE_DIR", default_value = crate::daemon::DEFAULT_STATE_DIR)]
-    pub state_dir: PathBuf,
+    /// Where a server `--run` starts keeps its pid and log [default:
+    /// $MB_STATE_DIR, else .mockingbird].
+    #[arg(long, requires = "run")]
+    pub state_dir: Option<PathBuf>,
 }
 
 /// Requests of one operation (or of a whole mock).
@@ -615,7 +616,7 @@ pub(crate) async fn fetch_metrics(admin_url: &str, token: Option<&str>) -> anyho
 
 /// The samples of counter `name` in a Prometheus text exposition: labels
 /// and value.
-fn samples(text: &str, name: &str) -> Vec<(BTreeMap<String, String>, u64)> {
+pub(crate) fn samples(text: &str, name: &str) -> Vec<(BTreeMap<String, String>, u64)> {
     let mut out = Vec::new();
     for line in text.lines() {
         let Some(rest) = line.strip_prefix(name) else {

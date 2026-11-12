@@ -538,12 +538,12 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "verify_run",
             title: "Run the app's tests against the mocks",
-            description: "Run the app's own command (its tests or an end-to-end suite, as start_server and server_status name them) from the project root against the mocks, as `mockingbird run` does: the proxy environment and CA preloads, this project's server (started for the run when none answers, then stopped). Only the requests the command made count. Returns ok (exit 0 and nothing points at the mock), command {exit_code, timed_out, duration_ms, output_tail}, window {requests}, and failures, each with a next_step: unmatched_route, error_status (a 4xx/5xx with its operation and problem detail), fallback (with its reason), blocked_host, unclaimed_hosts. CLI `mockingbird verify --run \"<cmd>\"`.",
+            description: "Run the app's own command (its tests or an end-to-end suite, as start_server and server_status name them) from the project root against the mocks, as `mockingbird run` does: the proxy environment and CA preloads, this project's server (started for the run when none answers, then stopped). Only the requests the command made count. Returns ok (exit 0 and nothing points at the mock), command {exit_code, timed_out, duration_ms, output_tail}, window {requests}, failures, each with a next_step: unmatched_route, error_status (a 5xx, a request validation rejected, or another 4xx when the command failed: operation, status, source, problem detail), fallback (with its reason), blocked_host, unclaimed_hosts (hosts it reached that no mock lists); and notes (4xx answers taken as expected because the command passed, hosts passed to the real API). What the command leaves running is stopped with it. CLI `mockingbird verify --run \"<cmd>\"`.",
             schema: obj(
                 json!({
                     "command": s("The command to run with sh -c, from the project root (for example npm test)."),
                     "config": s("Config file; default: the one start_server used, else ./mockingbird.yaml."),
-                    "timeout_secs": n("Stop the command after this many seconds; default 600."),
+                    "timeout_secs": n("Stop the command (and what it started) after this many seconds; default 300, at most 1800."),
                     "offline": b("Faker only, for a server this run starts."),
                 }),
                 &["command"],
@@ -1801,10 +1801,12 @@ impl McpServer {
                             .into(),
                     )
                 })?;
-                let timeout = opt_u64(a, "timeout_secs").map_or(
-                    crate::verify_run::DEFAULT_TIMEOUT,
-                    std::time::Duration::from_secs,
-                );
+                let timeout = opt_u64(a, "timeout_secs")
+                    .map_or(
+                        crate::verify_run::MCP_DEFAULT_TIMEOUT,
+                        std::time::Duration::from_secs,
+                    )
+                    .min(crate::verify_run::MCP_MAX_TIMEOUT);
                 let opts = crate::verify_run::Options {
                     command,
                     state_dir: self.state_for(Some(&config)).state_dir,
@@ -3248,6 +3250,9 @@ async fn stdio(server: Arc<McpServer>) -> anyhow::Result<()> {
         });
     }
     drop(tx);
+    // The client is gone: commands verify_run runs are stopped (and still
+    // reported, to no one) so the process can exit.
+    crate::verify_run::cancel_running();
     // Let in-flight calls finish before the process exits.
     let _ = writer.await;
     Ok(())
@@ -4486,6 +4491,7 @@ mod tests {
         };
         let names: Vec<&str> = remote.tools().iter().map(|t| t.name).collect();
         assert!(!names.contains(&"test_llm") && !names.contains(&"init_config"));
+        assert!(!names.contains(&"verify_run"), "runs commands: local only");
         assert!(names.contains(&"import_contract") && names.contains(&"list_mocks"));
         for remote_tool in ["get_draft", "edit_draft", "approve_draft", "get_request"] {
             assert!(names.contains(&remote_tool), "{remote_tool}");
@@ -4500,6 +4506,11 @@ mod tests {
             .await
             .unwrap_or_default();
         assert_eq!(r["result"]["isError"], true);
+        let r = remote
+            .handle(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"verify_run","arguments":{"command":"true"}}}))
+            .await
+            .unwrap_or_default();
+        assert_eq!(r["result"]["isError"], true, "{r}");
     }
 
     #[tokio::test]

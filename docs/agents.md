@@ -119,11 +119,12 @@ Then add `https://<host>/mcp` as a connector (in ChatGPT: Settings → Apps & Co
 
 - requires `--auth-token-env` (a token of at least 16 characters, checked as `Authorization: Bearer`) to listen on anything but loopback;
 - refuses requests whose `Origin` is not listed with `--allow-origin`;
-- hides the tools that act on the host (`doctor`, `init_config`, `init_example`, `configure_llm`, `test_llm`, `validate_contract`, the `server` tools) and refuses local paths in `import_contract` (send the text in `content` instead), unless `--allow-local-tools`;
+- hides the tools that act on the host (`doctor`, `init_config`, `init_example`, `configure_llm`, `test_llm`, `validate_contract`, the `server` tools, `project_hosts`, `verify_run`) and refuses local paths in `import_contract` (send the text in `content` instead), unless `--allow-local-tools`;
 - with `--read-only`, exposes only tools that change nothing.
 
 ## Security notes
 
+- `verify_run` runs the command it is given with `sh -c` on the machine the MCP server runs on, with that user's rights. Over stdio that is the agent's own machine; over HTTP the tool is hidden, and `--allow-local-tools` exposes it, which lets any caller with the token run any shell command there. Don't combine `--allow-local-tools` with a listener others can reach.
 - The MCP server has the Admin API rights of its token. Give remote agents an API key with the least role they need (`viewer` for `--read-only` use).
 - API keys never pass through the agent: profiles hold `env:` or `file:` references, `agent install` writes variable names only, and the key setup page sends nothing back.
 - `call_mock` returns the answer's status, `x-mockingbird-*` headers and body, and `expr_failed` when a [world expression](world.md#expressions) failed in the call. It reads that from the call's request record, which it finds by an `x-mockingbird-call` header it sends (so the header shows in the request log and in `request.headers`; a `redact_fields` entry matching it hides the record from `call_mock`). When the record is not among the session's 20 newest within about a second, the answer says `expr_failed_unknown: true`. `call_mock` and `import_contract` with a URL make requests from the machine the MCP server runs on; URL imports go through the server's [URL fetching](import.md#url-fetching) guards.

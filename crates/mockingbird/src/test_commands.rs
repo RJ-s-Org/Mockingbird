@@ -9,8 +9,9 @@
 //! [`MAX_COMMANDS`] commands:
 //!
 //! - `package.json`: `scripts.test` (`npm test`; not npm's placeholder that
-//!   only fails) and end-to-end scripts (`test:e2e`, `e2e`, ...: `npm run
-//!   <name>`), with `pnpm` or `yarn` when their lock file is there;
+//!   only fails) and other test scripts (`test:e2e`, `e2e`, ...: `npm run
+//!   <name>`; not lint, type check or watch scripts), with `pnpm` or `yarn`
+//!   when their lock file is there;
 //! - a Makefile's `test` target (`make test`), else its first `test-`,
 //!   `test_` or `e2e` target;
 //! - pytest: `pytest.ini`, `[tool.pytest…]` in `pyproject.toml`,
@@ -21,7 +22,9 @@
 //! - Go: `go.mod` with a `*_test.go` file below it (`go test ./...`);
 //! - Cargo: `Cargo.toml` (`cargo test`).
 //!
-//! A command found in a subfolder runs from the root as `cd <dir> && …`.
+//! A command found in a subfolder runs from the root as `cd <dir> && …`;
+//! a subfolder's `cargo test` or pytest is left out when a folder above
+//! has one (a Cargo workspace, a pytest rootdir).
 
 use std::path::Path;
 
@@ -121,13 +124,25 @@ pub fn detect(root: &Path) -> Vec<TestCommand> {
         dirs.extend(children);
     }
     let mut out = Vec::new();
+    // Folders whose command already runs a subfolder's tests: a Cargo
+    // workspace's `cargo test`, pytest from its rootdir.
+    let mut covers: Vec<(String, Ecosystem)> = Vec::new();
     for (dir, rel) in &dirs {
         if out.len() >= MAX_COMMANDS {
             break;
         }
-        for (command, source) in in_dir(dir, &mut budget) {
+        for (command, source, eco) in in_dir(dir, &mut budget) {
             if out.len() >= MAX_COMMANDS {
                 break;
+            }
+            if eco.covers_subfolders() {
+                if covers
+                    .iter()
+                    .any(|(above, e)| *e == eco && is_below(rel, above))
+                {
+                    continue;
+                }
+                covers.push((rel.clone(), eco));
             }
             let command = if rel == "." {
                 command
@@ -149,6 +164,31 @@ pub fn detect(root: &Path) -> Vec<TestCommand> {
     out
 }
 
+/// Whether folder `rel` lies below folder `above` (both relative to the
+/// root, `.` being the root).
+fn is_below(rel: &str, above: &str) -> bool {
+    above == "." || rel.strip_prefix(above).is_some_and(|r| r.starts_with('/'))
+}
+
+/// The test runner a command belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ecosystem {
+    Node,
+    Make,
+    Pytest,
+    Rspec,
+    Go,
+    Cargo,
+}
+
+impl Ecosystem {
+    /// Whether its command in a folder also runs the tests of the folders
+    /// below: `cargo test` in a workspace, pytest from its rootdir.
+    fn covers_subfolders(self) -> bool {
+        matches!(self, Ecosystem::Cargo | Ecosystem::Pytest)
+    }
+}
+
 /// `s` quoted for `sh` when it holds anything but plain path characters.
 fn shell_word(s: &str) -> String {
     if s.chars()
@@ -168,22 +208,30 @@ fn read(path: &Path) -> Option<String> {
     Some(text)
 }
 
-/// The test commands of one folder: `(command, source)`.
-fn in_dir(dir: &Path, budget: &mut usize) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    out.extend(node(dir));
-    out.extend(make(dir));
-    if let Some(source) = pytest(dir) {
-        out.push(("pytest".into(), source));
+/// The test commands of one folder: `(command, source, runner)`.
+fn in_dir(dir: &Path, budget: &mut usize) -> Vec<(String, String, Ecosystem)> {
+    let mut out: Vec<(String, String, Ecosystem)> = node(dir)
+        .into_iter()
+        .map(|(c, s)| (c, s, Ecosystem::Node))
+        .collect();
+    if let Some((c, s)) = make(dir) {
+        out.push((c, s, Ecosystem::Make));
     }
-    if let Some(found) = rspec(dir) {
-        out.push(found);
+    if let Some(source) = pytest(dir) {
+        out.push(("pytest".into(), source, Ecosystem::Pytest));
+    }
+    if let Some((c, s)) = rspec(dir) {
+        out.push((c, s, Ecosystem::Rspec));
     }
     if dir.join("go.mod").is_file() && has_go_test(dir, budget) {
-        out.push(("go test ./...".into(), "go.mod, *_test.go".into()));
+        out.push((
+            "go test ./...".into(),
+            "go.mod, *_test.go".into(),
+            Ecosystem::Go,
+        ));
     }
     if dir.join("Cargo.toml").is_file() {
-        out.push(("cargo test".into(), "Cargo.toml".into()));
+        out.push(("cargo test".into(), "Cargo.toml".into(), Ecosystem::Cargo));
     }
     out
 }
@@ -193,8 +241,10 @@ fn placeholder(script: &str) -> bool {
     script.contains("no test specified")
 }
 
-/// Whether a script name runs end-to-end or other test suites:
-/// `test:e2e`, `e2e`, `test-integration`, `cypress:run`, ...
+/// Whether a script name (other than `test`) runs a test suite: it starts
+/// with `test:`, `test-` or `test_` (`test:e2e`, `test-integration`), or
+/// has an `e2e` part (`e2e`, `cy:e2e`). Watch, update, debug, lint, type
+/// check and format scripts are not.
 fn test_like(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower != "test"
@@ -202,9 +252,11 @@ fn test_like(name: &str) -> bool {
             || lower.starts_with("test-")
             || lower.starts_with("test_")
             || lower.split([':', '-', '_']).any(|part| part == "e2e"))
-        && !lower.contains("watch")
-        && !lower.contains("update")
-        && !lower.contains("debug")
+        && ![
+            "watch", "update", "debug", "lint", "check", "types", "format", "fmt",
+        ]
+        .iter()
+        .any(|w| lower.contains(w))
 }
 
 fn node(dir: &Path) -> Vec<(String, String)> {
@@ -258,9 +310,9 @@ fn make(dir: &Path) -> Option<(String, String)> {
     let target = if targets.contains(&"test") {
         "test"
     } else {
-        targets.into_iter().find(|t| {
-            t.starts_with("test-") || t.starts_with("test_") || *t == "e2e" || *t == "check"
-        })?
+        targets
+            .into_iter()
+            .find(|t| t.starts_with("test-") || t.starts_with("test_") || *t == "e2e")?
     };
     Some((format!("make {target}"), format!("{name} {target}")))
 }
@@ -391,7 +443,7 @@ mod tests {
         write(
             dir.path(),
             "package.json",
-            r#"{"scripts": {"test": "jest", "test:e2e": "playwright test", "test:watch": "jest --watch", "build": "tsc", "e2e": "cypress run"}}"#,
+            r#"{"scripts": {"test": "jest", "test:e2e": "playwright test", "test:watch": "jest --watch", "test:lint": "eslint .", "test:types": "tsc", "build": "tsc", "e2e": "cypress run"}}"#,
         );
         assert_eq!(
             commands(dir.path()),
@@ -504,6 +556,38 @@ mod tests {
             write(dir.path(), &format!("p{i:02}/Cargo.toml"), "");
         }
         assert_eq!(detect(dir.path()).len(), MAX_COMMANDS);
+    }
+
+    #[test]
+    fn a_workspace_or_rootdir_covers_its_subfolders() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        );
+        write(
+            dir.path(),
+            "crates/a/Cargo.toml",
+            "[package]\nname = \"a\"\n",
+        );
+        write(dir.path(), "pytest.ini", "[pytest]\n");
+        write(dir.path(), "svc/pytest.ini", "[pytest]\n");
+        write(
+            dir.path(),
+            "web/package.json",
+            r#"{"scripts": {"test": "vitest"}}"#,
+        );
+        assert_eq!(
+            commands(dir.path()),
+            ["pytest", "cargo test", "cd web && npm test"]
+        );
+        let make = tempfile::tempdir().unwrap();
+        write(make.path(), "Makefile", "check:\n\tlint\n");
+        assert!(
+            detect(make.path()).is_empty(),
+            "a check target is not a test"
+        );
     }
 
     #[test]

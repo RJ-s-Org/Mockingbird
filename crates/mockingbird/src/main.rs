@@ -349,8 +349,12 @@ async fn verify_run(
         command,
         config: args.config.clone(),
         offline: args.offline,
-        state_dir: args.state_dir.clone(),
-        timeout: args.timeout.into(),
+        state_dir: args
+            .state_dir
+            .clone()
+            .or_else(|| std::env::var_os("MB_STATE_DIR").map(Into::into))
+            .unwrap_or_else(|| mockingbird::daemon::DEFAULT_STATE_DIR.into()),
+        timeout: args.timeout.map_or(verify_run::DEFAULT_TIMEOUT, Into::into),
         token: token.map(str::to_owned),
         interactive: true,
     };

@@ -10,19 +10,22 @@
 //! are examined. A server `verify` starts for the run has an empty log, so
 //! everything it logs counts.
 //!
-//! Reported, each with a `next_step`:
+//! Reported, each request once, each failure with a `next_step`:
 //!
 //! - `unmatched_route`: a request reached a mock but matched no operation
 //!   of its contract (404 or 405);
-//! - `error_status`: a mock answered 4xx or 5xx, with the operation, the
-//!   status and the problem's detail;
+//! - `error_status`: a mock answered 5xx, rejected the request in
+//!   validation, or (when the command failed) answered another 4xx, with
+//!   the operation, the status, the log entry's source and the problem's
+//!   detail; while the command passes, such another 4xx is taken as
+//!   expected and listed under `notes`;
 //! - `fallback`: an answer fell back to the faker because the LLM call (or
 //!   a replay) failed, with the reason;
 //! - `blocked_host`: the proxy blocked a host no mock claims
 //!   ([`crate::report::blocked_host_steps`]);
-//! - `unclaimed_hosts`: hosts the project can call that a bundled
+//! - `unclaimed_hosts`: hosts the command reached that a bundled
 //!   description or catalog example serves but no mock lists
-//!   ([`crate::hosts`]);
+//!   ([`crate::hosts`]); the project's others are a note;
 //! - `check`: an assertion given beside `--run` (`--called`, ...) that the
 //!   window fails.
 //!
@@ -47,8 +50,14 @@ use tokio::io::AsyncReadExt as _;
 use crate::client::{self, ClientError};
 use crate::report::{self, HostReport};
 
-/// The default limit on the command's run time.
+/// The default limit on the command's run time (`verify --run`).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The default limit on the command's run time for the MCP tool.
+pub const MCP_DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The longest run time the MCP tool accepts.
+pub const MCP_MAX_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// Lines of the command's output kept (its last ones).
 pub const TAIL_LINES: usize = 60;
@@ -100,9 +109,13 @@ pub struct CommandRun {
     /// Where it ran: the project root.
     pub cwd: String,
     /// Its exit code (`128 + n` when signal `n` ended it, 127 when it could
-    /// not start); `null` when it was stopped at the timeout.
+    /// not start); `null` when it was stopped at the timeout or interrupted.
     pub exit_code: Option<i32>,
     pub timed_out: bool,
+    /// Whether it was stopped early: Ctrl-C or SIGTERM to the CLI, or the
+    /// MCP client going away.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
     pub duration_ms: u64,
     /// The last lines of its stdout and stderr, interleaved as they came.
     pub output_tail: String,
@@ -138,6 +151,11 @@ pub struct RunFailure {
     pub operation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<u16>,
+    /// The log entries' `source` (`rejected`, `state`, `llm`, ...); absent
+    /// for a problem the mock answered itself (a scenario, a forced status,
+    /// a world rule).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// Requests it covers.
     pub count: u64,
     pub detail: String,
@@ -236,7 +254,8 @@ async fn with_session(
     settle(admin, token).await;
     // Mocks created while the command ran have no baseline: all theirs count.
     let mocks = list_mocks(admin, token).await.unwrap_or(mocks);
-    let (entries, truncated) = window_entries(admin, token, &mocks, &baseline).await?;
+    let read = window_entries(admin, token, &mocks, &baseline).await?;
+    let entries = read.entries;
     let metrics_after = metrics(own).await;
     let hosts = host_delta(
         &report::unmapped_hosts(&metrics_before),
@@ -246,13 +265,36 @@ async fn with_session(
     let mut outcome = Outcome {
         window: Window {
             requests: entries.len() as u64,
-            truncated,
+            truncated: read.truncated,
             server_started: session.started_server(),
             admin: admin.to_owned(),
         },
         ..Outcome::default()
     };
-    let mut failures = request_failures(&entries);
+    for m in &baseline.unread {
+        outcome.notes.push(format!(
+            "the request log of {} could not be read before the command ran; its requests were not examined",
+            m.name
+        ));
+    }
+    for m in &read.retention {
+        outcome.notes.push(format!(
+            "the request log of {} no longer reaches back to the command's start (observability.request_log_retention): its oldest requests in the window were not examined",
+            m.name
+        ));
+    }
+    let lost = dropped(&metrics_before);
+    for (mock, n) in dropped(&metrics_after) {
+        let grown = n.saturating_sub(lost.get(&mock).copied().unwrap_or(0));
+        if grown > 0 {
+            outcome.notes.push(format!(
+                "the request log of {mock} dropped {grown} records while the command ran (its write queue was full): they were not examined"
+            ));
+        }
+    }
+    let command_ok = command.exit_code == Some(0);
+    let (mut failures, expected) = request_failures(&entries, command_ok);
+    outcome.notes.extend(expected);
     add_details(admin, token, &mut failures).await;
 
     let mut claimed = HashSet::new();
@@ -274,17 +316,12 @@ async fn with_session(
             continue;
         };
         blocked.insert(h.host.clone());
-        failures.push(RunFailure {
-            kind: "blocked_host".into(),
-            workspace: None,
-            mock: None,
-            operation: None,
-            status: None,
-            count: h.requests,
-            detail: format!("the proxy blocked {}", describe_host(h)),
-            request_id: None,
-            next_step: Some(step),
-        });
+        failures.push(RunFailure::plain(
+            "blocked_host",
+            h.requests,
+            format!("the proxy blocked {}", describe_host(h)),
+            Some(step),
+        ));
     }
     for h in hosts.iter().filter(|h| h.mode == "pass") {
         outcome.notes.push(format!(
@@ -293,30 +330,39 @@ async fn with_session(
             times(h.requests)
         ));
     }
+    // Hosts the command reached (blocked ones already have a failure).
+    let reached: HashSet<&str> = hosts
+        .iter()
+        .map(|h| h.host.as_str())
+        .filter(|h| !blocked.contains(*h))
+        .collect();
     match crate::hosts::project_hosts_async(session.config.clone(), claimed).await {
         Ok(scan) => {
-            let hosts: Vec<String> = scan
+            let called: Vec<String> = scan
                 .unclaimed
                 .iter()
-                .filter(|h| h.fails_verify() && !blocked.contains(&h.host))
+                .filter(|h| h.fails_verify() && reached.contains(h.host.as_str()))
                 .map(|h| h.host.clone())
                 .collect();
-            if !hosts.is_empty() {
-                failures.push(RunFailure {
-                    kind: "unclaimed_hosts".into(),
-                    workspace: None,
-                    mock: None,
-                    operation: None,
-                    status: None,
-                    count: hosts.len() as u64,
-                    detail: format!(
-                        "the project can call {} with a bundled description or catalog example and no mock: {}",
-                        plural(hosts.len(), "host"),
-                        name_some(&hosts)
+            if !called.is_empty() {
+                failures.push(RunFailure::plain(
+                    "unclaimed_hosts",
+                    called.len() as u64,
+                    format!(
+                        "the command called {} that a bundled description or catalog example serves and no mock lists: {}",
+                        plural(called.len(), "host"),
+                        name_some(&called)
                     ),
-                    request_id: None,
-                    next_step: scan.summary_without(&blocked),
-                });
+                    scan.summary_without(&blocked),
+                ));
+            } else if scan
+                .unclaimed
+                .iter()
+                .any(crate::hosts::UnclaimedHost::fails_verify)
+                && let Some(summary) = scan.summary_without(&blocked)
+            {
+                // Not called in this run: worth knowing, not a failure.
+                outcome.notes.push(summary);
             }
         }
         Err(error) => outcome
@@ -329,27 +375,40 @@ async fn with_session(
             if ALWAYS.contains(&f.check.as_str()) {
                 continue;
             }
-            failures.push(RunFailure {
-                kind: "check".into(),
-                workspace: None,
-                mock: None,
-                operation: None,
-                status: None,
-                count: 1,
-                detail: format!("{}: {}", f.check, f.detail),
-                request_id: None,
-                next_step: None,
-            });
+            failures.push(RunFailure::plain(
+                "check",
+                1,
+                format!("{}: {}", f.check, f.detail),
+                None,
+            ));
         }
     }
     if failures.len() > MAX_FAILURES {
         outcome.more_failures = failures.len() - MAX_FAILURES;
         failures.truncate(MAX_FAILURES);
     }
-    outcome.ok = command.exit_code == Some(0) && failures.is_empty();
+    outcome.ok = command_ok && failures.is_empty();
     outcome.failures = failures;
     outcome.command = command;
     Ok(outcome)
+}
+
+impl RunFailure {
+    /// A failure tied to no mock or request.
+    fn plain(kind: &str, count: u64, detail: String, next_step: Option<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            workspace: None,
+            mock: None,
+            operation: None,
+            status: None,
+            source: None,
+            count,
+            detail,
+            request_id: None,
+            next_step,
+        }
+    }
 }
 
 /// The `verify` checks `--run` always makes, which are not repeated as
@@ -359,7 +418,6 @@ const ALWAYS: &[&str] = &[
     "no-blocked",
     "no-unmatched",
     "no-errors",
-    "no-client-errors",
     "no-unclaimed-hosts",
 ];
 
@@ -453,9 +511,17 @@ async fn list_mocks(admin: &str, token: Option<&str>) -> anyhow::Result<Vec<Mock
     Ok(out)
 }
 
-/// The newest request-log id of each mock that has one.
-async fn newest_ids(admin: &str, token: Option<&str>, mocks: &[MockRef]) -> HashMap<MockRef, i64> {
-    let mut out = HashMap::new();
+/// Where each mock's request log stood: its newest id (`None` for an empty
+/// log), and the mocks whose log could not be read.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Baseline {
+    newest: HashMap<MockRef, Option<i64>>,
+    unread: Vec<MockRef>,
+}
+
+/// The newest request-log id of each mock.
+async fn newest_ids(admin: &str, token: Option<&str>, mocks: &[MockRef]) -> Baseline {
+    let mut out = Baseline::default();
     for m in mocks {
         let page = get(
             admin,
@@ -465,8 +531,11 @@ async fn newest_ids(admin: &str, token: Option<&str>, mocks: &[MockRef]) -> Hash
             &[("fields", "summary".into()), ("limit", "1".into())],
         )
         .await;
-        if let Some(id) = page.ok().and_then(|p| p[0]["id"].as_i64()) {
-            out.insert(m.clone(), id);
+        match page {
+            Ok(page) => {
+                out.newest.insert(m.clone(), page[0]["id"].as_i64());
+            }
+            Err(_) => out.unread.push(m.clone()),
         }
     }
     out
@@ -476,7 +545,7 @@ async fn newest_ids(admin: &str, token: Option<&str>, mocks: &[MockRef]) -> Hash
 /// request path): two reads in a row agree, or [`SETTLE`] passed.
 async fn settle(admin: &str, token: Option<&str>) {
     let deadline = Instant::now() + SETTLE;
-    let mut last: Option<HashMap<MockRef, i64>> = None;
+    let mut last: Option<Baseline> = None;
     loop {
         tokio::time::sleep(Duration::from_millis(150)).await;
         let mocks = list_mocks(admin, token).await.unwrap_or_default();
@@ -488,23 +557,40 @@ async fn settle(admin: &str, token: Option<&str>) {
     }
 }
 
-/// The request-log entries (summaries) newer than `baseline`, newest first
-/// per mock, at most [`MAX_REQUESTS`]; whether the cap stopped the reading.
+/// The window's request-log entries.
+#[derive(Default)]
+struct Entries {
+    /// Newest first per mock, at most [`MAX_REQUESTS`].
+    entries: Vec<(MockRef, Value)>,
+    /// Whether the cap stopped the reading.
+    truncated: bool,
+    /// Mocks whose log no longer reaches back to the window's start
+    /// (`observability.request_log_retention`).
+    retention: Vec<MockRef>,
+}
+
+/// The request-log entries (summaries) newer than `baseline`. A mock whose
+/// baseline could not be read is not read; a mock with no baseline (created
+/// while the command ran) is read whole.
 async fn window_entries(
     admin: &str,
     token: Option<&str>,
     mocks: &[MockRef],
-    baseline: &HashMap<MockRef, i64>,
-) -> anyhow::Result<(Vec<(MockRef, Value)>, bool)> {
+    baseline: &Baseline,
+) -> anyhow::Result<Entries> {
     const PAGE: usize = 500;
-    let mut out = Vec::new();
+    let mut out = Entries::default();
     for m in mocks {
-        let floor = baseline.get(m).copied().unwrap_or(i64::MIN);
+        if baseline.unread.contains(m) {
+            continue;
+        }
+        let floor = baseline.newest.get(m).copied().flatten();
         let mut before: Option<i64> = None;
         loop {
-            let left = MAX_REQUESTS - out.len();
+            let left = MAX_REQUESTS - out.entries.len();
             if left == 0 {
-                return Ok((out, true));
+                out.truncated = true;
+                return Ok(out);
             }
             let mut query = vec![
                 ("fields", "summary".to_string()),
@@ -523,31 +609,54 @@ async fn window_entries(
             .await
             .map_err(|e| e.context(format!("reading the request log of {}", m.name)))?;
             let entries = page.as_array().cloned().unwrap_or_default();
-            let n = entries.len();
-            let mut done = n < PAGE.min(left);
+            let short = entries.len() < PAGE.min(left);
+            let mut reached = false;
             for e in entries {
                 let Some(id) = e["id"].as_i64() else {
                     continue;
                 };
-                if id <= floor {
-                    done = true;
+                if floor.is_some_and(|floor| id <= floor) {
+                    reached = true;
                     break;
                 }
                 before = Some(id);
-                out.push((m.clone(), e));
+                out.entries.push((m.clone(), e));
             }
-            if done || before.is_none() {
+            if reached {
                 break;
             }
-            if out.len() >= MAX_REQUESTS {
+            if short || before.is_none() {
+                // The log ended before the baseline entry: retention dropped
+                // the window's oldest requests (and the baseline with them).
+                if floor.is_some() {
+                    out.retention.push(m.clone());
+                }
+                break;
+            }
+            if out.entries.len() >= MAX_REQUESTS {
                 // The cap is reached with this mock's window not read to
                 // its start: older entries may be left.
-                return Ok((out, true));
+                out.truncated = true;
+                return Ok(out);
             }
         }
     }
-    Ok((out, false))
+    Ok(out)
 }
+
+/// How many request-log records of each mock the recorder dropped (its
+/// queue was full), from a Prometheus text exposition.
+fn dropped(metrics: &str) -> BTreeMap<String, u64> {
+    let mut out = BTreeMap::new();
+    for (labels, value) in report::samples(metrics, DROPPED_METRIC) {
+        *out.entry(labels.get("mock").cloned().unwrap_or_default())
+            .or_default() += value;
+    }
+    out
+}
+
+/// The recorder's counter of request-log records it dropped.
+const DROPPED_METRIC: &str = "mb_request_log_dropped_total";
 
 /// The growth of the proxy's unmapped-host counts from `before` to
 /// `after`, per host and mode.
@@ -608,20 +717,46 @@ fn window_report(
     out
 }
 
-/// The failures the logged requests show: unmatched routes, 4xx/5xx
-/// answers and fallbacks, grouped (by mock, route or operation, status or
-/// reason), the most frequent first within each kind.
-fn request_failures(entries: &[(MockRef, Value)]) -> Vec<RunFailure> {
-    // (kind, mock, operation or route, status, reason) → (count, newest id)
-    type Key = (u8, MockRef, String, u16, String);
+/// Where a 4xx/5xx answer came from, from its log entry's `source`: a
+/// problem the mock answered itself (a scenario, a forced status, a world
+/// rule) has none.
+fn source_label(source: Option<&str>) -> String {
+    match source {
+        None => "no source: a problem the mock answered itself (a scenario, a forced status or a world rule)".into(),
+        Some("rejected") => "source rejected: the request failed the contract's validation".into(),
+        Some("state") => "source state: the session's records or a world rule (refuse, an unknown id)".into(),
+        Some(s @ ("llm" | "patched" | "repaired")) => format!("source {s}: generated"),
+        Some(s) => format!("source {s}"),
+    }
+}
+
+/// Whether a 4xx/5xx answer is a failure whatever the command's outcome:
+/// a 5xx, or a request the contract's validation rejected.
+fn always_fails(status: u16, source: Option<&str>) -> bool {
+    status >= 500 || source == Some("rejected")
+}
+
+/// The failures the logged requests show, each request counted once:
+/// unmatched routes, then fallbacks, then 4xx/5xx answers, grouped (by
+/// mock, route or operation, status and source or reason), the most
+/// frequent first within each kind. A 4xx that matched an operation, is not
+/// a validation rejection and came while the command passed is taken as
+/// expected: it is returned as a note.
+fn request_failures(
+    entries: &[(MockRef, Value)],
+    command_ok: bool,
+) -> (Vec<RunFailure>, Vec<String>) {
+    // (kind, mock, operation or route, status, source or reason) → (count, newest id)
+    type Key = (u8, MockRef, String, u16, Option<String>);
     let mut groups: BTreeMap<Key, (u64, Option<i64>)> = BTreeMap::new();
     for (m, e) in entries {
         let status = u16::try_from(e["status"].as_u64().unwrap_or(0)).unwrap_or(0);
         let op = e["operation_id"].as_str();
+        let source = e["source"].as_str();
         let id = e["id"].as_i64();
-        let mut add = |kind: u8, what: String, status: u16, reason: String| {
+        let mut add = |kind: u8, what: String, status: u16, extra: Option<String>| {
             let entry = groups
-                .entry((kind, m.clone(), what, status, reason))
+                .entry((kind, m.clone(), what, status, extra))
                 .or_insert((0, None));
             entry.0 += 1;
             // Entries come newest first: keep the first id seen.
@@ -635,74 +770,92 @@ fn request_failures(entries: &[(MockRef, Value)]) -> Vec<RunFailure> {
                 e["method"].as_str().unwrap_or("?"),
                 e["path"].as_str().unwrap_or("?")
             );
-            add(0, route, status, String::new());
+            add(0, route, status, None);
             continue;
         }
         let op = op.unwrap_or("-").to_owned();
-        if status >= 400 {
-            add(1, op.clone(), status, String::new());
-        }
-        if e["source"].as_str() == Some("fallback") {
-            let reason = e["fallback_reason"].as_str().unwrap_or("unknown");
-            if !reason.starts_with(mb_engine::OFFLINE_REASON) {
-                add(2, op, status, reason.to_owned());
-            }
+        let reason = e["fallback_reason"].as_str().unwrap_or("unknown");
+        if source == Some("fallback") && !reason.starts_with(mb_engine::OFFLINE_REASON) {
+            add(1, op, status, Some(reason.to_owned()));
+        } else if status >= 400 {
+            let expected = command_ok && !always_fails(status, source);
+            add(
+                if expected { 3 } else { 2 },
+                op,
+                status,
+                source.map(str::to_owned),
+            );
         }
     }
-    let mut out: Vec<(u8, u64, RunFailure)> = groups
-        .into_iter()
-        .map(|((kind, m, what, status, reason), (count, id))| {
-            let workspace =
-                (m.workspace != mb_store::DEFAULT_WORKSPACE).then(|| m.workspace.clone());
-            let failure = match kind {
-                0 => RunFailure {
-                    kind: "unmatched_route".into(),
-                    workspace,
-                    detail: format!(
-                        "{}: {what} matched no operation of its contract (answered {status}, {})",
-                        m.name,
-                        times(count)
-                    ),
-                    next_step: Some(unmatched_step(&m.name, &what)),
-                    mock: Some(m.name),
-                    operation: None,
-                    status: Some(status),
-                    count,
-                    request_id: id,
-                },
-                1 => RunFailure {
-                    kind: "error_status".into(),
-                    workspace,
-                    detail: format!("{}: {what} answered {status} ({})", m.name, times(count)),
-                    next_step: None,
-                    mock: Some(m.name),
-                    operation: Some(what),
-                    status: Some(status),
-                    count,
-                    request_id: id,
-                },
-                _ => RunFailure {
-                    kind: "fallback".into(),
-                    workspace,
-                    detail: format!(
-                        "{}: {what} fell back to the faker ({}): {}",
-                        m.name,
-                        times(count),
-                        report::shorten(&reason, 300)
-                    ),
-                    next_step: Some(fallback_step(&m.name, &what)),
-                    mock: Some(m.name),
-                    operation: Some(what),
-                    status: Some(status),
-                    count,
-                    request_id: id,
-                },
-            };
-            (kind, count, failure)
-        })
-        .collect();
+    let mut out: Vec<(u8, u64, RunFailure)> = Vec::new();
+    let mut notes = Vec::new();
+    for ((kind, m, what, status, extra), (count, id)) in groups {
+        let workspace = (m.workspace != mb_store::DEFAULT_WORKSPACE).then(|| m.workspace.clone());
+        let failure = match kind {
+            0 => RunFailure {
+                kind: "unmatched_route".into(),
+                workspace,
+                detail: format!(
+                    "{}: {what} matched no operation of its contract (answered {status}, {})",
+                    m.name,
+                    times(count)
+                ),
+                next_step: Some(unmatched_step(&m.name, &what)),
+                mock: Some(m.name),
+                operation: None,
+                status: Some(status),
+                source: None,
+                count,
+                request_id: id,
+            },
+            1 => RunFailure {
+                kind: "fallback".into(),
+                workspace,
+                detail: format!(
+                    "{}: {what} fell back to the faker ({}): {}",
+                    m.name,
+                    times(count),
+                    report::shorten(extra.as_deref().unwrap_or("unknown"), 300)
+                ),
+                next_step: Some(fallback_step(&m.name, &what)),
+                mock: Some(m.name),
+                operation: Some(what),
+                status: Some(status),
+                source: Some("fallback".into()),
+                count,
+                request_id: id,
+            },
+            2 => RunFailure {
+                kind: "error_status".into(),
+                workspace,
+                detail: format!(
+                    "{}: {what} answered {status} ({}; {})",
+                    m.name,
+                    times(count),
+                    source_label(extra.as_deref())
+                ),
+                next_step: None,
+                mock: Some(m.name),
+                operation: Some(what),
+                status: Some(status),
+                source: extra,
+                count,
+                request_id: id,
+            },
+            _ => {
+                notes.push(format!(
+                    "{}: {what} answered {status} ({}; {}); the command passed, so it is taken as a status the test expected",
+                    m.name,
+                    times(count),
+                    source_label(extra.as_deref())
+                ));
+                continue;
+            }
+        };
+        out.push((kind, count, failure));
+    }
     out.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
-    out.into_iter().map(|(_, _, f)| f).collect()
+    (out.into_iter().map(|(_, _, f)| f).collect(), notes)
 }
 
 fn unmatched_step(mock: &str, route: &str) -> String {
@@ -717,7 +870,7 @@ fn fallback_step(mock: &str, op: &str) -> String {
     )
 }
 
-fn error_step(mock: &str, op: &str, status: u16, id: Option<i64>) -> String {
+fn error_step(mock: &str, op: &str, status: u16, source: Option<&str>, id: Option<i64>) -> String {
     let request = match id {
         Some(id) => format!(
             " and this request (get_request {{mock: {mock}, id: {id}}}; CLI `mockingbird api GET /mocks/{mock}/requests/{id}`)"
@@ -729,8 +882,15 @@ fn error_step(mock: &str, op: &str, status: u16, id: Option<i64>) -> String {
     } else {
         format!("operation {op}")
     };
+    // A 4xx the failing command may have expected (a test of a missing
+    // record or a refusal).
+    let expected = if always_fails(status, source) {
+        ""
+    } else {
+        "If the test expected this status, ignore it. "
+    };
     format!(
-        "Mock `{mock}` answered {status} to {target}. If the app's call is right, the mock is wrong: check its world (get_world {{mock: {mock}}}){request}, then fix the world description (patch_world) or the contract, and run verify --run again."
+        "Mock `{mock}` answered {status} to {target}. {expected}If the app's call is right, the mock is wrong: check its world (get_world {{mock: {mock}}}){request}, then fix the world description (patch_world) or the contract, and run verify --run again."
     )
 }
 
@@ -741,7 +901,13 @@ async fn add_details(admin: &str, token: Option<&str>, failures: &mut [RunFailur
     for f in failures.iter_mut().filter(|f| f.kind == "error_status") {
         let mock = f.mock.clone().unwrap_or_default();
         let op = f.operation.clone().unwrap_or_default();
-        f.next_step = Some(error_step(&mock, &op, f.status.unwrap_or(0), f.request_id));
+        f.next_step = Some(error_step(
+            &mock,
+            &op,
+            f.status.unwrap_or(0),
+            f.source.as_deref(),
+            f.request_id,
+        ));
         let Some(id) = f.request_id else {
             continue;
         };
@@ -823,21 +989,16 @@ impl Tail {
 }
 
 /// Reads `stream` into `tail` line by line (a line past [`LINE_CHARS`] is
-/// cut), echoing each on stderr when `echo` is set.
+/// cut there), echoing its bytes as they come on stderr when `echo` is set.
 async fn read_lines(
     mut stream: impl tokio::io::AsyncRead + Unpin,
     tail: Arc<Mutex<Tail>>,
     echo: bool,
 ) {
+    use std::io::Write as _;
     let mut buf = [0u8; 8192];
     let mut line: Vec<u8> = Vec::new();
     let flush = |line: &mut Vec<u8>| {
-        if echo {
-            eprintln!(
-                "{}",
-                String::from_utf8_lossy(line).trim_end_matches(['\n', '\r'])
-            );
-        }
         if let Ok(mut t) = tail.lock() {
             t.push(line);
         }
@@ -848,6 +1009,11 @@ async fn read_lines(
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
+        if echo {
+            let mut err = std::io::stderr().lock();
+            let _ = err.write_all(&buf[..n]);
+            let _ = err.flush();
+        }
         for &b in &buf[..n] {
             if b == b'\n' {
                 flush(&mut line);
@@ -861,7 +1027,21 @@ async fn read_lines(
     }
 }
 
-/// Runs `opts.command` from `cwd` with `env`, within `opts.timeout`.
+/// Stops every command `verify --run` is running (the MCP server calls it when its
+/// client goes away): each is ended as if interrupted, and still reported.
+pub fn cancel_running() {
+    let _ = cancel_channel().send(true);
+}
+
+fn cancel_channel() -> &'static tokio::sync::watch::Sender<bool> {
+    static CANCEL: std::sync::OnceLock<tokio::sync::watch::Sender<bool>> =
+        std::sync::OnceLock::new();
+    CANCEL.get_or_init(|| tokio::sync::watch::channel(false).0)
+}
+
+/// Runs `opts.command` from `cwd` with `env`, within `opts.timeout`. When
+/// the command ends, what it left running in its process group is stopped
+/// too.
 async fn execute(
     opts: &Options,
     cwd: &std::path::Path,
@@ -875,14 +1055,15 @@ async fn execute(
     #[cfg(windows)]
     let mut cmd = {
         let mut c = tokio::process::Command::new("cmd");
-        c.arg("/C").arg(&opts.command);
+        // Passed as written: cmd.exe does its own parsing of the line.
+        c.arg("/C").raw_arg(&opts.command);
         c
     };
     #[cfg(not(windows))]
     let mut cmd = {
         let mut c = tokio::process::Command::new("sh");
         c.arg("-c").arg(&opts.command);
-        // Its own process group, so a timeout stops what it started too.
+        // Its own process group, so what it starts can be stopped with it.
         c.process_group(0);
         c
     };
@@ -892,6 +1073,7 @@ async fn execute(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    let mut cancel = cancel_channel().subscribe();
     let started = Instant::now();
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -901,6 +1083,7 @@ async fn execute(
             return Ok(run);
         }
     };
+    let pid = child.id();
     let tail = Arc::new(Mutex::new(Tail::default()));
     let mut readers = Vec::new();
     if let Some(out) = child.stdout.take() {
@@ -927,24 +1110,38 @@ async fn execute(
         }
     };
     tokio::pin!(interrupt);
+    let cancelled = async {
+        // A closed channel never cancels.
+        if cancel.wait_for(|c| *c).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::pin!(cancelled);
     let status = tokio::select! {
         status = child.wait() => Some(status?),
         () = &mut deadline => {
             run.timed_out = true;
             None
         }
-        () = &mut interrupt => None,
+        () = &mut interrupt => {
+            run.interrupted = true;
+            None
+        }
+        () = &mut cancelled => {
+            run.interrupted = true;
+            None
+        }
     };
     let status = match status {
         Some(status) => Some(status),
         None => {
-            if let Some(pid) = child.id() {
+            if let Some(pid) = pid {
                 stop_group(pid, false);
             }
             match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
                 Ok(status) => status.ok(),
                 Err(_) => {
-                    if let Some(pid) = child.id() {
+                    if let Some(pid) = pid {
                         stop_group(pid, true);
                     }
                     let _ = child.kill().await;
@@ -954,13 +1151,24 @@ async fn execute(
         }
     };
     run.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // What the command left running in its group (a server it started in
+    // the background) is stopped with it.
+    if let Some(pid) = pid {
+        stop_group(pid, false);
+    }
+    let mut held = false;
     for reader in readers {
         let abort = reader.abort_handle();
         if tokio::time::timeout(DRAIN, reader).await.is_err() {
             abort.abort();
+            held = true;
         }
     }
-    if !run.timed_out {
+    // A process that ignored TERM still holds the output pipes.
+    if held && let Some(pid) = pid {
+        stop_group(pid, true);
+    }
+    if !run.timed_out && !run.interrupted {
         run.exit_code = status.map(exit_code);
     }
     if let Ok(t) = tail.lock() {
@@ -1006,10 +1214,11 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
 pub fn text(o: &Outcome) -> String {
     let c = &o.command;
     let secs = Duration::from_millis(c.duration_ms).as_secs_f64();
-    let ended = match (c.timed_out, c.exit_code) {
-        (true, _) => format!("was stopped at the timeout after {secs:.1}s"),
-        (false, Some(code)) => format!("exited {code} after {secs:.1}s"),
-        (false, None) => format!("was interrupted after {secs:.1}s"),
+    let ended = match (c.timed_out, c.interrupted, c.exit_code) {
+        (true, _, _) => format!("was stopped at the timeout after {secs:.1}s"),
+        (false, true, _) => format!("was interrupted after {secs:.1}s"),
+        (false, false, Some(code)) => format!("exited {code} after {secs:.1}s"),
+        (false, false, None) => format!("ended without an exit code after {secs:.1}s"),
     };
     let mut s = format!(
         "verify --run {}: `{}` {ended}; {} logged while it ran{}; {}\n",
@@ -1101,11 +1310,33 @@ mod tests {
                 json!({"id": 4, "operation_id": "listOrders", "status": 200, "source": "llm"}),
             ),
         ];
-        let f = request_failures(&entries);
+        let mut entries = entries;
+        entries.extend([
+            (
+                m("orders"),
+                json!({"id": 3, "operation_id": "getOrder", "status": 404, "source": "state"}),
+            ),
+            (
+                m("orders"),
+                json!({"id": 2, "operation_id": "getOrder", "status": 503, "source": null}),
+            ),
+            (
+                m("orders"),
+                json!({"id": 1, "operation_id": "updateOrder", "status": 400, "source": "fallback", "fallback_reason": "LLM request timed out"}),
+            ),
+        ]);
+        // The command passed: the 404 a world rule answered is expected.
+        let (f, notes) = request_failures(&entries, true);
         let kinds: Vec<&str> = f.iter().map(|f| f.kind.as_str()).collect();
         assert_eq!(
             kinds,
-            ["unmatched_route", "error_status", "fallback"],
+            [
+                "unmatched_route",
+                "fallback",
+                "fallback",
+                "error_status",
+                "error_status"
+            ],
             "{f:?}"
         );
         assert_eq!(f[0].count, 2);
@@ -1116,19 +1347,53 @@ mod tests {
             f[0].detail
         );
         assert!(f[0].next_step.as_deref().unwrap().contains("edit_contract"));
-        assert_eq!(f[1].operation.as_deref(), Some("createOrder"));
-        assert_eq!(f[1].status, Some(400));
         assert!(
-            f[2].detail.contains("LLM request timed out"),
+            f[1].detail.contains("LLM request timed out"),
             "{}",
-            f[2].detail
+            f[1].detail
         );
-        let step = error_step("orders", "createOrder", 400, Some(7));
+        // Each request once: the 400 fallback is a fallback, not also a 4xx.
+        assert_eq!(f.iter().map(|f| f.count).sum::<u64>(), 6, "{f:?}");
+        let rejected = f
+            .iter()
+            .find(|f| f.status == Some(400) && f.kind == "error_status")
+            .unwrap();
+        assert_eq!(rejected.source.as_deref(), Some("rejected"));
         assert!(
-            step.contains("get_world {mock: orders}")
-                && step.contains("get_request {mock: orders, id: 7}"),
+            rejected.detail.contains("source rejected"),
+            "{}",
+            rejected.detail
+        );
+        let five = f.iter().find(|f| f.status == Some(503)).unwrap();
+        assert!(
+            five.detail
+                .contains("no source: a problem the mock answered itself"),
+            "{}",
+            five.detail
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("getOrder answered 404") && notes[0].contains("source state"),
+            "{}",
+            notes[0]
+        );
+        // The command failed: the 404 is a failure the test may have expected.
+        let (f, notes) = request_failures(&entries, false);
+        assert!(notes.is_empty());
+        let missing = f
+            .iter()
+            .find(|f| f.status == Some(404) && f.kind == "error_status")
+            .unwrap();
+        assert_eq!(missing.operation.as_deref(), Some("getOrder"));
+        let step = error_step("orders", "getOrder", 404, Some("state"), Some(3));
+        assert!(
+            step.contains("If the test expected this status, ignore it.")
+                && step.contains("get_world {mock: orders}")
+                && step.contains("get_request {mock: orders, id: 3}"),
             "{step}"
         );
+        let step = error_step("orders", "createOrder", 400, Some("rejected"), Some(7));
+        assert!(!step.contains("expected this status"), "{step}");
     }
 
     #[test]
@@ -1199,10 +1464,14 @@ mod tests {
                 requests: 3,
                 ..Window::default()
             },
-            failures: request_failures(&[(
-                m("orders"),
-                json!({"id": 1, "operation_id": null, "method": "GET", "path": "/nope", "status": 404}),
-            )]),
+            failures: request_failures(
+                &[(
+                    m("orders"),
+                    json!({"id": 1, "operation_id": null, "method": "GET", "path": "/nope", "status": 404}),
+                )],
+                false,
+            )
+            .0,
             ..Outcome::default()
         };
         let s = text(&o);
