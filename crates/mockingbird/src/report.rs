@@ -91,6 +91,25 @@ pub struct VerifyArgs {
     /// Write the result to this file instead of stdout.
     #[arg(long, short = 'o')]
     pub output: Option<PathBuf>,
+    /// Run this command (with `sh -c`, from the project root of `-c`)
+    /// against the mocks as `mockingbird run` does, starting the server
+    /// when none answers, and check only the requests it made: unmatched
+    /// routes, 4xx/5xx answers, fallbacks, blocked hosts and the project's
+    /// unclaimed hosts, each with a next step. Exits 1 when the command
+    /// fails or any of those is found.
+    #[arg(long, value_name = "COMMAND")]
+    pub run: Option<String>,
+    /// How long the `--run` command may take before it and what it
+    /// started are stopped (and it fails) [default: 10m].
+    #[arg(long, requires = "run")]
+    pub timeout: Option<humantime::Duration>,
+    /// Faker only, no LLM, for a server `--run` starts.
+    #[arg(long, requires = "run")]
+    pub offline: bool,
+    /// Where a server `--run` starts keeps its pid and log [default:
+    /// $MB_STATE_DIR, else .mockingbird].
+    #[arg(long, requires = "run")]
+    pub state_dir: Option<PathBuf>,
 }
 
 /// Requests of one operation (or of a whole mock).
@@ -120,7 +139,7 @@ impl Counts {
         }
     }
 
-    fn merge(&mut self, other: &Counts) {
+    pub(crate) fn merge(&mut self, other: &Counts) {
         self.requests += other.requests;
         for (k, v) in &other.sources {
             *self.sources.entry(k.clone()).or_default() += v;
@@ -269,11 +288,18 @@ pub async fn collect(
     report.unmapped_hosts = unmapped_hosts(&metrics);
     let claimed = claimed_hosts(admin_url, token, workspace).await;
     report.next_steps = blocked_host_steps(&report.unmapped_hosts, &claimed);
-    for (labels, value) in samples(&metrics, crate::snapshot::ANSWERS_METRIC) {
-        let result = labels.get("result").cloned().unwrap_or_default();
-        *report.snapshot.entry(result).or_default() += value;
-    }
+    report.snapshot = snapshot_answers(&metrics);
     Ok(report)
+}
+
+/// Snapshot answers by result, from a Prometheus text exposition.
+pub(crate) fn snapshot_answers(metrics: &str) -> BTreeMap<String, u64> {
+    let mut out = BTreeMap::new();
+    for (labels, value) in samples(metrics, crate::snapshot::ANSWERS_METRIC) {
+        let result = labels.get("result").cloned().unwrap_or_default();
+        *out.entry(result).or_default() += value;
+    }
+    out
 }
 
 /// The config `verify --no-unclaimed-hosts` scans the project of: `-c`,
@@ -333,7 +359,7 @@ pub async fn add_unclaimed_hosts(
 /// samples of a Prometheus text exposition, sorted by host and mode.
 ///
 /// [`UNMAPPED_METRIC`]: crate::proxy::UNMAPPED_METRIC
-fn unmapped_hosts(metrics: &str) -> Vec<HostReport> {
+pub(crate) fn unmapped_hosts(metrics: &str) -> Vec<HostReport> {
     // One entry per host and mode: a host's `sibling_of` label changes
     // when the mocked hosts of its domain do, which starts a new sample.
     let mut merged: BTreeMap<(String, String), HostReport> = BTreeMap::new();
@@ -380,23 +406,32 @@ pub fn blocked_host_steps(
     hosts: &[HostReport],
     claimed: &std::collections::HashSet<String>,
 ) -> Vec<String> {
+    blocked_host_steps_during(hosts, claimed, "since the server started")
+}
+
+/// [`blocked_host_steps`] for counts taken over `when` (`since the server
+/// started`, `while the command ran`).
+pub fn blocked_host_steps_during(
+    hosts: &[HostReport],
+    claimed: &std::collections::HashSet<String>,
+    when: &str,
+) -> Vec<String> {
     hosts
         .iter()
         .filter(|h| h.mode == "block" && h.requests > 0)
         .filter(|h| h.host != crate::proxy::OTHER_HOSTS_LABEL && !h.host.is_empty())
         .filter(|h| !claimed.contains(&h.host))
-        .map(blocked_host_step)
+        .map(|h| blocked_host_step(h, when))
         .collect()
 }
 
-fn blocked_host_step(h: &HostReport) -> String {
+fn blocked_host_step(h: &HostReport, when: &str) -> String {
     let host = &h.host;
     let times = match h.requests {
         1 => "once".to_string(),
         n => format!("{n} times"),
     };
-    let mut step =
-        format!("{host} was blocked {times} since the server started: no mock serves it.");
+    let mut step = format!("{host} was blocked {times} {when}: no mock serves it.");
     if !h.sibling_of.is_empty() {
         let _ = write!(
             step,
@@ -535,7 +570,7 @@ pub async fn blocked_steps(
     Ok((blocked, blocked_host_steps(&hosts, &claimed)))
 }
 
-fn add_entry(m: &mut MockReport, e: &Value) {
+pub(crate) fn add_entry(m: &mut MockReport, e: &Value) {
     let status = e["status"].as_u64().unwrap_or(0);
     let reason = e["fallback_reason"].as_str();
     let source = match e["source"].as_str() {
@@ -563,7 +598,7 @@ fn add_entry(m: &mut MockReport, e: &Value) {
     m.operations.entry(op).or_default().add(source, status);
 }
 
-async fn fetch_metrics(admin_url: &str, token: Option<&str>) -> anyhow::Result<String> {
+pub(crate) async fn fetch_metrics(admin_url: &str, token: Option<&str>) -> anyhow::Result<String> {
     let url = format!("{}/metrics", admin_url.trim_end_matches('/'));
     let mut req = crate::daemon::http().get(&url);
     if let Some(token) = token.filter(|t| !t.is_empty()) {
@@ -581,7 +616,7 @@ async fn fetch_metrics(admin_url: &str, token: Option<&str>) -> anyhow::Result<S
 
 /// The samples of counter `name` in a Prometheus text exposition: labels
 /// and value.
-fn samples(text: &str, name: &str) -> Vec<(BTreeMap<String, String>, u64)> {
+pub(crate) fn samples(text: &str, name: &str) -> Vec<(BTreeMap<String, String>, u64)> {
     let mut out = Vec::new();
     for line in text.lines() {
         let Some(rest) = line.strip_prefix(name) else {
@@ -772,7 +807,7 @@ fn top(counts: &BTreeMap<String, u64>) -> String {
 }
 
 /// `s` cut to `max` characters, with `…` when cut.
-fn shorten(s: &str, max: usize) -> String {
+pub(crate) fn shorten(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {

@@ -90,6 +90,68 @@ impl Started {
 /// set up, or the server cannot be started or reached; a command that
 /// cannot be started is exit code 127, not an error.
 pub async fn run(args: RunArgs) -> anyhow::Result<ExitCode> {
+    let session = open(&args).await?;
+    let code = run_command(&args.command, &session.proxy).await;
+    session.close(args.keep).await;
+    code
+}
+
+/// The mocks a command runs against: the config's server (started by
+/// [`open`] when none answered) and the config's proxy (run in this process
+/// when the server has none). [`Session::close`] stops what `open` started.
+pub struct Session {
+    /// The config the server serves.
+    pub config: PathBuf,
+    /// The server's Admin API.
+    pub admin_url: String,
+    /// The proxy the command is sent through.
+    pub proxy: crate::proxy::env::ProxyEnvOptions,
+    started: Started,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("config", &self.config)
+            .field("admin_url", &self.admin_url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Session {
+    /// Whether this process runs the proxy (in front of a server that has
+    /// none): its counts are in this process's metrics, not the server's.
+    #[must_use]
+    pub fn runs_own_proxy(&self) -> bool {
+        self.started.proxy.is_some()
+    }
+
+    /// Whether [`open`] started the server.
+    #[must_use]
+    pub fn started_server(&self) -> bool {
+        self.started.server.is_some()
+    }
+
+    /// Stops what [`open`] started, leaving a server it started running
+    /// when `keep` is set.
+    pub async fn close(mut self, keep: bool) {
+        if keep && let Some((state, _child)) = self.started.server.take() {
+            eprintln!(
+                "mockingbird: the server keeps running (stop it with `mockingbird server stop --state-dir {}`)",
+                state.state_dir.display()
+            );
+        }
+        self.started.stop().await;
+    }
+}
+
+/// Makes the server of `args.config` (else `./mockingbird.yaml`) and its
+/// proxy answer, starting what is missing (`args.command` is not run).
+///
+/// # Errors
+///
+/// As [`run`]; what was started before the failure is stopped again.
+pub async fn open(args: &RunArgs) -> anyhow::Result<Session> {
     let config = match &args.config {
         Some(path) => path.clone(),
         None => {
@@ -112,42 +174,42 @@ pub async fn run(args: RunArgs) -> anyhow::Result<ExitCode> {
         }
     };
     let server_ip = reach(cfg.server.host);
-    let admin_url = format!(
+    let mut admin_url = format!(
         "http://{}",
         SocketAddr::new(server_ip, cfg.server.admin_port)
     );
     let data_url = format!("http://{}", SocketAddr::new(server_ip, cfg.server.port));
 
     let mut started = Started::default();
-    let result = prepare(&args, &config, &cfg, &admin_url, &data_url, &mut started).await;
-    let code = match result {
-        // A server `run` started may have taken free ports in place of busy
-        // defaults (written into the config): the proxy is read again.
-        Ok(proxy) => match options_for(Some(&config), None) {
-            Ok(mut opts) => {
-                opts.host = proxy.ip().to_string();
-                opts.port = proxy.port();
-                run_command(&args.command, &opts).await
-            }
-            Err(error) => Err(error),
-        },
-        Err(error) => Err(error),
-    };
-    if args.keep
-        && let Some((state, _child)) = started.server.take()
-    {
-        eprintln!(
-            "mockingbird: the server keeps running (stop it with `mockingbird server stop --state-dir {}`)",
-            state.state_dir.display()
-        );
+    let result = prepare(args, &config, &cfg, &admin_url, &data_url, &mut started).await;
+    // A server `run` started may have taken free ports in place of busy
+    // defaults (written into the config): the proxy is read again.
+    let proxy = result.and_then(|(proxy, admin)| {
+        if let Some(admin) = admin {
+            admin_url = admin;
+        }
+        let mut opts = options_for(Some(&config), None)?;
+        opts.host = proxy.ip().to_string();
+        opts.port = proxy.port();
+        Ok(opts)
+    });
+    match proxy {
+        Ok(proxy) => Ok(Session {
+            config,
+            admin_url,
+            proxy,
+            started,
+        }),
+        Err(error) => {
+            started.stop().await;
+            Err(error)
+        }
     }
-    started.stop().await;
-    code
 }
 
 /// Makes sure the server and its proxy answer, starting what is missing;
 /// returns the address of the proxy the command is sent through, which is
-/// always the config's own.
+/// always the config's own, and the admin URL of a server it started.
 async fn prepare(
     args: &RunArgs,
     config: &std::path::Path,
@@ -155,7 +217,7 @@ async fn prepare(
     admin_url: &str,
     data_url: &str,
     started: &mut Started,
-) -> anyhow::Result<SocketAddr> {
+) -> anyhow::Result<(SocketAddr, Option<String>)> {
     let foreign = match readyz(admin_url).await {
         None => None,
         Some(body) => foreign_server(&body, config),
@@ -203,14 +265,15 @@ async fn prepare(
         );
         // Read again: the start may have written a free proxy port.
         let opts = options_for(Some(config), None)?;
-        return Ok(SocketAddr::new(opts.host.parse()?, opts.port));
+        let admin = info["admin"].as_str().map(str::to_owned);
+        return Ok((SocketAddr::new(opts.host.parse()?, opts.port), admin));
     }
     if let Some(warning) = reuse_warning(args, admin_url) {
         eprintln!("{warning}");
     }
     wait_ready(admin_url, Duration::from(args.wait)).await?;
     let proxy_addr = match own_proxy(config, None).await? {
-        OwnProxy::Running(addr) => return Ok(addr),
+        OwnProxy::Running(addr) => return Ok((addr, None)),
         // A server without its proxy: run one in front of it for the
         // command.
         OwnProxy::Missing { addr, .. } => addr,
@@ -244,7 +307,7 @@ async fn prepare(
     let task = tokio::spawn(run_standalone(listener, standalone, stop_rx));
     started.proxy = Some((stop_tx, task));
     eprintln!("mockingbird: proxy http://{proxy_addr} in front of the server at {admin_url}");
-    Ok(proxy_addr)
+    Ok((proxy_addr, None))
 }
 
 /// Where `run` puts its proxy for the config at `config` (whose text is

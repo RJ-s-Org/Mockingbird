@@ -66,5 +66,7 @@ pub mod shares;
 pub mod shell_env;
 pub mod snapshot;
 pub mod telemetry;
+pub mod test_commands;
 pub mod tls;
+pub mod verify_run;
 pub mod watch;

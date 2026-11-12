@@ -42,6 +42,7 @@ mod scenarios_e2e;
 mod shared_ext;
 mod smart_import;
 mod tls;
+mod verify_run;
 mod webhooks_e2e;
 mod workspaces;
 mod world_runtime;
