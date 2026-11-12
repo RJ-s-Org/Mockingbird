@@ -84,6 +84,7 @@ mod nested_identity_patches;
 mod optional_null;
 mod partial_creates;
 mod provider_policy;
+mod query_same_record;
 mod readless_creates;
 mod references_by_value;
 mod related_writes;
