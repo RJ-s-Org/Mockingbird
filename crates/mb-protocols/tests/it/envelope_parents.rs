@@ -2,8 +2,10 @@
 //! their Item was issued; a folder's files, by its path id) whose answer envelope also
 //! holds a member of the parent's type (`/accounts/get`'s `item`): once the list is
 //! answered from state, that member is filled from the held parent, so it names the
-//! same parent on every call. The first list, generated, still draws it. Of two members
-//! of the parent's type, only the one named for it is filled.
+//! same parent on every call. The first list, generated, is filled the same before it is
+//! served and recorded. Of two members of the parent's type, only the one named for it
+//! is filled. A member elsewhere in the envelope named for the listed type's identity
+//! (`/auth/get`'s `numbers.ach[].account_id`) names a listed record, generated or not.
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 
@@ -292,4 +294,195 @@ async fn a_path_scoped_lists_parent_member_is_the_held_parent_by_its_definition(
         assert_eq!(page["data"][0]["id"], file["id"], "{page}");
         assert_eq!(page["parent"], held, "{page}");
     }
+}
+
+#[tokio::test]
+async fn the_first_generated_scoped_lists_parent_member_is_the_held_parent() {
+    let script = vec![
+        json!({"institution_id": "ins_1"}),
+        json!({"item": {"item_id": "drawn", "institution_id": "ins_x"}, "request_id": "r",
+               "accounts": [{"account_id": "a1", "name": "Checking"}]}),
+    ];
+    let h = support::described(CONTRACT, world(), script);
+    let (_, exchanged) = send(
+        &h,
+        "/item/public_token/exchange",
+        json!({"public_token": "p"}),
+    )
+    .await;
+    let token = exchanged["access_token"].clone();
+    let (_, read) = send(&h, "/item/get", json!({"access_token": token})).await;
+    let item = read["item"].clone();
+    assert_eq!(item["item_id"], exchanged["item_id"], "{read}");
+    let (source, first) = send(&h, "/accounts/get", json!({"access_token": token})).await;
+    assert_ne!(source, "state", "{first}");
+    assert_eq!(first["accounts"][0]["account_id"], json!("a1"), "{first}");
+    assert_eq!(first["item"], item, "{first}");
+    let (source, later) = send(&h, "/accounts/get", json!({"access_token": token})).await;
+    assert_eq!(source, "state", "{later}");
+    assert_eq!(later["item"], first["item"], "{later}");
+}
+
+/// [`CONTRACT`] with Plaid's `/auth/get`: the accounts, and their numbers beside them,
+/// each naming its account by `account_id`.
+fn with_auth() -> String {
+    CONTRACT.replace(
+        "components:\n",
+        r##"  /auth/get:
+    post:
+      operationId: authGet
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/TokenRequest"}}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accounts, numbers, item, request_id]
+                properties:
+                  accounts: {type: array, items: {$ref: "#/components/schemas/Account"}}
+                  numbers:
+                    type: object
+                    required: [ach]
+                    properties:
+                      ach:
+                        type: array
+                        minItems: 2
+                        items:
+                          type: object
+                          required: [account_id, routing]
+                          properties: {account_id: {type: string}, routing: {type: string}}
+                  item: {$ref: "#/components/schemas/Item"}
+                  request_id: {type: string}
+        "400": {$ref: "#/components/responses/Error"}
+components:
+"##,
+    )
+}
+
+fn auth_world() -> Value {
+    let mut world = world();
+    world["operations"]["authGet"] = json!({
+        "kind": "list", "type": "account", "answer": {"records": "/accounts"},
+        "scope": {"param": "access_token"}, "not_found": 400
+    });
+    world
+}
+
+/// The `account_id` each `numbers.ach` entry of `page` names.
+fn ach_accounts(page: &Value) -> Vec<Value> {
+    page["numbers"]["ach"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|entry| entry["account_id"].clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn envelope_references_to_the_listed_type_name_listed_records() {
+    let contract = with_auth();
+    assert!(contract.contains("/auth/get:"), "{contract}");
+    let script = vec![
+        json!({"institution_id": "ins_1"}),
+        json!({"item": {"item_id": "drawn", "institution_id": "ins_x"}, "request_id": "r",
+               "accounts": [{"account_id": "a1", "name": "Checking"},
+                            {"account_id": "a2", "name": "Savings"}],
+               "numbers": {"ach": [{"account_id": "elsewhere", "routing": "011"},
+                                   {"account_id": "a2", "routing": "012"},
+                                   {"account_id": "nowhere", "routing": "013"}]}}),
+    ];
+    let h = support::described(&contract, auth_world(), script);
+    let (_, exchanged) = send(
+        &h,
+        "/item/public_token/exchange",
+        json!({"public_token": "p"}),
+    )
+    .await;
+    let token = exchanged["access_token"].clone();
+    let listed = |page: &Value| -> Vec<Value> {
+        page["accounts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|a| a["account_id"].clone())
+            .collect()
+    };
+    // The generated list: by position among the references, cycling through the listed.
+    let (source, first) = send(&h, "/auth/get", json!({"access_token": token})).await;
+    assert_ne!(source, "state", "{first}");
+    assert_eq!(listed(&first), vec![json!("a1"), json!("a2")], "{first}");
+    assert_eq!(
+        ach_accounts(&first),
+        vec![json!("a1"), json!("a2"), json!("a1")],
+        "{first}"
+    );
+    assert_eq!(
+        first["numbers"]["ach"][2]["routing"],
+        json!("013"),
+        "{first}"
+    );
+    assert_eq!(first["item"]["item_id"], exchanged["item_id"], "{first}");
+    // A list from state: its drawn numbers name listed accounts too.
+    for _ in 0..2 {
+        let (source, page) = send(&h, "/auth/get", json!({"access_token": token})).await;
+        assert_eq!(source, "state", "{page}");
+        let ids = listed(&page);
+        assert_eq!(ids, vec![json!("a1"), json!("a2")], "{page}");
+        let named = ach_accounts(&page);
+        assert!(named.len() >= 2, "{page}");
+        assert!(named.iter().all(|id| ids.contains(id)), "{page}");
+    }
+}
+
+#[tokio::test]
+async fn a_generated_list_under_a_scenario_holds_the_held_parent_and_what_it_sets() {
+    let script = vec![
+        json!({"institution_id": "ins_1"}),
+        json!({"item": {"item_id": "drawn", "institution_id": "ins_x"}, "request_id": "r",
+               "accounts": [{"account_id": "a1", "name": "Checking"}]}),
+    ];
+    let world = world();
+    let h = support::harness(
+        CONTRACT,
+        script,
+        &support::HarnessOptions::default(),
+        |rt| {
+            let mut rt = support::with_effective(rt, world, false);
+            rt.scenarios.insert(
+                "steady".into(),
+                mb_protocols::ScenarioRuntime {
+                    spec: mb_engine::ScenarioSpec {
+                        name: "steady".into(),
+                        set: Some(json!({"request_id": "steady"})),
+                        ..mb_engine::ScenarioSpec::default()
+                    },
+                    ..mb_protocols::ScenarioRuntime::default()
+                },
+            );
+            rt
+        },
+    );
+    let (_, exchanged) = send(
+        &h,
+        "/item/public_token/exchange",
+        json!({"public_token": "p"}),
+    )
+    .await;
+    let token = exchanged["access_token"].clone();
+    let (status, _, first) = h
+        .send(
+            "POST",
+            "/accounts/get",
+            Some(json!({"access_token": token})),
+            &[("x-mockingbird-scenario", "steady")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["accounts"][0]["account_id"], json!("a1"), "{first}");
+    assert_eq!(first["item"]["item_id"], exchanged["item_id"], "{first}");
+    assert_eq!(first["request_id"], json!("steady"), "{first}");
 }
