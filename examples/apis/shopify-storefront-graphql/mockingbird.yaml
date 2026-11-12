@@ -1,0 +1,62 @@
+# Shopify Storefront GraphQL API 2026-10: products and variants, collections,
+# menus, pages, recommendations, and a cart that holds together (cartCreate,
+# cartLinesAdd, cartLinesUpdate, cartLinesRemove, cart).
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s localhost:8080/api/2026-10/graphql.json -H 'Host: juniper-plants.myshopify.com' \
+#     -H 'X-Shopify-Storefront-Access-Token: test-storefront-token' -H 'content-type: application/json' \
+#     -d '{"query":"mutation { cartCreate { cart { id checkoutUrl totalQuantity } userErrors { message } } }"}'
+# Contract: shopify-storefront.graphql, a hand-written subset (see its header); Shopify
+# publishes no openly licensed schema file, so there is no upstream to pin.
+proxy:
+  enabled: true          # apps reach https://juniper-plants.myshopify.com through http://127.0.0.1:8888
+mocks:
+  shopify-storefront:
+    contract: shopify-storefront.graphql
+    world: ./shopify-storefront.world.yaml   # the cart: merged lines, quantity 0 removes, totals from lines
+    graphql_path: /graphql.json              # Shopify's endpoint is /api/<version>/graphql.json
+    route_prefix: /api/2026-10               # set it to the version your app asks for (vercel/commerce: /api/2023-01)
+    hosts: [juniper-plants.myshopify.com]
+    persona: >-
+      Shopify Storefront API (version 2026-10) for "Juniper Plants", a Portland,
+      Oregon houseplant store at juniper-plants.myshopify.com, currency USD. Ids
+      are global ids "gid://shopify/<Type>/<13-digit number>" (Product,
+      ProductVariant, Collection, Page, Menu, MenuItem, ProductOption, Image).
+      Products are plants, pots and plant care (Fiddle Leaf Fig, Monstera
+      Deliciosa, Snake Plant, Pothos, terracotta pots, potting mix) with vendor
+      "Juniper Plants", lowercase-hyphen handles, 1-3 variants each (sizes
+      "Small", "Medium", "Large" or a single "Default Title"), prices as decimal
+      strings like "34.0" with currencyCode USD, and images at
+      https://cdn.shopify.com/s/files/1/0754/3727/7491/files/<handle>-<n>.jpg
+      (1200x1200). A product's priceRange spans its variants' prices. Collections
+      have handles like "indoor-plants", "pots-and-planters" and "plant-care";
+      menus "main-menu" and "footer" link to /collections/<handle> and
+      /pages/<handle>; pages are "about", "shipping-returns" and "plant-care-guide".
+      DateTime values are ISO 8601 UTC ("YYYY-MM-DDThh:mm:ssZ"). Connections
+      return at most the requested `first` items, with matching edges, nodes and
+      cursors. Mutations return userErrors as an empty list.
+    scenarios:
+      invalid-merchandise:
+        # Shopify answers 200 with userErrors when a line names a variant that does not exist.
+        operations: [Mutation.cartLinesAdd]
+        set:
+          cart: null
+          userErrors:
+            - __typename: CartUserError   # objects inside a list need their __typename
+              code: INVALID
+              field: [lines, "0", merchandiseId]
+              message: The merchandise does not exist.
+      invalid-merchandise-on-create:
+        # The same refusal on cartCreate, whose lines sit under `input`.
+        operations: [Mutation.cartCreate]
+        set:
+          cart: null
+          userErrors:
+            - __typename: CartUserError
+              code: INVALID
+              field: [input, lines, "0", merchandiseId]
+              message: The merchandise does not exist.
+      slow:
+        # Product lists and collection pages are the slow reads of a storefront.
+        latency: 3s
+      outage:
+        status: 503

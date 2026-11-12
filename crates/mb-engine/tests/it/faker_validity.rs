@@ -92,7 +92,7 @@ fn faked_success_bodies_validate_for_every_example_contract() {
     assert!(invalid.is_empty(), "{}", invalid.join("\n"));
 }
 
-/// The two GraphQL contracts are covered: their recursive object types
+/// The GraphQL contracts are covered: their recursive object types
 /// (Shopify's `InventoryItem.variant` and `ProductVariant.inventoryItem`
 /// require each other) are where the depth limit used to drop members.
 #[test]
@@ -100,6 +100,7 @@ fn the_graphql_contracts_are_among_them() {
     let names: Vec<String> = contracts().iter().map(|p| relative(p)).collect();
     for wanted in [
         "shopify-admin-graphql/shopify-admin.graphql",
+        "shopify-storefront-graphql/shopify-storefront.graphql",
         "github-graphql/github.graphql",
     ] {
         assert!(

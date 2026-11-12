@@ -55,6 +55,13 @@ pub const EXAMPLES: &[Example] = &[
     example!("github-graphql", ["github.graphql"]),
     example!("shopify-admin-graphql", ["shopify-admin.graphql"]),
     example!(
+        "shopify-storefront-graphql",
+        [
+            "shopify-storefront.graphql",
+            "shopify-storefront.world.yaml"
+        ]
+    ),
+    example!(
         "twilio",
         ["twilio-lookups.openapi.yaml", "twilio.openapi.yaml"]
     ),

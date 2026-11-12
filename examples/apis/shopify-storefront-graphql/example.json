@@ -1,0 +1,47 @@
+{
+  "name": "shopify-storefront-graphql",
+  "title": "Shopify Storefront GraphQL",
+  "category": "commerce",
+  "protocol": "graphql",
+  "summary": "The Shopify Storefront GraphQL API 2026-10 for a myshopify.com store: products and variants, collections, menus, pages, recommendations, and a cart that holds together (cartCreate, cartLinesAdd merging a variant's lines, cartLinesUpdate with quantity 0 removing, cartLinesRemove, totals computed from the lines).",
+  "contracts": [
+    "shopify-storefront.graphql"
+  ],
+  "hosts": [
+    "juniper-plants.myshopify.com"
+  ],
+  "scenarios": [
+    "invalid-merchandise",
+    "invalid-merchandise-on-create",
+    "slow",
+    "outage"
+  ],
+  "webhooks": null,
+  "upstream": {
+    "source": "https://shopify.dev/docs/api/storefront/2026-10",
+    "license": "proprietary",
+    "commit": null,
+    "url": null,
+    "sha256": null,
+    "replaces": null,
+    "notes": "Shopify publishes no Storefront API schema as an openly licensed file. The full schema ships as introspection JSON (storefront.schema.json in the @shopify/hydrogen-react npm package); this example neither vendors nor pins it, so the hand-written subset is the only contract. It keeps Shopify's type, field and argument names; ProductVariant.product is nullable here (Shopify: non-null) so a cart line can hold a variant without its whole product."
+  },
+  "sdk": {
+    "language": "node",
+    "package": "@shopify/storefront-api-client",
+    "verified": false
+  },
+  "smoke": {
+    "method": "POST",
+    "path": "/api/2026-10/graphql.json",
+    "host": "juniper-plants.myshopify.com",
+    "headers": {
+      "x-shopify-storefront-access-token": "test-storefront-token"
+    },
+    "body": {
+      "query": "mutation { cartCreate { cart { id checkoutUrl totalQuantity cost { totalAmount { amount currencyCode } } } userErrors { message } } }"
+    },
+    "status": 200,
+    "expect": "/cart/c/"
+  }
+}
