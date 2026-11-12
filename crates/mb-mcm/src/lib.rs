@@ -920,6 +920,27 @@ pub fn joined_name(name: &str) -> String {
         .collect()
 }
 
+/// A member name with ASCII case, `_` and `-` left out: `SmsUrl`, `sms_url` and
+/// `sms-url` are one member (a form API's request parameter and its record's member).
+#[must_use]
+pub fn member_key(member: &str) -> String {
+    member
+        .chars()
+        .filter(|c| !matches!(c, '_' | '-'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// The one of `members` whose [`member_key`] is `name`'s; `None` when none is, or more
+/// than one is (`sms_url` and `smsUrl` both). A name listed twice is one member.
+#[must_use]
+pub fn member_named<'m>(name: &str, members: impl IntoIterator<Item = &'m str>) -> Option<&'m str> {
+    let key = member_key(name);
+    let mut matching = members.into_iter().filter(|m| member_key(m) == key);
+    let found = matching.next()?;
+    matching.all(|m| m == found).then_some(found)
+}
+
 /// Whether `name` is, or ends with the [`words`] of, `tail`, separators and case aside:
 /// `next_page_token` ends with `page_token` and `pageToken`, not with `token_id`.
 #[must_use]
@@ -1562,6 +1583,17 @@ mod resolve_tests {
 mod member_path_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_member_is_named_by_its_key_when_exactly_one_member_has_it() {
+        assert_eq!(member_key("SmsUrl"), "smsurl");
+        assert_eq!(member_key("sms-url"), member_key("sms_url"));
+        let members = ["sms_url", "friendly_name", "friendly_name"];
+        assert_eq!(member_named("SmsUrl", members), Some("sms_url"));
+        assert_eq!(member_named("FriendlyName", members), Some("friendly_name"));
+        assert_eq!(member_named("To", members), None);
+        assert_eq!(member_named("SmsUrl", ["sms_url", "smsUrl"]), None);
+    }
 
     #[test]
     fn a_dotted_field_reads_a_nested_member_unless_the_record_has_one_of_its_name() {

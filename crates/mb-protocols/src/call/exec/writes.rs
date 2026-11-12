@@ -6,6 +6,11 @@
 //!   names) into the held one, at any depth, as a JSON merge patch does (see
 //!   [`Merge::onto`] for `null`s and unions). Then come the described transition and
 //!   changes ([`transitions::apply`]).
+//! - A top-level request member the record does not declare by its own name (a form
+//!   API's `SmsUrl`, `Status`) is the record member of the same [`mb_mcm::member_key`]
+//!   (`sms_url`, `status`) when exactly one has it and no described `set` reads it
+//!   ([`by_record_names`]); a member sent by the record's own name wins. Read-only and
+//!   identity checks see the record's name.
 //! - An update whose request is a patch document (JSON Patch, SCIM PatchOp) or the
 //!   instructions its description names applies it to the held one instead
 //!   ([`patches`]), all or nothing.
@@ -258,24 +263,34 @@ fn changed(
         .body
         .as_ref()
         .map_or(&empty, |b| sent_record(rt, op, b));
-    // A member saying the record is another owner's than the path names is not set:
-    // the path wins.
-    let sent = without_contradictions(rt, plan, call, stored, sent);
-    let (Value::Object(sent), Value::Object(held)) = (&sent, &stored.data) else {
-        return Err("unmerged_body".into());
-    };
     let bundle = rt.bundle();
     let schema = read_schema(rt, t);
-    let member = |name: &str| schema.and_then(|s| property_schema(bundle, s, name));
-    let identity = identity_members(rt, op, t);
-    let read_only = |name: &str| read_only(bundle, member(name).as_ref());
-    // What a client does not set: the identity, and the members the contract keeps.
-    let kept = |name: &str| identity.iter().any(|field| field == name) || read_only(name);
     let declared = schema.and_then(|s| declared_members(bundle, s));
     // A member the record does not declare is the description's when its `set` reads
     // it (Twilio's form `SmsUrl` for the record's `sms_url`): not merged, not a fallback.
     let described = rt.described().expressions(&op.id);
     let set_reads = |name: &str| described.is_some_and(|e| e.sets_from_body(name));
+    // A member sent by another name than the record's (a form API's `SmsUrl`, `Status`
+    // for its `sms_url`, `status`) is the record's member of the same key, before
+    // anything checks it by name.
+    let sent = match (&declared, sent) {
+        (Some(declared), Value::Object(members)) => {
+            let names: Vec<&str> = declared.iter().map(String::as_str).collect();
+            Value::Object(by_record_names(members, &names, set_reads))
+        }
+        _ => sent.clone(),
+    };
+    // A member saying the record is another owner's than the path names is not set:
+    // the path wins.
+    let sent = without_contradictions(rt, plan, call, stored, &sent);
+    let (Value::Object(sent), Value::Object(held)) = (&sent, &stored.data) else {
+        return Err("unmerged_body".into());
+    };
+    let member = |name: &str| schema.and_then(|s| property_schema(bundle, s, name));
+    let identity = identity_members(rt, op, t);
+    let read_only = |name: &str| read_only(bundle, member(name).as_ref());
+    // What a client does not set: the identity, and the members the contract keeps.
+    let kept = |name: &str| identity.iter().any(|field| field == name) || read_only(name);
     if let Some(declared) = &declared
         && let Some(name) = sent
             .keys()
@@ -283,9 +298,9 @@ fn changed(
     {
         return Err(Stop::on("undeclared_member", name));
     }
+    let mut sent = sent.clone();
     // A record member the query names is set as the body sets it (Trello's
     // `PUT /cards/{id}?name=…`).
-    let mut sent = sent.clone();
     for (name, value) in &call.query {
         if !sent.contains_key(name) && declared.as_ref().is_some_and(|d| d.contains(name)) {
             sent.insert(name.clone(), value.clone());
@@ -339,6 +354,53 @@ fn changed(
         }
     }
     Ok(Value::Object(out))
+}
+
+/// `sent` with each member the record does not declare by its own name under the
+/// one of `declared` whose [`mb_mcm::member_key`] is its key, when exactly one is
+/// ([`mb_mcm::member_named`]): a form API's `SmsUrl` is the record's `sms_url`. A member
+/// sent by the record's own name wins over one sent by another name; one a described
+/// `set` reads (`set_reads`), that no member or more than one has the key of, or that
+/// another name of its member sends a different value for, stays as sent. Top-level
+/// members only.
+pub(super) fn by_record_names(
+    sent: &Map<String, Value>,
+    declared: &[&str],
+    set_reads: impl Fn(&str) -> bool,
+) -> Map<String, Value> {
+    let own = |name: &str| declared.contains(&name);
+    let mut out: Map<String, Value> = sent
+        .iter()
+        .filter(|(name, _)| own(name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    let other: Vec<(&String, &Value, Option<&str>)> = sent
+        .iter()
+        .filter(|(name, _)| !own(name))
+        .map(|(name, value)| {
+            let member =
+                mb_mcm::member_named(name, declared.iter().copied()).filter(|_| !set_reads(name));
+            (name, value, member)
+        })
+        .collect();
+    // Two names of one member sending different values say nothing of which it takes.
+    let torn = |member: &str, value: &Value| {
+        other
+            .iter()
+            .any(|(_, v, m)| *m == Some(member) && *v != value)
+    };
+    for &(name, value, member) in &other {
+        match member.filter(|m| !torn(m, value)) {
+            Some(member) => {
+                out.entry(member.to_owned())
+                    .or_insert_with(|| value.clone());
+            }
+            None => {
+                out.insert(name.clone(), value.clone());
+            }
+        }
+    }
+    out
 }
 
 /// An identity held inside an object member (`info.label`) stays where it sits.
