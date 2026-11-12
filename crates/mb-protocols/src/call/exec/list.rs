@@ -356,6 +356,10 @@ async fn answer(
     state_lists::mark_listed(state, (plan, call), t, &served, ids).await;
     // A list paged by its `Range` header: ordered and cut by it.
     ranges::serve(bundle, (plan, call), &mut served);
+    // What the envelope says of a listed record names one the page lists.
+    if let Some(body) = served.body.as_mut() {
+        with_listed_references(rt, &shape, t, body);
+    }
     // A list the query leaves nothing of answers the bodiless status declared for that.
     if none_kept {
         lists::no_content(bundle, op, &mut served);
@@ -692,6 +696,164 @@ async fn held_parent(
         .get(link.path_param.as_deref()?)
         .and_then(id_string)?;
     state.get(&plan.session, &link.r#type, &id).await
+}
+
+/// A generated answer `body` to list `call`, before it is served and recorded, made to
+/// agree with the session as a page from state does: its parent-shaped envelope member
+/// is the held parent ([`with_held_parent`]) and what its envelope says of a listed
+/// record names one it lists ([`with_listed_references`]). Only for a list whose items
+/// have a described identity ([`identified`]). Whether it changed `body`.
+pub(in crate::call) async fn agree_generated(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    body: &mut Value,
+) -> bool {
+    let rt = state.rt;
+    let op = plan.op;
+    let kind = rt
+        .described()
+        .op(&op.id)
+        .and_then(|d| d.kind)
+        .or_else(|| OpKind::of(op));
+    if kind != Some(OpKind::List) || !identified(rt, op, OpKind::List) {
+        return false;
+    }
+    let (Some(t), Some(shape)) = (item_type(rt, op), Shape::of(rt, op)) else {
+        return false;
+    };
+    let before = body.clone();
+    let answer = std::mem::take(body);
+    *body = with_held_parent(state, (plan, call), t, &shape, answer).await;
+    with_listed_references(rt, &shape, t, body);
+    *body != before
+}
+
+/// Nested members deeper than this in an envelope are not looked into for references.
+const MAX_REFERENCE_DEPTH: usize = 8;
+
+/// What [`repoint`] reads: the listed type's identity member, the members its items'
+/// schema declares, and the listed records' ids.
+struct Listed {
+    /// The identity member of the listed type (`account_id`).
+    member: String,
+    /// The members the list's item schema declares.
+    declared: std::collections::HashSet<String>,
+    /// Each listed record's id, as text and as held.
+    ids: Vec<(String, Value)>,
+}
+
+/// `body`, a list answer of `shape` whose items are of type `t`, with each reference to
+/// a record of the type outside its list naming one it lists (Plaid's
+/// `numbers.ach[].account_id` beside `accounts`).
+///
+/// A reference is a member named as the type's described identity member is, where
+/// that name refers to the type (`account_id` to `account`, as `reference_prefix` and
+/// `type_stem` read it; `id` refers to no type), in a top member other than the list's
+/// and the parent-shaped one ([`parent_member`]), and below. An object holding that
+/// member whose every member is one the list's item schema declares is a record of
+/// the type, whole or in part (a `modified` record, a `removed` stub naming one), not a
+/// reference to one: it and what it holds are left as they are. The reference sits in
+/// an object holding something the item schema does not declare (`ach`'s `routing`).
+///
+/// Each reference naming no listed record names, instead, the listed record at its
+/// position among the references, cycling through them. Nothing is dropped, and with
+/// no record listed, or no members declared for the items, nothing changes.
+fn with_listed_references(rt: &MockRuntime, shape: &Shape, t: &str, body: &mut Value) {
+    let Some(list) = shape.top_member() else {
+        return;
+    };
+    let Some(member) = rt
+        .described()
+        .type_desc(t)
+        .and_then(|d| d.identity.as_ref())
+        .and_then(|i| i.member.as_deref())
+        .filter(|m| !m.contains('/'))
+    else {
+        return;
+    };
+    let refers = crate::call::reference_prefix(member).is_some_and(|prefix| {
+        crate::call::effects::type_stem(prefix) == crate::call::effects::type_stem(t)
+    });
+    if !refers {
+        return;
+    }
+    let Some(declared) = mb_engine::consistency::declared_members(rt.bundle(), &shape.items) else {
+        return;
+    };
+    let ids: Vec<(String, Value)> = shape
+        .items_in(body)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let id = item.get(member)?;
+            Some((id_string(id)?, id.clone()))
+        })
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let parent = rt
+        .described()
+        .type_desc(t)
+        .and_then(|d| d.parent.as_ref())
+        .and_then(|link| parent_member(rt, shape, list, &link.r#type, body))
+        .map(|(name, _)| name);
+    let listed = Listed {
+        member: member.to_owned(),
+        declared,
+        ids,
+    };
+    let Some(members) = body.as_object_mut() else {
+        return;
+    };
+    let mut at = 0;
+    for (name, value) in members.iter_mut() {
+        if name != list && parent.as_deref() != Some(name.as_str()) {
+            repoint(value, &listed, &mut at, 0);
+        }
+    }
+}
+
+/// Points each reference in `value` (at nesting `depth`, see
+/// [`with_listed_references`]) holding an id no listed record has at the listed record
+/// at its position `at` among them all, when that record's id is held as the reference
+/// is (a string or a number).
+fn repoint(value: &mut Value, listed: &Listed, at: &mut usize, depth: usize) {
+    if depth > MAX_REFERENCE_DEPTH {
+        return;
+    }
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                repoint(item, listed, at, depth + 1);
+            }
+        }
+        Value::Object(members) => {
+            // A record of the listed type, or a part of one: no reference.
+            if members.contains_key(&listed.member)
+                && members.keys().all(|name| listed.declared.contains(name))
+            {
+                return;
+            }
+            for (name, held) in members.iter_mut() {
+                if *name != listed.member {
+                    repoint(held, listed, at, depth + 1);
+                    continue;
+                }
+                let Some(id) = id_string(held) else {
+                    continue;
+                };
+                if !listed.ids.iter().any(|(listed_id, _)| *listed_id == id)
+                    && let Some((_, named)) = listed.ids.get(*at % listed.ids.len())
+                    && named.is_string() == held.is_string()
+                {
+                    *held = named.clone();
+                }
+                *at += 1;
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Whether member `name` of answer `schema` may be `null` (a `previous` link of a

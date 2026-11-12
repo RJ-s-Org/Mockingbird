@@ -1297,6 +1297,27 @@ pub(crate) async fn complete(
             {
                 lists::no_content(rt.bundle(), op, &mut generated);
             }
+            // A generated list agrees with the session as a page from state does: its
+            // parent-shaped envelope member is the held parent, and what its envelope
+            // says of a listed record names one it lists. What a scenario sets still
+            // stands over it.
+            if is_query
+                && target_id.is_none()
+                && answered.is_none()
+                && rt.consistency
+                && let Some(body) = generated.body.as_mut()
+            {
+                let changed = exec::agree_generated_list(&mut state, (plan, call), body)
+                    .instrument(state_span())
+                    .await;
+                // The engine applies a scenario's `set` to an object body only.
+                if changed
+                    && body.is_object()
+                    && let Some(set) = plan.scenario.and_then(|s| s.spec.set.as_ref())
+                {
+                    *body = mb_engine::apply_set(body, set);
+                }
+            }
             if matches!(op.kind, OperationKind::Command(Effect::Create)) {
                 // The answer as the model gave it, before a fresh id replaces one a stored
                 // record holds: whether it is that record (see [`repeats`]).
