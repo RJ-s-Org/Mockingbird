@@ -941,7 +941,7 @@ fn a_value_echoed_into_an_object_field_names_the_object() {
     let mut echoes = serde_json::Map::new();
     echoes.insert("owner".into(), json!("fernwood"));
     echoes.insert("team".into(), json!("core"));
-    let faker = Faker::default().with_hints(mb_engine::FakerHints { echoes });
+    let faker = Faker::default().with_hints(mb_engine::FakerHints { echoes, ..Default::default() });
     let schema = json!({"type": "object", "required": ["owner", "team"], "properties": {
         "owner": {"type": "object", "required": ["login", "name"], "properties": {
             "login": {"type": "string"}, "name": {"type": "string"}}},
@@ -960,7 +960,7 @@ fn an_echoed_object_name_keeps_to_its_member_s_schema() {
     echoes.insert("size".into(), json!("huge"));
     echoes.insert("deep".into(), json!("x"));
     echoes.insert("count".into(), json!(3));
-    let faker = Faker::default().with_hints(mb_engine::FakerHints { echoes });
+    let faker = Faker::default().with_hints(mb_engine::FakerHints { echoes, ..Default::default() });
     let schema = json!({"type": "object", "required": ["project", "size", "deep", "count"], "properties": {
         // The key's pattern refuses the value; the name takes it.
         "project": {"type": "object", "required": ["key", "name"], "properties": {
