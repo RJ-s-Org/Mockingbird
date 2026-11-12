@@ -92,8 +92,7 @@ impl Cli {
             Command::Verify(args) => args.state_dir.clone(),
             _ => None,
         }
-        .or_else(|| std::env::var_os("MB_STATE_DIR").map(PathBuf::from))
-        .unwrap_or_else(|| crate::daemon::DEFAULT_STATE_DIR.into());
+        .unwrap_or_else(default_state_dir);
         let cwd = std::env::current_dir().unwrap_or_default();
         crate::daemon::project_admin_url(&state_dir, config, &cwd).await
     }
@@ -115,6 +114,14 @@ impl Cli {
     }
 }
 
+/// The state directory of a command without `--state-dir`: `MB_STATE_DIR`,
+/// else [`crate::daemon::DEFAULT_STATE_DIR`].
+#[must_use]
+pub fn default_state_dir() -> PathBuf {
+    std::env::var_os("MB_STATE_DIR")
+        .map_or_else(|| crate::daemon::DEFAULT_STATE_DIR.into(), PathBuf::from)
+}
+
 /// A parsed command line: a [`Cli`] command, or one of the
 /// [`WorkflowCommand`]s that [`command`] adds to it.
 #[derive(Debug)]
@@ -124,8 +131,10 @@ pub enum Invocation {
     Cli(Box<Cli>),
     /// A workflow command with the global flags it runs with.
     Workflow {
-        /// `--admin-url` (`MB_ADMIN_URL`).
-        admin_url: String,
+        /// `--admin-url` (`MB_ADMIN_URL`), when given; else the command
+        /// resolves the project's server
+        /// ([`crate::daemon::project_admin_url`]).
+        admin_url: Option<String>,
         /// `--token` (`MB_ADMIN_TOKEN`).
         token: Option<String>,
         /// `--workspace` (`MB_WORKSPACE`).
@@ -206,7 +215,7 @@ where
     };
     let global = |id: &str| matches.get_one::<String>(id).cloned();
     Ok(Invocation::Workflow {
-        admin_url: crate::client::resolve_admin_url(global("admin_url").as_deref(), None),
+        admin_url: global("admin_url").filter(|u| !u.trim().is_empty()),
         token: global("token"),
         workspace: global("workspace").unwrap_or_else(|| mb_store::DEFAULT_WORKSPACE.to_string()),
         cmd,

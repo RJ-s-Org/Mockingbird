@@ -457,11 +457,12 @@ fn given_ports(args: &StartArgs) -> anyhow::Result<Vec<ChosenPort>> {
     ]
     .into_iter()
     .filter_map(|(key, flag, file)| {
-        flag.filter(|&p| p != file).map(|port| ChosenPort {
-            key,
-            busy: file,
-            port,
-        })
+        flag.filter(|&p| p != 0 && p != file)
+            .map(|port| ChosenPort {
+                key,
+                busy: file,
+                port,
+            })
     })
     .collect())
 }
@@ -661,8 +662,8 @@ pub async fn start_child(args: &StartArgs) -> anyhow::Result<(Value, std::proces
         error.holder = holder(error.address).await;
         return Err(error.into());
     }
-    // Only once every port is known to be free: a failed start leaves the
-    // config as it was.
+    // Only once every port is known to be free: a start that fails on a
+    // port leaves the config as it was.
     let given = given_ports(args)?;
     let (ports_chosen, ports_given) = match &args.config {
         Some(path) if !chosen.is_empty() || !given.is_empty() => {

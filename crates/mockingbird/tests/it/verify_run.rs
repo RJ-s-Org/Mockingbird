@@ -1285,13 +1285,19 @@ fn uses_the_projects_server(dir: &Path) {
     assert_eq!(out.status.code(), Some(0), "{json:#}");
     assert_eq!(json["window"]["server_started"], false, "{json:#}");
 
-    let mocks = mockingbird(dir).args(["mocks", "list"]).output().unwrap();
-    assert!(
-        mocks.status.success() && String::from_utf8_lossy(&mocks.stdout).contains("orders"),
-        "{}{}",
-        String::from_utf8_lossy(&mocks.stdout),
-        String::from_utf8_lossy(&mocks.stderr)
-    );
+    // A client subcommand, and a workflow one (parsed apart from them).
+    for (args, says) in [
+        (&["mocks", "list"][..], "\"orders\""),
+        (&["contracts", "list", "orders"][..], "\"active\""),
+    ] {
+        let out = mockingbird(dir).args(args).output().unwrap();
+        assert!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains(says),
+            "{args:?}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 
 /// The field trial: another project's server took the admin port the
@@ -1328,7 +1334,14 @@ async fn ports_given_to_server_start_are_written_and_used_by_run_verify_and_the_
                 .is_some_and(|n| n.contains(&format!("server.admin_port {admin} (was {taken})"))),
             "{out:#}"
         );
-        assert_eq!(out["ports_written"]["ports"][1]["key"], "server.admin_port");
+        assert!(
+            out["ports_written"]["ports"].as_array().is_some_and(|p| p
+                .iter()
+                .any(|p| p["key"] == "server.admin_port"
+                    && p["was"] == taken
+                    && p["port"] == admin)),
+            "{out:#}"
+        );
         let text = std::fs::read_to_string(dir.path().join("mockingbird.yaml")).unwrap();
         assert!(text.contains(&format!("admin_port: {admin}")), "{text}");
         uses_the_projects_server(dir.path());
