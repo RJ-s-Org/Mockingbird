@@ -35,8 +35,11 @@ pub(crate) struct BundleIndex {
     pub(super) types_by_def: HashMap<String, String>,
     /// The resource types of the query operations.
     pub(super) read_types: HashSet<String>,
-    /// Per resource type, the position of its first query by path parameter
-    /// with a success schema: the read a stored resource must suit.
+    /// Per resource type, the position of its own read: of its queries by path
+    /// parameter with a success schema, the one the description makes a read, else
+    /// the one addressing a record most directly (`/repos/{owner}/{repo}`, not
+    /// `/orgs/{org}/teams/{team_slug}/repos/{owner}/{repo}`; see
+    /// [`BundleIndex::described`]). The read a stored resource must suit.
     pub(super) detail_reads: HashMap<String, usize>,
     /// Per resource type with no such read, what a stored resource must
     /// suit instead, with the position of the read it comes from: a list's
@@ -168,6 +171,135 @@ fn own_alternative(bundle: &mb_mcm::Bundle, schema: &Value, t: &str) -> Option<V
     }
     let name = find(bundle, schema, t, false, 0)?;
     Some(serde_json::json!({"$ref": format!("#/$defs/{name}")}))
+}
+
+/// The operations `world` describes as reads where it differs from `base` (tier 0)
+/// in the operation's kind or type: the description's own choice of a read, which
+/// goes before the heuristics' (see [`BundleIndex::described`]). A target written
+/// alone only says how the record is named.
+pub(crate) fn described_reads<'w>(
+    base: &mb_mcm::world::World,
+    world: &'w mb_mcm::world::World,
+) -> HashSet<&'w str> {
+    world
+        .operations
+        .iter()
+        .filter(|(_, w)| w.kind == Some(mb_mcm::world::OpKind::Read))
+        .filter(|(id, w)| match base.operations.get(id.as_str()) {
+            None => true,
+            Some(b) => b.kind != w.kind || (w.r#type.is_some() && b.r#type != w.r#type),
+        })
+        .map(|(id, _)| id.as_str())
+        .collect()
+}
+
+/// Lower first: not described, not answering the type's own definition, not where a
+/// create puts the record, not where the type's records are written, the parameters
+/// before the record's key, the path's segments.
+type ReadRank = (bool, bool, bool, bool, usize, usize);
+
+/// How directly each read by path addresses one record of its type, lower first, so
+/// that of a type's reads the lowest is its own read:
+/// 1. one the world description makes a read (see [`described_reads`]);
+/// 2. one answering the definition named for the type (Stripe's `cards` read as
+///    `card` at `/v1/customers/{customer}/cards/{id}`, not as `issuing.card`);
+/// 3. one where a create of the type puts the record: its path is the create's
+///    path and the record's key (`POST /orgs/{org}/teams`, `GET /orgs/{org}/teams/
+///    {team_slug}`, not `GET /teams/{team_id}`), or the create's own path;
+/// 4. one where the type's records are written: the path of an update or delete of
+///    the type (`DELETE /projects/{project_id}/tasks/{id}`);
+/// 5. the fewest parameters before the record's key, the trailing run of parameter
+///    segments: other records' keys (`GET /repos/{owner}/{repo}` has none,
+///    `GET /orgs/{org}/teams/{team_slug}/repos/{owner}/{repo}`, a team's view of
+///    the repository, has two);
+/// 6. the fewest segments.
+///
+/// Off HTTP every read ranks the same.
+struct ReadRanks<'b> {
+    described: &'b HashSet<&'b str>,
+    /// Per resource type, the routes ([`route`]) its creates, updates and deletes
+    /// act at, each with whether it is a create's.
+    writes: HashMap<&'b str, Vec<(Vec<&'b str>, bool)>>,
+}
+
+impl<'b> ReadRanks<'b> {
+    fn new(bundle: &'b mb_mcm::Bundle, described: &'b HashSet<&'b str>) -> Self {
+        let mut writes: HashMap<&str, Vec<(Vec<&str>, bool)>> = HashMap::new();
+        for op in &bundle.operations {
+            let OperationKind::Command(effect @ (Effect::Create | Effect::Update | Effect::Delete)) =
+                &op.kind
+            else {
+                continue;
+            };
+            if let (Some(t), Binding::Http { path, .. }) =
+                (op.resource_type.as_deref(), &op.binding)
+            {
+                let create = matches!(effect, Effect::Create);
+                writes.entry(t).or_default().push((route(path), create));
+            }
+        }
+        Self { described, writes }
+    }
+
+    /// The rank of `op`, a read by path of type `t`.
+    fn of(&self, op: &Operation, t: &str) -> ReadRank {
+        let described = self.described.contains(op.id.as_str());
+        let named = op
+            .success_output()
+            .and_then(|o| def_name(o.schema.as_ref()?))
+            .is_some_and(|def| named_for(def, t));
+        let Binding::Http { path, .. } = &op.binding else {
+            return (!described, !named, true, true, 0, 0);
+        };
+        let segments = route(path);
+        let key = segments.iter().rev().take_while(|s| **s == "{}").count();
+        let collection = &segments[..segments.len() - key];
+        let routes = self.writes.get(t).map(Vec::as_slice).unwrap_or_default();
+        let made_here = routes
+            .iter()
+            .any(|(r, create)| *create && (r.as_slice() == collection || *r == segments));
+        let written_here = routes.iter().any(|(r, create)| !*create && *r == segments);
+        let before = collection.iter().filter(|s| **s == "{}").count();
+        (
+            !described,
+            !named,
+            !made_here,
+            !written_here,
+            before,
+            segments.len(),
+        )
+    }
+}
+
+/// Whether definition `def` is named for type `t`, case, separators and a plural
+/// (`s`, `es`, `ies`) aside: `balance_transaction` for `balance_transactions`, not
+/// `customer_balance_transaction`.
+pub(super) fn named_for(def: &str, t: &str) -> bool {
+    let norm = |s: &str| -> String {
+        s.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let (def, t) = (norm(def), norm(t));
+    let singular_y = t.strip_suffix("ies").map(|stem| format!("{stem}y"));
+    !def.is_empty()
+        && [
+            Some(t.as_str()),
+            t.strip_suffix('s'),
+            t.strip_suffix("es"),
+            singular_y.as_deref(),
+        ]
+        .contains(&Some(def.as_str()))
+}
+
+/// `path`'s segments, each parameter as `{}`: what two routes naming their
+/// parameters differently share.
+fn route(path: &str) -> Vec<&str> {
+    path.split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| if s.contains('{') { "{}" } else { s })
+        .collect()
 }
 
 /// The [`BundleIndex::record_schemas`] of `bundle`, from the reads by path chosen.
@@ -306,6 +438,16 @@ pub(super) struct SiblingList {
 
 impl BundleIndex {
     pub(crate) fn new(bundle: &mb_mcm::Bundle) -> Self {
+        Self::described(bundle, &HashSet::new())
+    }
+
+    /// The index of `bundle`, where `described` names the operations the world
+    /// description makes reads (see [`described_reads`]): of a type's reads by path,
+    /// one of those is its read before any the heuristics found, and otherwise the
+    /// one addressing a record most directly ([`ReadRanks`]), the first of equals.
+    pub(crate) fn described(bundle: &mb_mcm::Bundle, described: &HashSet<&str>) -> Self {
+        let ranks = ReadRanks::new(bundle, described);
+        let mut read_ranks: HashMap<String, ReadRank> = HashMap::new();
         let mut by_id = HashMap::with_capacity(bundle.operations.len());
         let mut path_fields: HashMap<String, Vec<String>> = HashMap::new();
         let mut identity_fields: HashMap<String, Vec<String>> = HashMap::new();
@@ -347,7 +489,14 @@ impl BundleIndex {
                     let by_path = op.identity.as_ref().is_some_and(|i| i.path_param.is_some())
                         && !op.is_action();
                     if by_path && op.success_output().is_some_and(|o| o.schema.is_some()) {
-                        detail_reads.entry(t.to_string()).or_insert(i);
+                        let rank = ranks.of(op, t);
+                        match read_ranks.get(t) {
+                            Some(held) if *held <= rank => {}
+                            _ => {
+                                read_ranks.insert(t.to_string(), rank);
+                                detail_reads.insert(t.to_string(), i);
+                            }
+                        }
                     }
                     let lists = list_item_schemas(bundle, op, &members);
                     // An answer with an identity of its own is one record: the lists it
