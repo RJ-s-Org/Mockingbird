@@ -306,8 +306,9 @@ fn is_item_of(item: &str, collection: &str) -> bool {
 
 /// The schema type `t`'s records declare their identity `field` with, and the one
 /// every read of them holds it by: the record schema's or its read by id's, else the
-/// first read's ([`super::exec::read_schemas`]: a type read only by its lists); every
-/// read's member schema, together (an `allOf`), when they are more than one.
+/// first read's ([`super::exec::read_schemas`]: a type read only by its lists), else,
+/// for a type no route reads, its creates' answers' ([`super::exec::created_schemas`]);
+/// every read's member schema, together (an `allOf`), when they are more than one.
 fn record_id_schema(rt: &MockRuntime, t: &str, field: &str) -> (Option<Value>, Option<Value>) {
     let index = rt.index();
     let bundle = rt.bundle();
@@ -320,7 +321,7 @@ fn record_id_schema(rt: &MockRuntime, t: &str, field: &str) -> (Option<Value>, O
         .flatten()
         .find_map(|schema| property_schema(bundle, schema, field));
     let mut all: Vec<Value> = declared.iter().cloned().collect();
-    for schema in super::exec::read_schemas(rt, t) {
+    for schema in read_or_created(rt, t) {
         if let Some(member) = property_schema(bundle, &schema, field)
             && !all.contains(&member)
         {
@@ -339,6 +340,17 @@ fn record_id_schema(rt: &MockRuntime, t: &str, field: &str) -> (Option<Value>, O
         _ => Some(json!({"allOf": all})),
     };
     (declared, held)
+}
+
+/// The schemas type `t`'s records are read by ([`super::exec::read_schemas`]), else,
+/// for a type no route reads, those its creates answer
+/// ([`super::exec::created_schemas`]): the only ones that declare its identity.
+fn read_or_created(rt: &MockRuntime, t: &str) -> Vec<Value> {
+    let read = super::exec::read_schemas(rt, t);
+    match read.is_empty() {
+        true => super::exec::created_schemas(rt, t),
+        false => read,
+    }
 }
 
 /// Whether `schema` is text and says nothing more of it: no `pattern`, `format`,
@@ -758,8 +770,8 @@ pub(super) fn record_id_examples(rt: &MockRuntime, t: &str, field: &str) -> Vec<
 }
 
 /// The ids type `t`'s identity `field` is given in the contract's examples: of the
-/// member as its records and reads declare it, and of the member in examples of the
-/// records themselves.
+/// member as its records and reads (for a type no route reads, its creates' answers)
+/// declare it, and of the member in examples of the records themselves.
 fn id_examples(rt: &MockRuntime, t: &str, field: &str) -> (Vec<String>, Vec<String>) {
     let bundle = rt.bundle();
     let index = rt.index();
@@ -773,7 +785,7 @@ fn id_examples(rt: &MockRuntime, t: &str, field: &str) -> (Vec<String>, Vec<Stri
         .cloned()
         .into_iter()
         .chain(read)
-        .chain(super::exec::read_schemas(rt, t))
+        .chain(read_or_created(rt, t))
         .collect();
     let of_member: Vec<String> = records
         .iter()
