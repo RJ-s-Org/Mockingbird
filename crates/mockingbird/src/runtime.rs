@@ -100,6 +100,9 @@ pub struct RuntimeDeps {
     pub webhook_log: SharedDeliveryLog,
     /// Every mock's record pool, kept across rebuilds of its runtime.
     pub record_pools: RecordPools,
+    /// The record types of the mocks of each `shares` group: the mounted mocks', set
+    /// each time the registry publishes them (see [`mb_protocols::SharedTypes`]).
+    pub shared_types: mb_protocols::SharedTypes,
 }
 
 /// Each mock's [`RecordPool`], by workspace and name: a rebuilt runtime (a world or
@@ -660,6 +663,9 @@ pub(crate) async fn build_runtime_tracked(
     rt.default_scenario = mock.behavior.default_scenario.clone();
     rt.pool = deps.record_pools.of(&mock.workspace, &mock.name);
     rt.shares = mock.behavior.shares.clone();
+    // Joined once mounted (see `MockRegistry::publish`), when the build can no longer
+    // fail and the mock is served.
+    rt.shared_types = deps.shared_types.clone();
     rt.strict_requests = mock.behavior.strict_requests;
     rt.base_paths = mb_import::base_paths(&contract.source);
     rt.webhooks = webhook_dispatcher(deps, mock).await?;
