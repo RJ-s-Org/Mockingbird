@@ -78,7 +78,7 @@ mod base_url;
 )]
 mod call;
 pub use call::exec_pool::{MIN_POOL_TOKENS, POOL_SIZE, RecordPool, fill as fill_record_pool};
-pub use call::shared::SharedTypes;
+pub use call::shared::{SharedEntry, SharedTypes};
 pub mod chaos;
 #[cfg_attr(
     not(any(
@@ -392,9 +392,9 @@ pub struct MockRuntime {
     /// The name the mocks of one API keep their sessions under together
     /// (see `call::shared`); `None` keeps this mock's own.
     pub shares: Option<String>,
-    /// The record types of the mocks of each `shares` group, which this one
-    /// [`SharedTypes::join`]s once built: what a type of this mock is in the
-    /// others is inferred from them. Every runtime of a server holds the same one.
+    /// The record types of the mocks of each `shares` group: what a type of this
+    /// mock is in the others is inferred from them. Every runtime of a server holds
+    /// the same one, which the server sets to its mounted mocks.
     pub shared_types: SharedTypes,
     /// Validate requests strictly: refuse a member the request schema does not
     /// declare, which is otherwise let through, and validate a contract the smart

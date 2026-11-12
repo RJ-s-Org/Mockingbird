@@ -665,3 +665,293 @@ async fn mocks_that_share_nothing_infer_nothing() {
     .await;
     assert_ne!(read["title"], "Over GraphQL", "{read}");
 }
+
+/// The gh trial's run 5: worlds saying `same_as` both ways and unknown ids
+/// answered 404. A pull request GraphQL created (its record keyed by its node id)
+/// is read over REST by its `number`, not answered "does not exist".
+#[tokio::test]
+async fn a_rest_read_by_number_finds_a_graphql_created_record_under_unknown_ids_404() {
+    let world = |doc: Value| serde_json::from_value::<mb_mcm::world::World>(doc).unwrap();
+    let described = (
+        world(json!({"version": 1, "types": {"pullrequest": {"same_as": ["pulls"]}}})),
+        world(json!({"version": 1, "types": {"pulls": {
+            "same_as": ["pullrequest"], "identity": {"member": "number"}}}})),
+    );
+    read_by_number_under_404(Some(&described)).await;
+    // The REST world says `same_as` alone: the path's `{pull_number}` still reads
+    // the record's `number`.
+    let same_as_only = (
+        described.0.clone(),
+        world(json!({"version": 1, "types": {"pulls": {"same_as": ["pullrequest"]}}})),
+    );
+    read_by_number_under_404(Some(&same_as_only)).await;
+    // The run itself had no world: the types are inferred.
+    read_by_number_under_404(None).await;
+}
+
+async fn read_by_number_under_404(worlds: Option<&(mb_mcm::world::World, mb_mcm::world::World)>) {
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let types = SharedTypes::default();
+    let gh = joined(
+        ("github-graphql", PULLS_SDL),
+        vec![pull_request(128, "Over GraphQL")],
+        &state,
+        &types,
+        worlds.map(|(gql, _)| gql),
+    );
+    let gql_router = graphql::try_router(gh).unwrap();
+    let mut rest_rt = Arc::try_unwrap(joined(
+        ("github-rest", PULLS),
+        vec![],
+        &state,
+        &types,
+        worlds.map(|(_, rest)| rest),
+    ))
+    .ok()
+    .unwrap();
+    rest_rt.unknown_ids = mb_protocols::UnknownIds::NotFound;
+    let rest_router = http_rest::router(Arc::new(rest_rt));
+
+    gql(
+        &gql_router,
+        r#"mutation { createPullRequest(title: "Over GraphQL") { id number } }"#,
+        false,
+    )
+    .await;
+    let read = rest(
+        &rest_router,
+        "GET",
+        "/repos/fernwood/trellis/pulls/128",
+        None,
+    )
+    .await;
+    assert_eq!(read["title"], "Over GraphQL", "{read}");
+    assert_eq!(read["number"], 128, "{read}");
+}
+
+/// A type of the group named like the reading one turns inference off for it:
+/// REST `pulls` reads GraphQL's `Pull`, not its `PullRequest`.
+#[tokio::test]
+async fn a_type_named_alike_in_the_group_turns_inference_off() {
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let types = SharedTypes::default();
+    let sdl = PULLS_SDL.replace(
+        "type Query {",
+        "type Pull { id: ID! number: Int! title: String! }\ntype Query { pull(number: Int!): Pull ",
+    );
+    let gh = joined(
+        ("github-graphql", &sdl),
+        vec![pull_request(7007, "Over GraphQL")],
+        &state,
+        &types,
+        None,
+    );
+    let gql_router = graphql::try_router(gh).unwrap();
+    let rest_rt = joined(
+        ("github-rest", PULLS),
+        vec![
+            json!({"id": 1, "node_id": "PR_1", "number": 7007, "title": "Made up", "state": "open"}),
+        ],
+        &state,
+        &types,
+        None,
+    );
+    let rest_router = http_rest::router(rest_rt);
+    gql(
+        &gql_router,
+        r#"mutation { createPullRequest(title: "Over GraphQL") { id number } }"#,
+        true,
+    )
+    .await;
+    let read = rest(
+        &rest_router,
+        "GET",
+        "/repos/fernwood/trellis/pulls/7007",
+        None,
+    )
+    .await;
+    assert_ne!(read["title"], "After leaving", "{read}");
+}
+
+/// What a mock adds to the group goes when it leaves it (its `shares` unset, as a
+/// server does for a mock deleted or unmounted): what was inferred from it is
+/// forgotten.
+#[tokio::test]
+async fn a_mock_leaving_the_group_takes_its_types_with_it() {
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let types = SharedTypes::default();
+    let gh = joined(
+        ("github-graphql", PULLS_SDL),
+        vec![
+            pull_request(7007, "Over GraphQL"),
+            pull_request(7008, "After leaving"),
+        ],
+        &state,
+        &types,
+        None,
+    );
+    let gql_router = graphql::try_router(gh).unwrap();
+    let rest_rt = joined(
+        ("github-rest", PULLS),
+        vec![
+            json!({"id": 1, "node_id": "PR_1", "number": 7008, "title": "Made up", "state": "open"}),
+        ],
+        &state,
+        &types,
+        None,
+    );
+    let rest_router = http_rest::router(rest_rt);
+    let create = |title: &str| {
+        format!(r#"mutation {{ createPullRequest(title: "{title}") {{ id number }} }}"#)
+    };
+    gql(&gql_router, &create("Over GraphQL"), true).await;
+    let read = rest(
+        &rest_router,
+        "GET",
+        "/repos/fernwood/trellis/pulls/7007",
+        None,
+    )
+    .await;
+    assert_eq!(read["title"], "Over GraphQL", "{read}");
+
+    let mut left = Arc::try_unwrap(runtime(
+        "github-graphql",
+        PULLS_SDL,
+        vec![],
+        Arc::clone(&state),
+    ))
+    .ok()
+    .unwrap();
+    left.shares = None;
+    types.join(&left);
+    gql(&gql_router, &create("After leaving"), true).await;
+    let read = rest(
+        &rest_router,
+        "GET",
+        "/repos/fernwood/trellis/pulls/7008",
+        None,
+    )
+    .await;
+    assert_ne!(read["title"], "After leaving", "{read}");
+}
+
+/// A `number` is unique only under its repository: each repository's read finds
+/// its own pull request #5 (the one whose `repository` names it), not the first one
+/// numbered 5. (A read is scoped by the path parameter nearest its target, here the
+/// repository's name, so two repositories of one name under two owners are not told
+/// apart.)
+#[tokio::test]
+async fn each_owner_reads_its_own_record_of_a_shared_number() {
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let types = SharedTypes::default();
+    let sdl = PULLS_SDL
+        .replace(
+            "type PullRequest { id: ID! number: Int!",
+            "type Repository { id: ID! name: String! }\ntype PullRequest { id: ID! repository: Repository number: Int!",
+        );
+    let rest_contract = PULLS.replace(
+        "        number: {type: integer}\n",
+        "        number: {type: integer}\n        repository: {type: object, properties: {name: {type: string}}}\n",
+    );
+    let in_repo = |repo: &str| {
+        json!({"__typename": "PullRequest", "id": format!("PR_{repo}5"), "number": 5,
+               "title": format!("In {repo}"), "state": "OPEN",
+               "repository": {"__typename": "Repository", "id": format!("R_{repo}"), "name": repo}})
+    };
+    let gh = joined(
+        ("github-graphql", &sdl),
+        vec![in_repo("one"), in_repo("two")],
+        &state,
+        &types,
+        None,
+    );
+    let gql_router = graphql::try_router(gh).unwrap();
+    let rest_rt = joined(
+        ("github-rest", &rest_contract),
+        vec![],
+        &state,
+        &types,
+        None,
+    );
+    let rest_router = http_rest::router(rest_rt);
+    for repo in ["one", "two"] {
+        gql(
+            &gql_router,
+            &format!(r#"mutation {{ createPullRequest(title: "In {repo}") {{ id number }} }}"#),
+            true,
+        )
+        .await;
+    }
+    for (owner, repo) in [("b", "two"), ("a", "one")] {
+        let read = rest(
+            &rest_router,
+            "GET",
+            &format!("/repos/{owner}/{repo}/pulls/5"),
+            None,
+        )
+        .await;
+        assert_eq!(read["title"], format!("In {repo}"), "{read}");
+    }
+}
+
+/// `same_as` on one side only: the GraphQL world names REST's type, the REST mock
+/// has no world, and its read still finds the GraphQL record (inferred there).
+#[tokio::test]
+async fn same_as_on_one_side_still_links_both() {
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let types = SharedTypes::default();
+    let world = serde_json::from_value::<mb_mcm::world::World>(
+        json!({"version": 1, "types": {"pullrequest": {"same_as": ["pulls"]}}}),
+    )
+    .unwrap();
+    let gh = joined(
+        ("github-graphql", PULLS_SDL),
+        vec![
+            pull_request(7007, "Over GraphQL"),
+            pull_request(99, "Made up"),
+        ],
+        &state,
+        &types,
+        Some(&world),
+    );
+    let gql_router = graphql::try_router(gh).unwrap();
+    let rest_rt = joined(
+        ("github-rest", PULLS),
+        vec![
+            json!({"id": 8, "node_id": "PR_8", "number": 8, "title": "Over REST", "state": "open"}),
+        ],
+        &state,
+        &types,
+        None,
+    );
+    let rest_router = http_rest::router(rest_rt);
+    gql(
+        &gql_router,
+        r#"mutation { createPullRequest(title: "Over GraphQL") { id number } }"#,
+        true,
+    )
+    .await;
+    let read = rest(
+        &rest_router,
+        "GET",
+        "/repos/fernwood/trellis/pulls/7007",
+        None,
+    )
+    .await;
+    assert_eq!(read["title"], "Over GraphQL", "{read}");
+    let made = rest(
+        &rest_router,
+        "POST",
+        "/repos/fernwood/trellis/pulls",
+        Some(json!({"title": "Over REST"})),
+    )
+    .await;
+    let number = made["number"].as_u64().unwrap();
+    let back = gql(
+        &gql_router,
+        &format!("{{ pullRequestByNumber(number: {number}) {{ title }} }}"),
+        false,
+    )
+    .await;
+    assert_eq!(back["pullRequestByNumber"]["title"], "Over REST", "{back}");
+}
