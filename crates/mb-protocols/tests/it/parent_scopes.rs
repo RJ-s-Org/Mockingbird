@@ -488,12 +488,8 @@ impl mb_state::StateStore for ListSpy {
     }
 }
 
-/// A list under one repository reads that repository's issues, not every one the
-/// session holds: with 200 held in `b/x` and two in `a/x`, listing `a/x` returns its
-/// two and reads none of `b/x`'s (after the first list of the type in the session,
-/// which reads the type once to learn none is held under no parent).
-#[tokio::test]
-async fn a_list_under_one_repository_reads_that_repository_s_issues() {
+/// [`harness`] over a [`ListSpy`] of a memory store.
+fn spied() -> (std::sync::Arc<ListSpy>, support::DescribedHarness) {
     let spy = std::sync::Arc::new(ListSpy {
         inner: std::sync::Arc::new(mb_state::MemoryStore::new(std::time::Duration::from_secs(
             3600,
@@ -514,6 +510,16 @@ async fn a_list_under_one_repository_reads_that_repository_s_issues() {
             support::with_effective(rt, world, false)
         },
     );
+    (spy, h)
+}
+
+/// A list under one repository reads that repository's issues, not every one the
+/// session holds: with 200 held in `b/x` and two in `a/x`, listing `a/x` returns its
+/// two and reads none of `b/x`'s (after the first list of the type in the session,
+/// which reads the type once to learn none is held under no parent).
+#[tokio::test]
+async fn a_list_under_one_repository_reads_that_repository_s_issues() {
+    let (spy, h) = spied();
     create(&h, "/repos/a/x/issues", "A one").await;
     create(&h, "/repos/a/x/issues", "A two").await;
     let session = mb_state::SessionKey {
@@ -547,4 +553,164 @@ async fn a_list_under_one_repository_reads_that_repository_s_issues() {
             assert_eq!(read, 0, "read {read} of b/x's issues to list a/x's");
         }
     }
+}
+
+/// What the session's `#unplaced/issues` marker says: `Some(true)` that it may hold
+/// issues stored under no parent, `Some(false)` that it holds none (its "none"
+/// document names the marker's epoch), `None` with no marker.
+async fn unplaced_held(
+    h: &support::DescribedHarness,
+    session: &mb_state::SessionKey,
+) -> Option<bool> {
+    let doc = |id: &'static str| async move {
+        h.rt.state
+            .get(session, mb_state::INTERNAL_TYPE, id)
+            .await
+            .unwrap()
+            .map(|doc| doc.data["epoch"].clone())
+    };
+    let marker = doc("#unplaced/issues").await?;
+    Some(doc("#unplaced/issues\u{1f}none").await != Some(marker))
+}
+
+/// The marker saying the session may hold issues stored under no parent goes back to
+/// "none" once it holds none: after the only such issue moves under `a/x` with a write
+/// there, a list of `a/x` reads none of `b/x`'s issues again.
+#[tokio::test]
+async fn the_unplaced_marker_resets_once_the_last_unplaced_record_moves() {
+    let (spy, h) = spied();
+    create(&h, "/repos/a/x/issues", "A one").await;
+    let session = mb_state::SessionKey {
+        workspace: h.rt.workspace.clone(),
+        mock: h.rt.name.clone(),
+        session: "default".into(),
+    };
+    for n in 1..=50 {
+        let resource = mb_state::StoredResource {
+            resource_type: "issues".into(),
+            id: format!("b\u{1f}x\u{1f}{}", 1000 + n),
+            data: json!({"id": 1000 + n, "number": n, "title": format!("B {n}")}),
+        };
+        h.rt.state.upsert(&session, resource).await.unwrap();
+    }
+    h.rt.state
+        .upsert(
+            &session,
+            mb_state::StoredResource {
+                resource_type: "issues".into(),
+                id: "900".into(),
+                data: json!({"id": 900, "number": 9, "title": "Seeded"}),
+            },
+        )
+        .await
+        .unwrap();
+    let titles = |list: &Value| {
+        let mut titles: Vec<String> = list
+            .as_array()
+            .unwrap_or_else(|| panic!("{list}"))
+            .iter()
+            .filter_map(|i| i["title"].as_str().map(str::to_string))
+            .collect();
+        titles.sort_unstable();
+        titles
+    };
+    let (status, _, list) = h.send("GET", "/repos/a/x/issues", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert!(titles(&list).contains(&"A one".to_string()), "{list}");
+    assert_eq!(unplaced_held(&h, &session).await, Some(true));
+
+    let (status, _, patched) = h
+        .send(
+            "PATCH",
+            "/repos/a/x/issues/9",
+            Some(json!({"title": "Moved"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert!(!keys(&h, "issues").await.contains(&"900".to_string()));
+    assert_eq!(unplaced_held(&h, &session).await, Some(false));
+
+    let before = spy.read();
+    let (status, headers, list) = h.send("GET", "/repos/a/x/issues", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(source(&headers), "state", "{list}");
+    assert_eq!(titles(&list), ["A one", "Moved"], "{list}");
+    let read = spy.read() - before;
+    assert_eq!(read, 0, "read {read} of b/x's issues to list a/x's");
+}
+
+/// A delete of the last issue stored under no parent resets the marker too.
+#[tokio::test]
+async fn the_unplaced_marker_resets_once_the_last_unplaced_record_is_deleted() {
+    let h = harness(Vec::new());
+    create(&h, "/repos/a/x/issues", "A one").await;
+    let session = mb_state::SessionKey {
+        workspace: h.rt.workspace.clone(),
+        mock: h.rt.name.clone(),
+        session: "default".into(),
+    };
+    h.rt.state
+        .upsert(
+            &session,
+            mb_state::StoredResource {
+                resource_type: "issues".into(),
+                id: "900".into(),
+                data: json!({"id": 900, "number": 9, "title": "Seeded"}),
+            },
+        )
+        .await
+        .unwrap();
+    let (status, _, list) = h.send("GET", "/repos/a/x/issues", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(unplaced_held(&h, &session).await, Some(true));
+    let (status, _, _) = h.send("DELETE", "/repos/a/x/issues/9", None, &[]).await;
+    assert!(status.is_success(), "{status}");
+    assert_eq!(unplaced_held(&h, &session).await, Some(false));
+}
+
+/// A list that reads the type and finds no issue stored under no parent resets the
+/// marker, unless a write storing one is in flight (its pending document is held).
+#[tokio::test]
+async fn a_list_finding_no_unplaced_record_resets_the_marker_unless_a_write_is_pending() {
+    let h = harness(Vec::new());
+    let session = mb_state::SessionKey {
+        workspace: h.rt.workspace.clone(),
+        mock: h.rt.name.clone(),
+        session: "default".into(),
+    };
+    let doc = |t: &str, id: &str, data: Value| mb_state::StoredResource {
+        resource_type: t.into(),
+        id: id.into(),
+        data,
+    };
+    let issue = |id: &str, n: u64| doc("issues", id, json!({"id": n, "number": n, "title": "I"}));
+    h.rt.state
+        .upsert(&session, issue("a\u{1f}x\u{1f}1", 1))
+        .await
+        .unwrap();
+    h.rt.state.upsert(&session, issue("900", 9)).await.unwrap();
+    let list = || async {
+        let (status, _, list) = h.send("GET", "/repos/a/x/issues", None, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+    };
+    list().await;
+    assert_eq!(unplaced_held(&h, &session).await, Some(true));
+
+    // Gone behind the call layer's back, while a write's pending document is held.
+    h.rt.state.delete(&session, "issues", "900").await.unwrap();
+    let pending = "#unplaced/issues\u{1f}pending\u{1f}0";
+    h.rt.state
+        .upsert(&session, doc(mb_state::INTERNAL_TYPE, pending, json!({})))
+        .await
+        .unwrap();
+    list().await;
+    assert_eq!(unplaced_held(&h, &session).await, Some(true));
+
+    h.rt.state
+        .delete(&session, mb_state::INTERNAL_TYPE, pending)
+        .await
+        .unwrap();
+    list().await;
+    assert_eq!(unplaced_held(&h, &session).await, Some(false));
 }

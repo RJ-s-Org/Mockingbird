@@ -55,7 +55,8 @@ pub(crate) type ItemCheck = std::sync::Arc<dyn Fn(&Value) -> bool + Send + Sync>
 /// passes `check`). Events missed because the receiver lagged are skipped.
 /// Empty when `op` has no resource type. Of a parent-scoped type
 /// ([`super::scopes`]) whose parent `call`'s path names, only the records
-/// under that parent, and those stored under none.
+/// under that parent, and those stored under none whose own links show no other
+/// parent (as a read under the parent finds them).
 #[cfg(any(feature = "sse", feature = "graphql"))]
 pub(crate) fn change_feed(
     rt: &std::sync::Arc<MockRuntime>,
@@ -110,6 +111,9 @@ pub(crate) fn change_feed(
                 .get(&feed.session, &feed.resource_type, &event.id)
                 .await;
             let Ok(Some(resource)) = found else { continue };
+            if !feed.fits(&resource) {
+                continue;
+            }
             let sendable = match &feed.check {
                 Some(check) => check(&resource.data),
                 None => feed
@@ -145,6 +149,18 @@ impl Feed {
         match (&self.parent, super::scopes::split_id(id)) {
             (Some(parent), Some((under, _))) => {
                 under.iter().copied().eq(parent.iter().map(String::as_str))
+            }
+            _ => true,
+        }
+    }
+
+    /// Whether `r` may be one of the feed's: one stored under its own id alone fits the
+    /// feed's parent when its own links show no other, as a read under the parent
+    /// finds it ([`super::state_access::unplaced_fits`]).
+    fn fits(&self, r: &mb_state::StoredResource) -> bool {
+        match &self.parent {
+            Some(parent) if !r.id.contains(super::scopes::SEP) => {
+                super::state_access::unplaced_fits(&self.rt, r, parent)
             }
             _ => true,
         }
