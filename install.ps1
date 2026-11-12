@@ -3,7 +3,8 @@
 #   irm https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.ps1 | iex
 #
 # Environment:
-#   MOCKINGBIRD_VERSION      release tag to install (default: the latest release)
+#   MOCKINGBIRD_VERSION      release tag to install (default: the latest release),
+#                            or `main` to build the main branch with cargo
 #   MOCKINGBIRD_INSTALL_DIR  where the binary goes (default: ~\.mockingbird\bin)
 #
 # Downloads the release zip, checks its SHA-256, installs mockingbird.exe and
@@ -17,6 +18,8 @@ $Target = 'x86_64-pc-windows-msvc'
 function Say($msg) { Write-Host "mockingbird-install: $msg" }
 
 function Install-Release {
+    # `main` has no release binary: it is built from source.
+    if ($env:MOCKINGBIRD_VERSION -eq 'main') { return $false }
     $tag = $env:MOCKINGBIRD_VERSION
     if (-not $tag) {
         try { $tag = (Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest").tag_name } catch { $tag = $null }
@@ -58,7 +61,8 @@ function Install-Source {
     Say 'building from source with cargo (a few minutes)'
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid())
     $cargoArgs = @('install', '--locked', '--git', "https://github.com/$Repo", '--root', $tmp, 'mockingbird-cli')
-    if ($env:MOCKINGBIRD_VERSION) { $cargoArgs += @('--tag', $env:MOCKINGBIRD_VERSION) }
+    if ($env:MOCKINGBIRD_VERSION -eq 'main') { $cargoArgs += @('--branch', 'main') }
+    elseif ($env:MOCKINGBIRD_VERSION) { $cargoArgs += @('--tag', $env:MOCKINGBIRD_VERSION) }
     & cargo @cargoArgs
     if ($LASTEXITCODE -ne 0) { return $false }
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -67,6 +71,9 @@ function Install-Source {
     return $true
 }
 
+if ($env:MOCKINGBIRD_VERSION -eq 'main' -and -not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    throw "MOCKINGBIRD_VERSION=main builds from source and needs cargo: install Rust (https://rustup.rs) and rerun"
+}
 if (-not (Install-Release)) {
     if (-not (Install-Source)) {
         throw "could not install: no release binary and no cargo. Install Rust (https://rustup.rs) and rerun, or use Docker."
