@@ -57,6 +57,9 @@ pub(super) enum Fallback {
     RecordInvalid,
     /// What the call adds would take its target past a cap (a queue's messages).
     OverCap,
+    /// The read asks for embedded members its held record does not hold yet
+    /// ([`super::query_roles`]): they are generated, and kept with the record.
+    EmbedMissing,
 }
 
 impl Fallback {
@@ -73,6 +76,7 @@ impl Fallback {
             Fallback::RenderFailed => "render_failed",
             Fallback::RecordInvalid => "record_invalid",
             Fallback::OverCap => "over_cap",
+            Fallback::EmbedMissing => "embed_missing",
         }
     }
 }
@@ -93,6 +97,16 @@ mod writes;
 pub(super) use create::{initial_token, unreadable};
 pub(super) use list::agree_generated as agree_generated_list;
 pub(super) use queue::forget as forget_queue;
+
+/// Whether `call` sends `op`'s described fields parameter: its answer may then be a
+/// part of the record, not the record.
+pub(super) fn narrows_fields(
+    rt: &crate::MockRuntime,
+    op: &mb_mcm::Operation,
+    call: &OperationCall,
+) -> bool {
+    fields::param(rt, op).is_some_and(|param| call.query.contains_key(param))
+}
 
 /// What [`run`] did with a call.
 pub(super) enum Ran {
@@ -338,6 +352,10 @@ async fn read(
     kind: OpKind,
 ) -> Ran {
     let rt = state.rt;
+    if lacks_embeds(rt, plan, call, &held) {
+        fell_back(rt, plan, kind, Fallback::EmbedMissing.as_str());
+        return Ran::Generate(None);
+    }
     // One held in its parent's array member is that item.
     let within = embedded::current(state, plan, call, &held).await;
     // A missing record the session knows of (deleted, or unknown under
@@ -397,6 +415,22 @@ async fn read(
     }
 }
 
+/// Whether the read asks for members to be embedded that `held`, the session's record
+/// it targets, does not hold yet ([`super::query_roles`]): they are generated over it,
+/// and kept with it. A record from the pool or held in its parent answers without them.
+fn lacks_embeds(
+    rt: &crate::MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    held: &Held<'_>,
+) -> bool {
+    held.target.is_some_and(|target| {
+        !super::query_roles::embeds(rt, plan.op, call)
+            .missing(&target.data)
+            .is_empty()
+    })
+}
+
 /// Today's path for a call the executor does not take: a plain read of a held record
 /// is still served from state when it can be.
 async fn unclassified(
@@ -409,7 +443,9 @@ async fn unclassified(
     let Some(stored) = held.target else {
         return Ran::Generate(None);
     };
-    if !(matches!(plan.op.kind, OperationKind::Query) && plain(plan)) {
+    if !(matches!(plan.op.kind, OperationKind::Query) && plain(plan))
+        || lacks_embeds(state.rt, plan, call, &held)
+    {
         return Ran::Generate(None);
     }
     let read = held_read(
@@ -524,6 +560,8 @@ async fn held_read(
             write_memory::note_not_caught_up(&mut served, plan, Some(stored), &earlier);
             // A described fields parameter narrows the record the answer holds.
             fields::narrow_read(rt, op, call, served.body.as_mut());
+            // Embedded members the read does not ask for are left out.
+            super::query_roles::embeds(rt, op, call).leave_out_unasked(served.body.as_mut());
             HeldRead::Served(Box::new(served))
         }
         None => HeldRead::Unrendered(Some(earlier), why(kept.as_ref())),

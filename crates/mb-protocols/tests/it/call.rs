@@ -1440,10 +1440,10 @@ async fn a_refused_unkeyed_mention_leaves_a_stored_read() {
     assert_eq!(again, first);
 }
 
-/// A by-id read with a query is one view of the resource, not the resource:
-/// each query keeps its own answer.
+/// A by-id read with a query reads the record its path names: the first read stores it
+/// under the path's id, and a read with another query is answered from it.
 #[tokio::test]
-async fn a_read_with_a_query_is_not_stored() {
+async fn a_read_with_a_query_reads_the_record_its_path_names() {
     let api = actions_of(
         WORLD,
         vec![
@@ -1454,8 +1454,8 @@ async fn a_read_with_a_query_is_not_stored() {
     let (_, first) = read(&api, "/customers/c1?view=a").await;
     assert_eq!(first["name"], "One");
     let (source, second) = read(&api, "/customers/c1?view=b").await;
-    assert_ne!(source, "state");
-    assert_eq!(second["name"], "Two");
+    assert_eq!(source, "state");
+    assert_eq!(second, first);
 }
 
 /// References between resources: a booking names its offer, a refund its

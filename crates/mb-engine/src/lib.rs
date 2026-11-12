@@ -5284,8 +5284,10 @@ fn reflect_record(
 /// structure and every value but its text as stored, each text value as `generated`
 /// wrote it at the same place (see [`is_text`]). A string the schema holds to a fixed
 /// form (an `enum`, `const`, `format` or `pattern`) or does not declare is no text. A
-/// value the schema then refuses is put back as stored. A result that still does not
-/// validate is the stored resource when that does, else `generated`, as
+/// value the schema then refuses is put back as stored. A top-level member the schema
+/// declares that the stored resource lacks (a part the read asked to be embedded) is
+/// `generated`'s, and is left out again when the schema refuses it. A result that still
+/// does not validate is the stored resource when that does, else `generated`, as
 /// [`overlay_target`] decides.
 fn restate(validator: &SchemaValidator, target: &StoredResource, generated: Value) -> Value {
     let mut texts = Vec::new();
@@ -5299,6 +5301,17 @@ fn restate(validator: &SchemaValidator, target: &StoredResource, generated: Valu
             *slot = Value::String(text);
         }
     }
+    let mut added: Vec<String> = Vec::new();
+    if let (Value::Object(members), Value::Object(answered), Some(declared)) =
+        (&mut merged, &generated, validator.declared_property_names())
+    {
+        for (name, value) in answered {
+            if !members.contains_key(name) && declared.contains(name) {
+                members.insert(name.clone(), value.clone());
+                added.push(name.clone());
+            }
+        }
+    }
     for _ in 0..MAX_RESTATE_PASSES {
         let violations = validator.violations(&merged);
         if violations.is_empty() {
@@ -5309,6 +5322,15 @@ fn restate(validator: &SchemaValidator, target: &StoredResource, generated: Valu
                 (merged.pointer_mut(&pointer), target.data.pointer(&pointer))
             {
                 *slot = stored.clone();
+                continue;
+            }
+            // Within a member only the answer has: that member goes.
+            let top = pointer.split('/').nth(1).unwrap_or_default();
+            let top = top.replace("~1", "/").replace("~0", "~");
+            if added.contains(&top)
+                && let Value::Object(members) = &mut merged
+            {
+                members.remove(&top);
             }
         }
     }
@@ -6753,7 +6775,7 @@ mod restate_tests {
             "genres": [{"id": 1, "name": "Ouest"}, {"id": 2, "name": "Drame dramatique"}],
             "seasons": [{"name": "Saison Un"}, {"name": "Saison Deux"}],
             "summary": {"text": "an object, not a string"},
-            "added": "a member the record does not have"
+            "added": "a member the schema does not declare"
         });
         let merged = restate(&validator, &stored, answer);
         assert_eq!(
@@ -6770,6 +6792,35 @@ mod restate_tests {
                 // Not a string in the answer.
                 "summary": "A western town."
             })
+        );
+    }
+
+    #[test]
+    fn a_restatement_keeps_what_the_answer_embeds() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "integer"},
+                "name": {"type": "string"},
+                "credits": {"type": "object", "properties": {
+                    "cast": {"type": "array", "items": {"type": "string"}}}},
+                "videos": {"type": "object", "properties": {
+                    "results": {"type": "array"}}}
+            }
+        });
+        let validator = SchemaValidator::new(&schema).unwrap();
+        let stored = held(json!({"id": 1, "name": "Deadwood"}));
+        let answer = json!({
+            "id": 2,
+            "name": "Deadwood (VF)",
+            "credits": {"cast": ["Timothy Olyphant"]},
+            // Refused by the schema: left out.
+            "videos": {"results": "none"},
+            "undeclared": true
+        });
+        assert_eq!(
+            restate(&validator, &stored, answer),
+            json!({"id": 1, "name": "Deadwood (VF)", "credits": {"cast": ["Timothy Olyphant"]}})
         );
     }
 }

@@ -56,6 +56,7 @@ mod minted;
 mod owner_tie_tests;
 mod owners;
 mod pages;
+mod query_roles;
 mod ranges;
 mod records;
 mod relations;
@@ -774,9 +775,23 @@ async fn prepare_state<'a>(
     // waits until the cache has had its say.
     // A read in another language than the held record was stored in: that language's
     // variant, or a generation that knows the record (see [`variants`]).
-    let variant = target
-        .as_ref()
-        .and_then(|held| rt.variants().of(session, op, call, held));
+    // A kept variant answers what the query asks to be embedded from the held record;
+    // what that lacks is generated, restating the record, and kept with it (see
+    // [`query_roles`]).
+    let embeds = query_roles::embeds(rt, op, call);
+    let variant =
+        target
+            .as_ref()
+            .and_then(|held| match rt.variants().of(session, op, call, held)? {
+                variants::Variant::Kept(mut kept) => {
+                    embeds.fill_from(&mut kept.data, &held.data);
+                    Some(match embeds.missing(&kept.data).is_empty() {
+                        true => variants::Variant::Kept(kept),
+                        false => variants::Variant::New,
+                    })
+                }
+                other => Some(other),
+            });
     let held = exec::Held {
         target: match &variant {
             Some(variants::Variant::Kept(kept)) => Some(kept),
@@ -1742,14 +1757,29 @@ pub(crate) async fn complete(
             )
             .await;
         }
+        // A single-record read's query only selects how its record is shown (see
+        // [`query_roles`]): the record is the path's, stored under its id, unless a
+        // fields parameter made the answer a part of it.
+        let single_record = is_query
+            && target_id.is_some()
+            && query_roles::single_record_read(rt, op)
+            && !exec::narrows_fields(rt, op, call);
         // A read in another language than its target: its record is that language's.
+        // One generated for what it embeds keeps its language's earlier text, and what
+        // it embedded is kept with the target.
         if variant
             && plain(plan)
             && (200..300).contains(&generated.status)
             && !transient_fallback(&generated)
-            && let (Some(held), Some(record)) = (target.as_ref(), generated.body.as_ref())
+            && let (Some(held), Some(record)) = (target.as_ref(), generated.body.as_mut())
         {
+            if single_record {
+                query_roles::onto_kept(rt, session, (op, call), held, record);
+            }
             rt.variants().keep(session, (op, call), held, record);
+            if single_record {
+                query_roles::keep_embedded(&mut state, session, (op, call), held, record).await;
+            }
         }
         // A request naming a seed asks for that seed's answer, and a query for
         // one view: the cache keeps those apart, so neither is the resource.
@@ -1760,6 +1790,7 @@ pub(crate) async fn complete(
             // A catch-up's answer has the whole resource's schema, whatever the
             // query asked: it settles as a plain read does.
             && (call.query.is_empty()
+                || single_record
                 || (is_query && !earlier.shown.is_empty() && target.is_some()))
             && !transient_fallback(&generated)
             && (200..300).contains(&generated.status)
@@ -1786,7 +1817,18 @@ pub(crate) async fn complete(
                     &generated,
                 )
                 .await;
+                // What the read asked to be embedded is kept with its record.
+                if single_record
+                    && let (Some(held), Some(body)) = (target.as_ref(), generated.body.as_mut())
+                {
+                    query_roles::keep_embedded(&mut state, session, (op, call), held, body).await;
+                }
             }
+        }
+        // Kept with the record or not, embedded members the read did not ask for are
+        // left out of its answer, as a read from the store leaves them out.
+        if single_record && (200..300).contains(&generated.status) {
+            query_roles::embeds(rt, op, call).leave_out_unasked(generated.body.as_mut());
         }
         // An operation with no resource type is stateless, GraphQL stores the
         // objects of its answers under their own types, and a delete's answer

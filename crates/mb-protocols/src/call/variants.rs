@@ -1,7 +1,8 @@
 //! Per-language variants of a record a read generated.
 //!
 //! A read whose operation declares a query parameter that selects the answer's language
-//! ([`selector`]: `language`, `lang` or `locale`) asks for the same record in that
+//! ([`selector`], by what the contract says of it: [`super::query_roles`]) asks for the
+//! same record in that
 //! language. The record a read generated (or took from the pool) is stored once, in the
 //! language of the read that made it, which [`Variants`] remembers. A later read of
 //! that record, still as that read left it, in another language is generated again,
@@ -18,9 +19,6 @@ const MAX_VARIANT_RECORDS: usize = 4096;
 
 /// Variants one record keeps at most; further languages are generated each time.
 const MAX_VARIANTS: usize = 16;
-
-/// Query parameter names that select an answer's language.
-const SELECTORS: &[&str] = &["language", "lang", "locale"];
 
 /// What [`Variants`] holds of one record.
 #[derive(Debug)]
@@ -42,10 +40,7 @@ pub(crate) struct Variants(std::sync::Mutex<HashMap<OwnRead, Represented>>);
 /// The query parameter `op` declares that selects its answer's language, and the
 /// value `call` sends for it (`None` when it sends none, or not as text).
 fn selector(op: &Operation, call: &OperationCall) -> Option<(String, Option<String>)> {
-    let declared = op.input.query.as_ref()?.get("properties")?.as_object()?;
-    let param = declared
-        .keys()
-        .find(|name| SELECTORS.iter().any(|s| name.eq_ignore_ascii_case(s)))?;
+    let param = super::query_roles::language_param(op)?;
     let value = call
         .query
         .get(param)
@@ -154,6 +149,20 @@ impl Variants {
             && (represented.kept.len() < MAX_VARIANTS || represented.kept.contains_key(&value))
         {
             represented.kept.insert(value, record.clone());
+        }
+    }
+
+    /// The record a read stored as `before` now stands as `after`, which only adds what a
+    /// later read embedded (see [`super::query_roles`]): its language and kept variants
+    /// stay, each answered with the members it lacks taken from `after`.
+    pub(super) fn grew(&self, session: &SessionKey, before: &StoredResource, after: &Value) {
+        let Ok(mut known) = self.0.lock() else {
+            return;
+        };
+        if let Some(represented) = known.get_mut(&OwnReads::key(session, before))
+            && represented.digest == OwnReads::digest(&before.data)
+        {
+            represented.digest = OwnReads::digest(after);
         }
     }
 }
