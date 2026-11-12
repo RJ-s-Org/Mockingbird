@@ -153,6 +153,7 @@ pub(super) async fn mint(
     let checks = IdChecks::new(rt, held.as_ref(), &header.schema, !location)?;
     let carried = request_values(op, call);
     let seed = MintSeed::new(rt, session, call);
+    let shown = record_id_examples(rt, t, field);
     let shape = match record_id_shape(rt, t, field) {
         Some(shape) => Some(shape),
         None => session_id_shape(state, session, t, field).await,
@@ -164,7 +165,7 @@ pub(super) async fn mint(
             (held.as_ref(), declared.as_ref()),
             &header.schema,
             string_identity,
-            (&checks, shape.as_ref()),
+            (&checks, shape.as_ref(), &shown),
         ) else {
             continue;
         };
@@ -455,19 +456,34 @@ impl IdChecks {
 /// An id drawn as the record declares its identity, else as the header declares
 /// itself, else a plain string: the first both the header and the record hold. A
 /// string identity holds a number drawn for an integer header as its digits, so a read
-/// by the id the header serves finds the record.
+/// by the id the header serves finds the record. The identity's schemas take
+/// `examples`, the ids the contract shows of it, so a pattern is drawn in their shape
+/// (the faker's example shapes: the alternative and case they take).
 fn draw(
     rt: &MockRuntime,
     (seed, t, field): (MintSeed<'_>, &str, &str),
     (strict, declared): (Option<&Value>, Option<&Value>),
     header: &Value,
     string_identity: bool,
-    (checks, shape): (&IdChecks, Option<&IdShape>),
+    (checks, shape, examples): (&IdChecks, Option<&IdShape>, &[String]),
 ) -> Option<Value> {
     let string = json!({"type": "string"});
     // The strictest first: what every read declares together, when that is more.
     let strict = strict.filter(|s| Some(*s) != declared);
-    let schemas = [strict, declared, Some(header), Some(&string)];
+    // The identity takes the examples the contract gives of it, after its own (the
+    // faker adds them up): a pattern is then drawn in the shape of the first that
+    // matches it (`SM…` of `^(SM|MM)…$`).
+    let shown = |schema: &Value| match examples.is_empty() {
+        true => schema.clone(),
+        false => json!({"allOf": [schema, {"examples": examples}]}),
+    };
+    let (strict_shown, declared_shown) = (strict.map(shown), declared.map(shown));
+    let schemas = [
+        strict_shown.as_ref(),
+        declared_shown.as_ref(),
+        Some(header),
+        Some(&string),
+    ];
     let (mut rng, faker) = seed.draws(rt, (t, field));
     // A shape the ids show goes first where the identity declares no form of its own.
     let shaped = shape
@@ -501,13 +517,15 @@ fn draw(
 /// plain string where they do not), in the type's identity pattern where it has one.
 /// `None` when the draw is not one the records hold (a pattern past the member's
 /// `maxLength`). Where the identity declares no form, the id takes `shape` when given
-/// ([`record_id_shape`], else [`session_id_shape`]). Whether the session holds it
-/// already is the caller's to check.
+/// ([`record_id_shape`], else [`session_id_shape`]); where it declares a pattern, the
+/// id is drawn in the shape of `shown`, the contract's examples of it
+/// ([`record_id_examples`]). Whether the session holds it already is the caller's to
+/// check.
 pub(super) fn draw_record_id(
     rt: &MockRuntime,
     seed: MintSeed<'_>,
     (t, field): (&str, &str),
-    shape: Option<&IdShape>,
+    (shape, shown): (Option<&IdShape>, &[String]),
 ) -> Option<Value> {
     let (declared, held) = record_id_schema(rt, t, field);
     let string = json!({"type": "string"});
@@ -523,7 +541,7 @@ pub(super) fn draw_record_id(
         (held.as_ref(), declared.as_ref()),
         &string,
         string_identity,
-        (&checks, shape),
+        (&checks, shape, shown),
     )?;
     match id_string(&id).and_then(|text| records::in_pattern(rt, t, &text)) {
         Some(formed) => {
@@ -553,7 +571,7 @@ pub(super) fn draw_id_as(
         (None, Some(declared)),
         &string,
         string_identity,
-        (&checks, shape.as_ref()),
+        (&checks, shape.as_ref(), &[]),
     )
 }
 
@@ -660,6 +678,31 @@ fn examples(rt: &MockRuntime, schema: &Value, field: Option<&str>) -> Vec<String
 /// member as its records and reads declare it, else of the member in examples of the
 /// records themselves.
 pub(super) fn record_id_shape(rt: &MockRuntime, t: &str, field: &str) -> Option<IdShape> {
+    let (of_member, of_records) = id_examples(rt, t, field);
+    match of_member.is_empty() {
+        false => IdShape::of(&of_member),
+        true => IdShape::of(&of_records),
+    }
+}
+
+/// The ids the contract's examples give type `t`'s identity `field`, each once: of the
+/// member as its records and reads declare it, then of the member in examples of the
+/// records themselves. A patterned identity is drawn in the shape of the first that
+/// matches its pattern ([`draw`]).
+pub(super) fn record_id_examples(rt: &MockRuntime, t: &str, field: &str) -> Vec<String> {
+    let (mut all, of_records) = id_examples(rt, t, field);
+    for id in of_records {
+        if !all.contains(&id) {
+            all.push(id);
+        }
+    }
+    all
+}
+
+/// The ids type `t`'s identity `field` is given in the contract's examples: of the
+/// member as its records and reads declare it, and of the member in examples of the
+/// records themselves.
+fn id_examples(rt: &MockRuntime, t: &str, field: &str) -> (Vec<String>, Vec<String>) {
     let bundle = rt.bundle();
     let index = rt.index();
     let read = index
@@ -679,14 +722,11 @@ pub(super) fn record_id_shape(rt: &MockRuntime, t: &str, field: &str) -> Option<
         .filter_map(|r| property_schema(bundle, r, field))
         .flat_map(|member| examples(rt, &member, None))
         .collect();
-    let ids = match of_member.is_empty() {
-        false => of_member,
-        true => records
-            .iter()
-            .flat_map(|r| examples(rt, r, Some(field)))
-            .collect(),
-    };
-    IdShape::of(&ids)
+    let of_records = records
+        .iter()
+        .flat_map(|r| examples(rt, r, Some(field)))
+        .collect();
+    (of_member, of_records)
 }
 
 /// The shape of the ids the session holds type `t`'s records under (the model's, or

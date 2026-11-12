@@ -148,6 +148,32 @@ Same agent-built mock as the second rerun (no `unknown_ids` in its config), serv
 - "messages create" now fails, on the flow's own check: the mock's sid starts with `MM`, which Twilio's sid pattern allows (`^(SM|MM)…`), and the flow wants `SM`.
 - Verify stays 0 of 9: the agent didn't mock `verify.twilio.com`, so the proxy blocks it.
 
+## Fourth rerun: blocked-host next steps and example-shaped sids (2026-11-12)
+
+A fresh Claude Code got the same one-line prompt in a clean copy of the app. The plugin came from the marketplace (main with #534), and the binary was main plus this PR.
+
+**Build.** 432 s, 77 turns, $3.74 of Claude Code usage.
+- It used `init_example twilio` with `full: true`.
+- It also mocked `lookups.twilio.com` and `monitor.twilio.com` from the specs the CLI bundles, so `debugger:logs:list` now works.
+- Its world gives Message and Call sids their prefixes, and adds parent scoping and list filters.
+- It left Verify out again and said so: "Commands for Verify, Messaging services, Conversations and so on get a 502 that names the host … I can add any of these from the specs the CLI already bundles."
+
+**Flows: 12 of 21.**
+- Messages: 9 of 9.
+- Phone numbers: 3 of 3.
+- Verify: 0 of 9, blocked.
+
+After the flows, `mockingbird report` gives the step from #534. `monitor.twilio.com`, which is now mocked, no longer gets one:
+
+> verify.twilio.com was blocked 9 times since the server started: no mock serves it. If it is the same API as the mock serving api.twilio.com, lookups.twilio.com, monitor.twilio.com, add verify.twilio.com to that mock's hosts. No catalog example lists this host: otherwise import its API's contract into a mock that lists verify.twilio.com in hosts (import_contract). …
+
+The agent never ran a Verify command while it built, so the step had nothing to show it then. The step appears only once the app's own flows run.
+
+**Example-shaped sids (this PR).** The third rerun's mock has no world rule for `sid`, so `messages create` failed: the mint drew `MM…` with mixed-case hex, which the pattern `^(SM|MM)[0-9a-fA-F]{32}$` allows. A minted value now follows the contract's example for the member: here `SM` followed by lowercase hex. With this PR the same mock passes `messages create`: 12 of 21, all 12 messaging and number flows.
+
+**Still open.**
+- **Verify isn't mocked.** The agent chooses which of the CLI's products to mock, and it never calls a host it left out, so nothing flags the gap while it builds. The bundled `twilio_verify_v2.json` is right there. A general fix would have the agent run one command per product the app ships before handing back, or have it mock every bundled contract whose host the app calls.
+
 ## Files
 
 These are outside the repo, in `mockingbird-trials/twilio/`:
