@@ -186,6 +186,10 @@ pub struct HarnessOptions {
     pub unknown_ids_not_found: bool,
     /// The usage every scripted LLM call reports (none when unset).
     pub usage: Option<mb_llm::Usage>,
+    /// No LLM at all: every answer is the faker's (`--offline`).
+    pub offline: bool,
+    /// Every LLM call fails with this HTTP status, and the faker stands in.
+    pub llm_fails_with: Option<u16>,
 }
 
 /// [`described`]'s runtime, with `configure` applied to the bare runtime before it is
@@ -216,12 +220,30 @@ pub fn harness_of(
     use mb_state::{CachingStateStore, MemoryStore, StateStore};
 
     let usage = options.usage.unwrap_or_default();
-    let provider = Arc::new(ScriptedProvider::with_usage(
-        script
-            .into_iter()
-            .map(|v| Ok((v.to_string(), usage)))
+    let script = match options.llm_fails_with {
+        Some(status) => (0..256)
+            .map(|_| {
+                Err(mb_llm::LlmError::Http {
+                    status,
+                    body: "forbidden".into(),
+                })
+            })
             .collect(),
-    ));
+        // `{"$llm_error": 429}` scripts a call failing with that HTTP status.
+        None => script
+            .into_iter()
+            .map(
+                |v| match v.get("$llm_error").and_then(serde_json::Value::as_u64) {
+                    Some(status) => Err(mb_llm::LlmError::Http {
+                        status: u16::try_from(status).unwrap(),
+                        body: "scripted failure".into(),
+                    }),
+                    None => Ok((v.to_string(), usage)),
+                },
+            )
+            .collect(),
+    };
+    let provider = Arc::new(ScriptedProvider::with_usage(script));
     let mut store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     if options.cached {
         store = CachingStateStore::wrap(
@@ -234,7 +256,7 @@ pub fn harness_of(
         "described",
         Arc::new(bundle),
         Arc::new(Engine::new(
-            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            (!options.offline).then(|| Arc::clone(&provider) as Arc<dyn Provider>),
             EngineConfig::default(),
         )),
         store,

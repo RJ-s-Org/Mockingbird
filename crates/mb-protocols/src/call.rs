@@ -1384,6 +1384,19 @@ pub(crate) async fn complete(
             {
                 lists::no_content(rt.bundle(), op, &mut generated);
             }
+            // A faker list of a collection the session listed lists what it listed, as
+            // a model shown those records would.
+            if is_query
+                && target_id.is_none()
+                && answered.is_none()
+                && rt.consistency
+                && generated.source == Source::Fallback
+                && let Some(body) = generated.body.as_mut()
+            {
+                exec::fallback_lists_marked(&mut state, (plan, call), body)
+                    .instrument(state_span())
+                    .await;
+            }
             // A generated list agrees with the session as a page from state does: its
             // parent-shaped envelope member is the held parent, and what its envelope
             // says of a listed record names one it lists. What a scenario sets still
@@ -1668,12 +1681,17 @@ pub(crate) async fn complete(
                 .instrument(state_span())
                 .await;
             }
-            // A faker list standing in for a failed LLM call seeds nothing,
-            // or its items would join the session's later LLM lists.
+            // A faker list standing in for a failed LLM call seeds nothing, or its
+            // items would join the session's later LLM lists; unless the failure
+            // lasts (auth or quota) and the list marks its collection listed, when
+            // later lists answer from what it seeds, as after a model's. One a retry
+            // may get past (a `429`, a `5xx`, a timeout) leaves the next list to the
+            // model.
             let seeding = is_query
                 && rt.consistency
                 && target_id.is_none()
-                && !transient_fallback(&generated);
+                && (!transient_fallback(&generated)
+                    || lasting_fallback(&generated) && state_lists::marks_listed(rt, plan, call));
             // A single answer with an identity of its own is one record, not a list of
             // what it holds (a weather reading's `weather` conditions). It is stored
             // under its identity only on a route with no path parameter, which then

@@ -736,6 +736,86 @@ pub(in crate::call) async fn agree_generated(
     *body != before
 }
 
+/// A faker answer `body` to list `call` (offline, or standing in for a failed LLM call)
+/// of a collection the session listed ([`state_lists::marked`]), made to list what the
+/// session listed there, as a model shown those records would: its items are the
+/// listed records the session holds, each as held over the members of a drawn item (the
+/// drawn items in turn) for what the record lacks (an identity list's `owners`). Only
+/// for a list whose items have a described identity ([`identified`]) that a list asking
+/// for nothing but a page marks ([`state_lists::marks_listed`]), and asks no page
+/// position. A page size the request asks for ([`list_query::requested_page`]) keeps
+/// the first that many, in the order the mark placed them. Left as drawn when none is
+/// held, more are kept than the array admits, or the answer so filled does not suit its
+/// schema. Whether it changed `body`.
+pub(in crate::call) async fn fallback_lists_marked(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    body: &mut Value,
+) -> bool {
+    let rt = state.rt;
+    let op = plan.op;
+    let bundle = rt.bundle();
+    let kind = rt
+        .described()
+        .op(&op.id)
+        .and_then(|d| d.kind)
+        .or_else(|| OpKind::of(op));
+    if kind != Some(OpKind::List)
+        || !identified(rt, op, OpKind::List)
+        || !state_lists::marks_listed(rt, plan, call)
+    {
+        return false;
+    }
+    let paged = list_query::of(rt, op, call)
+        .and_then(|q| q.page)
+        .is_some_and(|p| p.position.is_some());
+    let (false, Some(t), Some(shape)) = (paged, item_type(rt, op), Shape::of(rt, op)) else {
+        return false;
+    };
+    let marked = state_lists::marked(state, (plan, call), t).await;
+    let size = list_query::requested_page(rt, op, call)
+        .and_then(|(_, limit)| usize::try_from(limit.items).ok())
+        .unwrap_or(usize::MAX);
+    let drawn = shape.items_in(body).cloned().unwrap_or_default();
+    let mut items = Vec::with_capacity(marked.len().min(size));
+    for id in &marked {
+        if items.len() >= size {
+            break;
+        }
+        let Some(held) = state.get(&plan.session, t, id).await else {
+            continue;
+        };
+        let Value::Object(own) = lists::projected(bundle, Some(&shape.items), &held.data, 0) else {
+            continue;
+        };
+        let mut item = match drawn.is_empty() {
+            true => Map::new(),
+            false => drawn[items.len() % drawn.len()]
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+        };
+        item.extend(own);
+        items.push(Value::Object(item));
+    }
+    if items.is_empty() || shape.max_items(rt).is_some_and(|max| items.len() > max) {
+        return false;
+    }
+    let mut filled = body.clone();
+    let Some(slot) = shape.items_in_mut(&mut filled) else {
+        return false;
+    };
+    *slot = items;
+    let fits = plan
+        .engine
+        .schema_violations(bundle, shape.schema(), &filled)
+        .is_some_and(|violations| violations.is_empty());
+    if fits {
+        *body = filled;
+    }
+    fits
+}
+
 /// `body`, a list answer to `call` whose items are of type `t`, with each reference to a
 /// record of another described type naming one of that type that the session listed
 /// under the same issued parent and still holds ([`state_lists::issued_marked`]: the

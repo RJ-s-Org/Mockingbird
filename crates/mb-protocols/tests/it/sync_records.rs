@@ -677,3 +677,224 @@ async fn the_catalog_plaid_syncs_transactions_name_the_items_listed_accounts() {
         "{listed:?} {again}"
     );
 }
+
+/// Sends `body` to `path` of the catalog's Plaid mock: its answer, which must be 200,
+/// and its source.
+async fn plaid_sourced(h: &support::DescribedHarness, path: &str, body: Value) -> (Value, String) {
+    let (status, headers, body) = h.send("POST", path, Some(body), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{path}: {body}");
+    let source = headers["x-mockingbird-source"]
+        .to_str()
+        .unwrap_or_default()
+        .to_owned();
+    (body, source)
+}
+
+/// The catalog's Plaid example with no model answering (`options` say why), in the
+/// trial's order: link token, exchange, `/accounts/get`, `/auth/get`, `/identity/get`,
+/// `/transactions/sync`, balance, item, institution, `/accounts/get` again. The
+/// faker's first account list is the Item's, as a model's would be: every later list
+/// of the Item's accounts answers it from state, and the sync's transactions name it.
+async fn faker_plaid_lists_the_items_accounts_once(options: support::HarnessOptions) {
+    let world = mb_import::parse_document(PLAID_WORLD.as_bytes()).unwrap();
+    let h = support::described_with(PLAID, world, vec![], &options, false);
+    let _ = plaid_post(
+        &h,
+        "/link/token/create",
+        json!({"client_name": "Ledgerly", "language": "en", "country_codes": ["US"],
+               "user": {"client_user_id": "u1"}, "products": ["transactions"]}),
+    )
+    .await;
+    let exchanged = plaid_post(
+        &h,
+        "/item/public_token/exchange",
+        json!({"public_token": "public-sandbox-5c224a01-8314-4491-a06f-39e193d5cddc"}),
+    )
+    .await;
+    let token = json!({"access_token": exchanged["access_token"]});
+    let (first, _) = plaid_sourced(&h, "/accounts/get", token.clone()).await;
+    let listed = accounts_named(&first, &["accounts"]);
+    assert!(!listed.is_empty(), "{first}");
+    // The Item's accounts, from state: `/auth/get` serves them as held.
+    let (auth, source) = plaid_sourced(&h, "/auth/get", token.clone()).await;
+    assert_eq!(source, "state", "{auth}");
+    assert_eq!(accounts_named(&auth, &["accounts"]), listed, "{auth}");
+    // The held accounts have no `owners` for `/identity/get` to serve from state (as
+    // with a model): the faker draws them, over the listed accounts.
+    let (identity, _) = plaid_sourced(&h, "/identity/get", token.clone()).await;
+    assert_eq!(
+        accounts_named(&identity, &["accounts"]),
+        listed,
+        "{identity}"
+    );
+    let (synced, _) = plaid_sourced(&h, "/transactions/sync", token.clone()).await;
+    let named = accounts_named(&synced, &["added", "modified", "removed"]);
+    assert!(!named.is_empty(), "{synced}");
+    assert!(
+        named.iter().all(|id| listed.contains(id)),
+        "{listed:?} {synced}"
+    );
+    let (balances, source) = plaid_sourced(&h, "/accounts/balance/get", token.clone()).await;
+    assert_eq!(source, "state", "{balances}");
+    assert_eq!(
+        accounts_named(&balances, &["accounts"]),
+        listed,
+        "{balances}"
+    );
+    let item = plaid_post(&h, "/item/get", token.clone()).await;
+    let institution = item["item"]["institution_id"]
+        .as_str()
+        .unwrap_or("ins_109508")
+        .to_owned();
+    let _ = plaid_post(
+        &h,
+        "/institutions/get_by_id",
+        json!({"institution_id": institution, "country_codes": ["US"]}),
+    )
+    .await;
+    let (again, source) = plaid_sourced(&h, "/accounts/get", token).await;
+    assert_eq!(source, "state", "{again}");
+    assert_eq!(accounts_named(&again, &["accounts"]), listed, "{again}");
+}
+
+/// Offline (`--offline`): every answer is the faker's.
+#[tokio::test]
+async fn offline_the_catalog_plaids_first_account_list_is_the_items() {
+    faker_plaid_lists_the_items_accounts_once(support::HarnessOptions {
+        offline: true,
+        ..Default::default()
+    })
+    .await;
+}
+
+/// The model's every call fails (a `403`), and the faker stands in.
+#[tokio::test]
+async fn with_a_failing_llm_the_catalog_plaids_first_account_list_is_the_items() {
+    faker_plaid_lists_the_items_accounts_once(support::HarnessOptions {
+        llm_fails_with: Some(403),
+        ..Default::default()
+    })
+    .await;
+}
+
+/// [`CONTRACT`] with `/accounts/owned`: the Item's accounts, each with its `owner`,
+/// paged by a `count` in the request.
+fn owned_accounts() -> String {
+    let route = r##"  /accounts/owned:
+    post:
+      operationId: accountsOwned
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [access_token], properties: {access_token: {type: string}, cursor: {type: string}, count: {type: integer, minimum: 1}}}}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accounts]
+                properties:
+                  accounts:
+                    type: array
+                    items:
+                      type: object
+                      required: [account_id, name, owner]
+                      properties: {account_id: {type: string}, name: {type: string}, owner: {type: string}}
+                  next_cursor: {type: [string, "null"]}
+        "400": {$ref: "#/components/responses/Error"}
+  /accounts/{account_id}:"##;
+    CONTRACT.replacen("  /accounts/{account_id}:", route, 1)
+}
+
+/// [`world`] with `/accounts/owned` a list of the Item's accounts paged by `count`.
+fn owned_world() -> Value {
+    let mut world = world();
+    world["operations"]["accountsOwned"] = json!({
+        "kind": "list", "type": "account", "answer": {"records": "/accounts"},
+        "scope": {"param": "access_token"}, "not_found": 400,
+        "paging": {"style": "cursor", "request": "cursor", "response": "next_cursor", "size": "count"}
+    });
+    world
+}
+
+/// A faker list standing in for a refused LLM call (a `403`), of a collection the
+/// session listed, lists what it listed only as far as the page size it asks for: the
+/// held accounts lack the `owner` it requires, so it is generated, and the faker's
+/// accounts are the first two listed.
+#[tokio::test]
+async fn a_faker_list_of_a_listed_collection_keeps_its_page_size() {
+    let accounts = json!({"accounts": [{"account_id": "a-1", "name": "Checking"},
+                                       {"account_id": "a-2", "name": "Savings"},
+                                       {"account_id": "a-3", "name": "Credit"}],
+                          "request_id": "r"});
+    let h = support::described(
+        &owned_accounts(),
+        owned_world(),
+        vec![json!({}), accounts, json!({"$llm_error": 403})],
+    );
+    let (_, exchanged) = send(
+        &h,
+        "POST",
+        "/item/public_token/exchange",
+        Some(json!({"public_token": "p"})),
+    )
+    .await;
+    let token = exchanged["access_token"].clone();
+    let (_, listed) = send(
+        &h,
+        "POST",
+        "/accounts/get",
+        Some(json!({"access_token": token})),
+    )
+    .await;
+    assert_eq!(
+        accounts_named(&listed, &["accounts"]),
+        ["a-1", "a-2", "a-3"]
+    );
+    let (source, owned) = send(
+        &h,
+        "POST",
+        "/accounts/owned",
+        Some(json!({"access_token": token, "count": 2})),
+    )
+    .await;
+    assert_eq!(source, "fallback", "{owned}");
+    assert_eq!(
+        accounts_named(&owned, &["accounts"]),
+        ["a-1", "a-2"],
+        "{owned}"
+    );
+}
+
+/// A faker list standing in for an LLM call a retry may get past (a `429`) seeds
+/// nothing and marks nothing: once the model answers again, the next list is the
+/// model's, not the faker's from state.
+#[tokio::test]
+async fn a_list_after_a_retryable_llm_failure_is_the_models() {
+    let accounts = json!({"accounts": [{"account_id": "m-1", "name": "Checking"},
+                                       {"account_id": "m-2", "name": "Savings"}],
+                          "request_id": "r"});
+    let h = support::described(
+        CONTRACT,
+        world(),
+        vec![json!({}), json!({"$llm_error": 429}), accounts],
+    );
+    let (_, exchanged) = send(
+        &h,
+        "POST",
+        "/item/public_token/exchange",
+        Some(json!({"public_token": "p"})),
+    )
+    .await;
+    let token = json!({"access_token": exchanged["access_token"]});
+    let (source, drawn) = send(&h, "POST", "/accounts/get", Some(token.clone())).await;
+    assert_eq!(source, "fallback", "{drawn}");
+    let (source, again) = send(&h, "POST", "/accounts/get", Some(token)).await;
+    assert_eq!(source, "llm", "{again}");
+    assert_eq!(
+        accounts_named(&again, &["accounts"]),
+        ["m-1", "m-2"],
+        "{again}"
+    );
+}
