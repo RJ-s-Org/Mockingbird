@@ -44,6 +44,7 @@ mod described_runtime;
 mod described_state_lists;
 mod effect_members;
 mod engine_error_bodies;
+mod envelope_parents;
 mod envelope_writes;
 #[cfg(feature = "amqp")]
 mod events_amqp;
