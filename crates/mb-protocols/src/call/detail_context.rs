@@ -118,7 +118,8 @@ fn embed_view(
 }
 
 /// `value` with each text cut ([`list_context::cut_texts`]) and each list longer than
-/// `items` cut to its first `items`, then a note of how many more it holds.
+/// `items` cut to its first `items`, then a note of how many more it holds
+/// ([`mb_engine::prompt::cut_list_note`]).
 fn project(value: &Value, items: usize, depth: usize) -> Value {
     if depth > MAX_PROJECT_DEPTH {
         return Value::Null;
@@ -137,9 +138,8 @@ fn project(value: &Value, items: usize, depth: usize) -> Value {
                 .map(|item| project(item, items, depth + 1))
                 .collect();
             if list.len() > items {
-                shown.push(Value::String(format!(
-                    "… {} more not shown",
-                    list.len() - items
+                shown.push(Value::String(mb_engine::prompt::cut_list_note(
+                    list.len() - items,
                 )));
             }
             Value::Array(shown)

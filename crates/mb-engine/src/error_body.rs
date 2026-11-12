@@ -2237,6 +2237,7 @@ impl Engine {
                         &format!("{}:{status}:{cause:?}", op.id),
                         [&error_call],
                     ),
+                    cut_lists: false,
                 };
                 let tokens = backticked(
                     [bundle.description.as_deref(), variant.description.as_deref()]
