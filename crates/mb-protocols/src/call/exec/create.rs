@@ -1397,6 +1397,38 @@ pub(super) fn read_schemas(rt: &crate::MockRuntime, t: &str) -> Vec<Value> {
     read_shapes(rt, t).into_iter().map(|(s, _)| s).collect()
 }
 
+/// The records the creates of type `t` answer: each create's answer, or the record its
+/// identity says the answer holds. For a type no route reads ([`read_schemas`] holds
+/// none), [`Shape::of`] takes them as the record, and what a create mints (its
+/// identity) is declared there alone.
+pub(in crate::call) fn created_schemas(rt: &crate::MockRuntime, t: &str) -> Vec<Value> {
+    let bundle = rt.bundle();
+    let mut schemas: Vec<Value> = Vec::new();
+    for op in &bundle.operations {
+        let desc = rt.described().op(&op.id);
+        let kind = desc.and_then(|d| d.kind).or_else(|| OpKind::of(op));
+        let of = desc
+            .and_then(|d| d.r#type.as_deref())
+            .or(op.resource_type.as_deref());
+        if kind != Some(OpKind::Create) || of != Some(t) {
+            continue;
+        }
+        let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+            continue;
+        };
+        let record = match op.identity.as_ref().filter(|i| i.record.is_some()) {
+            Some(identity) => record_schema_of(bundle, identity, schema),
+            None => Some(schema.clone()),
+        };
+        if let Some(record) = record
+            && !schemas.contains(&record)
+        {
+            schemas.push(record);
+        }
+    }
+    schemas
+}
+
 /// The first member a create's `request` sends of its record one level into an object
 /// member the type's reads do not declare (GraphQL's `input`), with a non-empty array
 /// or object value (child records) of another JSON type than the type's reads hold it
