@@ -67,7 +67,10 @@
 //! the contract says is unique that the generated path refuses (`repeated_value`), go on
 //! to generation too.
 
+mod first_read;
 mod fresh;
+
+pub(super) use first_read::{FirstRead, first_read};
 
 use mb_engine::consistency::{property_schema, required_members};
 use mb_engine::error_body::{ErrorCause, RefusalFacts};
@@ -424,6 +427,20 @@ pub(super) async fn run(
     let filled_keys = mint_keys(state, (&plan.session, t), &keys, &mut data, &mut owned)
         .instrument(state_span())
         .await;
+    // So is a record's integer `number`, the key records conventionally go by beside
+    // their id (an issue's, a pull request's) where no route reads it (a GraphQL
+    // record looked up below another): one past the highest held, never a draw.
+    let numbered: Vec<(String, Value)> = shape
+        .members
+        .iter()
+        .filter(|(name, _)| name == SEQUENCE_MEMBER && !keys.iter().any(|(k, _)| k == name))
+        .cloned()
+        .collect();
+    if !numbered.is_empty() {
+        mint_keys(state, (&plan.session, t), &numbered, &mut data, &mut owned)
+            .instrument(state_span())
+            .await;
+    }
     // A member referring to the record a path parameter names (a comment's
     // `pullrequest` under `/pullrequests/{pull_request_id}`) is that record.
     if let Value::Object(known) = &mut data {
@@ -704,6 +721,10 @@ async fn repeated_key(
 /// A member's name with its schema.
 type Member = (String, Value);
 
+/// The member a record's ordinal conventionally goes by beside its id (an issue's
+/// `number`), as [`crate::call::entities`] keys records by it: minted in sequence.
+const SEQUENCE_MEMBER: &str = "number";
+
 /// Mints on `data`, a created record of type `t`, each of `keys` (its alternate keys,
 /// [`Shape::key_members`]) it holds no value for and that `owned` leaves to nobody: an
 /// integer member is one past the highest the type's records hold under the record's
@@ -733,7 +754,11 @@ async fn mint_keys(
         let listed = state.numbered_with(session, t, name, MAX_SCAN).await;
         let top = listed
             .iter()
-            .filter_map(|r| r.data.get(name)?.as_i64())
+            // A number a record holds as text (`"9"`) counts as well.
+            .filter_map(|r| {
+                let held = r.data.get(name)?;
+                held.as_i64().or_else(|| held.as_str()?.parse().ok())
+            })
             .max()
             .unwrap_or(0);
         let value = Value::from(top.saturating_add(1));

@@ -80,7 +80,7 @@ pub mod validate;
 
 pub use extract::extract_json;
 pub use faker::{Costs, Faker, FakerHints};
-pub use fill::{CallerAnswer, FillContext, Filled, fill_nulls, free_text};
+pub use fill::{CallerAnswer, FillContext, Filled, fill_nulls, free_text, persona_names};
 pub use guards::{
     EngineGuards, GenerationLimiter, TokenBudget, without_effects_schema, without_items_schema,
 };
