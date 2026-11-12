@@ -15,8 +15,10 @@ Prerequisite: a running server of this project (`server_status`; start one with 
 | OpenAPI 3.x / Swagger 2.0, GraphQL SDL or introspection JSON, `.proto` or descriptor set, WSDL 1.1, AsyncAPI 2/3 | `import_contract {source: "./api.yaml", mock: "orders"}`; CLI `mockingbird import api.yaml --as orders` |
 | A directory of `.proto`/`.graphql`/WSDL+XSD files | pass the directory (CLI and local MCP); it is packed as tar.gz |
 | API documentation (Markdown, HTML, PDF, text, or a URL to it), a HAR recording, a Postman collection | same call (several documentation pages: `urls: [...]`); it becomes a **draft** reviewed before it serves. Pass `approve: true` to take it when the import reports no warnings; otherwise review it: `get_draft {mock}` lists operations with confidence and warnings, `get_draft {mock, operation}` shows one definition, `edit_draft {mock, operation, patch}` fixes it with a JSON merge patch, `approve_draft {mock}` serves it. A later import merges into the draft or active contract (`mode: "replace"` starts over) |
-| Only an idea of the API | write a small OpenAPI 3.1 file first, then import it |
+| Only an idea of the API, or a public API the catalog lacks | write a small OpenAPI 3.1 file first, then import it |
 | A contract that only exists in the conversation (remote agents, ChatGPT) | `import_contract {content: "<the file text>", filename: "api.yaml", mock: "orders"}` |
+
+When you write a contract by hand, pin each member the app branches on to its success value: `const` for the one value the app needs (`code: {const: "Ok"}`), `enum` only for values it treats alike (`status: {enum: [active, trialing]}`). With no LLM (`--offline`, or a profile that fails) the faker fills a plain string with any word and draws an `enum` at random, so an app checking `code === "Ok"` fails. Model the API's other answers (a `NoRoute` code) as a scenario (`put_scenario`, see the `mockingbird-testing` skill), not as more values of the success schema.
 
 `validate_contract {path}` compiles a contract locally and lists its operation ids, without a server.
 
