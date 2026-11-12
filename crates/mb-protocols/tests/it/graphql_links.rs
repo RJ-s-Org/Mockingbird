@@ -146,3 +146,77 @@ async fn an_executor_create_is_linked_to_the_record_its_id_argument_names() {
     assert_eq!(held.data["state"], "CLOSED", "{}", held.data);
     assert!(held.data["milestone"].is_null(), "{}", held.data);
 }
+
+/// A link a model wrote in a record a mutation's payload nests (`ticketEdge.node.url`)
+/// that no client can follow is served as a URL: `https//…` (its colon missing) with
+/// its scheme mended, and a drawn word or a mended link on a placeholder host rebuilt as
+/// the record's own link (the mock's host, its plural type name and its number). A
+/// nested link that is one already stays.
+#[tokio::test]
+async fn a_nested_record_s_unfollowable_link_is_served_as_a_url() {
+    use tower::ServiceExt;
+    const TICKETS: &str = r#"
+type Ticket { id: ID! number: Int! title: String! url: String! }
+type TicketEdge { node: Ticket! }
+type AddTicketPayload { ticketEdge: TicketEdge! related: [Ticket!]! }
+type Query { ticket(number: Int!): Ticket }
+type Mutation { addTicket(title: String!): AddTicketPayload }
+"#;
+    let answer = json!({"__typename": "AddTicketPayload",
+        "ticketEdge": {"__typename": "TicketEdge", "node": {"__typename": "Ticket",
+            "id": "T_9", "number": 9, "title": "Router panics",
+            "url": "https//tracker.test/acme/roadmap/tickets/412#comment-3521"}},
+        "related": [{"__typename": "Ticket", "id": "T_1", "number": 1, "title": "Old",
+            "url": "https://tracker.test/acme/roadmap/tickets/1"},
+            {"__typename": "Ticket", "id": "T_2", "number": 2, "title": "Drawn", "url": "harbor"},
+            {"__typename": "Ticket", "id": "T_3", "number": 3, "title": "Placeholder",
+             "url": "https:/example.com/acme/roadmap/tickets/3"}]});
+    let provider = Arc::new(mb_llm::ScriptedProvider::new(vec![Ok(answer.to_string())]));
+    let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let mut rt = MockRuntime::new(
+        "tickets",
+        Arc::new(compile(TICKETS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider as Arc<dyn mb_llm::Provider>),
+            EngineConfig::default(),
+        )),
+        store,
+    );
+    rt.hosts = vec!["tracker.test".into()];
+    let router = graphql::try_router(Arc::new(rt)).unwrap();
+    let query = r#"mutation { addTicket(title: "Router panics") {
+        ticketEdge { node { id number url } } related { id url } } }"#;
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/graphql")
+        .header("content-type", "application/json")
+        .header("x-mockingbird-session", "s1")
+        .body(axum::body::Body::from(
+            json!({ "query": query }).to_string(),
+        ))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(body.get("errors").is_none(), "{body}");
+    let payload = &body["data"]["addTicket"];
+    assert_eq!(
+        payload["ticketEdge"]["node"]["url"],
+        "https://tracker.test/acme/roadmap/tickets/412#comment-3521",
+        "{body}"
+    );
+    assert_eq!(
+        payload["related"][0]["url"], "https://tracker.test/acme/roadmap/tickets/1",
+        "{body}"
+    );
+    assert_eq!(
+        payload["related"][1]["url"], "https://tracker.test/tickets/2",
+        "{body}"
+    );
+    assert_eq!(
+        payload["related"][2]["url"], "https://tracker.test/tickets/3",
+        "{body}"
+    );
+}

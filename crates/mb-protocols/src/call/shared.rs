@@ -8,9 +8,10 @@
 //! a GraphQL type (`PullRequest`, `Repository`) declaring the same identity. It is
 //! answered in the reading mock's shape: members renamed between camelCase and
 //! snake_case where only that differs, enum values in the reading schema's case,
-//! REST's `node_id` as GraphQL's `id` (and back), and a scalar one shape holds
-//! flattened, named for the object the other holds it in, nested there (GraphQL's
-//! `headRefName` as REST's `head.ref`, and back).
+//! REST's `node_id` as GraphQL's `id` (and back), in the objects it nests and
+//! their lists too (a number where a plain string is declared as that string),
+//! and a scalar one shape holds flattened, named for the object the other holds
+//! it in, nested there (GraphQL's `headRefName` as REST's `head.ref`, and back).
 
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -321,7 +322,8 @@ pub(crate) fn reshape(
     defs: &Map<String, Value>,
     data: &Value,
 ) -> Value {
-    reshape_at(props, defs, data, 0)
+    let mut budget = RESHAPE_OBJECTS;
+    reshape_at(props, defs, data, (0, &mut budget))
 }
 
 /// The properties of the object `schema` is, through `$ref`s and a nullable
@@ -352,14 +354,128 @@ fn object_props<'a>(
     None
 }
 
-/// [`reshape`] `depth` objects down: an object member is reshaped as its own
-/// schema declares it (a GraphQL `repository: {id: "R_1"}` where REST's
-/// repository id is a number loses its id), to four levels.
+/// How many levels of objects and lists [`reshape`] answers in the reading shape.
+const RESHAPE_DEPTH: usize = 6;
+/// How many objects one [`reshape`] answers in the reading shape, at most: a nested
+/// object past it is kept as the record holds it.
+const RESHAPE_OBJECTS: usize = 400;
+
+/// `schema` past its `$ref`s and a nullable `anyOf` (a union of one type and `null`),
+/// among `defs`.
+fn unwrapped<'a>(defs: &'a Map<String, Value>, schema: &'a Value) -> &'a Value {
+    let mut schema = schema;
+    for _ in 0..6 {
+        if let Some(def) = schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+            .and_then(|n| defs.get(n))
+        {
+            schema = def;
+            continue;
+        }
+        let branches: Vec<&Value> = schema
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|b| b.get("type").and_then(Value::as_str) != Some("null"))
+            .collect();
+        match branches.as_slice() {
+            [one] => schema = one,
+            _ => break,
+        }
+    }
+    schema
+}
+
+/// The properties of the object type `schema` holds `value` as: its own, else, for a
+/// union or an interface (GraphQL's `owner: RepositoryOwner`, a `oneOf` of its object
+/// types), the type `value`'s `__typename` names, else the one declaring most of
+/// `value`'s members (the first of those declaring as many); `None` when none
+/// declares any. An `anyOf` of one type and `null` is that type.
+fn props_for<'a>(
+    defs: &'a Map<String, Value>,
+    schema: &'a Value,
+    value: &Value,
+) -> Option<&'a Map<String, Value>> {
+    if let Some(props) = object_props(defs, schema) {
+        return Some(props);
+    }
+    let schema = unwrapped(defs, schema);
+    let branches: Vec<&Value> = ["oneOf", "anyOf"]
+        .iter()
+        .filter_map(|k| schema.get(*k).and_then(Value::as_array))
+        .flatten()
+        .collect();
+    let named = value
+        .get("__typename")
+        .and_then(Value::as_str)
+        .and_then(|t| {
+            branches.iter().find(|b| {
+                b.get("$ref")
+                    .and_then(Value::as_str)
+                    .and_then(|r| r.strip_prefix("#/$defs/"))
+                    == Some(t)
+            })
+        });
+    if let Some(branch) = named {
+        return object_props(defs, branch);
+    }
+    let members = value.as_object()?;
+    let mut best: Option<(&Map<String, Value>, usize)> = None;
+    for props in branches.iter().filter_map(|b| object_props(defs, b)) {
+        let declared = members
+            .keys()
+            .filter(|k| {
+                [(*k).clone(), snake(k), camel(k)]
+                    .iter()
+                    .any(|n| props.contains_key(n))
+            })
+            .count();
+        if best.is_none_or(|(_, most)| declared > most) {
+            best = Some((props, declared));
+        }
+    }
+    // A value no branch declares a member of is kept as it is.
+    best.filter(|(_, most)| *most > 0).map(|(props, _)| props)
+}
+
+/// Whether member `name` names a record (`id`, `node_id`, `owner_id`, `ownerId`): one
+/// whose value is not turned into another JSON type, but left to what the shape maps
+/// to it or fill writes.
+fn names_a_record(name: &str) -> bool {
+    let snaked = snake(name);
+    snaked == "id" || snaked.ends_with("_id")
+}
+
+/// `value`, a number another shape holds where `schema` declares a plain string (no
+/// `format`, `enum` or `pattern`), as that string; `None` otherwise.
+fn stringified(schema: &Value, defs: &Map<String, Value>, value: &Value) -> Option<Value> {
+    let Value::Number(n) = value else {
+        return None;
+    };
+    let text = Value::String(n.to_string());
+    let plain = unwrapped(defs, schema);
+    let constrained = ["format", "enum", "pattern", "const"]
+        .iter()
+        .any(|k| plain.get(*k).is_some());
+    (plain.get("type").and_then(Value::as_str) == Some("string")
+        && !constrained
+        && of_type(schema, defs, &text))
+    .then_some(text)
+}
+
+/// [`reshape`] `depth` levels down, `budget` objects more at most: an object member,
+/// and each object of a list member, is reshaped as its own schema declares it (a
+/// GraphQL `repository: {id: "R_1"}` where REST's repository id is a number loses its
+/// id; REST's `owner: {id: 42, node_id: "U_1"}` read as GraphQL's `RepositoryOwner`
+/// shows `id: "U_1"`), to [`RESHAPE_DEPTH`] levels.
 fn reshape_at(
     props: &Map<String, Value>,
     defs: &Map<String, Value>,
     data: &Value,
-    depth: usize,
+    (depth, budget): (usize, &mut usize),
 ) -> Value {
     let mut out = Map::new();
     for (key, value) in data.as_object().into_iter().flatten() {
@@ -370,16 +486,18 @@ fn reshape_at(
             continue;
         };
         let mut value = fit_enum(schema, defs, value);
-        // A value of another JSON type than the member holds (GraphQL's `"I_1"`
-        // id where REST's is a number) is left out for fill to write.
+        // A value of another JSON type than the member holds (GraphQL's `"I_1"` id
+        // where REST's is a number) is left out for what the shape maps to it (REST's
+        // `node_id` as GraphQL's `id`) or fill to write; a number where a plain string
+        // is declared is that string, unless it names a record.
         if !of_type(schema, defs, &value) {
-            continue;
+            match stringified(schema, defs, &value).filter(|_| !names_a_record(&name)) {
+                Some(text) => value = text,
+                None => continue,
+            }
         }
-        if value.is_object()
-            && depth < 4
-            && let Some(inner) = object_props(defs, schema)
-        {
-            value = reshape_at(inner, defs, &value, depth + 1);
+        if depth < RESHAPE_DEPTH {
+            value = reshape_inner(schema, defs, value, (depth, &mut *budget));
         }
         out.insert(name, value);
     }
@@ -399,6 +517,40 @@ fn reshape_at(
     unflattened(props, defs, data, &mut out);
     flattened(props, defs, data, &mut out);
     Value::Object(out)
+}
+
+/// `value`, a member `schema` declares, with each object it is or a list of it holds
+/// reshaped as `schema` declares that object ([`props_for`]), while `budget` lasts.
+fn reshape_inner(
+    schema: &Value,
+    defs: &Map<String, Value>,
+    value: Value,
+    (depth, budget): (usize, &mut usize),
+) -> Value {
+    match value {
+        Value::Object(_) => {
+            let Some(inner) = props_for(defs, schema, &value) else {
+                return value;
+            };
+            if *budget == 0 {
+                return value;
+            }
+            *budget -= 1;
+            reshape_at(inner, defs, &value, (depth + 1, budget))
+        }
+        Value::Array(items) => {
+            let Some(item_schema) = unwrapped(defs, schema).get("items") else {
+                return Value::Array(items);
+            };
+            Value::Array(
+                items
+                    .into_iter()
+                    .map(|item| reshape_inner(item_schema, defs, item, (depth, &mut *budget)))
+                    .collect(),
+            )
+        }
+        other => other,
+    }
 }
 
 /// The names a member whose words are `words` may go by in a shape: as is in

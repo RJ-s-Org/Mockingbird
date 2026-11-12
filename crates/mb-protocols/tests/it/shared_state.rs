@@ -1001,3 +1001,94 @@ async fn same_as_on_one_side_still_links_both() {
     .await;
     assert_eq!(back["pullRequestByNumber"]["title"], "Over REST", "{back}");
 }
+
+/// The objects a shared record nests are answered in the reading mock's shape too,
+/// through an interface and in a list: the REST owner's integer `id` is no GraphQL
+/// `ID`, its `node_id` is; a number where a plain string is declared is that string.
+#[tokio::test]
+async fn nested_objects_take_the_reading_mock_s_identity() {
+    const PROJECTS: &str = r##"
+openapi: 3.0.3
+info: {title: projects, version: "1"}
+paths:
+  /projects/{owner}/{repo}:
+    get:
+      operationId: getProject
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: the project
+          content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}
+        "404": {description: missing}
+components:
+  schemas:
+    Owner:
+      type: object
+      required: [id, login]
+      properties:
+        id: {type: integer}
+        node_id: {type: string}
+        login: {type: string}
+        postal_code: {type: integer}
+    Project:
+      type: object
+      required: [id, name, owner]
+      properties:
+        id: {type: integer}
+        node_id: {type: string}
+        name: {type: string}
+        owner: {$ref: "#/components/schemas/Owner"}
+        members:
+          type: array
+          items: {$ref: "#/components/schemas/Owner"}
+"##;
+    const GQL: &str = r#"
+interface ProjectOwner { id: ID! login: String! }
+type User implements ProjectOwner { id: ID! login: String! postalCode: String }
+type Team implements ProjectOwner { id: ID! login: String! size: Int }
+type Project { id: ID! name: String! owner: ProjectOwner! members: [User!]! }
+type Query { project(owner: String!, name: String!): Project }
+"#;
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let types = SharedTypes::default();
+    let rest_rt = joined(
+        ("acme-rest", PROJECTS),
+        vec![json!({"id": 7, "node_id": "P_7", "name": "trellis",
+                    "owner": {"id": 42, "node_id": "U_1", "login": "fernwood"},
+                    "members": [{"id": 43, "node_id": "U_2", "login": "ash", "postal_code": 94110}]})],
+        &state,
+        &types,
+        None,
+    );
+    let rest_router = http_rest::router(rest_rt);
+    let gh = joined(
+        ("acme-graphql", GQL),
+        vec![
+            json!({"__typename": "Project", "id": "P_x", "name": "other",
+                    "owner": {"__typename": "User", "id": "U_x", "login": "x"},
+                    "members": []}),
+        ],
+        &state,
+        &types,
+        None,
+    );
+    let gql_router = graphql::try_router(gh).unwrap();
+
+    let read = rest(&rest_router, "GET", "/projects/fernwood/trellis", None).await;
+    assert_eq!(read["owner"]["id"], 42, "{read}");
+    let back = gql(
+        &gql_router,
+        r#"{ project(owner: "fernwood", name: "trellis") {
+              id name owner { id login } members { id login postalCode } } }"#,
+        false,
+    )
+    .await;
+    let project = &back["project"];
+    assert_eq!(project["name"], "trellis", "{back}");
+    assert_eq!(project["owner"]["id"], "U_1", "{back}");
+    assert_eq!(project["owner"]["login"], "fernwood", "{back}");
+    assert_eq!(project["members"][0]["id"], "U_2", "{back}");
+    assert_eq!(project["members"][0]["postalCode"], "94110", "{back}");
+}
