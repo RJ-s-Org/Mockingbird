@@ -1637,10 +1637,13 @@ impl Engine {
     /// as Cal.com's `{status, data}` does its `status`: the value `kept` holds for it
     /// (what the API answered in an envelope of this shape before), else the value the
     /// member's schema fixes (a `const`, a one-value `enum`, a `default`), else its
-    /// example when that suits it and is not a boolean's. `None` when a required member
-    /// has none of these: a guess is no answer, and the read is generated instead. The
-    /// record is not changed; whether the answer suits its schema is for
-    /// [`Engine::serve_stored`] to say.
+    /// example when that suits it and is not a boolean's. So does each object deeper
+    /// around the record ([`mb_mcm::Identity::envelope_levels`]: a Relay edge's
+    /// `__typename` and `cursor` around `/noteEdge/node`), from what `kept` holds under
+    /// the members leading to it. `None` when a required member has none of these: a
+    /// guess is no answer, and the read is generated instead. The record is not
+    /// changed; whether the answer suits its schema is for [`Engine::serve_stored`] to
+    /// say.
     #[must_use]
     pub fn held_answer(
         &self,
@@ -1654,14 +1657,25 @@ impl Engine {
             return Some(record.clone());
         };
         let mut answer = identity.answer_holding(record.clone(), None);
-        let (Some(member), Some(envelope), Some(schema)) = (
-            identity.envelope_member(),
-            answer.as_object_mut(),
-            response_schema.or_else(|| op.success_output()?.schema.as_ref()),
-        ) else {
+        let Some(schema) = response_schema.or_else(|| op.success_output()?.schema.as_ref()) else {
             return Some(answer);
         };
-        self.fill_envelope(bundle, schema, envelope, member, kept)?;
+        // Each object around the record, outermost first: a Relay edge's
+        // `{noteEdge: {__typename, node}}` as much as the answer's top.
+        for (path, member) in identity.envelope_levels() {
+            let pointer = json_pointer(path);
+            let (Some(level), Some(envelope)) = (
+                consistency::schema_at(bundle, schema, &pointer),
+                answer.pointer_mut(&pointer).and_then(Value::as_object_mut),
+            ) else {
+                break;
+            };
+            let kept = kept.and_then(|kept| {
+                path.iter()
+                    .try_fold(kept, |at, token| at.get(token)?.as_object())
+            });
+            self.fill_envelope(bundle, &level, envelope, member, kept)?;
+        }
         Some(answer)
     }
 
@@ -1715,7 +1729,10 @@ impl Engine {
     /// lists none); any other is drawn
     /// from the engine's seed (`0` without one) mixed with the contract, the operation
     /// and the member, so every read of the operation answers them the same. Empty
-    /// when the answer holds its record in no envelope.
+    /// when the answer holds its record in no envelope. The draws of an object deeper
+    /// around the record ([`mb_mcm::Identity::envelope_levels`]) are under the members
+    /// leading to it (`{noteEdge: {cursor}}`), as [`Engine::held_answer`] reads them;
+    /// a level that draws nothing leaves no object.
     #[must_use]
     pub fn envelope_draws(
         &self,
@@ -1724,49 +1741,71 @@ impl Engine {
         response_schema: Option<&Value>,
     ) -> Map<String, Value> {
         let mut drawn = Map::new();
-        let (Some(member), Some(schema)) = (
-            op.identity.as_ref().and_then(|i| i.envelope_member()),
+        let (Some(identity), Some(schema)) = (
+            op.identity.as_ref(),
             response_schema.or_else(|| op.success_output()?.schema.as_ref()),
         ) else {
             return drawn;
         };
-        let schema = consistency::non_null(bundle, schema);
-        for name in consistency::required_members(bundle, schema) {
-            if name == member {
-                continue;
-            }
-            let Some(member_schema) = consistency::property_schema(bundle, schema, &name) else {
-                continue;
+        // Each object around the record, outermost first; a deeper one's draws are
+        // kept under the members leading to it (`{noteEdge: {cursor}}`).
+        for (path, member) in identity.envelope_levels() {
+            let Some(level) = consistency::schema_at(bundle, schema, &json_pointer(path)) else {
+                break;
             };
-            if self.told_value(bundle, &member_schema).is_some() {
+            let level = consistency::non_null(bundle, &level);
+            let mut here = Map::new();
+            for name in consistency::required_members(bundle, level) {
+                if name == member {
+                    continue;
+                }
+                let Some(member_schema) = consistency::property_schema(bundle, level, &name) else {
+                    continue;
+                };
+                if self.told_value(bundle, &member_schema).is_some() {
+                    continue;
+                }
+                // The answer is a success: a boolean beside its record says so.
+                if consistency::declares_boolean(bundle, &member_schema) {
+                    here.insert(name, Value::Bool(true));
+                    continue;
+                }
+                // A list beside the record (GraphQL's `userErrors`, `warnings`) holds
+                // nothing on a success.
+                if consistency::declares_empty_array(bundle, &member_schema) {
+                    here.insert(name, Value::Array(Vec::new()));
+                    continue;
+                }
+                let validator = self.schema_validator(bundle, &member_schema).ok();
+                // The top level's draws as they always were; a deeper one's by its path.
+                let key = path.iter().fold(String::new(), |k, t| k + t + "/") + &name;
+                let mut draws = seed::Draws::seeded(
+                    self.faker_seed.unwrap_or_default(),
+                    &[&bundle.source_digest, &op.id, "envelope", &key],
+                    &[],
+                );
+                let (value, valid) = self.fake_checked(
+                    bundle,
+                    &member_schema,
+                    validator.as_deref(),
+                    &FakerHints::default(),
+                    &mut draws,
+                );
+                if valid {
+                    here.insert(name, value);
+                }
+            }
+            // A level that draws nothing leaves no object for it.
+            if here.is_empty() {
                 continue;
             }
-            // The answer is a success: a boolean beside its record says so.
-            if consistency::declares_boolean(bundle, &member_schema) {
-                drawn.insert(name, Value::Bool(true));
-                continue;
-            }
-            // A list beside the record (GraphQL's `userErrors`, `warnings`) holds
-            // nothing on a success.
-            if consistency::declares_empty_array(bundle, &member_schema) {
-                drawn.insert(name, Value::Array(Vec::new()));
-                continue;
-            }
-            let validator = self.schema_validator(bundle, &member_schema).ok();
-            let mut draws = seed::Draws::seeded(
-                self.faker_seed.unwrap_or_default(),
-                &[&bundle.source_digest, &op.id, "envelope", &name],
-                &[],
-            );
-            let (value, valid) = self.fake_checked(
-                bundle,
-                &member_schema,
-                validator.as_deref(),
-                &FakerHints::default(),
-                &mut draws,
-            );
-            if valid {
-                drawn.insert(name, value);
+            let into = path.iter().try_fold(&mut drawn, |at, token| {
+                at.entry(token.clone())
+                    .or_insert_with(|| Value::Object(Map::new()))
+                    .as_object_mut()
+            });
+            if let Some(into) = into {
+                into.extend(here);
             }
         }
         drawn
@@ -5706,6 +5745,14 @@ paths:
     }
 }
 
+/// The RFC 6901 pointer of `tokens` (`["noteEdge"]` is `/noteEdge`; none is `""`).
+fn json_pointer(tokens: &[String]) -> String {
+    tokens
+        .iter()
+        .map(|t| format!("/{}", t.replace('~', "~0").replace('/', "~1")))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6532,6 +6579,58 @@ components:
             op.identity
         );
         engine.held_answer(bundle, op, &json!({"id": 7}), kept, None)
+    }
+
+    /// A Relay create answering its note at `/noteEdge/node`: the edge's required
+    /// `cursor` is drawn under `noteEdge` and filled there, its `__typename` told by
+    /// its schema; levels that draw nothing leave the top-level draws as they were.
+    #[test]
+    fn deeper_envelope_levels_are_drawn_and_filled_under_their_path() {
+        let sdl = r#"
+type Note { id: ID! body: String! }
+type NoteEdge { cursor: String! node: Note }
+type Bare { node: Note }
+type Wrap { bare: Bare! }
+type AddNotePayload { ok: Boolean! noteEdge: NoteEdge wrap: Wrap! }
+type Query { note(id: ID!): Note }
+type Mutation { addNote(body: String!): AddNotePayload }
+"#;
+        let bundle = mb_import::compile(sdl.as_bytes()).unwrap();
+        let engine = Engine::new(None, EngineConfig::default());
+        let op = bundle.operation("Mutation.addNote").unwrap();
+        assert_eq!(
+            op.identity.as_ref().and_then(|i| i.record.clone()),
+            Some(mb_mcm::RecordAt::Pointer(vec![
+                "noteEdge".into(),
+                "node".into()
+            ]))
+        );
+        let drawn = engine.envelope_draws(&bundle, op, None);
+        assert_eq!(drawn["ok"], json!(true), "{drawn:?}");
+        let cursor = drawn["noteEdge"]["cursor"].clone();
+        assert!(cursor.is_string(), "{drawn:?}");
+        let note = json!({"__typename": "Note", "id": "n1", "body": "hi"});
+        let answer = engine
+            .held_answer(&bundle, op, &note, Some(&drawn), None)
+            .unwrap();
+        assert_eq!(answer["noteEdge"]["node"], note);
+        assert_eq!(answer["noteEdge"]["cursor"], cursor);
+        assert_eq!(answer["noteEdge"]["__typename"], "NoteEdge");
+
+        // Three levels, the deeper two drawing nothing: the top level's draws alone.
+        let mut deep = op.clone();
+        if let Some(identity) = deep.identity.as_mut() {
+            identity.record = Some(mb_mcm::RecordAt::Pointer(vec![
+                "wrap".into(),
+                "bare".into(),
+                "node".into(),
+            ]));
+        }
+        let drawn = engine.envelope_draws(&bundle, &deep, None);
+        let top: Vec<&String> = drawn.keys().collect();
+        assert!(!top.contains(&&"wrap".to_string()), "{drawn:?}");
+        assert_eq!(drawn.get("ok"), Some(&json!(true)), "{drawn:?}");
+        assert!(drawn.values().all(|v| !v.is_object()), "{drawn:?}");
     }
 
     #[test]

@@ -945,6 +945,55 @@ fn write_identity(
     })
 }
 
+/// The record a create's `payload` holds through a Relay edge: its member (`noteEdge`)
+/// and the record's type, lowercased (`note`). The payload has no `id` of its own and
+/// exactly one member, not a list, of an edge type: an object type with no `id` and a
+/// `node` field (not a list) of an object type with an `id` (`NoteEdge { cursor,
+/// node: Note }`). An
+/// edge whose node is an interface or a union (`timelineEdge` over a union of events)
+/// is not one. `record`, when the mutation's name names one, must be that node's type,
+/// and no member of the payload may hold that type directly (then
+/// [`write_identity`]'s member is where the record is).
+fn edge_record(schema: &Schema, payload: &str, record: Option<&str>) -> Option<(String, String)> {
+    let fields = schema.object_fields(payload)?;
+    if fields.iter().any(|x| x.name == "id") {
+        return None;
+    }
+    let identified = |t: &str| {
+        schema
+            .object_fields(t)
+            .is_some_and(|fields| fields.iter().any(|x| x.name == "id"))
+    };
+    let node_of = |x: &Field| {
+        if !matches!(x.ty.base, BaseType::Named(_)) {
+            return None;
+        }
+        let edge = schema.object_fields(named_type(&x.ty))?;
+        if edge.iter().any(|n| n.name == "id") {
+            return None;
+        }
+        let node = edge
+            .iter()
+            .find(|n| n.name == "node" && matches!(n.ty.base, BaseType::Named(_)))?;
+        let held = named_type(&node.ty);
+        identified(held).then(|| held.to_lowercase())
+    };
+    let edges: Vec<(String, String)> = fields
+        .iter()
+        .filter_map(|x| Some((x.name.clone(), node_of(x)?)))
+        .collect();
+    let [(member, held)] = edges.as_slice() else {
+        return None;
+    };
+    if record.is_some_and(|r| r != held) {
+        return None;
+    }
+    let direct = fields.iter().any(|x| {
+        matches!(x.ty.base, BaseType::Named(_)) && named_type(&x.ty).to_lowercase() == *held
+    });
+    (!direct).then(|| (member.clone(), held.clone()))
+}
+
 /// The record a mutation's payload holds, when the mutation names it: `payload` (a
 /// type with no `id` of its own) has exactly one member holding an object type with an
 /// `id`, not as a list (`CartLinesAddPayload`'s `cart`), and `f` has a `<type>Id`
@@ -1026,6 +1075,15 @@ fn operation(
     let write_effect = write.as_ref().map(|(effect, _)| *effect);
     let record = write.map(|(_, record)| record);
     let record_of_write = record.clone();
+    // A create whose payload holds its record through a Relay edge
+    // (`addNote` answering `{noteEdge {node}}`): that node's type is its record,
+    // whether or not its name names one (`add` is no write verb of a name's end).
+    let edge = (operation_type == GraphqlOperationType::Mutation
+        && kind == OperationKind::Command(Effect::Create)
+        && matches!(f.ty.base, BaseType::Named(_)))
+    .then(|| edge_record(schema, named, record.as_deref()))
+    .flatten();
+    let record = record.or_else(|| edge.as_ref().map(|(_, held)| held.clone()));
     let resource_type = match object_fields {
         // A write's payload with no `id` of its own (`IssuePayload`,
         // `DeletePayload`) stands for the record its name names.
@@ -1072,6 +1130,16 @@ fn operation(
         .or_else(|| {
             let effect = write_effect.filter(|e| kind == OperationKind::Command(*e))?;
             write_identity(schema, f, effect, record_of_write.as_deref()?, named)
+        })
+        .or_else(|| {
+            let (member, _) = edge?;
+            Some(Identity {
+                path_param: None,
+                field: "id".into(),
+                input_field: None,
+                path_field: None,
+                record: Some(mb_mcm::RecordAt::Pointer(vec![member, "node".into()])),
+            })
         });
     let (body, body_required) = input_values_schema(&f.args);
     let op = Operation {
