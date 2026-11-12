@@ -2087,7 +2087,7 @@ impl Engine {
         status: u16,
         (cause, repeated): (ErrorCause, &[String]),
     ) -> Option<Writable<'a>> {
-        let provider = self.provider.as_deref()?;
+        let provider = self.live_provider().ok()?.as_ref();
         let variant = op.output_for_status(status)?;
         if crate::media::is_non_json(op, variant) {
             return None;
@@ -2279,7 +2279,9 @@ impl Engine {
                             }
                         }
                         Err(reason) => {
-                            tracing::warn!(operation = %op.id, status, %reason, "the error body was not written: the faker's is served");
+                            if !crate::provider_down(&reason) {
+                                tracing::warn!(operation = %op.id, status, %reason, "the error body was not written: the faker's is served");
+                            }
                             return Kept::now(None);
                         }
                     }

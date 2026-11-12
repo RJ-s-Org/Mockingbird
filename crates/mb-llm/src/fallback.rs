@@ -109,6 +109,20 @@ impl Provider for FallbackProvider {
         }
     }
 
+    /// Blocked only when both are, with the primary's reason.
+    fn blocked(&self) -> Option<String> {
+        let primary = self.primary.blocked()?;
+        self.secondary.blocked().map(|_| primary)
+    }
+
+    /// Skipped only when both are blocked (each then counts the call).
+    fn skip(&self) -> Option<String> {
+        self.blocked()?;
+        let primary = self.primary.skip();
+        let secondary = self.secondary.skip();
+        primary.or(secondary)
+    }
+
     /// The primary's tokens on a truncated or stopped reply are added to
     /// the secondary's result; its partial text is not salvaged across hops.
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, LlmError> {
@@ -116,7 +130,11 @@ impl Provider for FallbackProvider {
         match self.primary.complete(primary_req).await {
             Ok(response) => Ok(response),
             Err(error) => {
-                tracing::warn!(%error, "primary LLM provider failed; trying fallback provider");
+                if matches!(error, LlmError::Unavailable(_)) {
+                    tracing::debug!(%error, "primary LLM provider unavailable; trying fallback provider");
+                } else {
+                    tracing::warn!(%error, "primary LLM provider failed; trying fallback provider");
+                }
                 let spent = error.spent();
                 match self
                     .secondary
@@ -164,7 +182,11 @@ impl Provider for FallbackProvider {
             },
             Err(error) => error,
         };
-        tracing::warn!(%error, "primary LLM provider stream failed; trying fallback provider");
+        if matches!(error, LlmError::Unavailable(_)) {
+            tracing::debug!(%error, "primary LLM provider unavailable; trying fallback provider");
+        } else {
+            tracing::warn!(%error, "primary LLM provider stream failed; trying fallback provider");
+        }
         self.secondary
             .stream_metered(for_hop(self.secondary_settings, req))
             .await

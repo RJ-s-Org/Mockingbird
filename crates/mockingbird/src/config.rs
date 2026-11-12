@@ -967,10 +967,12 @@ async fn build_app_inner(
         webhook_log: Default::default(),
         record_pools: Default::default(),
         shared_types: Default::default(),
+        llm_health: Default::default(),
     };
     let snapshot = open_snapshot(args)?;
     crate::snapshot::install(snapshot.clone());
     let brokers = deps.events.brokers.clone();
+    let llm_health = Arc::clone(&deps.llm_health);
     let registry = MockRegistry::new();
     // Subscribe before the first load, so no change after it is missed.
     let changes = ha.changes();
@@ -1107,6 +1109,7 @@ async fn build_app_inner(
             proxy: proxy
                 .as_ref()
                 .map(|_| std::net::SocketAddr::new(cfg.proxy.host, cfg.proxy.port)),
+            llm_health,
         },
         metrics_gate,
     );

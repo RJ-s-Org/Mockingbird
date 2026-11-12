@@ -75,6 +75,7 @@ fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
         webhook_log: Default::default(),
         record_pools: Default::default(),
         shared_types: Default::default(),
+        llm_health: Default::default(),
     }
 }
 
@@ -2149,4 +2150,197 @@ async fn a_graphql_create_follows_a_page_link_only_a_response_example_shows() {
         made,
         format!("https://tracker.test/acme/roadmap/merge/{number}")
     );
+}
+
+/// A provider answering `402`, counting its calls, and online deps whose
+/// profile `spent` (key reference `env:SPENT_KEY`) calls it, serving mock
+/// `orders`.
+async fn spent_provider_mock() -> (
+    MockServer,
+    Arc<dyn ControlStore>,
+    RuntimeDeps,
+    Arc<MockRegistry>,
+    String,
+) {
+    let llm = MockServer::start().await;
+    wiremock::Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(402)
+                .set_body_json(json!({"error": {"message": "Insufficient credits", "code": 402}})),
+        )
+        .mount(&llm)
+        .await;
+    let store = store().await;
+    let mut p = profile("spent", llm.uri(), None);
+    p.secret_ref = Some("env:SPENT_KEY".into());
+    store.put_profile(&p).await.unwrap();
+    let mock = create_mock(&store, "orders", "/orders", Some("spent")).await;
+    activate(&store, &mock, &fixture_source()).await;
+    let mut deps = deps(store.clone());
+    deps.offline = false;
+    deps.ext.secrets = Arc::new(FixedSecrets(HashMap::from([
+        ("env:SPENT_KEY".to_string(), "old-key".to_string()),
+        ("env:NEW_KEY".to_string(), "new-key".to_string()),
+    ])));
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let base = serve(registry.router()).await;
+    (llm, store, deps, registry, base)
+}
+
+async fn llm_calls(llm: &MockServer) -> usize {
+    llm.received_requests().await.unwrap().len()
+}
+
+/// A read's fallback reason and how long it took.
+async fn timed_read(base: &str, id: &str) -> (String, Duration) {
+    let started = Instant::now();
+    let r = reqwest::get(format!("{base}/orders/orders/{id}"))
+        .await
+        .unwrap();
+    let took = started.elapsed();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["x-mockingbird-source"], "fallback");
+    let reason = r.headers()["x-mockingbird-fallback-reason"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    (reason, took)
+}
+
+/// A `402` marks the profile's provider unusable: later answers fall back
+/// at once without calling it, and the health reports the calls.
+#[tokio::test]
+async fn a_spent_key_is_called_once_then_skipped() {
+    let (llm, _store, deps, _registry, base) = spent_provider_mock().await;
+    let (first, _) = timed_read(&base, "o1").await;
+    assert!(first.starts_with(mb_engine::UNUSABLE_REASON), "{first}");
+    assert_eq!(llm_calls(&llm).await, 1);
+    for id in ["o2", "o3", "o4"] {
+        let (reason, took) = timed_read(&base, id).await;
+        assert!(reason.starts_with(mb_engine::UNUSABLE_REASON), "{reason}");
+        assert!(took < Duration::from_secs(1), "{took:?}");
+    }
+    assert_eq!(llm_calls(&llm).await, 1, "a marked provider is not called");
+    // A create's fill skips it too.
+    let created = reqwest::Client::new()
+        .post(format!("{base}/orders/orders"))
+        .json(&json!({"customerId": "c1", "total": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert!(created.status().is_success(), "{}", created.status());
+    assert_eq!(llm_calls(&llm).await, 1);
+    let health = deps.llm_health.snapshot();
+    assert_eq!(health.len(), 1);
+    assert_eq!(health[0].profile, "default/spent");
+    assert_eq!((health[0].state, health[0].status), ("unusable", Some(402)));
+    assert!(health[0].fallbacks >= 3, "{health:?}");
+}
+
+/// A reload that changes the profile's key clears the mark: its provider is
+/// called again. A reload with the same key keeps it.
+#[tokio::test]
+async fn a_new_key_clears_the_mark() {
+    let (llm, store, deps, registry, base) = spent_provider_mock().await;
+    timed_read(&base, "o1").await;
+    timed_read(&base, "o2").await;
+    assert_eq!(llm_calls(&llm).await, 1);
+
+    registry
+        .reload_profile(&deps, DEFAULT_WORKSPACE, "spent")
+        .await;
+    timed_read(&base, "o3").await;
+    assert_eq!(llm_calls(&llm).await, 1);
+
+    let mut p = store
+        .get_profile(DEFAULT_WORKSPACE, "spent")
+        .await
+        .unwrap()
+        .unwrap();
+    p.secret_ref = Some("env:NEW_KEY".into());
+    store.put_profile(&p).await.unwrap();
+    registry
+        .reload_profile(&deps, DEFAULT_WORKSPACE, "spent")
+        .await;
+    timed_read(&base, "o4").await;
+    assert_eq!(llm_calls(&llm).await, 2, "the new key is tried");
+}
+
+/// With no LLM (offline, as with no key), no answer calls a provider.
+#[tokio::test]
+async fn offline_answers_call_no_provider() {
+    let llm = MockServer::start().await;
+    let store = store().await;
+    store
+        .put_profile(&profile("p", llm.uri(), None))
+        .await
+        .unwrap();
+    let mock = create_mock(&store, "orders", "/orders", Some("p")).await;
+    activate(&store, &mock, &fixture_source()).await;
+    let deps = deps(store);
+    assert!(deps.offline);
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let base = serve(registry.router()).await;
+    for id in ["o1", "o2"] {
+        let (reason, _) = timed_read(&base, id).await;
+        assert!(reason.starts_with(mb_engine::OFFLINE_REASON), "{reason}");
+    }
+    let created = reqwest::Client::new()
+        .post(format!("{base}/orders/orders"))
+        .json(&json!({"customerId": "c1", "total": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert!(created.status().is_success(), "{}", created.status());
+    assert_eq!(llm_calls(&llm).await, 0);
+    assert!(deps.llm_health.snapshot().is_empty());
+}
+
+/// A `429` backs the profile off for its `Retry-After`: answers inside the
+/// window fall back at once (no retry, hedge or wait), and the provider is
+/// called again after it.
+#[tokio::test]
+async fn a_rate_limit_backs_off_then_calls_resume() {
+    let llm = MockServer::start().await;
+    wiremock::Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "1"))
+        .mount(&llm)
+        .await;
+    let store = store().await;
+    store
+        .put_profile(&profile("busy", llm.uri(), None))
+        .await
+        .unwrap();
+    let mock = create_mock(&store, "orders", "/orders", Some("busy")).await;
+    activate(&store, &mock, &fixture_source()).await;
+    let mut deps = deps(store);
+    deps.offline = false;
+    deps.limits.hedge_after = Duration::from_millis(100);
+    deps.ext.secrets = Arc::new(FixedSecrets(HashMap::from([(
+        "env:MB_TEST_REGISTRY_LLM_KEY".to_string(),
+        "k".to_string(),
+    )])));
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let base = serve(registry.router()).await;
+
+    let (first, _) = timed_read(&base, "o1").await;
+    assert!(first.starts_with(mb_engine::BACKING_OFF_REASON), "{first}");
+    assert_eq!(llm_calls(&llm).await, 1, "a 429 is not retried or hedged");
+    let (inside, took) = timed_read(&base, "o2").await;
+    assert!(
+        inside.starts_with(mb_engine::BACKING_OFF_REASON),
+        "{inside}"
+    );
+    assert!(took < Duration::from_millis(500), "{took:?}");
+    assert_eq!(llm_calls(&llm).await, 1);
+    assert_eq!(deps.llm_health.snapshot()[0].state, "backing_off");
+
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    timed_read(&base, "o3").await;
+    assert_eq!(llm_calls(&llm).await, 2, "called again after the backoff");
 }

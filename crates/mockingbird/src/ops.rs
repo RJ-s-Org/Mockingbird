@@ -54,6 +54,10 @@ pub struct OpsState {
     /// env` and `run` hand out this server's own proxy, never another one on
     /// the same port; `None` when it runs no proxy.
     pub proxy: Option<std::net::SocketAddr>,
+    /// The LLM providers' health, which `/readyz` reports under `llm` (each
+    /// profile's state and how many calls fell back because of it), with a
+    /// reason for each provider marked unusable or backing off.
+    pub llm_health: Arc<mb_llm::HealthRegistry>,
 }
 
 /// Where a server was started from, as `/readyz` reports it: its config
@@ -162,6 +166,7 @@ async fn ping_within<E: std::fmt::Display>(
 }
 
 async fn readyz(State(st): State<OpsState>, headers: HeaderMap) -> Response {
+    let llm = st.llm_health.snapshot();
     // Both pings run at once, each bounded, so readyz answers in ~2s at most.
     let (control, state) = tokio::join!(ping_within(st.store.ping()), ping_within(st.state.ping()));
     let (status, reasons) = match control {
@@ -185,6 +190,7 @@ async fn readyz(State(st): State<OpsState>, headers: HeaderMap) -> Response {
                 reasons.push(format!("mock {mock}: {reason}"));
             }
             reasons.extend(st.registry.budget_issues());
+            reasons.extend(llm.iter().filter_map(llm_issue));
             for mock in st.registry.degraded_mocks() {
                 reasons.push(format!(
                     "mock {mock}: state store failing, serving statelessly"
@@ -216,12 +222,37 @@ async fn readyz(State(st): State<OpsState>, headers: HeaderMap) -> Response {
     if let Some(dp) = st.data_plane.filter(|_| authorized) {
         body["data_plane"] = json!(dp);
     }
+    if authorized && !llm.is_empty() {
+        body["llm"] = json!(llm);
+    }
     if authorized {
         body["config"] = json!(st.origin.config);
         body["dir"] = json!(st.origin.dir);
         body["proxy"] = json!(st.proxy.map(|a| a.to_string()));
     }
     (code, axum::Json(body)).into_response()
+}
+
+/// The `/readyz` reason of a provider that is not called now: `llm profile
+/// <workspace/name>: unusable (HTTP 402: ...), N calls fell back`, or
+/// `backing off (HTTP 429) until <unix time>`; `None` for one that is ok.
+fn llm_issue(h: &mb_llm::HealthSnapshot) -> Option<String> {
+    let status = h.status.map(|s| format!("HTTP {s}")).unwrap_or_default();
+    let state = match h.state {
+        "unusable" => format!(
+            "unusable for this run ({status}: {})",
+            h.reason.as_deref().unwrap_or("-")
+        ),
+        "backing_off" => format!(
+            "backing off ({status}) until unix time {}",
+            h.until_unix.unwrap_or_default()
+        ),
+        _ => return None,
+    };
+    Some(format!(
+        "llm profile {}: {state}; {} calls fell back to the faker without calling it",
+        h.profile, h.fallbacks
+    ))
 }
 
 async fn metrics(State(st): State<OpsState>) -> Response {

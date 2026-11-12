@@ -7,6 +7,7 @@
 
 #[cfg(feature = "testing")]
 mod fallback;
+mod health;
 mod openai;
 #[cfg(feature = "testing")]
 mod scripted;

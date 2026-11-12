@@ -521,6 +521,7 @@ fn deps(
         webhook_log: Default::default(),
         record_pools: Default::default(),
         shared_types: Default::default(),
+        llm_health: Default::default(),
     }
 }
 
@@ -542,6 +543,7 @@ fn ops_state(
         data_plane: None,
         origin: Default::default(),
         proxy: None,
+        llm_health: Default::default(),
     }
 }
 
@@ -1116,6 +1118,7 @@ async fn metrics_exposes_request_counters() {
         data_plane: None,
         origin: Default::default(),
         proxy: None,
+        llm_health: Default::default(),
     }))
     .await;
     let r = reqwest::get(format!("{base}/metrics")).await.unwrap();
@@ -1281,4 +1284,49 @@ async fn bench_reload_all() {
             println!("PERF-8 reload_all of {m} mocks, {delay} ms reads: {best:?} (best of 3)");
         }
     }
+}
+
+/// `/readyz` (and so `server status`) reports each provider's state and the
+/// calls that fell back because of it; a provider that is not called makes
+/// the server degraded, with a reason naming the profile.
+#[tokio::test]
+async fn readyz_reports_the_llm_providers_health() {
+    let health = Arc::new(mb_llm::HealthRegistry::default());
+    let spent = health.for_profile("default/spent", "http://llm.test/v1", Some("k"));
+    let fine = health.for_profile("default/fine", "http://llm.test/v1", Some("k"));
+    assert!(spent.observe(402, "Insufficient credits", None).is_some());
+    for _ in 0..3 {
+        assert!(spent.admit().is_err());
+    }
+    assert!(fine.admit().is_ok());
+    let store: Arc<dyn ControlStore> = stub_store().await;
+    let base = serve(ops::router(OpsState {
+        llm_health: health.clone(),
+        ..ops_state(store, memory_state(), MockRegistry::new())
+    }))
+    .await;
+    let body: Value = reqwest::get(format!("{base}/readyz"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["status"], "degraded", "{body}");
+    assert_eq!(
+        body["llm"],
+        json!([
+            {"profile": "default/fine", "state": "ok", "fallbacks": 0},
+            {"profile": "default/spent", "state": "unusable", "status": 402,
+             "reason": "the provider asks for payment: the key is out of credit", "fallbacks": 3},
+        ])
+    );
+    let reasons = body["reasons"].as_array().unwrap();
+    assert_eq!(reasons.len(), 1, "{body}");
+    let reason = reasons[0].as_str().unwrap();
+    assert!(
+        reason.starts_with("llm profile default/spent: unusable for this run (HTTP 402")
+            && reason.contains("3 calls fell back"),
+        "{reason}"
+    );
+    drop((spent, fine));
 }

@@ -591,6 +591,7 @@ impl Env {
             webhook_log: Default::default(),
             record_pools: Default::default(),
             shared_types: Default::default(),
+            llm_health: Default::default(),
         };
         let registry = MockRegistry::new();
         let data = serve(registry.router()).await;

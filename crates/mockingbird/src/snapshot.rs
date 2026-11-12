@@ -470,6 +470,21 @@ impl Provider for SnapshotProvider {
         }
     }
 
+    /// The live provider's, when recording only: a replay may still answer.
+    fn blocked(&self) -> Option<String> {
+        match &self.inner {
+            Some(p) if !self.snapshot.replays() => p.blocked(),
+            _ => None,
+        }
+    }
+
+    fn skip(&self) -> Option<String> {
+        match &self.inner {
+            Some(p) if !self.snapshot.replays() => p.skip(),
+            _ => None,
+        }
+    }
+
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, LlmError> {
         if let Some(content) = self.replayed(&req) {
             return Ok(ChatResponse {

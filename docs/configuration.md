@@ -179,6 +179,8 @@ How the Admin API, console and CLI authenticate. Read at startup.
 
 `--offline` serves every mock with the faker and makes no LLM calls.
 
+A provider that refuses a profile's key for good is not called again for the rest of the process: a `401`, a `402`, or a `403` (or OpenAI's quota `429`) whose body says the key is past its limit or out of credit (`Key limit exceeded`, `Insufficient credits`, `insufficient_quota`) marks the profile unusable. Its calls (generation, the executor's fill, error bodies, streams, record pools) then fall back to local fill and the faker at once, with no retry, hedge or timeout, and their answers count as the faker's, as offline ones do (`X-Mockingbird-Fallback-Reason: the LLM provider is unusable for this run: …`). Another `403` is an ordinary error. A `429` backs the profile off for its `Retry-After` in seconds (60 s without one, 15 min at most): calls during the backoff fall back at once, without waiting, and the provider is called again after it. Each is logged once, as a warning naming the profile, the status and the reason. `/readyz` (and `server status`) lists every profile under `llm` with its `state` (`ok`, `unusable` or `backing_off` until `until_unix`) and `fallbacks`, the calls that fell back because of it, and reports the server `degraded` while one is not `ok`. A reload that changes the profile's `api_key` or `base_url` clears the mark; other changes keep it.
+
 ## `observability`
 
 | Key | Type | Default | Range / rule | Env / flag | Meaning |
