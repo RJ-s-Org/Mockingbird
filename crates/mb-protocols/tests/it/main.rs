@@ -64,6 +64,7 @@ mod graphql_relay_inputs;
 mod graphql_ws;
 mod grpc;
 mod header_identity;
+mod held_nested;
 mod http_media;
 mod http_rest;
 mod identity_by_contract;
