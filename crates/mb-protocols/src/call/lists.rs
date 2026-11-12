@@ -287,6 +287,7 @@ fn fits_param<'a>(
     member: Member<'a>,
 ) -> Option<Member<'a>> {
     let (param_parts, _) = schema_parts(bundle, Some(declared));
+    let member = id_form(member, &types_of(&param_parts));
     let types = member.types();
     // A real number (a coordinate) is matched within a margin, if at all, and a
     // constant member (Jira's `expand`) is no filter.
@@ -299,6 +300,36 @@ fn fits_param<'a>(
         && member.constant().is_none()
         && !(own_words && member.enumerated().is_none());
     fits.then_some(member)
+}
+
+/// A member that is an id or the record it names (an expandable reference, as Stripe's
+/// `customer`: `anyOf [string, $ref customer]`, each object declaring an `id`) is
+/// filtered by a text parameter as its id: its parts that are text. Any other member is
+/// as it is.
+fn id_form<'a>(member: Member<'a>, param_types: &BTreeSet<&str>) -> Member<'a> {
+    let types = member.types();
+    if !(types.into_iter().eq(["object", "string"]) && param_types.iter().eq(&["string"])) {
+        return member;
+    }
+    // Only a record, which an `id` names, is referenced so.
+    let records = member
+        .parts
+        .iter()
+        .filter(|p| types_of(&[*p]).into_iter().eq(["object"]))
+        .all(|p| p.get("properties").and_then(|m| m.get("id")).is_some());
+    if !records {
+        return member;
+    }
+    let parts = member
+        .parts
+        .iter()
+        .copied()
+        .filter(|p| types_of(&[*p]).into_iter().eq(["string"]))
+        .collect();
+    Member {
+        name: member.name,
+        parts,
+    }
 }
 
 /// The names of the members the parts of an item declare, each once.

@@ -6,7 +6,7 @@ PaymentIntents (form-encoded, like the real API), refunds, and webhooks signed w
 
 | | |
 | --- | --- |
-| Contract | [`stripe.openapi.yaml`](stripe.openapi.yaml), a hand-written subset that keeps Stripe's operation ids |
+| Contract | [`stripe.openapi.yaml`](stripe.openapi.yaml), a hand-written subset that keeps Stripe's operation ids. A PaymentIntent's `customer` and a refund's `payment_intent` are an id or the object, as upstream: `GET /v1/payment_intents/{id}?expand[]=customer` answers the customer the session holds |
 | Upstream | [stripe/openapi](https://github.com/stripe/openapi) `spec3.json` (MIT), pinned in [`example.json`](example.json); `mockingbird examples init stripe --full` downloads it |
 | Hosts | `api.stripe.com` |
 | Scenarios | `card-declined` (402), `rate-limited` (429), `outage` (500) |

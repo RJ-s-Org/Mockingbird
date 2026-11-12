@@ -1236,6 +1236,12 @@ fn flatten<R: Rng>(
             let mut eligible: Vec<usize> = (0..branches.len())
                 .filter(|i| !((has_list || has_object) && is_null_schema(&branches[*i])))
                 .collect();
+            // An id or the record it names (an expandable reference) is drawn as the
+            // id: an API answers the object only when the request asks to expand it,
+            // and the read that does puts the record there itself.
+            if !has_object && is_reference_choice(root, branches) {
+                eligible.retain(|i| !is_object_schema(root, &branches[*i]));
+            }
             // Branches with no finite instance are taken only when every
             // branch is one.
             let finite: Vec<usize> = eligible
@@ -1321,6 +1327,41 @@ fn is_array_schema(root: &Value, schema: &Value) -> bool {
         return false;
     };
     obj.contains_key("items") || type_names(obj) == ["array"]
+}
+
+/// Whether `branches` are an id or the record it names: a text branch, and every other
+/// branch but `null` an object that declares an `id` member (Stripe's `customer`:
+/// `anyOf [string, $ref customer]`).
+fn is_reference_choice(root: &Value, branches: &[Value]) -> bool {
+    let resolved = |b: &'_ Value| -> Option<Map<String, Value>> {
+        let b = match b.get("$ref").and_then(Value::as_str) {
+            Some(r) => resolve_ref(root, r)?,
+            None => b,
+        };
+        b.as_object().cloned()
+    };
+    let mut text = false;
+    let mut records = false;
+    for branch in branches {
+        if is_null_schema(branch) {
+            continue;
+        }
+        let Some(obj) = resolved(branch) else {
+            return false;
+        };
+        if type_names(&obj) == ["string"] && !obj.contains_key("properties") {
+            text = true;
+        } else if obj
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|p| p.contains_key("id"))
+        {
+            records = true;
+        } else {
+            return false;
+        }
+    }
+    text && records
 }
 
 /// Whether `schema` admits only `null`.
