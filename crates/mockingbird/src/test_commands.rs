@@ -360,7 +360,7 @@ impl Ecosystem {
 }
 
 /// `s` quoted for `sh` when it holds anything but plain path characters.
-fn shell_word(s: &str) -> String {
+pub(crate) fn shell_word(s: &str) -> String {
     if s.chars()
         .all(|c| c.is_ascii_alphanumeric() || "/._-:@+".contains(c))
     {

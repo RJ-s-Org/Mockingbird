@@ -259,6 +259,7 @@ mockingbird verify -c mockingbird.yaml --run "bundle exec rspec spec/checkout_sp
   | `unclaimed_hosts` | the command reached a host that a bundled description or catalog example serves and no mock lists ([below](#hosts-the-project-can-call)) |
   | `check` | an assertion given beside `--run` (`--called`, `--no-unmapped`, `--no-client-errors`, `--exact-replay`) fails on the window |
   | `serve_failed` | the `--serve` command exited, was not ready in time or found its port taken; the tests were not run |
+  | `missing_dependencies` | the command exited non-zero, or the `--serve` command failed to start (or exited non-zero while the failing command ran), and its output shows a dependency that is not installed; like `serve_failed`, it does not point at the mock ([below](#missing-dependencies)) |
 
   When the command exits 0, a 4xx that matched an operation and passed
   validation is taken as a status the test expected (a lookup of a
@@ -266,6 +267,63 @@ mockingbird verify -c mockingbird.yaml --run "bundle exec rspec spec/checkout_sp
   failed on. Also under `notes`: hosts the proxy passed to the real API
   (`proxy.unmapped: pass`), and the project's unclaimed hosts when the
   command called none of them.
+- <a id="missing-dependencies"></a>**Missing dependencies.** When the
+  command exits non-zero, or the serve command fails before it is ready
+  (or exits non-zero while a command that fails runs), the last lines of
+  its output are read for a runtime's own error, where the runtime prints
+  it: at the start of a line (after `E `, `Error: ` or `Error [ERR_…]: `),
+  so a test's assertion that quotes the text does not count. Ruby `Could
+  not find gem`, `Bundler::GemNotFound`, `cannot load such file -- X`
+  (`LoadError`), also at the end of a raised line; Node `Cannot find
+  module 'X'`, `Cannot find package 'X'` (`ERR_MODULE_NOT_FOUND`); Python
+  `No module named X` (`ModuleNotFoundError`, `ImportError`, `python -m`);
+  Go `cannot find package`, `no required module provides package`,
+  `missing go.sum entry`, also after `go: ` or a file position; Java
+  `ClassNotFoundException`, `NoClassDefFoundError` after `Exception in
+  thread`, after `Caused by:` or at the start of a line a stack frame
+  follows (a class probe a library logs is not one); failing those, the
+  shell's `command not found`. The last such error wins. A name that is
+  the project's own module is not a missing dependency: a path
+  (`./routes`, `/app/x.js`), a Node alias (`@/…`, `#…`, `~/…`) or a file
+  a `baseUrl` resolves (`x.js`, `x.ts`, `src/x`), a Python package or
+  module (`x/`, `x.py`, `src/x`), or a Ruby file (`lib/x.rb`, `x.rb`), in
+  the folder the command runs in or the project root.
+  The next step names the project's install command, from the files of
+  the folder the failing command runs in (after its leading `cd <dir>`
+  steps joined with `&&` or `;`; a `|| exit` after one is skipped and
+  `cd -` goes back), else of the nearest folder above it up to the
+  project root:
+
+  | Project files | Install command |
+  |---|---|
+  | `Gemfile` | `bundle install` |
+  | `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` |
+  | `yarn.lock` | `yarn install --immutable` with `.yarnrc.yml` (Yarn 2+), else `yarn install --frozen-lockfile` |
+  | `bun.lock`, `bun.lockb` | `bun install` |
+  | `package-lock.json` | `npm ci` |
+  | `package.json` alone | `npm install` |
+  | `uv.lock`, `poetry.lock`, `pdm.lock`, `Pipfile` | `uv sync`, `poetry install`, `pdm install`, `pipenv install --dev` |
+  | `requirements.txt` | `pip install -r requirements.txt`, with an `-r` for each of its test and development variants (`requirements-dev.txt`, `requirements_test.txt`, ...); without it, a `requirements/` folder's `test.txt`, `dev.txt`, ... (else `base.txt`), else any `requirements*.txt` (at most 4 files) |
+  | `pyproject.toml`, `setup.py` | `pip install -e '.[test]'` when `[project.optional-dependencies]` has a `test`, `tests`, `testing` or `dev` extra, else `pip install -e .` |
+  | `go.mod` | `go mod tidy` |
+  | `pom.xml` | `mvn -q -DskipTests package` (`./mvnw` when the project has it) |
+  | `build.gradle` | `./gradlew build -x test` (`gradle` without the wrapper) |
+
+  A folder with a `package.json` or `pyproject.toml` but no lockfile is
+  taken as a workspace member: the install runs from the nearest folder
+  above it, up to the git root, with a lockfile or a workspace
+  (`pnpm-workspace.yaml` → `pnpm install`, a `package.json` with
+  `workspaces` → `npm install`, `uv.lock` or `[tool.uv.workspace]` → `uv
+  sync --all-packages`). For example: "The tests failed on a missing
+  module `requests` (ModuleNotFoundError). Install the project's
+  dependencies (`cd /app/api && pip install -r requirements.txt`), then
+  run verify --run again. Run the install in your own shell, not under
+  `mockingbird run`." (its proxy may block the package registry). A
+  missing toolchain (`mvn`, `bundle`, `node`) is named to install first;
+  a missing command no runtime claims gets no project install, only "not
+  installed on this machine (or not on PATH)". When the serve command
+  failed this way, its `serve_failed` step defers to this one. A failure
+  with none of these errors gets no such step.
 - **Exit code** 1 when the command exits non-zero, is stopped at the
   timeout or interrupted, or any failure is found; 0 otherwise.
 - **Caps.** `--timeout` (default `10m`; the MCP tool's `timeout_secs`
