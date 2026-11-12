@@ -258,6 +258,13 @@ const MAX_FIRST_CALLS: usize = 16_384;
 /// are emptied ([`MAX_FIRST_CALLS`]) places start over, so a new session may draw as a
 /// held one does. Either way every draw is still checked against what the session
 /// holds, so its ids stay its own, but they depend on the order of sessions.
+///
+/// The counts live in this runtime alone, so a runtime built anew (a restart, a
+/// reloaded world) counts from zero while the session keeps what it minted before. So
+/// that it never draws those ids again, each runtime that mints for a session claims a
+/// generation of it, durably in the session ([`claim_generation`]): a session holding
+/// nothing yet claims `0`, which draws as before, and every other generation is mixed
+/// into the seed of each draw.
 #[derive(Debug, Default)]
 pub(crate) struct MintCounts(std::sync::Mutex<Minting>);
 
@@ -268,6 +275,10 @@ pub(crate) struct Minting {
     order: std::collections::VecDeque<SessionKey>,
     /// How many sessions first minted in each call, by its fingerprint.
     first_calls: HashMap<u64, u64>,
+    /// The generation this runtime claimed of each session ([`claim_generation`]).
+    generations: HashMap<SessionKey, u64>,
+    /// What this runtime's generation documents name it by, drawn on first use.
+    token: Option<String>,
 }
 
 /// What one session is known by (its first minting call's fingerprint and its place
@@ -296,6 +307,7 @@ impl MintCounts {
             sessions,
             order,
             first_calls,
+            ..
         } = &mut *minting;
         if !sessions.contains_key(session) {
             while sessions.len() >= MAX_MINTING_SESSIONS {
@@ -332,4 +344,156 @@ impl MintCounts {
         *count = count.saturating_add(1);
         (mints.known_by, n)
     }
+
+    /// The generation this runtime claimed of `session` ([`claim_generation`]); `None`
+    /// before it claimed one.
+    pub(super) fn generation(&self, session: &SessionKey) -> Option<u64> {
+        self.lock().generations.get(session).copied()
+    }
+
+    /// Keeps `generation` as the one this runtime claimed of `session`.
+    fn set_generation(&self, session: &SessionKey, generation: u64) {
+        let mut minting = self.lock();
+        if !minting.generations.contains_key(session)
+            && minting.generations.len() >= MAX_MINTING_SESSIONS
+        {
+            // Claimed anew when one mints again: a new generation, drawing apart.
+            minting.generations.clear();
+        }
+        minting.generations.insert(session.clone(), generation);
+    }
+
+    /// What this runtime's generation documents name it by: another runtime's
+    /// document of the same generation is not this one's.
+    fn token(&self) -> String {
+        self.lock()
+            .token
+            .get_or_insert_with(|| format!("{:016x}", rand::random::<u64>()))
+            .clone()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Minting> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// The prefix of the ids of the [`mb_state::INTERNAL_TYPE`] documents naming the
+/// generations of a session's minting claimed ([`claim_generation`]): `#mint/<n>`.
+const GENERATION_PREFIX: &str = "#mint/";
+
+/// Generations [`claim_generation`] tries in turn before it draws one at random.
+const GENERATION_ATTEMPTS: u64 = 16;
+
+/// Generation documents [`claim_generation`] reads, at most, to find the highest.
+const MAX_GENERATIONS_READ: usize = 1024;
+
+fn generation_id(generation: u64) -> String {
+    format!("{GENERATION_PREFIX}{generation}")
+}
+
+/// Claims, once per call, the generation this runtime mints `session`'s seeded ids in
+/// ([`MintCounts`]), before one is drawn: the one it claimed before while the session
+/// holds its document as this runtime's, else one past the highest the session holds,
+/// written as a document of its own only where none is yet
+/// ([`mb_state::StateStore::insert_seeded`]), so two runtimes (or two calls) claiming at
+/// once never take the same one. A session that holds no generation and no record (new,
+/// or reset) claims `0`, which draws as a runtime always drew; one holding records but
+/// no generation (restored from a snapshot, or written before generations were kept)
+/// starts at `1`, so it never draws again what generation `0` drew. A runtime whose
+/// document the session lost (a reset, a reseed) takes it again where none took it
+/// since. When the store cannot say, nothing is claimed (nothing is stored either);
+/// when every generation tried is taken, one is drawn at random and kept by this
+/// runtime alone.
+pub(super) async fn claim_generation(state: &mut StateAccess<'_>, session: &SessionKey) {
+    if state.mint_claimed || !state.open() {
+        return;
+    }
+    state.mint_claimed = true;
+    let rt = state.rt;
+    let counts = rt.mint_counts();
+    let token = counts.token();
+    let known = counts.generation(session);
+    if let Some(known) = known {
+        let held = rt
+            .state
+            .get(session, mb_state::INTERNAL_TYPE, &generation_id(known))
+            .await;
+        match state.settle(held) {
+            Some(Some(doc)) if claimed_by(&doc, &token) => return,
+            // Another runtime's since the session lost this one's.
+            Some(Some(_)) => {}
+            Some(None) => {
+                if claim(state, session, known, &token).await != Some(false) {
+                    return;
+                }
+            }
+            None => return,
+        }
+    }
+    let held = rt
+        .state
+        .list_prefix(
+            session,
+            mb_state::INTERNAL_TYPE,
+            GENERATION_PREFIX,
+            MAX_GENERATIONS_READ,
+        )
+        .await;
+    let Some(held) = state.settle(held) else {
+        return;
+    };
+    let highest = held
+        .iter()
+        .filter_map(|r| r.id.strip_prefix(GENERATION_PREFIX)?.parse::<u64>().ok())
+        .chain(known)
+        .max();
+    let first = match highest {
+        Some(highest) => highest.saturating_add(1),
+        None => {
+            let records = rt.state.export(session).await;
+            match state.settle(records) {
+                Some(records) => u64::from(!records.is_empty()),
+                None => return,
+            }
+        }
+    };
+    for generation in (0..GENERATION_ATTEMPTS).map(|n| first.saturating_add(n)) {
+        match claim(state, session, generation, &token).await {
+            Some(true) => {
+                counts.set_generation(session, generation);
+                return;
+            }
+            Some(false) => {}
+            None => return,
+        }
+    }
+    // Taken each: one no runtime draws in but by chance.
+    let drawn = rand::random::<u64>() | (1 << 63);
+    counts.set_generation(session, drawn);
+}
+
+/// Whether generation document `doc` is the one the runtime named by `token` wrote.
+fn claimed_by(doc: &StoredResource, token: &str) -> bool {
+    doc.data.get("runtime").and_then(Value::as_str) == Some(token)
+}
+
+/// Writes `generation`'s document where the session holds none; whether it did, `None`
+/// when the store failed.
+async fn claim(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    generation: u64,
+    token: &str,
+) -> Option<bool> {
+    let doc = StoredResource {
+        resource_type: mb_state::INTERNAL_TYPE.to_string(),
+        id: generation_id(generation),
+        data: serde_json::json!({"generation": generation, "runtime": token}),
+    };
+    let r = state.rt.state.insert_seeded(session, doc).await;
+    let stored = state.settle(r)?;
+    state.wrote |= stored;
+    Some(stored)
 }

@@ -288,7 +288,7 @@ pub(super) async fn mint_one(
     carried: &HashSet<String>,
     given: &mut Vec<String>,
 ) -> Option<Value> {
-    let seed = header_ids::MintSeed::new(state.rt, session, call);
+    let seed = header_ids::MintSeed::claimed(state, session, call).await;
     let shown = header_ids::record_id_examples(state.rt, t, field);
     let shape = match header_ids::record_id_shape(state.rt, t, field) {
         Some(shape) => Some(shape),

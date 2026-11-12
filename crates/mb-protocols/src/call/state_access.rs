@@ -35,6 +35,8 @@ pub(crate) struct StateAccess<'a> {
     /// ([`scopes`]); `None` outside a call's path (a GraphQL helper), where a record's
     /// links alone name its parent.
     scope_call: Option<Box<CallScope>>,
+    /// The call claimed its session's mint generation ([`claim_generation`]).
+    pub(super) mint_claimed: bool,
 }
 
 /// What a call says of the parent of the records it reads and writes.
@@ -165,6 +167,7 @@ impl<'a> StateAccess<'a> {
             unplaced: Vec::new(),
             placed: HashSet::new(),
             scope_call: None,
+            mint_claimed: false,
         }
     }
 

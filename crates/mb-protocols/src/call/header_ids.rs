@@ -32,8 +32,10 @@ const ATTEMPTS: u32 = 8;
 /// the time) and in whatever order sessions first minting in different calls start,
 /// and every draw (a retry after a collision too) differs from the others of the
 /// runtime. Concurrent calls of one session take their counts in the order they arrive,
-/// so their ids may swap from one run to the next. Without a seed the draws are random,
-/// as the engine's are.
+/// so their ids may swap from one run to the next. A runtime minting for a session
+/// that holds an earlier runtime's ids mixes in the generation it claimed
+/// ([`crate::call::claim_generation`]), so it never draws those again. Without a seed
+/// the draws are random, as the engine's are.
 #[derive(Clone, Copy)]
 pub(super) struct MintSeed<'a> {
     seed: Option<u64>,
@@ -48,6 +50,26 @@ impl<'a> MintSeed<'a> {
             session,
             call,
         }
+    }
+
+    /// [`Self::new`], with the session's mint generation claimed for this runtime first
+    /// ([`crate::call::claim_generation`]) when the draws are seeded: what a write that
+    /// stores the ids it mints draws by.
+    pub(super) async fn claimed(
+        state: &mut StateAccess<'_>,
+        session: &'a SessionKey,
+        call: &'a OperationCall,
+    ) -> Self {
+        let seed = Self::new(state.rt, session, call);
+        if seed.seeded() {
+            super::claim_generation(state, session).await;
+        }
+        seed
+    }
+
+    /// Whether the draws are seeded (else random, and nothing is counted).
+    pub(super) fn seeded(self) -> bool {
+        self.seed.is_some()
     }
 
     /// The session the ids are minted in.
@@ -83,7 +105,15 @@ impl<'a> MintSeed<'a> {
             Value::from(place),
             Value::from(drawn),
         ];
-        let derived = mb_engine::seed::derive(seed, &labels, &[&counts[0], &counts[1], &counts[2]]);
+        // Generation 0 draws as a runtime always drew.
+        let generation = rt
+            .mint_counts()
+            .generation(self.session)
+            .filter(|g| *g != 0)
+            .map(Value::from);
+        let mut parts = vec![&counts[0], &counts[1], &counts[2]];
+        parts.extend(generation.as_ref());
+        let derived = mb_engine::seed::derive(seed, &labels, &parts);
         Some((derived, drawn))
     }
 
@@ -152,7 +182,7 @@ pub(super) async fn mint(
         == Some("string");
     let checks = IdChecks::new(rt, held.as_ref(), &header.schema, !location)?;
     let carried = request_values(op, call);
-    let seed = MintSeed::new(rt, session, call);
+    let seed = MintSeed::claimed(state, session, call).await;
     let shown = record_id_examples(rt, t, field);
     let shape = match record_id_shape(rt, t, field) {
         Some(shape) => Some(shape),

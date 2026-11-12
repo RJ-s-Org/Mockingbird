@@ -571,6 +571,10 @@ pub(super) async fn host<'r>(
     if ops.reads_seq {
         host.read_counters(state).await;
     }
+    // A write's `mint` draws apart from what an earlier runtime minted the session.
+    if ops.mints && !matches!(plan.op.kind, mb_mcm::OperationKind::Query) {
+        MintSeed::claimed(state, &plan.session, call).await;
+    }
     host
 }
 

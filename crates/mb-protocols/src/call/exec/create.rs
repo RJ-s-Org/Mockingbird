@@ -314,7 +314,7 @@ pub(super) async fn run(
         mb_mcm::set_member_at(&mut data, &member, value);
     }
     // Its tokens' first values; a token none can be minted for is filled as any member.
-    let seed = crate::call::header_ids::MintSeed::new(rt, &plan.session, call);
+    let seed = crate::call::header_ids::MintSeed::claimed(state, &plan.session, call).await;
     initial_token(rt, (seed, t), &mut data);
     let issued = issue_aliases(rt, (seed, t, op), response_schema, &mut data);
     let tokens = token_members(rt, t);

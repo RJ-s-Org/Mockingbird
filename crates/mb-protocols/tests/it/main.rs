@@ -88,6 +88,7 @@ mod issued_aliases;
 mod issued_scopes;
 mod language_variants;
 mod list_prompt_size;
+mod mint_after_reload;
 mod nested_identity_patches;
 mod optional_null;
 mod parent_scopes;

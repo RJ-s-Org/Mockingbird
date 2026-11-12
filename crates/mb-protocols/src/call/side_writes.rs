@@ -184,7 +184,7 @@ async fn create(
         mb_mcm::set_member_at(&mut data, member, value.clone());
     }
     // Its tokens' first values, as an executed create's.
-    let seed = super::header_ids::MintSeed::new(rt, session, call);
+    let seed = super::header_ids::MintSeed::claimed(state, session, call).await;
     super::exec::initial_token(rt, (seed, ty), &mut data);
     let field = exprs::identity_member(rt, ty);
     let id = match mb_mcm::member_at(&data, &field).and_then(id_string) {

@@ -113,6 +113,8 @@ pub struct OpExpressions {
     pub reads_held: bool,
     /// Whether an expression of it calls `seq`.
     pub reads_seq: bool,
+    /// Whether an expression of it calls `mint`.
+    pub mints: bool,
 }
 
 /// A list's default item filter.
@@ -456,6 +458,7 @@ impl OpExpressions {
             types: Vec::new(),
             reads_held: false,
             reads_seq: false,
+            mints: false,
         };
         let (types, reads_held) = reads(out.programs());
         out.types = types;
@@ -464,6 +467,10 @@ impl OpExpressions {
             .programs()
             .any(|p| p.check().functions.iter().any(|f| f.name == "seq"));
         out.reads_seq = reads_seq;
+        let mints = out
+            .programs()
+            .any(|p| p.check().functions.iter().any(|f| f.name == "mint"));
+        out.mints = mints;
         out
     }
 

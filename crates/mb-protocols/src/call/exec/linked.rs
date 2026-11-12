@@ -294,6 +294,6 @@ async fn pick(
     {
         return Some(value);
     }
-    let seed = MintSeed::new(rt, &plan.session, call);
+    let seed = MintSeed::claimed(state, &plan.session, call).await;
     draw_id_as(rt, (seed, t, name), &declared).filter(|v| fits(v))
 }
