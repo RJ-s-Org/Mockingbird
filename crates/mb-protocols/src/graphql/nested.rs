@@ -585,6 +585,13 @@ impl Walk<'_> {
             let Some(value) = stored.get(key).filter(|v| obj.get(key) != Some(*v)) else {
                 continue;
             };
+            // Below the member, what the record lacks stays as generated: a
+            // later read selecting more under a held list keeps those fields.
+            let value = match obj.get(key) {
+                Some(generated) => lay_over(generated, value),
+                None => value.clone(),
+            };
+            let value = &value;
             let Some(schema) = child.names().find_map(|n| props.get(n)) else {
                 continue;
             };
@@ -1053,6 +1060,40 @@ fn overlay(out: &mut Map<String, Value>, data: &Value, sel: &Selection) {
                 out.insert(key.clone(), rekey(member.clone(), child));
             }
         }
+    }
+}
+
+/// `stored` (keyed by response keys) over `generated`: objects member by
+/// member, keeping the generated members `stored` lacks; lists item by item,
+/// each stored item over the generated one of its `id` (by position when it
+/// has none); anything else is `stored`.
+fn lay_over(generated: &Value, stored: &Value) -> Value {
+    match (generated, stored) {
+        (Value::Object(generated), Value::Object(stored)) => {
+            let mut out = generated.clone();
+            for (key, value) in stored {
+                let merged = match generated.get(key) {
+                    Some(below) => lay_over(below, value),
+                    None => value.clone(),
+                };
+                out.insert(key.clone(), merged);
+            }
+            Value::Object(out)
+        }
+        (Value::Array(generated), Value::Array(stored)) => Value::Array(
+            stored
+                .iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    let twin = match item.get("id") {
+                        Some(id) => generated.iter().find(|g| g.get("id") == Some(id)),
+                        None => generated.get(i),
+                    };
+                    twin.map_or_else(|| item.clone(), |twin| lay_over(twin, item))
+                })
+                .collect(),
+        ),
+        _ => stored.clone(),
     }
 }
 
