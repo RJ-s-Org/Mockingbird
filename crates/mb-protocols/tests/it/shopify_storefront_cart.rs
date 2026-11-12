@@ -1,6 +1,6 @@
 //! The Shopify Storefront example's cart, offline, with its world description:
 //! lines of one variant merge, quantity 0 removes a line, and the totals a
-//! read answers are computed from the lines.
+//! read answers are computed from the lines; a cart created with lines holds them, totalled.
 #![cfg(feature = "graphql")]
 
 use std::sync::Arc;
@@ -190,4 +190,42 @@ async fn the_cart_merges_removes_and_totals_from_its_lines() {
     assert_eq!(cart["totalQuantity"], 0, "{data}");
     assert_eq!(amount(&cart["cost"]["subtotalAmount"]), "0.0", "{data}");
     assert_eq!(amount(&cart["cost"]["totalAmount"]), "0.0", "{data}");
+}
+
+/// A cart created with lines holds them, totalled, from state.
+#[tokio::test]
+async fn a_cart_created_with_lines_holds_them() {
+    let addr = serve().await;
+    let (data, source) = call(
+        addr,
+        &format!(
+            "mutation($i: CartInput) {{ cartCreate(input: $i) {{ cart {{ {CART} }} userErrors {{ message }} }} }}"
+        ),
+        json!({"i": {"lines": [{"merchandiseId": VARIANT, "quantity": 2}]}}),
+    )
+    .await;
+    assert_eq!(source, "state", "{data}");
+    assert_eq!(data["cartCreate"]["userErrors"], json!([]), "{data}");
+    let cart = &data["cartCreate"]["cart"];
+    assert_eq!(cart["totalQuantity"], 2, "{data}");
+    let line = &cart["lines"]["edges"][0]["node"];
+    assert_eq!(line["merchandise"]["id"], VARIANT, "{data}");
+    assert_eq!(line["merchandise"]["title"], "Small", "{data}");
+    assert_eq!(amount(&cart["cost"]["totalAmount"]), "25.98", "{data}");
+    let id = cart["id"].as_str().unwrap().to_string();
+    let (data, source) = call(
+        addr,
+        &format!("query($id: ID!) {{ cart(id: $id) {{ {CART} }} }}"),
+        json!({"id": id}),
+    )
+    .await;
+    assert_eq!(source, "state", "{data}");
+    let edges = data["cart"]["lines"]["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 1, "{data}");
+    assert_eq!(edges[0]["node"]["quantity"], 2, "{data}");
+    assert_eq!(
+        amount(&data["cart"]["cost"]["totalAmount"]),
+        "25.98",
+        "{data}"
+    );
 }

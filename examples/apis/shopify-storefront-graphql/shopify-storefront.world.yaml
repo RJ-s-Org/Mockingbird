@@ -1,12 +1,9 @@
 # World description for shopify-storefront.graphql (see docs/world.md): how the
 # cart holds together. It holds no records and no values from traffic.
 #
-# - cartCreate stores a cart; cartLinesAdd, cartLinesUpdate and cartLinesRemove
-#   change the cart their `cartId` names, and cart(id:) reads it back.
-# - cartCreate's `set` builds lines from `input.lines` too, but on current main
-#   a create sending `input.lines` is still generated (the engine takes the
-#   input lines for a member sent in another shape and falls back before `set`
-#   applies): create the cart empty and add lines with cartLinesAdd.
+# - cartCreate stores a cart, with the lines its `input.lines` names (built by
+#   its `set`); cartLinesAdd, cartLinesUpdate and cartLinesRemove change the
+#   cart their `cartId` names, and cart(id:) reads it back.
 # - A line added with the variant and attributes of a line the cart holds
 #   raises that line's quantity, as Shopify merges them.
 # - A line keeps a copy of its variant (merchandise) as the session holds it:
