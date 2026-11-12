@@ -263,6 +263,10 @@ pub enum Command {
     /// list them, show one, or write one into a directory.
     #[command(subcommand)]
     Examples(crate::examples::ExamplesCommand),
+    /// The vendor hosts the project can call that no mock lists, found in
+    /// its files (bundled API descriptions, URL literals), with what to
+    /// import for each, as JSON.
+    Hosts(crate::hosts::HostsArgs),
     #[command(flatten)]
     Client(ClientCommand),
 }

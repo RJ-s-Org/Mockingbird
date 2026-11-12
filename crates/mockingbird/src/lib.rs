@@ -46,6 +46,7 @@ pub mod examples;
 pub mod file_config;
 pub mod ha;
 pub mod host_guard;
+pub mod hosts;
 pub mod import_llm;
 pub mod keys;
 pub mod maintenance;

@@ -168,12 +168,78 @@ carries the whole report with every reason in full, and `markdown` or
 | `--no-client-errors` | a mock answered 4xx (for example a request the contract rejects) |
 | `--exact-replay` | a replay used an operation-level match |
 | `--called OP[=N]` | operation `OP` (contract operation id; `mock/OP` for one mock) was called fewer than N times (default 1); repeatable |
+| `--no-unclaimed-hosts` | the project can call a host no mock lists ([below](#hosts-the-project-can-call)); scans the project of `-c/--config` (default `./mockingbird.yaml`) and prints a `Next:` line per domain |
 
 Both see what the request log keeps: the last
 `observability.request_log_retention` requests per mock (1000 by default;
 raise it for long suites). Unmapped hosts are counted by the proxy that
 `serve --proxy` runs; a standalone `mockingbird proxy` process keeps its
 own counts.
+
+## Hosts the project can call
+
+The report only sees hosts the app called. `mockingbird hosts -c
+mockingbird.yaml` (MCP `project_hosts`) finds the vendor hosts the app
+*can* call before it runs, from its files, and lists those no mock claims.
+
+It scans the **project root**: the nearest folder at or above the
+config's folder that holds `.git` or a package manifest (`package.json`,
+`pyproject.toml`, `Gemfile`, `go.mod`, `Cargo.toml`, `pom.xml`,
+`build.gradle`, ...), never climbing to the home folder; without one, the
+config's folder. Two signals:
+
+- **Bundled API descriptions**, anywhere in the project, installed
+  dependencies included (`node_modules`, `vendor`, `.venv`,
+  `site-packages`, `.gems`, ...): JSON and YAML files that are OpenAPI 3
+  (the hosts of `servers[].url`, at the top, per path or per operation,
+  with `{variables}` set to their defaults) or Swagger 2 (`host`). A file
+  is parsed only when its first 8 KiB carry a top-level key such
+  documents have. Each host is recorded with the file, its `info.title`
+  and the number of operations served on it; a file that names the host
+  but serves no operation there is left out beside one that does.
+  Dependencies' `test`, `fixtures` and `examples` folders are skipped.
+- **URL literals** (`https://host`) in the app's own code and configuration
+  files (not its dependencies, documentation, package manifests or lock
+  files), kept only when the host shares a registrable domain (eTLD+1)
+  with a host of a bundled description, a mocked host or a catalog
+  example's host, so documentation links stay out.
+
+The walk never enters `.git`, the config's own folder (when it is not the
+root), build outputs (`target`, `dist`, `build`, `.next`, ...), CI folders
+(`.github`, ...) or symlinks, so it never leaves the root. IP addresses,
+`localhost` and reserved names (`example.com`, `*.test`, ...) are
+ignored. A host counts as claimed when a mock of the config (or of the
+running server, for `start_server`, `server_status` and `verify`) lists it
+in `hosts`, or it is a `proxy.images` host.
+
+The scan is capped: 200,000 directory entries, 4 MiB per file (a larger
+description is skipped and counted under `skipped_large`; a larger source
+file is read up to 4 MiB), 256 MiB in all, and 2 s of wall-clock time.
+When a cap stops it, `scan.complete` is `false`, `scan.stopped` names the
+cap and a last `next_steps` entry says the list may be incomplete. Within
+one MCP server, a scan is reused while the modification times of the root
+and the two levels below it are unchanged (`scan.cached`).
+
+The answer, as JSON:
+
+- `project_root`, `config`;
+- `scan`: `files_visited`, `files_read`, `bytes_read`, `elapsed_ms`,
+  `specs` (descriptions found), `complete`, `stopped`, `cached`;
+- `unclaimed`: per host no mock lists, its `domain`, the `specs` that
+  serve it (`path` relative to the root, `title`, `operations`), the
+  `sources` naming it (up to three files) and the catalog `examples`
+  whose mocks list it;
+- `claimed`: the hosts found that a mock lists;
+- `next_steps`: one per registrable domain (domains with a mocked host
+  first, then those the app's files name; at most 8, the rest counted in
+  one more entry), naming per host what to import: the bundled
+  descriptions by path with their operation counts (`import_contract`),
+  else the catalog examples (`init_example`), else that no contract was
+  found and the host needs one or a reason it is not needed.
+
+The MCP `start_server` (with a config) and `server_status` answers append
+the same `next_steps`, and `mockingbird verify --no-unclaimed-hosts` fails
+while the list is not empty.
 
 ## GitHub Actions
 

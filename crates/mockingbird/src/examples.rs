@@ -258,6 +258,20 @@ pub fn serving(host: &str) -> Vec<Serving> {
         .collect()
 }
 
+/// Every host a mock of the catalog lists in its `hosts` (normalized, see
+/// [`normalize_host`](crate::registry::normalize_host)), sorted.
+pub fn catalog_hosts() -> Vec<String> {
+    let mut hosts: Vec<String> = catalog_configs()
+        .iter()
+        .flat_map(|(_, config)| config.mocks.values())
+        .flat_map(|m| m.hosts.iter())
+        .filter_map(|h| crate::registry::normalize_host(h))
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
 /// Runs an `examples` subcommand and returns its JSON output.
 ///
 /// # Errors

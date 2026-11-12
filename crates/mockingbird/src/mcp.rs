@@ -173,6 +173,7 @@ const LOCAL_TOOLS: &[&str] = &[
     "stop_server",
     "proxy_env",
     "open_key_setup",
+    "project_hosts",
 ];
 
 /// Why a tool call failed: shown to the model as an error result.
@@ -464,7 +465,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "start_server",
             title: "Start Mockingbird in the background",
-            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env (or proxy_env_error, why this project's proxy could not be handed out). With a config, also world_review: for each mock whose world description has gaps, the next_steps and world_gaps an import answers (review them as after import_contract, the mockingbird-world skill); and next_steps naming mocks that answer for one host without a common shares group (give mocks of one API the same mocks.<name>.shares); and unknown_ids: per mock, how a read of an id the session does not hold is answered (its setting, or the types inferred to answer 404 once the session has written one of their records, and those that generate; get_world says why).",
+            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env (or proxy_env_error, why this project's proxy could not be handed out). With a config, also world_review: for each mock whose world description has gaps, the next_steps and world_gaps an import answers (review them as after import_contract, the mockingbird-world skill); and next_steps naming mocks that answer for one host without a common shares group (give mocks of one API the same mocks.<name>.shares), and the hosts the project can call that no mock lists, with what to import for each (as project_hosts); and unknown_ids: per mock, how a read of an id the session does not hold is answered (its setting, or the types inferred to answer 404 once the session has written one of their records, and those that generate; get_world says why).",
             schema: obj(
                 json!({
                     "config": s("Config file (preferred)."),
@@ -513,9 +514,20 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "server_status",
             title: "Background server status",
-            description: "Whether the background server runs, and its /readyz (ready, degraded reasons). After the app ran: next_steps, one per host the proxy blocked since the server started that no mock lists now, naming the mock of its domain to add it to and the catalog examples that list it, if any. Mock those hosts before handing back.",
+            description: "Whether the background server runs, and its /readyz (ready, degraded reasons). next_steps: one per host the proxy blocked since the server started that no mock lists now, naming the mock of its domain to add it to and the catalog examples that list it, if any; then the unclaimed hosts of the project (as project_hosts). Mock those hosts before handing back.",
             schema: obj(
                 json!({ "config": s("Config file the server was started with; default: the one start_server used.") }),
+                &[],
+            ),
+            read_only: true,
+            destructive: false,
+        },
+        Tool {
+            name: "project_hosts",
+            title: "Hosts the project can call that no mock lists",
+            description: "Scan the project of a config (the nearest folder above it with .git or a package manifest) for the vendor hosts the app can call: hosts of OpenAPI 3 / Swagger 2 files bundled anywhere in it, installed dependencies included, and of URL literals in its own files that share a domain with one of those, a mocked host or a catalog example. Returns unclaimed (each host no mock lists, with the API descriptions that serve it: path, title, operations; the files naming it; the catalog examples listing it), claimed, scan (files, bytes, time, whether a limit stopped it) and next_steps naming what to import for each host. start_server and server_status carry the same next_steps.",
+            schema: obj(
+                json!({ "config": s("Config file; default: the one start_server used, else ./mockingbird.yaml.") }),
                 &[],
             ),
             read_only: true,
@@ -1721,6 +1733,7 @@ impl McpServer {
                 }
                 if let Some(config) = &args.config {
                     self.add_start_review(&mut started, config).await;
+                    self.add_unclaimed_steps(&mut started, config).await;
                 }
                 if let (Some(config), Ok(mut recorded)) = (&args.config, self.started_config.lock())
                 {
@@ -1743,7 +1756,20 @@ impl McpServer {
             "server_status" => {
                 let mut status = daemon::status(&self.server_state(a)).await?;
                 self.add_blocked_steps(&mut status).await;
+                if let Some(config) = self.project_config(a) {
+                    self.add_unclaimed_steps(&mut status, &config).await;
+                }
                 Ok(status)
+            }
+            "project_hosts" => {
+                let config = self.project_config(a).ok_or_else(|| {
+                    ToolError(
+                        "give config: there is no ./mockingbird.yaml and start_server used none"
+                            .into(),
+                    )
+                })?;
+                let answer = crate::hosts::project_hosts_async(config, Default::default()).await?;
+                Ok(serde_json::to_value(answer).map_err(anyhow::Error::from)?)
             }
             "server_logs" => {
                 let lines = opt_u64(a, "lines").unwrap_or(100);
@@ -2549,6 +2575,49 @@ impl McpServer {
         }
         if !review.is_empty() {
             obj.insert("world_review".into(), Value::Array(review));
+        }
+    }
+
+    /// The config a project tool reads: its `config` argument, else the
+    /// one `start_server` used, else `./mockingbird.yaml` when it exists.
+    fn project_config(&self, a: &Value) -> Option<PathBuf> {
+        let config = opt_str(a, "config")
+            .map(PathBuf::from)
+            .or_else(|| self.recorded_config());
+        crate::proxy::env::config_or_local(config.as_deref())
+    }
+
+    /// Appends the `next_steps` of the project host scan of `config`
+    /// ([`crate::hosts::project_hosts`]) to a `start_server` or
+    /// `server_status` answer: hosts the project can call that no mock of
+    /// the config, or of the running server, lists. A config that does not
+    /// load adds nothing.
+    async fn add_unclaimed_steps(&self, answer: &mut Value, config: &std::path::Path) {
+        let admin = answer
+            .get("admin")
+            .or_else(|| answer.get("server").and_then(|s| s.get("admin")))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let served = match admin {
+            Some(admin) => {
+                crate::report::claimed_hosts(&admin, self.token.as_deref(), &self.workspace).await
+            }
+            None => std::collections::HashSet::new(),
+        };
+        let Ok(scan) = crate::hosts::project_hosts_async(config.to_path_buf(), served).await else {
+            return;
+        };
+        if scan.next_steps.is_empty() {
+            return;
+        }
+        let Some(obj) = answer.as_object_mut() else {
+            return;
+        };
+        let steps = obj
+            .entry("next_steps")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(steps) = steps.as_array_mut() {
+            steps.extend(scan.next_steps.into_iter().map(Value::String));
         }
     }
 

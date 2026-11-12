@@ -58,6 +58,16 @@ pub struct VerifyArgs {
     /// contract (404 or 405: a route the contract lacks).
     #[arg(long)]
     pub no_unmatched: bool,
+    /// Fail when the project can call a host no mock lists: a host of an
+    /// API description bundled in the project (its dependencies included)
+    /// or of a URL literal in its own files (`mockingbird hosts`). Scans
+    /// the project of `--config`.
+    #[arg(long)]
+    pub no_unclaimed_hosts: bool,
+    /// The project's config for `--no-unclaimed-hosts`; default
+    /// `./mockingbird.yaml`.
+    #[arg(short = 'c', long)]
+    pub config: Option<PathBuf>,
     /// Fail on 5xx responses.
     #[arg(long)]
     pub no_errors: bool,
@@ -172,8 +182,13 @@ pub struct Report {
     /// Snapshot answers by result (`exact`, `operation`, `miss`,
     /// `recorded`); empty without `--record` / `--replay`.
     pub snapshot: BTreeMap<String, u64>,
+    /// Hosts the project can call that no mock lists (`verify
+    /// --no-unclaimed-hosts` only, see [`crate::hosts`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unclaimed_hosts: Vec<String>,
     /// What to do about the hosts the proxy blocked
-    /// ([`blocked_host_steps`]); omitted when none was blocked.
+    /// ([`blocked_host_steps`]) and, with `--no-unclaimed-hosts`, the
+    /// hosts no mock lists; omitted when there are none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub next_steps: Vec<String>,
 }
@@ -257,6 +272,26 @@ pub async fn collect(
         *report.snapshot.entry(result).or_default() += value;
     }
     Ok(report)
+}
+
+/// Adds the project host scan of `config` ([`crate::hosts`]) to `report`:
+/// the hosts no mock lists (in the config, or on the server at
+/// `admin_url`) and their `next_steps`.
+///
+/// # Errors
+///
+/// Fails when the config cannot be read or parsed.
+pub async fn add_unclaimed_hosts(
+    report: &mut Report,
+    config: &std::path::Path,
+    admin_url: &str,
+    token: Option<&str>,
+) -> anyhow::Result<()> {
+    let served = claimed_hosts(admin_url, token, &report.workspace).await;
+    let answer = crate::hosts::project_hosts_async(config.to_path_buf(), served).await?;
+    report.unclaimed_hosts = answer.unclaimed.into_iter().map(|h| h.host).collect();
+    report.next_steps.extend(answer.next_steps);
+    Ok(())
 }
 
 /// The proxied hosts no mock claims, from the [`UNMAPPED_METRIC`]
@@ -618,6 +653,29 @@ pub fn check(report: &Report, args: &VerifyArgs) -> anyhow::Result<Vec<Failure>>
             };
             fail(check, format!("{}: {} requests", h.describe(), h.requests));
         }
+    }
+    if args.no_unclaimed_hosts && !report.unclaimed_hosts.is_empty() {
+        let n = report.unclaimed_hosts.len();
+        let named: Vec<&str> = report
+            .unclaimed_hosts
+            .iter()
+            .take(TOP_ENTRIES)
+            .map(String::as_str)
+            .collect();
+        let more = if n > TOP_ENTRIES {
+            format!(", {} more", n - TOP_ENTRIES)
+        } else {
+            String::new()
+        };
+        fail(
+            "no-unclaimed-hosts",
+            format!(
+                "{n} host{} the project can call ha{} no mock ({}{more})",
+                if n == 1 { "" } else { "s" },
+                if n == 1 { "s" } else { "ve" },
+                named.join(", ")
+            ),
+        );
     }
     if args.exact_replay
         && let Some(n) = report.snapshot.get("operation").filter(|n| **n > 0)
@@ -1167,6 +1225,38 @@ mod tests {
         assert_eq!(checks, ["no-fallbacks", "no-blocked", "called"], "{f:?}");
         assert!(f[2].detail.contains("createOrder: called 0 times"));
         assert!(check(&r, &verify(&["--called", "getOrder=x"])).is_err());
+    }
+
+    #[test]
+    fn unclaimed_hosts_fail_no_unclaimed_hosts_and_print_next_lines() {
+        let mut r = report();
+        assert!(
+            check(&r, &verify(&["--no-unclaimed-hosts"]))
+                .unwrap()
+                .is_empty()
+        );
+        r.unclaimed_hosts = [
+            "a.vendor.com",
+            "b.vendor.com",
+            "c.vendor.com",
+            "d.vendor.com",
+        ]
+        .map(String::from)
+        .to_vec();
+        r.next_steps = vec!["4 hosts of vendor.com that the project can call have no mock.".into()];
+        assert!(check(&r, &verify(&[])).unwrap().is_empty());
+        let f = check(&r, &verify(&["--no-unclaimed-hosts", "-c", "app.yaml"])).unwrap();
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].check, "no-unclaimed-hosts");
+        assert_eq!(
+            f[0].detail,
+            "4 hosts the project can call have no mock (a.vendor.com, b.vendor.com, c.vendor.com, 1 more)"
+        );
+        let text = render(&r, Some(&f), Format::Text).unwrap();
+        assert!(
+            text.contains("Next: 4 hosts of vendor.com that the project can call have no mock."),
+            "{text}"
+        );
     }
 
     #[test]
