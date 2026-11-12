@@ -189,9 +189,15 @@ A fresh Claude Code got the same one-line prompt in a clean copy of the app. The
 - Phone numbers: 3 of 3.
 - Verify: 8 of 9.
 
-The one failure is `verification-check:create`. It is served from state, with a fill, but its `to`, `service_sid` and `status` come back as generated words (`"to": "alpha"`, `"status": "juniper"`) instead of the request's `To`, the path's `ServiceSid` and `approved`. `CreateVerification` on the same service carries the request's values. That engine bug has its own PR.
+The one failure is `verification-check:create`. It is served from state, with a fill, but its `to`, `service_sid` and `status` come back as generated words (`"to": "alpha"`, `"status": "juniper"`) instead of the request's `To`, the path's `ServiceSid` and `approved`. `CreateVerification` on the same service carries the request's values. That engine bug has its own PR (next section).
 
 The first-round step was 5 KB. This PR's review cut it to one line of about 220 characters in `start_server`/`server_status`, and one entry of about 500 characters per domain in `project_hosts`.
+
+## Sixth run: a readless create keeps its record (2026-11-12)
+
+The fifth rerun's mock, unchanged, served by main plus this PR: **21 of 21**.
+
+`VerificationCheck` has a create but no read. The id member's schema was looked up only in the type's reads, so the record's sid was minted as a plain word. The stored record itself was right: the request's `To` and the path's `ServiceSid` were both there. But that sid failed the answer's `^VE[0-9a-fA-F]{32}$` pattern, so the answer fell back to a wholly generated one. With no read, the id's schema and examples now come from what the type's creates answer. The check then answers with the sent `To`, the path's `ServiceSid`, a `VE…` sid, and `status: "approved"`, which the fill picks from the member's description (no world rule).
 
 ## Files
 
