@@ -168,7 +168,7 @@ carries the whole report with every reason in full, and `markdown` or
 | `--no-client-errors` | a mock answered 4xx (for example a request the contract rejects) |
 | `--exact-replay` | a replay used an operation-level match |
 | `--called OP[=N]` | operation `OP` (contract operation id; `mock/OP` for one mock) was called fewer than N times (default 1); repeatable |
-| `--no-unclaimed-hosts` | the project can call a host no mock lists ([below](#hosts-the-project-can-call)); scans the project of `-c/--config` (default `./mockingbird.yaml`) and prints a `Next:` line per domain |
+| `--no-unclaimed-hosts` | the project can call a host no mock lists that a bundled description or catalog example serves ([below](#hosts-the-project-can-call)); scans the project of `-c/--config` (default `./mockingbird.yaml`) and prints the summary as a `Next:` line |
 
 Both see what the request log keeps: the last
 `observability.request_log_retention` requests per mock (1000 by default;
@@ -186,29 +186,49 @@ It scans the **project root**: the nearest folder at or above the
 config's folder that holds `.git` or a package manifest (`package.json`,
 `pyproject.toml`, `Gemfile`, `go.mod`, `Cargo.toml`, `pom.xml`,
 `build.gradle`, ...), never climbing to the home folder; without one, the
-config's folder. Two signals:
+config's folder. A root that is the home folder or a filesystem root is
+refused (an error): keep the config in the app's project folder. Two
+signals:
 
 - **Bundled API descriptions**, anywhere in the project, installed
   dependencies included (`node_modules`, `vendor`, `.venv`,
   `site-packages`, `.gems`, ...): JSON and YAML files that are OpenAPI 3
   (the hosts of `servers[].url`, at the top, per path or per operation,
-  with `{variables}` set to their defaults) or Swagger 2 (`host`). A file
-  is parsed only when its first 8 KiB carry a top-level key such
-  documents have. Each host is recorded with the file, its `info.title`
-  and the number of operations served on it; a file that names the host
-  but serves no operation there is left out beside one that does.
-  Dependencies' `test`, `fixtures` and `examples` folders are skipped.
+  with `{variables}` set to their defaults) or Swagger 2 (`host`). In a
+  dependency, a JSON file is parsed only when it starts with `{` and its
+  first 8 KiB contain one of the keys `"openapi"`, `"swagger"`,
+  `"paths"`, `"components"`, `"servers"` or `"basePath"` (at any depth,
+  since writers may put `openapi` after a large `components`); a YAML
+  file when a line of its first 8 KiB starts with one of them. The app's
+  own JSON and YAML files are read whole (up to 4 MiB) and sniffed the
+  same way over all of it. The parse then requires a top-level `openapi`
+  or `swagger` key; a member of an unexpected shape (a scalar where an
+  object belongs) is ignored, not the whole file. Each host is recorded
+  with the file, its `info.title` and the number of operations served on
+  it; a file that names the host but serves no operation there is left
+  out beside one that does. Dependencies' `test`, `fixtures` and
+  `examples` folders are skipped.
 - **URL literals** (`https://host`) in the app's own code and configuration
-  files (not its dependencies, documentation, package manifests or lock
-  files), kept only when the host shares a registrable domain (eTLD+1)
-  with a host of a bundled description, a mocked host or a catalog
-  example's host, so documentation links stay out.
+  files (not its dependencies, its test folders `test`, `tests`,
+  `__tests__`, `spec`, `specs`, `e2e`, documentation, package manifests,
+  lock files, or a file that parsed as a description), kept only when the
+  host shares a registrable domain (eTLD+1) with a host of a bundled
+  description or a mocked host, or is itself a host a catalog example's
+  mock lists, so documentation links stay out.
+
+Each listed host carries its `evidence`: `spec` (a bundled description
+serves it), `catalog` (a catalog example serves it) or `literal` (only a
+URL in the app's files names it). `literal` hosts are the weaker tier:
+listed, but `verify --no-unclaimed-hosts` does not fail on them.
 
 The walk never enters `.git`, the config's own folder (when it is not the
-root), build outputs (`target`, `dist`, `build`, `.next`, ...), CI folders
-(`.github`, ...) or symlinks, so it never leaves the root. IP addresses,
-`localhost` and reserved names (`example.com`, `*.test`, ...) are
-ignored. A host counts as claimed when a mock of the config (or of the
+root), CI folders (`.github`, ...) or symlinks, so it never leaves the
+root, and leaves out every file a mock of the config names (`contract`,
+`world`), wherever the config sits. The app's build outputs (`target`,
+`dist`, `build`, `out`, `.next`, ...) are skipped, but not inside
+dependencies, where packages ship their descriptions in `dist/`. IP
+addresses, `localhost` and reserved names (`example.com`, `*.test`, ...)
+are ignored. A host counts as claimed when a mock of the config (or of the
 running server, for `start_server`, `server_status` and `verify`) lists it
 in `hosts`, or it is a `proxy.images` host.
 
@@ -216,30 +236,45 @@ The scan is capped: 200,000 directory entries, 4 MiB per file (a larger
 description is skipped and counted under `skipped_large`; a larger source
 file is read up to 4 MiB), 256 MiB in all, and 2 s of wall-clock time.
 When a cap stops it, `scan.complete` is `false`, `scan.stopped` names the
-cap and a last `next_steps` entry says the list may be incomplete. Within
-one MCP server, a scan is reused while the modification times of the root
-and the two levels below it are unchanged (`scan.cached`).
+cap, and the summary and a last `next_steps` entry say the list may be
+incomplete. Within one process (an MCP server), a scan is reused while
+the modification times of the root and the two levels below it are
+unchanged (`scan.cached`); a scan the time budget stopped is not reused,
+and nor is any scan of a root with more than 20,000 entries at those
+levels.
 
 The answer, as JSON:
 
 - `project_root`, `config`;
 - `scan`: `files_visited`, `files_read`, `bytes_read`, `elapsed_ms`,
   `specs` (descriptions found), `complete`, `stopped`, `cached`;
-- `unclaimed`: per host no mock lists, its `domain`, the `specs` that
-  serve it (`path` relative to the root, `title`, `operations`), the
-  `sources` naming it (up to three files) and the catalog `examples`
-  whose mocks list it;
+- `summary`: one line, how many hosts have no mock per domain (with how
+  many have a bundled description or a catalog example) and where the
+  detail is;
+- `unclaimed`: per host no mock lists, its `domain`, `evidence`, the
+  `specs` that serve it (`path` relative to the root, `title`,
+  `operations`), the `sources` naming it (up to three files) and the
+  catalog `examples` whose mocks list it. Several `specs` for one host
+  (versions of one product) are all needed, not alternatives: import each
+  into its own mock listing the host, give those mocks one
+  `mocks.<name>.shares` group, and a distinct `route_prefix` each (with
+  `path_rewrite.add_prefix` to keep the path);
 - `claimed`: the hosts found that a mock lists;
-- `next_steps`: one per registrable domain (domains with a mocked host
-  first, then those the app's files name; at most 8, the rest counted in
-  one more entry), naming per host what to import: the bundled
-  descriptions by path with their operation counts (`import_contract`),
-  else the catalog examples (`init_example`), else that no contract was
-  found and the host needs one or a reason it is not needed.
+- `next_steps`: one per registrable domain, about 500 characters each
+  (domains with a mocked host first, then those with a description or
+  catalog example; at most 8, the rest counted in one more entry). Each
+  names its hosts by short labels (`verify` for `verify.vendor.com`):
+  those with a bundled description under the directory of their files
+  (largest APIs first, `(n)` marking n versions) to `import_contract`,
+  those in the catalog with the example to `init_example`, and those only
+  named in the app's files.
 
 The MCP `start_server` (with a config) and `server_status` answers append
-the same `next_steps`, and `mockingbird verify --no-unclaimed-hosts` fails
-while the list is not empty.
+the `summary` line to their `next_steps` (after the other steps; a host a
+blocked-host step already names is left out of it), and `mockingbird
+verify --no-unclaimed-hosts` fails while a `spec` or `catalog` host is
+listed, printing the summary as a `Next:` line. `verify -c` also picks the
+server whose admin listener that config describes, without `--admin-url`.
 
 ## GitHub Actions
 

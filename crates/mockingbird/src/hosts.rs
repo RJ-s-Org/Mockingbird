@@ -9,15 +9,20 @@
 //!   operation) or Swagger 2 (`host`). Each host is recorded with the file,
 //!   its title and the operations served there.
 //! - URL literals (`https://host`) in the app's own files (not its
-//!   dependencies), kept only when the host shares a registrable domain
-//!   with a host of such a description, a mocked host or a catalog
-//!   example's host, so documentation links stay out.
+//!   dependencies or tests), kept only when the host shares a registrable
+//!   domain with a host of such a description or a mocked host, or is a
+//!   catalog example's host itself, so documentation links stay out.
 //!
-//! The walk skips version control, build outputs, the mock's own folder
-//! and symlinks, and stops at [`Limits`] (files, bytes per file, bytes in
-//! all, wall-clock time), saying so in [`ScanStats::stopped`]. A scan is
-//! cached per project root while the modification times near the root are
-//! unchanged.
+//! Each unclaimed host carries its [`Evidence`]: a host only named by a
+//! URL literal is listed but is the weaker tier, which `verify
+//! --no-unclaimed-hosts` does not fail on.
+//!
+//! The walk skips version control, build outputs (outside dependencies),
+//! the mock's own folder and contract files, and symlinks, and stops at
+//! [`Limits`] (files, bytes per file, bytes in all, wall-clock time),
+//! saying so in [`ScanStats::stopped`]. A scan that ran to the end or
+//! stopped at a size limit is cached per project root while the
+//! modification times near the root are unchanged.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -26,6 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
+use anyhow::bail;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
@@ -64,8 +70,8 @@ impl Default for Limits {
     }
 }
 
-/// Bytes read from the start of a JSON or YAML file to decide whether it
-/// may be an API description.
+/// Bytes read from the start of a dependency's JSON or YAML file to decide
+/// whether it may be an API description.
 const HEAD: u64 = 8 * 1024;
 
 /// Files whose presence marks a project root (besides `.git`).
@@ -90,31 +96,41 @@ const MANIFESTS: &[&str] = &[
     "pubspec.yaml",
 ];
 
-/// Directories never walked: version control, build outputs, caches.
+/// Directories never walked: version control, caches, editor and CI
+/// settings.
 const SKIP_DIRS: &[&str] = &[
     ".git",
     ".hg",
     ".svn",
-    "target",
-    "dist",
-    "build",
-    ".next",
-    ".nuxt",
-    ".svelte-kit",
-    ".turbo",
     ".cache",
     ".gradle",
-    "coverage",
     "__pycache__",
     ".mockingbird",
     ".idea",
     ".vscode",
-    // CI and repository settings, not the app.
     ".github",
     ".gitlab",
     ".circleci",
     ".husky",
 ];
+
+/// The app's build outputs, skipped outside dependencies only: packages
+/// ship their API descriptions in `dist/` and `build/`.
+const BUILD_DIRS: &[&str] = &[
+    "target",
+    "dist",
+    "build",
+    "out",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".turbo",
+    "coverage",
+];
+
+/// The app's test folders: walked for API descriptions, not for URL
+/// literals (tests name hosts the app does not call).
+const TEST_DIRS: &[&str] = &["test", "tests", "__tests__", "spec", "specs", "e2e"];
 
 /// Lock files: their URLs are package registries, not hosts the app calls.
 /// Package manifests ([`MANIFESTS`]) are left out of the URL search alike
@@ -219,8 +235,15 @@ const MAX_LITERAL_HOSTS: usize = 5_000;
 /// counted in one more step.
 const MAX_STEPS: usize = 8;
 
-/// Hosts named in one step; the rest of the domain is counted.
-const MAX_HOSTS_PER_STEP: usize = 60;
+/// Characters of one domain's step (about; the host labels are cut to fit).
+const MAX_STEP_CHARS: usize = 500;
+
+/// Domains named in the summary line; the rest are counted.
+const SUMMARY_DOMAINS: usize = 4;
+
+/// Directory entries the cache fingerprint looks at; past it the scan is
+/// not cached.
+const MAX_FINGERPRINT_ENTRIES: usize = 20_000;
 
 /// An API description that serves a host.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
@@ -239,6 +262,20 @@ pub struct ExampleRef {
     pub example: String,
     pub mock: String,
     pub contract: String,
+}
+
+/// Why a host is in the list, strongest first.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum Evidence {
+    /// An API description bundled in the project serves it.
+    Spec,
+    /// A catalog example's mock lists it (and the app's files name it).
+    Catalog,
+    /// Only a URL literal in the app's files names it, beside a described
+    /// or mocked host of its domain: listed, but `verify
+    /// --no-unclaimed-hosts` does not fail on it.
+    Literal,
 }
 
 /// What a scan cost and whether it saw the whole project.
@@ -277,6 +314,8 @@ struct RawScan {
     /// Host to the app's files with a URL literal naming it.
     literals: BTreeMap<String, Vec<String>>,
     stats: ScanStats,
+    /// The time budget stopped it (such a scan is not cached).
+    timed_out: bool,
 }
 
 /// A host the project can call that no mock lists.
@@ -286,7 +325,9 @@ pub struct UnclaimedHost {
     /// Its registrable domain (eTLD+1).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
-    /// The API descriptions in the project that serve it.
+    pub evidence: Evidence,
+    /// The API descriptions in the project that serve it. Several (versions
+    /// of one product) are all needed, not alternatives.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub specs: Vec<SpecRef>,
     /// The app's files with a URL literal naming it.
@@ -297,6 +338,15 @@ pub struct UnclaimedHost {
     pub examples: Vec<ExampleRef>,
 }
 
+impl UnclaimedHost {
+    /// Whether `verify --no-unclaimed-hosts` fails on it: a bundled
+    /// description or the catalog serves it.
+    #[must_use]
+    pub fn fails_verify(&self) -> bool {
+        self.evidence != Evidence::Literal
+    }
+}
+
 /// The scan of a config's project: the hosts no mock lists and what to do
 /// about them.
 #[derive(Serialize, Debug)]
@@ -304,16 +354,49 @@ pub struct Answer {
     pub project_root: String,
     pub config: String,
     pub scan: ScanStats,
+    /// One line for the whole list; absent when it is empty
+    /// and the scan complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     pub unclaimed: Vec<UnclaimedHost>,
     /// Hosts the scan found that a mock lists.
     pub claimed: Vec<String>,
+    /// One per registrable domain, with what to import.
     pub next_steps: Vec<String>,
+    /// The claimed hosts, for [`Answer::summary_without`].
+    #[serde(skip)]
+    claimed_all: BTreeSet<String>,
+}
+
+impl Answer {
+    /// The summary line without the hosts in `exclude` (say, hosts a
+    /// blocked-host step already names); `None` when nothing is left and
+    /// the scan was complete.
+    #[must_use]
+    pub fn summary_without(&self, exclude: &HashSet<String>) -> Option<String> {
+        let left: Vec<UnclaimedHost> = self
+            .unclaimed
+            .iter()
+            .filter(|h| !exclude.contains(&h.host))
+            .cloned()
+            .collect();
+        summary(&left, &self.claimed_all, &self.scan)
+    }
+}
+
+/// Whether `dir` is the home folder or a filesystem root, which are never
+/// scanned as a project.
+fn too_broad(dir: &Path) -> bool {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    dir.parent().is_none() || home.as_deref() == Some(dir)
 }
 
 /// The project root of `config`: the nearest ancestor of its directory
 /// (the directory included) holding `.git` or a package manifest
-/// (`package.json`, `go.mod`, ...), not climbing to the home directory or the filesystem
-/// root; else the config's directory.
+/// (`package.json`, `go.mod`, ...), not climbing to the home directory or
+/// the filesystem root; else the config's directory.
 pub fn project_root(config: &Path) -> PathBuf {
     let absolute = std::path::absolute(config).unwrap_or_else(|_| config.to_path_buf());
     let dir = absolute
@@ -321,11 +404,8 @@ pub fn project_root(config: &Path) -> PathBuf {
         .unwrap_or(absolute)
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from);
     for candidate in dir.ancestors() {
-        let is_top = candidate.parent().is_none() || home.as_deref() == Some(candidate);
+        let is_top = too_broad(candidate);
         if is_top && candidate != dir {
             break;
         }
@@ -340,12 +420,22 @@ pub fn project_root(config: &Path) -> PathBuf {
     dir
 }
 
+/// What a scan leaves out besides the fixed lists: the config's folder
+/// (when it is not the root) and the files its mocks name (contracts and
+/// world descriptions).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+struct Skip {
+    dir: Option<PathBuf>,
+    files: BTreeSet<PathBuf>,
+}
+
 /// Scans the project of `config` and matches it against the config's mocks
 /// (and `also_claimed`, such as the hosts a running server's mocks list).
 ///
 /// # Errors
 ///
-/// Fails when the config cannot be read or parsed.
+/// Fails when the config cannot be read or parsed, or its project root is
+/// the home folder or a filesystem root.
 pub fn project_hosts(config: &Path, also_claimed: &HashSet<String>) -> anyhow::Result<Answer> {
     let cfg = crate::file_config::load(config)?;
     let mut claimed: BTreeSet<String> = cfg
@@ -357,25 +447,37 @@ pub fn project_hosts(config: &Path, also_claimed: &HashSet<String>) -> anyhow::R
         .collect();
     claimed.extend(also_claimed.iter().cloned());
     let root = project_root(config);
+    if too_broad(&root) {
+        bail!(
+            "not scanning {} for hosts: it is the home folder or a filesystem root; keep the config in the app's project folder",
+            root.display()
+        );
+    }
     let config_dir = std::path::absolute(config)
         .ok()
         .and_then(|c| c.canonicalize().ok())
         .and_then(|c| c.parent().map(Path::to_path_buf));
-    let skip = config_dir.filter(|d| *d != root);
-    let raw = cached_scan(&root, skip.as_deref(), Limits::default());
-    let list = format!(
-        "`mockingbird hosts -c {}` (MCP project_hosts)",
-        config.display()
-    );
+    let skip = Skip {
+        dir: config_dir.filter(|d| *d != root),
+        files: cfg
+            .mocks
+            .values()
+            .flat_map(|m| std::iter::once(&m.contract).chain(m.world.iter()))
+            .filter_map(|p| std::path::absolute(p).ok()?.canonicalize().ok())
+            .collect(),
+    };
+    let raw = cached_scan(&root, &skip, Limits::default());
     let (unclaimed, found_claimed) = classify(&raw, &claimed, &crate::examples::catalog_hosts());
-    let next_steps = next_steps(&unclaimed, &claimed, &raw.stats, &list);
+    let list = format!("`mockingbird hosts -c {}`", config.display());
     Ok(Answer {
         project_root: root.display().to_string(),
         config: config.display().to_string(),
-        scan: raw.stats.clone(),
+        summary: summary(&unclaimed, &claimed, &raw.stats),
+        next_steps: next_steps(&unclaimed, &claimed, &raw.stats, &list),
+        scan: raw.stats,
         unclaimed,
         claimed: found_claimed,
-        next_steps,
+        claimed_all: claimed,
     })
 }
 
@@ -401,10 +503,10 @@ pub async fn run(args: &HostsArgs) -> anyhow::Result<serde_json::Value> {
     Ok(serde_json::to_value(answer)?)
 }
 
-/// Splits the scanned hosts into those no claimed host covers (with the
-/// catalog examples listing each) and those a mock lists. URL literals
-/// count only for hosts that share a registrable domain with an API
-/// description's host, a claimed host or a `catalog` host.
+/// Splits the scanned hosts into those no claimed host covers (with their
+/// [`Evidence`] and the catalog examples listing each) and those a mock
+/// lists. A URL literal counts when its host shares a registrable domain
+/// with a described or claimed host, or is a `catalog` host itself.
 fn classify(
     raw: &RawScan,
     claimed: &BTreeSet<String>,
@@ -415,9 +517,9 @@ fn classify(
         .keys()
         .map(String::as_str)
         .chain(claimed.iter().map(String::as_str))
-        .chain(catalog.iter().map(String::as_str))
         .filter_map(registrable_domain)
         .collect();
+    let catalog: HashSet<&str> = catalog.iter().map(String::as_str).collect();
     let mut found: BTreeMap<&str, UnclaimedHost> = BTreeMap::new();
     for (host, specs) in &raw.specs {
         // A description that names the host but serves no operation there
@@ -431,7 +533,8 @@ fn classify(
         };
     }
     for (host, sources) in &raw.literals {
-        if registrable_domain(host).is_some_and(|d| known.contains(d)) {
+        let in_known_domain = registrable_domain(host).is_some_and(|d| known.contains(d));
+        if in_known_domain || catalog.contains(host.as_str()) {
             found
                 .entry(host)
                 .or_insert_with(|| new_host(host))
@@ -454,6 +557,13 @@ fn classify(
                 contract: s.contract,
             })
             .collect();
+        h.evidence = if !h.specs.is_empty() {
+            Evidence::Spec
+        } else if !h.examples.is_empty() {
+            Evidence::Catalog
+        } else {
+            Evidence::Literal
+        };
         unclaimed.push(h);
     }
     (unclaimed, found_claimed)
@@ -463,62 +573,123 @@ fn new_host(host: &str) -> UnclaimedHost {
     UnclaimedHost {
         host: host.to_owned(),
         domain: registrable_domain(host).map(str::to_owned),
+        evidence: Evidence::Literal,
         specs: Vec::new(),
         sources: Vec::new(),
         examples: Vec::new(),
     }
 }
 
-/// The `next_steps` for `unclaimed`: one per registrable domain (domains
-/// with a mocked host first, then those the app's files name), each host
-/// with what to import: the API descriptions that serve it, else the
-/// catalog examples that list it, else none found. At most [`MAX_STEPS`];
-/// one more counts the rest and names `list`, and one says when the scan
-/// stopped early.
+/// `unclaimed` by registrable domain, in report order: domains with a
+/// mocked host first, then those with a description or catalog entry,
+/// then the rest, by name.
+fn domains<'a>(
+    unclaimed: &'a [UnclaimedHost],
+    claimed: &BTreeSet<String>,
+) -> Vec<(String, Vec<&'a UnclaimedHost>)> {
+    let mut groups: BTreeMap<String, Vec<&UnclaimedHost>> = BTreeMap::new();
+    for h in unclaimed {
+        let key = h.domain.clone().unwrap_or_else(|| h.host.clone());
+        groups.entry(key).or_default().push(h);
+    }
+    let mut ordered: Vec<(String, Vec<&UnclaimedHost>)> = groups.into_iter().collect();
+    ordered.sort_by_cached_key(|(domain, hosts)| {
+        (
+            mocked_of(claimed, domain).is_empty(),
+            hosts.iter().all(|h| h.evidence == Evidence::Literal),
+            domain.clone(),
+        )
+    });
+    ordered
+}
+
+/// The claimed hosts of `domain`.
+fn mocked_of<'a>(claimed: &'a BTreeSet<String>, domain: &str) -> Vec<&'a str> {
+    claimed
+        .iter()
+        .map(String::as_str)
+        .filter(|c| registrable_domain(c) == Some(domain))
+        .collect()
+}
+
+/// One line for the list (about 300 characters): how many hosts have no
+/// mock, per domain (with how many have a bundled description), and where
+/// the detail is. `None` when the list is empty and the scan complete.
+fn summary(
+    unclaimed: &[UnclaimedHost],
+    claimed: &BTreeSet<String>,
+    stats: &ScanStats,
+) -> Option<String> {
+    let stopped = (!stats.complete).then(|| {
+        format!(
+            " The scan stopped early ({}), so the list may be incomplete.",
+            stats.stopped.join("; ")
+        )
+    });
+    if unclaimed.is_empty() {
+        return stopped.map(|s| format!("No host found without a mock.{s}"));
+    }
+    let groups = domains(unclaimed, claimed);
+    let mut parts: Vec<String> = groups
+        .iter()
+        .take(SUMMARY_DOMAINS)
+        .map(|(domain, hosts)| {
+            let described = hosts
+                .iter()
+                .filter(|h| h.evidence == Evidence::Spec)
+                .count();
+            let listed = hosts
+                .iter()
+                .filter(|h| h.evidence == Evidence::Catalog)
+                .count();
+            let mut detail = Vec::new();
+            if described > 0 {
+                detail.push(format!("{described} with a bundled description"));
+            }
+            if listed > 0 {
+                detail.push(format!("{listed} in the catalog"));
+            }
+            if detail.is_empty() {
+                format!("{domain} {}", hosts.len())
+            } else {
+                format!("{domain} {} ({})", hosts.len(), detail.join(", "))
+            }
+        })
+        .collect();
+    if groups.len() > SUMMARY_DOMAINS {
+        parts.push(format!("{} more domains", groups.len() - SUMMARY_DOMAINS));
+    }
+    let n = unclaimed.len();
+    Some(format!(
+        "{n} host{} the project can call ha{} no mock: {}. project_hosts (`mockingbird hosts`) lists each with what to import; mock those the app's flows use, or name why a domain is left out.{}",
+        plural(n),
+        if n == 1 { "s" } else { "ve" },
+        parts.join(", "),
+        stopped.unwrap_or_default()
+    ))
+}
+
+/// The `next_steps` for `unclaimed`: one per registrable domain (in
+/// [`domains`] order), each about [`MAX_STEP_CHARS`] long, naming its
+/// hosts by short labels under the directory of their descriptions; the
+/// detail is in `unclaimed`. At most [`MAX_STEPS`]; one more counts the
+/// rest and names `list`, and one says when the scan stopped early.
 fn next_steps(
     unclaimed: &[UnclaimedHost],
     claimed: &BTreeSet<String>,
     stats: &ScanStats,
     list: &str,
 ) -> Vec<String> {
-    let mut groups: BTreeMap<String, Vec<&UnclaimedHost>> = BTreeMap::new();
-    for h in unclaimed {
-        let key = h.domain.clone().unwrap_or_else(|| h.host.clone());
-        groups.entry(key).or_default().push(h);
-    }
-    let mocked_of = |domain: &str| -> Vec<&str> {
-        claimed
-            .iter()
-            .map(String::as_str)
-            .filter(|c| registrable_domain(c) == Some(domain))
-            .collect()
-    };
-    let mut ordered: Vec<(String, Vec<&UnclaimedHost>)> = groups.into_iter().collect();
-    ordered.sort_by_cached_key(|(domain, hosts)| {
-        (
-            mocked_of(domain).is_empty(),
-            hosts.iter().all(|h| h.sources.is_empty()),
-            domain.clone(),
-        )
-    });
     let mut steps = Vec::new();
     let mut rest_hosts = 0;
     let mut rest_domains = 0;
-    for (i, (domain, mut hosts)) in ordered.into_iter().enumerate() {
+    for (i, (domain, hosts)) in domains(unclaimed, claimed).into_iter().enumerate() {
         if i >= MAX_STEPS {
             rest_hosts += hosts.len();
             rest_domains += 1;
             continue;
         }
-        // What to import first: hosts with a description, then those
-        // the catalog lists, then the rest.
-        let kind = |h: &UnclaimedHost| match (h.specs.is_empty(), h.examples.is_empty()) {
-            (false, _) => 0,
-            (true, false) => 1,
-            (true, true) => 2,
-        };
-        hosts.sort_by(|a, b| (kind(a), &a.host).cmp(&(kind(b), &b.host)));
-        steps.push(group_step(&domain, &hosts, &mocked_of(&domain), list));
+        steps.push(domain_step(&domain, &hosts, &mocked_of(claimed, &domain)));
     }
     if rest_hosts > 0 {
         steps.push(format!(
@@ -542,115 +713,182 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
-fn group_step(domain: &str, hosts: &[&UnclaimedHost], mocked: &[&str], list: &str) -> String {
-    let mut step = if let [only] = hosts {
-        format!("{} has no mock, but the project can call it", only.host)
-    } else {
-        format!(
-            "{} hosts of {domain} that the project can call have no mock",
-            hosts.len()
-        )
-    };
+/// `host` without its `domain` suffix (`verify` for `verify.vendor.com`);
+/// the domain itself stays whole.
+fn label(host: &str, domain: &str) -> String {
+    host.strip_suffix(domain)
+        .and_then(|l| l.strip_suffix('.'))
+        .filter(|l| !l.is_empty())
+        .unwrap_or(host)
+        .to_owned()
+}
+
+/// The longest directory every path in `paths` lies in (`""` for none).
+fn common_dir<'a>(paths: impl IntoIterator<Item = &'a str>) -> String {
+    let mut common: Option<Vec<&str>> = None;
+    for path in paths {
+        let dirs: Vec<&str> = path.split('/').collect();
+        let dirs = &dirs[..dirs.len().saturating_sub(1)];
+        common = Some(match common {
+            None => dirs.to_vec(),
+            Some(c) => c
+                .iter()
+                .zip(dirs)
+                .take_while(|(a, b)| a == b)
+                .map(|(a, _)| *a)
+                .collect(),
+        });
+    }
+    common.unwrap_or_default().join("/")
+}
+
+/// `items` joined by `, ` within `budget` characters, the rest counted
+/// (`… and 4 more`).
+fn fit(items: &[String], budget: usize) -> String {
+    let mut out = String::new();
+    for (i, item) in items.iter().enumerate() {
+        let more = format!(", … and {} more", items.len() - i);
+        let sep = if i == 0 { "" } else { ", " };
+        let last = i + 1 == items.len();
+        let needed = out.len() + sep.len() + item.len() + if last { 0 } else { more.len() };
+        if i > 0 && needed > budget {
+            out.push_str(&more);
+            return out;
+        }
+        out.push_str(sep);
+        out.push_str(item);
+    }
+    out
+}
+
+/// One domain's step: its hosts by kind, each kind with what to do.
+fn domain_step(domain: &str, hosts: &[&UnclaimedHost], mocked: &[&str]) -> String {
+    let mut head = format!(
+        "{domain}: {} host{} without a mock",
+        hosts.len(),
+        plural(hosts.len())
+    );
     if !mocked.is_empty() {
-        let _ = write!(step, " (mocked: {})", mocked.join(", "));
+        let labels: Vec<String> = mocked.iter().map(|m| label(m, domain)).collect();
+        let _ = write!(head, " (mocked: {})", labels.join(", "));
     }
-    step.push('.');
-    let paths: Vec<&str> = hosts
-        .iter()
-        .flat_map(|h| h.specs.iter().map(|s| s.path.as_str()))
-        .collect();
-    let dirs: BTreeSet<&str> = paths
-        .iter()
-        .map(|p| p.rsplit_once('/').map_or("", |(dir, _)| dir))
-        .collect();
-    let common = (paths.len() > 1 && dirs.len() == 1)
-        .then(|| dirs.into_iter().next())
-        .flatten()
-        .filter(|d| !d.is_empty());
-    if let Some(dir) = common {
-        let _ = write!(step, " Bundled API descriptions in {dir}/:");
-    }
-    let shown: Vec<String> = hosts
-        .iter()
-        .take(MAX_HOSTS_PER_STEP)
-        .map(|h| host_fragment(h, common))
-        .collect();
-    let _ = write!(step, " {}", shown.join("; "));
-    if hosts.len() > MAX_HOSTS_PER_STEP {
-        let _ = write!(
-            step,
-            "; and {} more hosts of {domain} ({list})",
-            hosts.len() - MAX_HOSTS_PER_STEP
+    head.push('.');
+    let of = |e: Evidence| -> Vec<&UnclaimedHost> {
+        hosts.iter().copied().filter(|h| h.evidence == e).collect()
+    };
+    let (described, listed, named) = (
+        of(Evidence::Spec),
+        of(Evidence::Catalog),
+        of(Evidence::Literal),
+    );
+
+    // The fixed text first; the host lists share what is left.
+    let mut tails: Vec<(String, Vec<String>, String)> = Vec::new();
+    if !described.is_empty() {
+        let mut described = described;
+        // The largest APIs first: the likeliest the app's flows use.
+        let ops = |h: &UnclaimedHost| h.specs.iter().map(|s| s.operations).sum::<usize>();
+        described.sort_by(|a, b| ops(b).cmp(&ops(a)).then_with(|| a.host.cmp(&b.host)));
+        let dir = common_dir(
+            described
+                .iter()
+                .flat_map(|h| h.specs.iter().map(|s| s.path.as_str())),
         );
+        let several = described.iter().any(|h| h.specs.len() > 1);
+        let labels = described
+            .iter()
+            .map(|h| match h.specs.len() {
+                1 => label(&h.host, domain),
+                n => format!("{} ({n})", label(&h.host, domain)),
+            })
+            .collect();
+        let place = if dir.is_empty() {
+            String::new()
+        } else {
+            format!(" in {dir}/")
+        };
+        let versions = if several {
+            " (n) = n versioned descriptions, all needed: one mock each listing the host, one mocks.<name>.shares group, distinct route_prefix."
+        } else {
+            ""
+        };
+        tails.push((
+            format!(" {} with a bundled description{place}: ", described.len()),
+            labels,
+            format!(". import_contract each.{versions}"),
+        ));
     }
-    step.push_str(". Import each one the app's flows use into a mock that lists the host in hosts, or name in your hand-back why it is left out.");
+    if !listed.is_empty() {
+        let labels = listed
+            .iter()
+            .map(|h| {
+                let examples: Vec<&str> = h.examples.iter().map(|e| e.example.as_str()).collect();
+                format!("{} (`{}`)", label(&h.host, domain), examples.join("`, `"))
+            })
+            .collect();
+        tails.push((
+            format!(" {} in the catalog: ", listed.len()),
+            labels,
+            ". init_example.".to_owned(),
+        ));
+    }
+    if !named.is_empty() {
+        let labels = named.iter().map(|h| label(&h.host, domain)).collect();
+        tails.push((
+            format!(" {} only named in the app's files: ", named.len()),
+            labels,
+            ".".to_owned(),
+        ));
+    }
+    let also: Vec<String> = hosts
+        .iter()
+        .filter(|h| h.evidence == Evidence::Spec && !h.examples.is_empty())
+        .map(|h| format!("{} (`{}`)", label(&h.host, domain), h.examples[0].example))
+        .collect();
+    let also = if also.is_empty() {
+        String::new()
+    } else {
+        format!(" Also in the catalog: {}.", also.join(", "))
+    };
+    let fixed: usize = head.len()
+        + also.len()
+        + tails
+            .iter()
+            .map(|(lead, _, end)| lead.len() + end.len())
+            .sum::<usize>();
+    let budget = MAX_STEP_CHARS.saturating_sub(fixed).max(60);
+    let total: usize = tails
+        .iter()
+        .map(|(_, labels, _)| labels.iter().map(|l| l.len() + 2).sum::<usize>())
+        .sum::<usize>()
+        .max(1);
+    let mut step = head;
+    for (lead, labels, end) in &tails {
+        let own: usize = labels.iter().map(|l| l.len() + 2).sum();
+        // Each list gets a share of the budget by its length.
+        let share = (budget * own / total).max(30);
+        let _ = write!(step, "{lead}{}{end}", fit(labels, share));
+    }
+    step.push_str(&also);
     step
 }
 
-/// One host of a step: what to import for it.
-fn host_fragment(h: &UnclaimedHost, common: Option<&str>) -> String {
-    let mut s = h.host.clone();
-    if !h.sources.is_empty() {
-        let _ = write!(s, " (named in {})", h.sources.join(", "));
-    }
-    if !h.specs.is_empty() {
-        let specs: Vec<String> = h
-            .specs
-            .iter()
-            .map(|spec| {
-                let path = match common {
-                    Some(dir) => spec
-                        .path
-                        .strip_prefix(dir)
-                        .and_then(|p| p.strip_prefix('/'))
-                        .unwrap_or(&spec.path),
-                    None => &spec.path,
-                };
-                format!(
-                    "{path} ({} operation{})",
-                    spec.operations,
-                    plural(spec.operations)
-                )
-            })
-            .collect();
-        let _ = write!(s, ": import_contract {}", specs.join(" or "));
-    } else if !h.examples.is_empty() {
-        let examples: Vec<String> = h
-            .examples
-            .iter()
-            .map(|e| {
-                format!(
-                    "example `{}` (mock `{}`, contract `{}`)",
-                    e.example, e.mock, e.contract
-                )
-            })
-            .collect();
-        let _ = write!(
-            s,
-            ": the catalog lists it, {} (init_example)",
-            examples.join(" or ")
-        );
-    } else {
-        s.push_str(": no contract found: import one, or say why the app doesn't need this host");
-    }
-    s
-}
-
-/// Scans cached per (root, skipped folder) with their [`fingerprint`].
-type Cache = HashMap<(PathBuf, Option<PathBuf>), (Option<SystemTime>, Arc<RawScan>)>;
+/// Scans cached per (root, skips) with their [`fingerprint`].
+type Cache = HashMap<(PathBuf, Skip), (SystemTime, Arc<RawScan>)>;
 
 /// Projects kept in the cache.
 const CACHE_ENTRIES: usize = 16;
 
-/// [`scan`], from the cache while the root's [`fingerprint`] holds.
-fn cached_scan(root: &Path, skip: Option<&Path>, limits: Limits) -> RawScan {
+/// [`scan`], from the cache while the root's [`fingerprint`] holds. A
+/// scan the time budget stopped is not cached (the next one may get
+/// further); one stopped at a size limit is.
+fn cached_scan(root: &Path, skip: &Skip, limits: Limits) -> RawScan {
     static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = (root.to_path_buf(), skip.map(Path::to_path_buf));
+    let key = (root.to_path_buf(), skip.clone());
     let print = fingerprint(root, skip);
-    if let Ok(cache) = cache.lock()
+    if let (Ok(cache), Some(print)) = (cache.lock(), print)
         && let Some((at, scan)) = cache.get(&key)
-        && print.is_some()
         && *at == print
     {
         let mut scan = (**scan).clone();
@@ -658,7 +896,9 @@ fn cached_scan(root: &Path, skip: Option<&Path>, limits: Limits) -> RawScan {
         return scan;
     }
     let scan = scan(root, skip, limits);
-    if let Ok(mut cache) = cache.lock() {
+    if let (Ok(mut cache), Some(print)) = (cache.lock(), print)
+        && !scan.timed_out
+    {
         if cache.len() >= CACHE_ENTRIES {
             cache.clear();
         }
@@ -670,29 +910,38 @@ fn cached_scan(root: &Path, skip: Option<&Path>, limits: Limits) -> RawScan {
 /// The newest modification time of the root and the entries one and two
 /// levels below it (not the skipped folders): adding or removing a file
 /// there, or installing a dependency, changes it; an edit deeper down does
-/// not.
-fn fingerprint(root: &Path, skip: Option<&Path>) -> Option<SystemTime> {
+/// not. `None` (not cacheable) past [`MAX_FINGERPRINT_ENTRIES`] entries.
+fn fingerprint(root: &Path, skip: &Skip) -> Option<SystemTime> {
     let mtime = |p: &Path| std::fs::symlink_metadata(p).and_then(|m| m.modified()).ok();
     let mut newest = mtime(root)?;
-    let mut bump = |t: Option<SystemTime>| {
+    let mut seen = 0usize;
+    let mut bump = |t: Option<SystemTime>| -> bool {
+        seen += 1;
         if let Some(t) = t
             && t > newest
         {
             newest = t;
         }
+        seen <= MAX_FINGERPRINT_ENTRIES
     };
     for entry in std::fs::read_dir(root).ok()?.flatten() {
         let path = entry.path();
         let name = entry.file_name();
-        if SKIP_DIRS.contains(&name.to_string_lossy().as_ref()) || Some(path.as_path()) == skip {
+        if SKIP_DIRS.contains(&name.to_string_lossy().as_ref())
+            || skip.dir.as_deref() == Some(path.as_path())
+        {
             continue;
         }
-        bump(mtime(&path));
+        if !bump(mtime(&path)) {
+            return None;
+        }
         if entry.file_type().is_ok_and(|t| t.is_dir())
             && let Ok(children) = std::fs::read_dir(&path)
         {
             for child in children.flatten() {
-                bump(mtime(&child.path()));
+                if !bump(mtime(&child.path())) {
+                    return None;
+                }
             }
         }
     }
@@ -701,7 +950,7 @@ fn fingerprint(root: &Path, skip: Option<&Path>) -> Option<SystemTime> {
 
 /// Walks `root` (not `skip`, symlinks or [`SKIP_DIRS`]): the app's own
 /// files first, then its dependency folders.
-fn scan(root: &Path, skip: Option<&Path>, limits: Limits) -> RawScan {
+fn scan(root: &Path, skip: &Skip, limits: Limits) -> RawScan {
     let mut walker = Walker {
         root,
         skip,
@@ -711,9 +960,9 @@ fn scan(root: &Path, skip: Option<&Path>, limits: Limits) -> RawScan {
         stopped: None,
     };
     let mut deps = Vec::new();
-    walker.walk(root.to_path_buf(), false, &mut deps);
+    walker.walk(root.to_path_buf(), Place::App, &mut deps);
     for dir in deps {
-        walker.walk(dir, true, &mut Vec::new());
+        walker.walk(dir, Place::Dependency, &mut Vec::new());
     }
     let mut raw = walker.raw;
     raw.stats.elapsed_ms = u64::try_from(walker.start.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -731,9 +980,17 @@ fn scan(root: &Path, skip: Option<&Path>, limits: Limits) -> RawScan {
     raw
 }
 
+/// Where a folder lies: the app's own files, its tests, or a dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    App,
+    AppTests,
+    Dependency,
+}
+
 struct Walker<'a> {
     root: &'a Path,
-    skip: Option<&'a Path>,
+    skip: &'a Skip,
     limits: Limits,
     start: Instant,
     raw: RawScan,
@@ -746,6 +1003,7 @@ impl Walker<'_> {
     fn stop(&mut self) -> bool {
         if self.stopped.is_none() {
             if self.start.elapsed() >= self.limits.budget {
+                self.raw.timed_out = true;
                 self.stopped = Some(format!(
                     "time budget of {} ms",
                     self.limits.budget.as_millis()
@@ -759,11 +1017,11 @@ impl Walker<'_> {
         self.stopped.is_some()
     }
 
-    /// Walks `dir`; outside dependencies (`in_deps` false) a dependency
-    /// folder is queued in `deps` instead of entered.
-    fn walk(&mut self, dir: PathBuf, in_deps: bool, deps: &mut Vec<PathBuf>) {
-        let mut stack = vec![dir];
-        while let Some(dir) = stack.pop() {
+    /// Walks `dir`; in the app's files a dependency folder is queued in
+    /// `deps` instead of entered.
+    fn walk(&mut self, dir: PathBuf, place: Place, deps: &mut Vec<PathBuf>) {
+        let mut stack = vec![(dir, place)];
+        while let Some((dir, place)) = stack.pop() {
             if self.stop() {
                 return;
             }
@@ -785,25 +1043,33 @@ impl Walker<'_> {
                     continue;
                 };
                 let name = entry.file_name().to_string_lossy().into_owned();
+                let name = name.as_str();
                 let path = entry.path();
                 if kind.is_dir() {
-                    if SKIP_DIRS.contains(&name.as_str()) || Some(path.as_path()) == self.skip {
+                    let in_deps = place == Place::Dependency;
+                    if SKIP_DIRS.contains(&name)
+                        || self.skip.dir.as_deref() == Some(path.as_path())
+                        || (!in_deps && BUILD_DIRS.contains(&name))
+                        || (in_deps && DEPENDENCY_SKIP_DIRS.contains(&name))
+                    {
                         continue;
                     }
-                    if !in_deps && DEPENDENCY_DIRS.contains(&name.as_str()) {
+                    if !in_deps && DEPENDENCY_DIRS.contains(&name) {
                         deps.push(path);
-                    } else if !(in_deps && DEPENDENCY_SKIP_DIRS.contains(&name.as_str())) {
-                        stack.push(path);
+                    } else if place == Place::App && TEST_DIRS.contains(&name) {
+                        stack.push((path, Place::AppTests));
+                    } else {
+                        stack.push((path, place));
                     }
-                } else if kind.is_file() {
-                    files.push((path, name));
+                } else if kind.is_file() && !self.skip.files.contains(&path) {
+                    files.push((path, name.to_owned()));
                 }
             }
             for (path, name) in files.into_iter().rev() {
                 if self.stop() {
                     return;
                 }
-                self.file(&path, &name, in_deps);
+                self.file(&path, &name, place);
             }
         }
     }
@@ -826,10 +1092,10 @@ impl Walker<'_> {
         Some(bytes)
     }
 
-    fn file(&mut self, path: &Path, name: &str, in_deps: bool) {
+    fn file(&mut self, path: &Path, name: &str, place: Place) {
         let ext = extension(name);
         let spec_ext = SPEC_EXTENSIONS.contains(&ext.as_str());
-        let source = !in_deps
+        let source = place == Place::App
             && (SOURCE_EXTENSIONS.contains(&ext.as_str()) || name.starts_with(".env"))
             && !MANIFESTS.contains(&name)
             && !LOCKFILES.contains(&name);
@@ -840,7 +1106,10 @@ impl Walker<'_> {
             return;
         };
         let rel = relative(self.root, path);
-        if source {
+        if place != Place::Dependency {
+            // The app's own files are read whole (up to the per-file limit):
+            // a description is sniffed over all of it, and a file that is
+            // none is searched for URLs (outside tests).
             let Some(bytes) = self.read(path, self.limits.max_file_bytes) else {
                 return;
             };
@@ -850,11 +1119,15 @@ impl Walker<'_> {
             if spec_ext && sniff(&bytes, &ext) {
                 if len > self.limits.max_file_bytes {
                     self.raw.stats.skipped_large += 1;
-                } else {
-                    self.spec(&bytes, &ext, &rel);
+                    return;
+                }
+                if self.spec(&bytes, &ext, &rel) {
+                    return;
                 }
             }
-            self.literals(&bytes, &rel);
+            if source {
+                self.literals(&bytes, &rel);
+            }
             return;
         }
         let Some(head) = self.read(path, HEAD) else {
@@ -878,9 +1151,11 @@ impl Walker<'_> {
         self.spec(&bytes, &ext, &rel);
     }
 
-    fn spec(&mut self, bytes: &[u8], ext: &str, rel: &str) {
+    /// Records the hosts of `bytes` when it is an API description; whether
+    /// it is one.
+    fn spec(&mut self, bytes: &[u8], ext: &str, rel: &str) -> bool {
         let Some((title, hosts)) = parse_spec(bytes, ext) else {
-            return;
+            return false;
         };
         for (host, operations) in hosts {
             self.raw.specs.entry(host).or_default().push(SpecRef {
@@ -889,6 +1164,7 @@ impl Walker<'_> {
                 operations,
             });
         }
+        true
     }
 
     fn literals(&mut self, bytes: &[u8], rel: &str) {
@@ -919,10 +1195,12 @@ fn relative(root: &Path, path: &Path) -> String {
         .join("/")
 }
 
-/// Whether the start of a JSON or YAML file may be an API description: a
-/// top-level key OpenAPI or Swagger documents have (`openapi`, `swagger`,
-/// `paths`, `components`, `servers`, `basePath`; JSON writers may put
-/// `openapi` after a large `components`). The parse decides.
+/// Whether `head` (the start of a JSON or YAML file) may be an API
+/// description. JSON: it starts with `{` and names one of the keys OpenAPI
+/// or Swagger documents have at the top (`openapi`, `swagger`, `paths`,
+/// `components`, `servers`, `basePath`) anywhere in it, since writers may
+/// put `openapi` after a large `components`. YAML: a line starts with one
+/// of those keys. The parse decides.
 fn sniff(head: &[u8], ext: &str) -> bool {
     const KEYS: &[&str] = &[
         "openapi",
@@ -950,67 +1228,199 @@ fn sniff(head: &[u8], ext: &str) -> bool {
     })
 }
 
-#[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+/// A value that may have another shape than expected: an odd member (a
+/// scalar where an object belongs) is ignored instead of failing the whole
+/// document.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Lenient<T> {
+    Valid(T),
+    Other(serde::de::IgnoredAny),
+}
+
+impl<T> Lenient<T> {
+    fn get(&self) -> Option<&T> {
+        match self {
+            Lenient::Valid(v) => Some(v),
+            Lenient::Other(_) => None,
+        }
+    }
+}
+
+/// `Option<Lenient<T>>` as an `Option<&T>`.
+fn ok<T>(v: Option<&Lenient<T>>) -> Option<&T> {
+    v.and_then(Lenient::get)
+}
+
+type Servers = Lenient<Vec<Lenient<Server>>>;
+
+#[derive(Deserialize)]
 struct SpecDoc {
     openapi: Option<serde::de::IgnoredAny>,
     swagger: Option<serde::de::IgnoredAny>,
-    info: Option<Info>,
-    servers: Option<Vec<Server>>,
-    host: Option<String>,
-    paths: Option<BTreeMap<String, PathItem>>,
+    info: Option<Lenient<Info>>,
+    servers: Option<Servers>,
+    host: Option<Lenient<String>>,
+    paths: Option<Paths>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 struct Info {
-    title: Option<String>,
+    title: Option<Lenient<String>>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 struct Server {
-    url: Option<String>,
-    variables: Option<BTreeMap<String, Variable>>,
+    url: Option<Lenient<String>>,
+    variables: Option<Lenient<BTreeMap<String, Lenient<Variable>>>>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 struct Variable {
-    default: Option<String>,
+    default: Option<Lenient<String>>,
 }
 
-#[derive(Deserialize, Default)]
-struct PathItem {
-    servers: Option<Vec<Server>>,
-    get: Option<Operation>,
-    put: Option<Operation>,
-    post: Option<Operation>,
-    delete: Option<Operation>,
-    options: Option<Operation>,
-    head: Option<Operation>,
-    patch: Option<Operation>,
-    trace: Option<Operation>,
+/// The HTTP methods of an OpenAPI path item.
+const METHODS: &[&str] = &[
+    "get", "put", "post", "delete", "options", "head", "patch", "trace",
+];
+
+/// A value read from a map, any other value (a scalar, a list) giving
+/// `Default`: [`Paths`], [`PathItem`] and [`OpSlot`] skip what they do not
+/// read without buffering it, unlike [`Lenient`], which suits small values.
+trait FromMap: Default {
+    fn from_map<'de, A: serde::de::MapAccess<'de>>(map: A) -> Result<Self, A::Error>;
 }
 
-#[derive(Deserialize, Default)]
-struct Operation {
-    servers: Option<Vec<Server>>,
-}
+struct OrDefault<T>(std::marker::PhantomData<T>);
 
-impl PathItem {
-    fn operations(&self) -> impl Iterator<Item = &Operation> {
-        [
-            &self.get,
-            &self.put,
-            &self.post,
-            &self.delete,
-            &self.options,
-            &self.head,
-            &self.patch,
-            &self.trace,
-        ]
-        .into_iter()
-        .flatten()
+impl<'de, T: FromMap> serde::de::Visitor<'de> for OrDefault<T> {
+    type Value = T;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("any value")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
+        T::from_map(map)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<T, A::Error> {
+        while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+        Ok(T::default())
+    }
+
+    fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<T, D::Error> {
+        d.deserialize_any(self)
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<T, E> {
+        Ok(T::default())
+    }
+
+    fn visit_i64<E>(self, _: i64) -> Result<T, E> {
+        Ok(T::default())
+    }
+
+    fn visit_u64<E>(self, _: u64) -> Result<T, E> {
+        Ok(T::default())
+    }
+
+    fn visit_f64<E>(self, _: f64) -> Result<T, E> {
+        Ok(T::default())
+    }
+
+    fn visit_str<E>(self, _: &str) -> Result<T, E> {
+        Ok(T::default())
+    }
+
+    fn visit_bytes<E>(self, _: &[u8]) -> Result<T, E> {
+        Ok(T::default())
+    }
+
+    fn visit_none<E>(self) -> Result<T, E> {
+        Ok(T::default())
+    }
+
+    fn visit_unit<E>(self) -> Result<T, E> {
+        Ok(T::default())
     }
 }
+
+/// `Deserialize` through [`OrDefault`].
+macro_rules! from_map_deserialize {
+    ($t:ty) => {
+        impl<'de> Deserialize<'de> for $t {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                d.deserialize_any(OrDefault::<$t>(std::marker::PhantomData))
+            }
+        }
+    };
+}
+
+/// The path items of `paths`.
+#[derive(Default)]
+struct Paths(Vec<PathItem>);
+
+impl FromMap for Paths {
+    fn from_map<'de, A: serde::de::MapAccess<'de>>(mut map: A) -> Result<Self, A::Error> {
+        let mut items = Vec::new();
+        while map.next_key::<serde::de::IgnoredAny>()?.is_some() {
+            items.push(map.next_value::<PathItem>()?);
+        }
+        Ok(Paths(items))
+    }
+}
+
+#[derive(Default)]
+struct PathItem {
+    servers: Option<Servers>,
+    operations: Vec<Operation>,
+}
+
+impl FromMap for PathItem {
+    fn from_map<'de, A: serde::de::MapAccess<'de>>(mut map: A) -> Result<Self, A::Error> {
+        let mut item = PathItem::default();
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "servers" {
+                item.servers = Some(map.next_value()?);
+            } else if METHODS.contains(&key.as_str()) {
+                if let OpSlot(Some(op)) = map.next_value()? {
+                    item.operations.push(op);
+                }
+            } else {
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+        }
+        Ok(item)
+    }
+}
+
+/// An operation, or `None` for a method member that is not an object.
+#[derive(Default)]
+struct OpSlot(Option<Operation>);
+
+struct Operation {
+    servers: Option<Servers>,
+}
+
+impl FromMap for OpSlot {
+    fn from_map<'de, A: serde::de::MapAccess<'de>>(mut map: A) -> Result<Self, A::Error> {
+        let mut op = Operation { servers: None };
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "servers" {
+                op.servers = Some(map.next_value()?);
+            } else {
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+        }
+        Ok(OpSlot(Some(op)))
+    }
+}
+
+from_map_deserialize!(Paths);
+from_map_deserialize!(PathItem);
+from_map_deserialize!(OpSlot);
 
 /// An OpenAPI 3 or Swagger 2 document's title and, per host it names, the
 /// operations served there; `None` when `bytes` is not one.
@@ -1023,51 +1433,45 @@ fn parse_spec(bytes: &[u8], ext: &str) -> Option<(Option<String>, BTreeMap<Strin
     if doc.openapi.is_none() && doc.swagger.is_none() {
         return None;
     }
-    let mut top = server_hosts(doc.servers.as_deref());
+    let mut top = server_hosts(ok(doc.servers.as_ref()));
     if doc.swagger.is_some()
-        && let Some(host) = doc
-            .host
-            .as_deref()
-            .and_then(|h| url_host(&format!("https://{h}")))
+        && let Some(host) = ok(doc.host.as_ref()).and_then(|h| url_host(&format!("https://{h}")))
     {
         top.push(host);
     }
     let mut hosts: BTreeMap<String, usize> = top.iter().map(|h| (h.clone(), 0)).collect();
-    for item in doc.paths.iter().flat_map(BTreeMap::values) {
-        let path_hosts = item
-            .servers
-            .as_deref()
-            .map(|s| server_hosts(Some(s)))
+    for item in doc.paths.iter().flat_map(|p| &p.0) {
+        let path_hosts = Some(server_hosts(ok(item.servers.as_ref())))
             .filter(|h| !h.is_empty())
             .unwrap_or_else(|| top.clone());
         for host in &path_hosts {
             hosts.entry(host.clone()).or_insert(0);
         }
-        for op in item.operations() {
-            let op_hosts = op
-                .servers
-                .as_deref()
-                .map(|s| server_hosts(Some(s)))
-                .filter(|h| !h.is_empty());
+        for op in &item.operations {
+            let op_hosts = Some(server_hosts(ok(op.servers.as_ref()))).filter(|h| !h.is_empty());
             for host in op_hosts.as_ref().unwrap_or(&path_hosts) {
                 *hosts.entry(host.clone()).or_insert(0) += 1;
             }
         }
     }
-    let title = doc.info.and_then(|i| i.title).filter(|t| !t.is_empty());
+    let title = ok(doc.info.as_ref())
+        .and_then(|i| ok(i.title.as_ref()))
+        .filter(|t| !t.is_empty())
+        .cloned();
     Some((title, hosts))
 }
 
 /// The usable hosts of OpenAPI `servers`, with each `{variable}` replaced
 /// by its default.
-fn server_hosts(servers: Option<&[Server]>) -> Vec<String> {
+fn server_hosts(servers: Option<&Vec<Lenient<Server>>>) -> Vec<String> {
     let mut hosts: Vec<String> = servers
         .into_iter()
         .flatten()
+        .filter_map(Lenient::get)
         .filter_map(|s| {
-            let mut url = s.url.clone()?;
-            for (name, var) in s.variables.iter().flatten() {
-                if let Some(default) = &var.default {
+            let mut url = ok(s.url.as_ref())?.clone();
+            for (name, var) in ok(s.variables.as_ref()).into_iter().flatten() {
+                if let Some(default) = var.get().and_then(|v| ok(v.default.as_ref())) {
                     url = url.replace(&format!("{{{name}}}"), default);
                 }
             }
@@ -1196,11 +1600,19 @@ mod tests {
         a.unclaimed.iter().find(|h| h.host == host)
     }
 
+    fn complete() -> ScanStats {
+        ScanStats {
+            complete: true,
+            ..ScanStats::default()
+        }
+    }
+
     #[test]
     fn bundled_openapi_and_swagger_descriptions_are_found_and_named() {
         let dir = project();
         let a = answer(dir.path());
         let checks = unclaimed(&a, "checks.vendor-one.com").expect("OpenAPI 3 host");
+        assert_eq!(checks.evidence, Evidence::Spec);
         assert_eq!(
             checks.specs,
             [SpecRef {
@@ -1218,17 +1630,54 @@ mod tests {
         // The mocked domain comes first, with what to import.
         assert_eq!(
             a.next_steps[0],
-            "checks.vendor-one.com has no mock, but the project can call it (mocked: api.vendor-one.com). checks.vendor-one.com: import_contract node_modules/@vendor-one/sdk/specs/vendor_one_checks.json (3 operations). Import each one the app's flows use into a mock that lists the host in hosts, or name in your hand-back why it is left out."
+            "vendor-one.com: 1 host without a mock (mocked: api). 1 with a bundled description in node_modules/@vendor-one/sdk/specs/: checks. import_contract each."
         );
-        assert!(
-            a.next_steps[1]
-                .contains("import_contract vendor/ledger/api/ledger.yaml (2 operations)"),
-            "{:?}",
-            a.next_steps
+        assert_eq!(
+            a.next_steps[1],
+            "vendor-two.io: 1 host without a mock. 1 with a bundled description in vendor/ledger/api/: ledger. import_contract each."
+        );
+        assert_eq!(
+            a.summary.as_deref(),
+            Some(
+                "2 hosts the project can call have no mock: vendor-one.com 1 (1 with a bundled description), vendor-two.io 1 (1 with a bundled description). project_hosts (`mockingbird hosts`) lists each with what to import; mock those the app's flows use, or name why a domain is left out."
+            )
         );
         assert_eq!(
             a.project_root,
             dir.path().canonicalize().unwrap().display().to_string()
+        );
+    }
+
+    /// npm packages ship their descriptions in `dist/`: build-output names
+    /// are skipped in the app only.
+    #[test]
+    fn a_description_in_a_dependency_build_folder_is_found() {
+        let dir = project();
+        write(
+            dir.path(),
+            "node_modules/pkg/dist/api.json",
+            &OPENAPI.replace("checks.vendor-one.com", "shipped.vendor-five.com"),
+        );
+        let a = answer(dir.path());
+        assert!(unclaimed(&a, "shipped.vendor-five.com").is_some());
+    }
+
+    #[test]
+    fn several_descriptions_of_one_host_are_all_needed() {
+        let dir = project();
+        write(
+            dir.path(),
+            "node_modules/@vendor-one/sdk/specs/vendor_one_checks_v3.json",
+            &OPENAPI.replace("/v2/", "/v3/"),
+        );
+        let a = answer(dir.path());
+        assert_eq!(
+            unclaimed(&a, "checks.vendor-one.com").unwrap().specs.len(),
+            2
+        );
+        assert_eq!(
+            a.next_steps[0],
+            "vendor-one.com: 1 host without a mock (mocked: api). 1 with a bundled description in node_modules/@vendor-one/sdk/specs/: checks (2). import_contract each. (n) = n versioned descriptions, all needed: one mock each listing the host, one mocks.<name>.shares group, distinct route_prefix."
         );
     }
 
@@ -1243,12 +1692,43 @@ mod tests {
         let a = answer(dir.path());
         assert!(a.unclaimed.is_empty(), "{:?}", a.unclaimed);
         assert!(a.next_steps.is_empty(), "{:?}", a.next_steps);
+        assert!(a.summary.is_none());
         assert_eq!(a.claimed, ["checks.vendor-one.com", "ledger.vendor-two.io"]);
         // A host a running server's mock lists counts as well.
         write(dir.path(), "mocks/mockingbird.yaml", "mocks: {}\n");
         let served: HashSet<String> = ["ledger.vendor-two.io".to_owned()].into();
         let a = project_hosts(&dir.path().join("mocks/mockingbird.yaml"), &served).unwrap();
         assert!(unclaimed(&a, "ledger.vendor-two.io").is_none());
+        assert!(unclaimed(&a, "checks.vendor-one.com").is_some());
+    }
+
+    /// The mocks' own contracts and world files are not the app's, wherever
+    /// the config sits (here at the root).
+    #[test]
+    fn the_mocks_own_contracts_are_skipped_with_the_config_at_the_root() {
+        let dir = project();
+        write(
+            dir.path(),
+            "contracts/billing.json",
+            &OPENAPI.replace("checks.vendor-one.com", "billing.vendor-six.com"),
+        );
+        write(
+            dir.path(),
+            "contracts/billing.world.json",
+            "{\"note\": \"https://world.vendor-six.com\"}",
+        );
+        write(
+            dir.path(),
+            "mockingbird.yaml",
+            "mocks:\n  billing:\n    contract: contracts/billing.json\n    world: contracts/billing.world.json\n",
+        );
+        let a = project_hosts(&dir.path().join("mockingbird.yaml"), &HashSet::new()).unwrap();
+        assert!(
+            unclaimed(&a, "billing.vendor-six.com").is_none(),
+            "{:?}",
+            a.unclaimed
+        );
+        assert!(unclaimed(&a, "world.vendor-six.com").is_none());
         assert!(unclaimed(&a, "checks.vendor-one.com").is_some());
     }
 
@@ -1260,24 +1740,51 @@ mod tests {
             "src/client.js",
             "const BASE = 'https://billing.vendor-one.com/v1';\n// docs: https://docs.unrelated-site.org/guide\nfetch(`http://localhost:3000/x`); 'https://api.example.com';\n",
         );
-        // Dependencies are not read for literals.
+        // Dependencies and the app's tests are not read for literals.
         write(
             dir.path(),
             "node_modules/x/index.js",
             "'https://deps.vendor-one.com'",
         );
+        write(
+            dir.path(),
+            "test/client.test.js",
+            "'https://tests.vendor-one.com'",
+        );
         let a = answer(dir.path());
         let billing = unclaimed(&a, "billing.vendor-one.com").expect("kept");
         assert_eq!(billing.sources, ["src/client.js"]);
-        assert!(billing.specs.is_empty());
+        assert_eq!(billing.evidence, Evidence::Literal);
+        assert!(!billing.fails_verify());
+        assert!(
+            unclaimed(&a, "checks.vendor-one.com")
+                .unwrap()
+                .fails_verify()
+        );
         assert!(unclaimed(&a, "docs.unrelated-site.org").is_none());
         assert!(unclaimed(&a, "deps.vendor-one.com").is_none());
+        assert!(unclaimed(&a, "tests.vendor-one.com").is_none());
         assert!(a.unclaimed.iter().all(|h| h.host != "localhost"));
-        let step = &a.next_steps[0];
-        assert!(
-            step.starts_with("2 hosts of vendor-one.com that the project can call have no mock (mocked: api.vendor-one.com). checks.vendor-one.com: import_contract node_modules/@vendor-one/sdk/specs/vendor_one_checks.json (3 operations); billing.vendor-one.com (named in src/client.js): no contract found: import one, or say why the app doesn't need this host. Import each"),
-            "{step}"
+        assert_eq!(
+            a.next_steps[0],
+            "vendor-one.com: 2 hosts without a mock (mocked: api). 1 with a bundled description in node_modules/@vendor-one/sdk/specs/: checks. import_contract each. 1 only named in the app's files: billing."
         );
+    }
+
+    /// A description in the app's own files is not also searched for URLs.
+    #[test]
+    fn a_parsed_description_is_not_searched_for_literals() {
+        let dir = project();
+        let own = OPENAPI
+            .replace("checks.vendor-one.com", "own.vendor-one.com")
+            .replace(
+                "\"version\": \"1\"",
+                "\"version\": \"1\", \"termsOfService\": \"https://terms.vendor-one.com\"",
+            );
+        write(dir.path(), "api/own.json", &own);
+        let a = answer(dir.path());
+        assert!(unclaimed(&a, "own.vendor-one.com").is_some());
+        assert!(unclaimed(&a, "terms.vendor-one.com").is_none());
     }
 
     #[test]
@@ -1312,11 +1819,15 @@ mod tests {
     fn caps_stop_the_scan_and_say_so() {
         let dir = project();
         let root = dir.path().canonicalize().unwrap();
-        let tiny = Limits {
-            max_files: 2,
-            ..Limits::default()
-        };
-        let raw = scan(&root, None, tiny);
+        let none = Skip::default();
+        let raw = scan(
+            &root,
+            &none,
+            Limits {
+                max_files: 2,
+                ..Limits::default()
+            },
+        );
         assert!(!raw.stats.complete);
         assert_eq!(raw.stats.stopped, ["2 files visited"]);
         let steps = next_steps(&[], &BTreeSet::new(), &raw.stats, "`list`");
@@ -1326,10 +1837,16 @@ mod tests {
             "{}",
             steps[0]
         );
+        assert_eq!(
+            summary(&[], &BTreeSet::new(), &raw.stats).as_deref(),
+            Some(
+                "No host found without a mock. The scan stopped early (2 files visited), so the list may be incomplete."
+            )
+        );
 
         let raw = scan(
             &root,
-            None,
+            &none,
             Limits {
                 max_total_bytes: 10,
                 ..Limits::default()
@@ -1340,7 +1857,7 @@ mod tests {
 
         let raw = scan(
             &root,
-            None,
+            &none,
             Limits {
                 max_file_bytes: 64,
                 ..Limits::default()
@@ -1355,13 +1872,62 @@ mod tests {
 
         let raw = scan(
             &root,
-            None,
+            &none,
             Limits {
                 budget: Duration::ZERO,
                 ..Limits::default()
             },
         );
         assert_eq!(raw.stats.stopped, ["time budget of 0 ms"]);
+        assert!(raw.timed_out);
+    }
+
+    #[test]
+    fn the_cache_is_marked_and_a_new_file_invalidates_it() {
+        let dir = project();
+        let root = dir.path().canonicalize().unwrap();
+        let skip = Skip::default();
+        let first = cached_scan(&root, &skip, Limits::default());
+        assert!(!first.stats.cached);
+        let again = cached_scan(&root, &skip, Limits::default());
+        assert!(again.stats.cached);
+        assert_eq!(again.specs, first.specs);
+        // A new file one level down changes the fingerprint.
+        std::thread::sleep(Duration::from_millis(20));
+        write(
+            &root,
+            "vendor/new.json",
+            &OPENAPI.replace("checks.vendor-one.com", "new.vendor-seven.com"),
+        );
+        let fresh = cached_scan(&root, &skip, Limits::default());
+        assert!(!fresh.stats.cached);
+        assert!(fresh.specs.contains_key("new.vendor-seven.com"));
+    }
+
+    #[test]
+    fn a_scan_the_clock_stopped_is_not_cached() {
+        let dir = project();
+        let root = dir.path().canonicalize().unwrap();
+        let skip = Skip::default();
+        let quick = Limits {
+            budget: Duration::ZERO,
+            ..Limits::default()
+        };
+        assert!(cached_scan(&root, &skip, quick).timed_out);
+        let second = cached_scan(&root, &skip, quick);
+        assert!(!second.stats.cached);
+        // A size-capped scan is cached.
+        let small = Limits {
+            max_files: 2,
+            ..Limits::default()
+        };
+        let other = tempfile::tempdir().unwrap();
+        let other = other.path().canonicalize().unwrap();
+        write(&other, "a.json", "{}");
+        write(&other, "b.json", "{}");
+        write(&other, "c.json", "{}");
+        assert!(!cached_scan(&other, &skip, small).stats.cached);
+        assert!(cached_scan(&other, &skip, small).stats.cached);
     }
 
     #[cfg(unix)]
@@ -1388,29 +1954,42 @@ mod tests {
     #[test]
     fn a_host_without_a_description_falls_back_to_the_catalog() {
         let dir = project();
-        // A catalog example's host, named in the app's source: known by the
-        // catalog alone.
+        // A catalog example's host, named in the app's source: kept by the
+        // exact host, not by its domain.
         let host = crate::examples::catalog_hosts()
             .into_iter()
             .find(|h| !crate::examples::serving(h).is_empty())
             .unwrap();
+        let domain = registrable_domain(&host).unwrap().to_owned();
+        let sibling = format!("docs-site.{domain}");
         write(
             dir.path(),
             "src/app.py",
-            &format!("BASE = \"https://{host}/v1\"\n"),
+            &format!("BASE = \"https://{host}/v1\"\nDOCS = \"https://{sibling}/x\"\n"),
         );
         let a = answer(dir.path());
         let h = unclaimed(&a, &host).expect("catalog host kept");
-        assert!(!h.examples.is_empty());
-        let step = a.next_steps.iter().find(|s| s.contains(&host)).unwrap();
+        assert_eq!(h.evidence, Evidence::Catalog);
+        assert!(h.fails_verify());
+        assert!(
+            unclaimed(&a, &sibling).is_none(),
+            "a doc link of the domain"
+        );
+        let step = a
+            .next_steps
+            .iter()
+            .find(|s| s.starts_with(&domain))
+            .unwrap();
         let serving = &crate::examples::serving(&host)[0];
         assert!(
             step.contains(&format!(
-                "{host} (named in src/app.py): the catalog lists it, example `{}` (mock `{}`, contract `{}`)",
-                serving.example, serving.mock, serving.contract
+                "1 in the catalog: {} (`{}",
+                label(&host, &domain),
+                serving.example
             )),
             "{step}"
         );
+        assert!(step.contains("init_example"), "{step}");
     }
 
     #[test]
@@ -1418,16 +1997,54 @@ mod tests {
         let hosts: Vec<UnclaimedHost> = (0..12)
             .map(|i| new_host(&format!("api.vendor{i:02}.com")))
             .collect();
-        let stats = ScanStats {
-            complete: true,
-            ..ScanStats::default()
-        };
-        let steps = next_steps(&hosts, &BTreeSet::new(), &stats, "`mockingbird hosts`");
+        let steps = next_steps(&hosts, &BTreeSet::new(), &complete(), "`mockingbird hosts`");
         assert_eq!(steps.len(), MAX_STEPS + 1);
         assert_eq!(
             steps[MAX_STEPS],
             "And 4 more hosts in 4 more domains have no mock: `mockingbird hosts` lists them all."
         );
+        let line = summary(&hosts, &BTreeSet::new(), &complete()).unwrap();
+        assert!(line.contains(", 8 more domains."), "{line}");
+    }
+
+    /// Many hosts of one domain fit one step of about 500 characters.
+    #[test]
+    fn a_large_domain_step_stays_short() {
+        let hosts: Vec<UnclaimedHost> = (0..60)
+            .map(|i| UnclaimedHost {
+                evidence: Evidence::Spec,
+                specs: vec![SpecRef {
+                    path: format!("node_modules/sdk/specs/product_{i:02}.json"),
+                    title: None,
+                    operations: 60 - i,
+                }],
+                ..new_host(&format!("product{i:02}.vendor.com"))
+            })
+            .collect();
+        let claimed: BTreeSet<String> = ["api.vendor.com".to_owned()].into();
+        let steps = next_steps(&hosts, &claimed, &complete(), "`list`");
+        assert_eq!(steps.len(), 1);
+        let step = &steps[0];
+        assert!(step.len() <= MAX_STEP_CHARS + 40, "{} {step}", step.len());
+        assert!(
+            step.starts_with("vendor.com: 60 hosts without a mock (mocked: api). 60 with a bundled description in node_modules/sdk/specs/: product00, product01, "),
+            "{step}"
+        );
+        assert!(step.contains(" more. import_contract each."), "{step}");
+    }
+
+    #[test]
+    fn a_blocked_host_is_left_out_of_the_summary() {
+        let dir = project();
+        let a = answer(dir.path());
+        let blocked: HashSet<String> = ["checks.vendor-one.com".to_owned()].into();
+        let line = a.summary_without(&blocked).unwrap();
+        assert!(
+            line.starts_with("1 host the project can call has no mock: vendor-two.io 1"),
+            "{line}"
+        );
+        let all: HashSet<String> = a.unclaimed.iter().map(|h| h.host.clone()).collect();
+        assert!(a.summary_without(&all).is_none());
     }
 
     #[test]
@@ -1440,6 +2057,26 @@ mod tests {
             project_root(&root.join("mocks/mockingbird.yaml")),
             root.join("mocks")
         );
+        assert!(too_broad(Path::new("/")));
+    }
+
+    /// An odd member (a scalar where an object belongs) loses that member,
+    /// not the document.
+    #[test]
+    fn an_odd_member_does_not_fail_the_description() {
+        let doc = r#"{"openapi": "3.0.0", "info": "not an object",
+          "servers": [{"url": "https://odd.vendor.com"}, 7],
+          "paths": {
+            "/a": {"x-flag": true, "servers": "nope", "get": {}, "post": "weird"},
+            "/b": 5,
+            "/c": {"get": {"servers": [{"url": 3}]}}
+          }}"#;
+        let (title, hosts) = parse_spec(doc.as_bytes(), "json").unwrap();
+        assert_eq!(title, None);
+        assert_eq!(
+            hosts.into_iter().collect::<Vec<_>>(),
+            [("odd.vendor.com".to_owned(), 2)]
+        );
     }
 
     #[test]
@@ -1448,25 +2085,23 @@ mod tests {
         assert!(!sniff(b"{\"name\": \"pkg\", \"version\": \"1\"}", "json"));
         assert!(sniff(b"# c\nopenapi: 3.1.0\n", "yaml"));
         assert!(!sniff(b"name: ci\non: push\n", "yml"));
-        let hosts = url_hosts(b"a https://API.Vendor.com:443/x b http://10.0.0.1/ c ftp://f.vendor.com d https://${HOST}/");
+        let hosts = url_hosts(
+            b"a https://API.Vendor.com:443/x b http://10.0.0.1/ c ftp://f.vendor.com d https://${HOST}/",
+        );
         assert_eq!(hosts.into_iter().collect::<Vec<_>>(), ["api.vendor.com"]);
         assert_eq!(
             url_host("https://{region}.api.vendor.com/v1"),
             None,
             "an unresolved variable"
         );
-        let servers = [Server {
-            url: Some("https://{region}.api.vendor.com/v1".into()),
-            variables: Some(
-                [(
-                    "region".to_owned(),
-                    Variable {
-                        default: Some("eu".into()),
-                    },
-                )]
-                .into(),
-            ),
-        }];
+        let servers: Vec<Lenient<Server>> = serde_json::from_str(
+            r#"[{"url": "https://{region}.api.vendor.com/v1", "variables": {"region": {"default": "eu"}}}]"#,
+        )
+        .unwrap();
         assert_eq!(server_hosts(Some(&servers)), ["eu.api.vendor.com"]);
+        assert_eq!(label("verify.vendor.com", "vendor.com"), "verify");
+        assert_eq!(label("vendor.com", "vendor.com"), "vendor.com");
+        assert_eq!(common_dir(["a/b/c/x.json", "a/b/y.json"]), "a/b");
+        assert_eq!(common_dir(["x.json"]), "");
     }
 }

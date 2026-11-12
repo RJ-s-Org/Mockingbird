@@ -307,15 +307,9 @@ async fn verify(
     args: mockingbird::report::VerifyArgs,
 ) -> Result<(), Failure> {
     use mockingbird::report;
+    let config = report::unclaimed_hosts_config(&args).map_err(Failure::Usage)?;
     let mut collected = report::collect(admin_url, token, workspace).await?;
-    if args.no_unclaimed_hosts {
-        let config = mockingbird::proxy::env::config_or_local(args.config.as_deref()).ok_or_else(
-            || {
-                Failure::Usage(
-                    "--no-unclaimed-hosts scans the project of a config: pass -c <mockingbird.yaml> (there is no ./mockingbird.yaml)".into(),
-                )
-            },
-        )?;
+    if let Some(config) = config {
         report::add_unclaimed_hosts(&mut collected, &config, admin_url, token).await?;
     }
     let failures =

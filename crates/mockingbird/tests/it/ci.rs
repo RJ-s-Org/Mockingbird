@@ -392,6 +392,31 @@ fn server_start_fails_on_a_busy_data_port() {
     assert_start_refused(&ports, "data_plane", ports.data);
 }
 
+/// `verify --no-unclaimed-hosts` without its config is a usage error (exit
+/// 2), found before any server is asked.
+#[test]
+fn no_unclaimed_hosts_without_a_config_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing.yaml");
+    let out = mockingbird(
+        &[
+            "--admin-url",
+            "http://127.0.0.1:1",
+            "verify",
+            "--no-unclaimed-hosts",
+            "-c",
+            &missing.display().to_string(),
+        ],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--no-unclaimed-hosts: no config at"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn replay_and_record_must_share_a_directory() {
     let out = mockingbird(

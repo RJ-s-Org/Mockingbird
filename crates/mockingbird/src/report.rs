@@ -58,14 +58,16 @@ pub struct VerifyArgs {
     /// contract (404 or 405: a route the contract lacks).
     #[arg(long)]
     pub no_unmatched: bool,
-    /// Fail when the project can call a host no mock lists: a host of an
-    /// API description bundled in the project (its dependencies included)
-    /// or of a URL literal in its own files (`mockingbird hosts`). Scans
-    /// the project of `--config`.
+    /// Fail when the project can call a host no mock lists that an API
+    /// description bundled in the project (its dependencies included) or a
+    /// catalog example serves (`mockingbird hosts`); hosts only named by a
+    /// URL in the app's files are listed, not failed on. Scans the project
+    /// of `--config`.
     #[arg(long)]
     pub no_unclaimed_hosts: bool,
-    /// The project's config for `--no-unclaimed-hosts`; default
-    /// `./mockingbird.yaml`.
+    /// The project's config: the project `--no-unclaimed-hosts` scans
+    /// (default `./mockingbird.yaml`), and, without `--admin-url`, the
+    /// server whose admin listener it describes.
     #[arg(short = 'c', long)]
     pub config: Option<PathBuf>,
     /// Fail on 5xx responses.
@@ -274,9 +276,31 @@ pub async fn collect(
     Ok(report)
 }
 
+/// The config `verify --no-unclaimed-hosts` scans the project of: `-c`,
+/// else `./mockingbird.yaml`; `None` without the flag.
+///
+/// # Errors
+///
+/// A usage message when the flag is given and that config does not exist.
+pub fn unclaimed_hosts_config(args: &VerifyArgs) -> Result<Option<PathBuf>, String> {
+    if !args.no_unclaimed_hosts {
+        return Ok(None);
+    }
+    match crate::proxy::env::config_or_local(args.config.as_deref()) {
+        Some(config) if config.is_file() => Ok(Some(config)),
+        Some(config) => Err(format!(
+            "--no-unclaimed-hosts: no config at {}",
+            config.display()
+        )),
+        None => Err("--no-unclaimed-hosts scans the project of a config: pass -c <mockingbird.yaml> (there is no ./mockingbird.yaml)".into()),
+    }
+}
+
 /// Adds the project host scan of `config` ([`crate::hosts`]) to `report`:
 /// the hosts no mock lists (in the config, or on the server at
-/// `admin_url`) and their `next_steps`.
+/// `admin_url`) that `verify --no-unclaimed-hosts` fails on, and the
+/// scan's summary line as a next step (leaving out hosts a blocked-host
+/// step already names).
 ///
 /// # Errors
 ///
@@ -289,8 +313,19 @@ pub async fn add_unclaimed_hosts(
 ) -> anyhow::Result<()> {
     let served = claimed_hosts(admin_url, token, &report.workspace).await;
     let answer = crate::hosts::project_hosts_async(config.to_path_buf(), served).await?;
-    report.unclaimed_hosts = answer.unclaimed.into_iter().map(|h| h.host).collect();
-    report.next_steps.extend(answer.next_steps);
+    let blocked: std::collections::HashSet<String> = report
+        .unmapped_hosts
+        .iter()
+        .filter(|h| h.mode == "block")
+        .map(|h| h.host.clone())
+        .collect();
+    report.next_steps.extend(answer.summary_without(&blocked));
+    report.unclaimed_hosts = answer
+        .unclaimed
+        .into_iter()
+        .filter(crate::hosts::UnclaimedHost::fails_verify)
+        .map(|h| h.host)
+        .collect();
     Ok(())
 }
 
@@ -477,8 +512,8 @@ pub async fn claimed_hosts(
     hosts
 }
 
-/// The `next_steps` for the hosts the proxy of the server at `admin_url`
-/// blocked since it started and no mock claims now
+/// The hosts the proxy of the server at `admin_url` blocked since it
+/// started and no mock claims now, and their `next_steps`
 /// ([`blocked_host_steps`], [`claimed_hosts`]).
 ///
 /// # Errors
@@ -488,10 +523,16 @@ pub async fn blocked_steps(
     admin_url: &str,
     token: Option<&str>,
     workspace: &str,
-) -> anyhow::Result<Vec<String>> {
+) -> anyhow::Result<(Vec<String>, Vec<String>)> {
     let metrics = fetch_metrics(admin_url, token).await?;
     let claimed = claimed_hosts(admin_url, token, workspace).await;
-    Ok(blocked_host_steps(&unmapped_hosts(&metrics), &claimed))
+    let hosts = unmapped_hosts(&metrics);
+    let blocked = hosts
+        .iter()
+        .filter(|h| h.mode == "block" && h.requests > 0 && !claimed.contains(&h.host))
+        .map(|h| h.host.clone())
+        .collect();
+    Ok((blocked, blocked_host_steps(&hosts, &claimed)))
 }
 
 fn add_entry(m: &mut MockReport, e: &Value) {
@@ -670,7 +711,7 @@ pub fn check(report: &Report, args: &VerifyArgs) -> anyhow::Result<Vec<Failure>>
         fail(
             "no-unclaimed-hosts",
             format!(
-                "{n} host{} the project can call ha{} no mock ({}{more})",
+                "{n} host{} with a bundled description or catalog example ha{} no mock ({}{more})",
                 if n == 1 { "" } else { "s" },
                 if n == 1 { "s" } else { "ve" },
                 named.join(", ")
@@ -1228,6 +1269,29 @@ mod tests {
     }
 
     #[test]
+    fn no_unclaimed_hosts_needs_a_config_that_exists() {
+        assert_eq!(unclaimed_hosts_config(&verify(&[])), Ok(None));
+        let err = unclaimed_hosts_config(&verify(&[
+            "--no-unclaimed-hosts",
+            "-c",
+            "/nonexistent/mockingbird.yaml",
+        ]))
+        .unwrap_err();
+        assert!(
+            err.contains("no config at /nonexistent/mockingbird.yaml"),
+            "{err}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("mockingbird.yaml");
+        std::fs::write(&config, "mocks: {}\n").unwrap();
+        let path = config.display().to_string();
+        assert_eq!(
+            unclaimed_hosts_config(&verify(&["--no-unclaimed-hosts", "-c", &path])),
+            Ok(Some(config))
+        );
+    }
+
+    #[test]
     fn unclaimed_hosts_fail_no_unclaimed_hosts_and_print_next_lines() {
         let mut r = report();
         assert!(
@@ -1250,7 +1314,7 @@ mod tests {
         assert_eq!(f[0].check, "no-unclaimed-hosts");
         assert_eq!(
             f[0].detail,
-            "4 hosts the project can call have no mock (a.vendor.com, b.vendor.com, c.vendor.com, 1 more)"
+            "4 hosts with a bundled description or catalog example have no mock (a.vendor.com, b.vendor.com, c.vendor.com, 1 more)"
         );
         let text = render(&r, Some(&f), Format::Text).unwrap();
         assert!(
