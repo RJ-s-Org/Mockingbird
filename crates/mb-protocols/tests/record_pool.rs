@@ -437,8 +437,8 @@ async fn a_create_leaves_its_state_nulls_and_partly_sent_members_out_of_the_pool
                "status": "archived", "meta": {"note": "old"}, "dims": {"w": 9, "h": 9}})
     };
     let batch = json!({"records": (1..=5).map(pooled).collect::<Vec<_>>()});
-    // The model's fill: the state and the rest of the dims the request sent part of.
-    let fill = json!({"status": "active", "dims": {"h": 2}});
+    // The model's fill: the rest of the dims the request sent part of.
+    let fill = json!({"dims": {"h": 2}});
     let h = support::described(&contract, w, vec![batch, fill]);
     mb_protocols::fill_record_pool(Arc::downgrade(&h.rt), 60_000).await;
     assert_eq!(h.rt.pool.sizes().get("widgets"), Some(&5));
@@ -461,14 +461,15 @@ async fn a_create_leaves_its_state_nulls_and_partly_sent_members_out_of_the_pool
         "fill's null, not the pool's: {made}"
     );
     assert_eq!(made["dims"]["w"], 1, "the request's: {made}");
-    // One fill call, for the state and the dims the request sent part of; never for
-    // what the pool record gave.
+    // One fill call, for the dims the request sent part of; never for what the pool
+    // record gave, nor for the state no persona speaks of (its first value).
     let requests = h.provider.requests();
     assert_eq!(requests.len(), calls + 1, "{made}");
     let asked = format!("{:?}", requests.last().unwrap().response_format);
+    assert!(asked.contains("dims"), "{asked}");
     assert!(
-        asked.contains("status") && asked.contains("dims"),
+        !asked.contains("color") && !asked.contains("status"),
         "{asked}"
     );
-    assert!(!asked.contains("color"), "{asked}");
+    assert_eq!(made["status"], "active", "{made}");
 }

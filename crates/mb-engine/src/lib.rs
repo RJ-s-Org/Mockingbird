@@ -80,7 +80,7 @@ pub mod validate;
 
 pub use extract::extract_json;
 pub use faker::{Costs, Faker, FakerHints};
-pub use fill::{FillContext, Filled, fill_nulls, free_text};
+pub use fill::{CallerAnswer, FillContext, Filled, fill_nulls, free_text};
 pub use guards::{
     EngineGuards, GenerationLimiter, TokenBudget, without_effects_schema, without_items_schema,
 };
@@ -306,7 +306,7 @@ pub struct GenerationContext<'a> {
     pub answer_records: Option<&'a mb_mcm::world::Pointer>,
     /// The representation a read asks its target in (`language=fr-FR`), when that is
     /// not the one the target was stored in: the answer is the target itself, with its
-    /// text in that representation (see [`restate`]).
+    /// text in that representation (see `restate`).
     pub restates: Option<&'a str>,
 }
 

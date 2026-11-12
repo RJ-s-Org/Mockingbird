@@ -27,7 +27,10 @@ fn repo_contracts() -> Vec<PathBuf> {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             let contract = matches!(ext, "yaml" | "yml" | "json" | "graphql" | "proto" | "wsdl")
                 && name != "mockingbird.yaml"
-                && name != "example.json";
+                && name != "example.json"
+                // A world description beside its contract (`plaid.world.yaml`) is no
+                // contract.
+                && !name.contains(".world.");
             if contract {
                 out.push(path);
             }
