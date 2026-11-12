@@ -589,3 +589,124 @@ async fn an_optional_embedded_record_held_in_part_is_completed_offline() {
     assert!(read["labels"][0]["color"].is_string(), "{read}");
     assert_eq!(read["topics"], json!(["router"]), "{read}");
 }
+
+/// A list and a read by id of items whose answers require more than a seed holds.
+const ITEMS: &str = r##"
+openapi: 3.0.0
+info: {title: items, version: "1"}
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters: [{name: title, in: query, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Item"}}}}
+    post:
+      operationId: createItem
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+  /items/{id}:
+    get:
+      operationId: getItem
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+components:
+  schemas:
+    Item:
+      type: object
+      required: [id, title, comments, owner]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        comments: {type: integer, minimum: 0}
+        owner: {type: object, nullable: true, required: [login], properties: {login: {type: string}}}
+"##;
+
+/// Held records lacking what a list's items require are completed for the list, as for
+/// a read of one, with no model too: the stored members kept, the page from state, and
+/// a later read of one answers what the list completed.
+#[tokio::test]
+async fn listed_records_lacking_required_members_are_completed() {
+    let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    for (id, title) in [("i7", "Seeded seven"), ("i8", "Seeded eight")] {
+        store
+            .upsert(
+                &session("items"),
+                StoredResource {
+                    resource_type: "items".into(),
+                    id: id.into(),
+                    data: json!({"id": id, "title": title}),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let rt = MockRuntime::new(
+        "items",
+        Arc::new(compile(ITEMS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::clone(&store),
+    );
+    // As a server serves it: over its tier-0 world.
+    let rt = crate::support::with_effective(rt, json!({}), false);
+    let router = http_rest::router(Arc::new(rt));
+
+    let (source, list) = get(&router, "/items").await;
+    assert_eq!(source, "state", "{list}");
+    let items = list.as_array().cloned().unwrap_or_default();
+    let mut titles: Vec<&str> = items.iter().filter_map(|i| i["title"].as_str()).collect();
+    titles.sort_unstable();
+    assert_eq!(titles, ["Seeded eight", "Seeded seven"], "{list}");
+    for item in &items {
+        assert!(item["comments"].is_u64(), "{list}");
+        assert_eq!(item["owner"], Value::Null, "{list}");
+    }
+    let (source, one) = get(&router, "/items/i7").await;
+    assert_eq!(source, "state", "{one}");
+    let listed = items.iter().find(|i| i["id"] == "i7").cloned();
+    assert_eq!(Some(one), listed);
+}
+
+/// A record the list's query drops is not completed: nothing is filled or stored for it.
+#[tokio::test]
+async fn a_record_the_list_drops_is_not_completed() {
+    let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    for (id, title) in [("i7", "Seeded seven"), ("i8", "Seeded eight")] {
+        store
+            .upsert(
+                &session("items"),
+                StoredResource {
+                    resource_type: "items".into(),
+                    id: id.into(),
+                    data: json!({"id": id, "title": title}),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let rt = MockRuntime::new(
+        "items",
+        Arc::new(compile(ITEMS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::clone(&store),
+    );
+    let rt = crate::support::with_effective(rt, json!({}), false);
+    let router = http_rest::router(Arc::new(rt));
+
+    let (source, list) = get(&router, "/items?title=Seeded%20seven").await;
+    assert_eq!(source, "state", "{list}");
+    let ids: Vec<&str> = list
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(ids, ["i7"], "{list}");
+    let dropped = store.get(&session("items"), "items", "i8").await.unwrap();
+    assert_eq!(
+        dropped.map(|r| r.data),
+        Some(json!({"id": "i8", "title": "Seeded eight"}))
+    );
+}
