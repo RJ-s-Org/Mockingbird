@@ -33,6 +33,7 @@ use crate::{
 mod admission;
 mod bundle_index;
 mod canonical;
+mod children;
 mod collections;
 mod computed;
 mod creates;
@@ -633,6 +634,11 @@ async fn prepare_state<'a>(
                 .await
         }
     };
+    // A parent read draws its embeds from its held children; a child its held parent
+    // embeds is taken from there ([`children`]).
+    let target = children::settle_target(&mut state, (plan, call), target_id.as_deref(), target)
+        .instrument(state_span())
+        .await;
     // What the path named, before a record found by another member takes its place.
     let named_id = target_id.clone();
     // Found by another field (an issue's `number`): writes go to its id.
@@ -847,7 +853,22 @@ async fn prepare_state<'a>(
     };
     let (recalled, fill_usage) =
         match exec::run(&mut state, plan, call, held, response_schema).await {
-            exec::Ran::Answered(served) => {
+            exec::Ran::Answered(mut served) => {
+                // A read of a held parent drew its embeds above.
+                if (200..300).contains(&served.status)
+                    && !(matches!(op.kind, OperationKind::Query)
+                        && target.is_some()
+                        && children::is_parent(rt, op))
+                {
+                    children::after_answer(
+                        &mut state,
+                        (plan, call),
+                        target_id.as_deref().filter(|_| !foreign_key),
+                        served.body.as_mut(),
+                    )
+                    .instrument(state_span())
+                    .await;
+                }
                 state.touch(session).instrument(state_span()).await;
                 return Prepared::Answered(served);
             }
@@ -856,10 +877,13 @@ async fn prepare_state<'a>(
             exec::Ran::Spent(recalled, usage) => (recalled, usage),
         };
     if target.is_none()
-        && let Some(served) = member_read(&mut state, plan, call, response_schema)
+        && let Some(mut served) = member_read(&mut state, plan, call, response_schema)
             .instrument(state_span())
             .await
     {
+        children::after_answer(&mut state, (plan, call), None, served.body.as_mut())
+            .instrument(state_span())
+            .await;
         state.touch(session).instrument(state_span()).await;
         return Prepared::Answered(Box::new(served));
     }
@@ -879,10 +903,13 @@ async fn prepare_state<'a>(
 
     // A described list of a collection the session listed before: from its records.
     if target.is_none()
-        && let Some(served) = state_lists::answer(&mut state, plan, call)
+        && let Some(mut served) = state_lists::answer(&mut state, plan, call)
             .instrument(state_span())
             .await
     {
+        children::after_answer(&mut state, (plan, call), None, served.body.as_mut())
+            .instrument(state_span())
+            .await;
         cursors::after_answer(&mut state, plan, &served)
             .instrument(state_span())
             .await;
@@ -2136,6 +2163,16 @@ pub(crate) async fn complete(
                     *body = before;
                 }
             }
+        }
+        // A parent's embeds as its held children have them, and a child in its parent's.
+        if (200..300).contains(&generated.status) && !unstored && !foreign_key && !variant {
+            children::after_answer(
+                &mut state,
+                (plan, call),
+                target_id.as_deref(),
+                generated.body.as_mut(),
+            )
+            .await;
         }
         // Served as it was answered, holding the record as state now has it.
         if let (Some(identity), Some(mut answer)) = (held_in, answered.take()) {
