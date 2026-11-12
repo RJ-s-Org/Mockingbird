@@ -186,13 +186,13 @@ async fn an_unheld_id_is_not_found_under_unknown_ids_404() {
 }
 
 #[tokio::test]
-async fn a_record_that_does_not_render_generates() {
+async fn a_record_lacking_a_required_member_is_completed_from_state() {
     let (capture, _guard) = Capture::install();
     let h = support::harness(
         CONTRACT,
         vec![
             json!({"id": "w1", "name": "a"}),
-            json!({"id": "w1", "name": "a", "size": 2}),
+            json!({"id": "w1", "name": "b", "size": 2}),
         ],
         &HarnessOptions::default(),
         |rt| rt,
@@ -202,12 +202,48 @@ async fn a_record_that_does_not_render_generates() {
         .send("POST", "/widgets", Some(json!({"name": "a"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+    // The stored record lacks `size`, which the read requires: filled locally, the
+    // stored name kept, nothing generated.
+    let (status, headers, body) = h.send("GET", "/widgets/w1", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body["name"], "a", "{body}");
+    assert!(body["size"].is_i64(), "{body}");
+    assert_eq!(capture.of("getWidget"), vec![exec(None)]);
+}
+
+#[tokio::test]
+async fn a_record_that_does_not_render_generates() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(
+        CONTRACT,
+        vec![json!({"id": "w1", "name": "a", "size": 2})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    // A stored value that breaks the read's schema is nothing completion adds.
+    let session = mb_state::SessionKey {
+        workspace: "default".into(),
+        mock: "described".into(),
+        session: "default".into(),
+    };
+    h.rt.state
+        .upsert(
+            &session,
+            mb_state::StoredResource {
+                resource_type: "widgets".into(),
+                id: "w1".into(),
+                data: json!({"id": "w1", "name": "a", "size": "big"}),
+            },
+        )
+        .await
+        .unwrap();
     let (status, headers, body) = h.send("GET", "/widgets/w1", None, &[]).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(source(&headers), "llm", "{body}");
-    // The stored record lacks a member the read requires: logged with why.
+    // Logged with why.
     let failed = ExecLine {
-        render_error: Some("/size required".into()),
+        render_error: Some("/size type".into()),
         ..exec(Some("render_failed"))
     };
     assert_eq!(capture.of("getWidget"), vec![failed]);

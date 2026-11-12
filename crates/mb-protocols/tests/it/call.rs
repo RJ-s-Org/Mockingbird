@@ -1642,7 +1642,8 @@ async fn a_refund_prompt_holds_its_intent() {
 }
 
 /// A generated read of a stored target also shows what the target refers to.
-/// The stored intent lacks a required member, so it is not served as is.
+/// The stored intent holds a member of another type than its read declares, so it is
+/// not served as is (one merely lacking a member is completed from state instead).
 #[tokio::test]
 async fn a_read_prompt_holds_what_the_target_refers_to() {
     let (api, state) = references(true, json!({"id": "pi_1", "status": "open"}));
@@ -1650,7 +1651,7 @@ async fn a_read_prompt_holds_what_the_target_refers_to() {
         &state,
         "payment_intents",
         "pi_1",
-        json!({"id": "pi_1", "customer": "cus_1"}),
+        json!({"id": "pi_1", "customer": "cus_1", "status": 5}),
     )
     .await;
     store(
@@ -2870,9 +2871,10 @@ fn flight_search() -> Value {
            "passengers": [{"type": "adult"}], "currency": "EUR"})
 }
 
-/// A search's answer holds offers: the detail read is generated knowing the
-/// one it reads and keeps what the search listed, a booking's prompt holds
-/// it, and the detail answer stays for the next read.
+/// A search's answer holds offers: the detail read completes the one it reads from
+/// state, keeping what the search listed and filling what the detail requires
+/// besides, a booking's prompt holds it, and the detail answer stays for the next
+/// read.
 #[tokio::test]
 async fn a_searched_offer_keeps_what_the_search_listed() {
     let found = json!({"searchId": "5b1f7c1e-8a44-4f7e-b1a2-0c9d8e7f6a51", "currency": "EUR",
@@ -2897,9 +2899,10 @@ async fn a_searched_offer_keeps_what_the_search_listed() {
     for member in ["taxes", "baggage", "fareRules"] {
         fewer[member] = detail[member].clone();
     }
+    let notes = json!({"fareRules": {"notes": ["Changes allowed before departure"]}});
     let api = travel(vec![
         Ok(found.to_string()),
-        Ok(detail.to_string()),
+        Ok(notes.to_string()),
         Ok(booked.to_string()),
         Ok(fewer.to_string()),
     ]);
@@ -2908,14 +2911,18 @@ async fn a_searched_offer_keeps_what_the_search_listed() {
         .await;
     assert_eq!(status, StatusCode::OK);
 
+    // What the detail requires besides is filled locally, the model asked only for
+    // its free text (the fare rules' notes).
     let (source, offer) = read(&api, &format!("/offers/{OFFER_ID}")).await;
-    assert_eq!(source, "llm");
-    let prompt = prompt_of(&api, 1);
-    assert!(prompt.contains("<existing_resource>"), "{prompt}");
-    assert!(prompt.contains("148.30"), "{prompt}");
+    assert_eq!(source, "state", "{offer}");
     assert_eq!(offer["price"]["amount"], "148.30");
     assert_eq!(offer["segments"], flight_segments("TP764"));
-    assert_eq!(offer["fareRules"]["changeable"], true);
+    assert!(offer["fareRules"]["changeable"].is_boolean(), "{offer}");
+    assert_eq!(
+        offer["fareRules"]["notes"],
+        json!(["Changes allowed before departure"])
+    );
+    assert_eq!(api.provider.requests().len(), 2);
 
     let request = json!({"offerId": OFFER_ID,
         "passengers": [{"givenName": "Ana", "familyName": "Silva",
@@ -2933,16 +2940,17 @@ async fn a_searched_offer_keeps_what_the_search_listed() {
 
     // The booking names the offer, so the offer's next read is told of it once, shown
     // the booking as new. An answer listing no effect on the offer changes nothing:
-    // the store's copy answers, whole, then and after.
+    // the store's copy answers, then and after.
     let (source, told) = read(&api, &format!("/offers/{OFFER_ID}")).await;
     assert_eq!(source, "llm");
     let prompt = prompt_of(&api, 3);
     assert!(prompt.contains("<new_resources>"), "{prompt}");
     assert!(prompt.contains("H4K2P9"), "{prompt}");
-    assert_eq!(told, offer);
+    assert_eq!(told["price"], offer["price"], "{told}");
+    assert_eq!(told["segments"], offer["segments"], "{told}");
     let (source, again) = read(&api, &format!("/offers/{OFFER_ID}")).await;
     assert_eq!(source, "state");
-    assert_eq!(again, offer);
+    assert_eq!(again, told);
     assert_eq!(api.provider.requests().len(), 4);
 }
 

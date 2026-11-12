@@ -232,7 +232,7 @@ pub(super) fn repaired(
 /// that branch's own violations of it, so that a repair re-draws what breaks the branch
 /// rather than the whole value. As it is when the branch has none (it matches several
 /// branches, or none is told).
-fn narrowed(
+pub(super) fn narrowed(
     rt: &crate::MockRuntime,
     schema: &Value,
     answer: &Value,

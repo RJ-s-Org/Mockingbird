@@ -100,7 +100,10 @@ pub(super) const EXECUTES: bool = true;
 /// [`crate::call::world::recall_answers`]), the newest first, each with its read's
 /// answer schema and its scalar members. Fill takes one only into an object of the
 /// record of that very schema (an issue's `user`), never by a name alone.
-async fn caller(state: &mut StateAccess<'_>, plan: &CallPlan<'_>) -> Vec<mb_engine::CallerAnswer> {
+pub(super) async fn caller(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+) -> Vec<mb_engine::CallerAnswer> {
     let rt = state.rt;
     let (answers, _) = crate::call::world::recall_answers(state, plan).await;
     answers
@@ -963,7 +966,7 @@ fn issue_aliases(
 /// boolean; a text member whose pattern opens with the identity's literal prefix and all
 /// of its pattern (Stripe's `client_secret`, `^pi_…_secret_…$` after `^pi_…$`) starts
 /// with the record's own id, where that still fits.
-fn settle_filled(
+pub(super) fn settle_filled(
     rt: &crate::MockRuntime,
     (field, schemas): (&str, &[Value]),
     (missing, required): (&[(String, Value)], &[String]),
@@ -1676,7 +1679,7 @@ pub(super) fn unread(
 }
 
 /// The deepest an object member's own requirements are followed.
-const GAP_DEPTH: usize = 6;
+pub(super) const GAP_DEPTH: usize = 6;
 
 /// Which members below a record's top [`gaps`] takes.
 #[derive(Clone, Copy)]
@@ -2419,7 +2422,7 @@ const MAX_EMBED_TYPES: usize = 8;
 type Fits<'a> = dyn Fn(&Value, &Value) -> bool + 'a;
 
 /// Whether `value` validates against member schema `schema`.
-fn fits(rt: &crate::MockRuntime, schema: &Value, value: &Value) -> bool {
+pub(super) fn fits(rt: &crate::MockRuntime, schema: &Value, value: &Value) -> bool {
     rt.engine
         .schema_violations(rt.bundle(), schema, value)
         .is_some_and(|v| v.is_empty())
