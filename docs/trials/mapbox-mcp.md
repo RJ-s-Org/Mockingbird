@@ -117,3 +117,22 @@ A decoy Mockingbird server from another folder held 8080, 9090, 50051 and its pr
 - **3:** ✓ in 171 s, and nothing was written to the other project's server.
 - **5:** ✗ p50 2.5 s, three calls over 5 s, and one 20 s timeout. This agent wrote a larger contract than run 1's and no persona; why these answers are slow is still open.
 - The other measures are as in run 1.
+
+## Run 3: fresh agent with `verify --run` (2026-11-12)
+
+The binary and plugin were `main` at `b927dcc9`, which has #493, #505, #506 and #517. A fresh agent got the same prompt, and the flows ran with `mockingbird verify -c mockingbird.yaml --run "node mcp.mjs flows.json"`.
+
+**Agent build: 121 s, 20 turns, $0.54.**
+- It wrote a 15-operation contract by hand and noticed two paths it doesn't cover: `/places/v1/details/retrieve` (B2) and the `isochrone/v1/{profile}` form the ground-location tool builds.
+- It asked instead of adding them.
+- It didn't run the app's own calls, because the app's unit tests stub the network.
+
+**`verify --run` catches B2.** It failed with two `unmatched_route` findings, each with a next step: ``Mock `mapbox` has no operation for GET /places/v1/details/retrieve/…: its contract lacks the route the app calls. …``. The other steps answered.
+
+**New blocker: stale config ports (fix in progress, branch `cli/recorded-server`).**
+- `init_config` wrote ports 8081/9091/50052. Another session's server took 8081 before the agent started its own.
+- The agent restarted with `start_server` on 18081/19091/15052, but those ports were not written to the config.
+- `verify --run` then refused the server that now held 9091 (another project's, correctly). After that it failed with "a background server already runs": it never found the project's own server, recorded in `.mockingbird/`.
+- The numbers above come from correcting the config's ports by hand.
+
+**Not measured: answer quality.** The OpenRouter key hit its spend limit during this run, so every model call got a 403 and fell back to the faker. `verify --run` reported each as a `fallback` with that reason. Quality and latency need a rerun once the limit is raised.

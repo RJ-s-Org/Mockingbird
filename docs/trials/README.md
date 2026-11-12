@@ -42,3 +42,4 @@ Apps the fixes were not tuned on, each mocked by a Claude Code agent from one pr
 
 - [github-readme-stats](github-readme-stats.md): GitHub GraphQL and REST.
 - [Mapbox MCP server](mapbox-mcp.md): maps (search, geocoding, routing, isochrones). Hollow answers fixed in #480 and #476; the plugin's MCP reaching another project's server is open.
+- [go-github digest](go-github.md) (2026-11-12, the repo's own example app, offline, no model): GitHub REST from Go. Both subtests pass once the example's rate-limit check accepts go-github's `RateLimitError`.
