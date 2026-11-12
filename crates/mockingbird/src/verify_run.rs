@@ -445,12 +445,20 @@ async fn with_session(
     }
     add_details(admin, token, &mut failures).await;
     let missing = missing_dependencies(
-        &session.config,
         &root,
         &cwd,
         serve_run.as_ref().map(|s| (s, serve_failed)),
         &command,
     );
+    // The serve command failed on a missing dependency: its failure defers
+    // to that one's step.
+    if missing.iter().any(|f| f.detail.ends_with(SERVE_OUTPUT))
+        && let Some(f) = failures.iter_mut().find(|f| f.kind == "serve_failed")
+    {
+        f.next_step = Some(
+            "Install the missing dependency first (the missing_dependencies failure says how), then run verify --run again.".into(),
+        );
+    }
     for (i, f) in missing.into_iter().enumerate() {
         failures.insert(i, f);
     }
@@ -577,11 +585,10 @@ const NOT_THE_MOCK: &[&str] = &["serve_failed", "missing_dependencies"];
 /// A `missing_dependencies` failure for each failed command (the serve
 /// command first, when it failed to start or exited non-zero beside a
 /// failing command: `serve` is its run and whether it failed to start)
-/// whose output shows a dependency that is not installed, with
-/// the project's install command ([`crate::missing_deps`]). The same
+/// whose output shows a dependency that is not installed, with the
+/// project's install command ([`crate::missing_deps`]). The same
 /// dependency is named once.
 fn missing_dependencies(
-    config: &std::path::Path,
     root: &std::path::Path,
     cwd: &std::path::Path,
     serve: Option<(&ServeRun, bool)>,
@@ -599,7 +606,7 @@ fn missing_dependencies(
     {
         sources.push((
             "The app's server",
-            "the serve command's output",
+            SERVE_OUTPUT,
             run.command.as_str(),
             run.output_tail.as_str(),
         ));
@@ -614,40 +621,31 @@ fn missing_dependencies(
     }
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    let mut blocked = None;
     for (who, place, line, tail) in sources {
-        let Some(missing) = missing_deps::find(tail) else {
+        let dir = missing_deps::command_dir(cwd, line);
+        let Some(missing) = missing_deps::find(tail, &[&dir, root]) else {
             continue;
         };
-        let dir = missing_deps::command_dir(cwd, line);
-        let install = missing_deps::install(&dir, root, missing.ecosystem);
+        let install = missing
+            .ecosystem
+            .filter(|_| !missing.unknown_command())
+            .and_then(|e| missing_deps::install(&dir, root, e));
         if !seen.insert((missing.name.clone(), install.clone())) {
             continue;
         }
-        // Read once, only when needed: whether the proxy blocks the
-        // package registries (a host no mock claims).
-        let registries_blocked = *blocked.get_or_insert_with(|| {
-            crate::file_config::load(config)
-                .and_then(|mut cfg| {
-                    crate::file_config::apply_env(&mut cfg)?;
-                    Ok(cfg)
-                })
-                .is_ok_and(|cfg| cfg.proxy.unmapped == crate::file_config::Unmapped::Block)
-        });
         out.push(RunFailure::plain(
             "missing_dependencies",
             1,
             format!("{} in {place}", missing.describe()),
-            Some(missing_deps::step(
-                who,
-                &missing,
-                install.as_ref(),
-                registries_blocked,
-            )),
+            Some(missing_deps::step(who, &missing, install.as_ref())),
         ));
     }
     out
 }
+
+/// Where a `missing_dependencies` failure found in the serve command's
+/// output says it was found.
+const SERVE_OUTPUT: &str = "the serve command's output";
 
 /// The `verify` checks `--run` always makes, which are not repeated as
 /// `check` failures.
@@ -2215,7 +2213,6 @@ mod tests {
         let root = dir.path();
         std::fs::create_dir(root.join("server")).unwrap();
         std::fs::write(root.join("server/package.json"), "{}").unwrap();
-        let config = root.join("mockingbird.yaml");
         let serve = ServeRun {
             command: "cd server && npm start".into(),
             exit_code: Some(1),
@@ -2228,43 +2225,75 @@ mod tests {
             output_tail: "Error: Cannot find module 'express'".into(),
             ..CommandRun::default()
         };
-        let found = missing_dependencies(&config, root, root, Some((&serve, true)), &command);
+        let found = missing_dependencies(root, root, Some((&serve, true)), &command);
         // The same module and install, named once (for the server).
         assert_eq!(found.len(), 1, "{found:?}");
         let step = found[0].next_step.as_deref().unwrap();
         assert!(
-            step.starts_with("The app's server could not start: missing module `express`")
-                && step.contains("server && npm install`"),
+            step.starts_with("The app's server failed on a missing module `express`")
+                && step.contains("server && npm install`")
+                && step.ends_with("not under `mockingbird run`."),
             "{step}"
         );
         // A command that passed, or was stopped at the timeout, is not read,
         // nor a serve command that exited while passing tests ran.
         command.exit_code = Some(0);
-        assert!(missing_dependencies(&config, root, root, None, &command).is_empty());
-        assert!(
-            missing_dependencies(&config, root, root, Some((&serve, false)), &command).is_empty()
-        );
+        assert!(missing_dependencies(root, root, None, &command).is_empty());
+        assert!(missing_dependencies(root, root, Some((&serve, false)), &command).is_empty());
         command.exit_code = None;
         command.timed_out = true;
-        assert!(missing_dependencies(&config, root, root, None, &command).is_empty());
+        assert!(missing_dependencies(root, root, None, &command).is_empty());
         // A clean failure names no dependency.
         command.timed_out = false;
         command.exit_code = Some(1);
         command.output_tail = "1 example, 1 failure".into();
-        assert!(missing_dependencies(&config, root, root, None, &command).is_empty());
+        assert!(missing_dependencies(root, root, None, &command).is_empty());
 
         command.output_tail = "Error: Cannot find module 'express'".into();
         let o = Outcome {
-            failures: missing_dependencies(&config, root, root, None, &command),
+            failures: missing_dependencies(root, root, None, &command),
             command,
             ..Outcome::default()
         };
         let s = text(&o);
         assert!(s.contains("; the app's dependencies are missing\n"), "{s}");
         assert!(
-            s.contains("  missing_dependencies: missing module `express`"),
+            s.contains("  missing_dependencies: a missing module `express`"),
             "{s}"
         );
-        assert!(s.contains("    Next: The tests could not start"), "{s}");
+        assert!(
+            s.contains("    Next: The tests failed on a missing module"),
+            "{s}"
+        );
+    }
+
+    /// With the serve command failed on a missing dependency, the status
+    /// line names the dependencies, and neither failure points at the mock.
+    #[test]
+    fn the_status_line_names_missing_dependencies_beside_a_failed_serve() {
+        let o = Outcome {
+            command: CommandRun {
+                command: "npm test".into(),
+                not_run: true,
+                ..CommandRun::default()
+            },
+            failures: vec![
+                RunFailure::plain(
+                    "missing_dependencies",
+                    1,
+                    format!("a missing module `express` (Cannot find module) in {SERVE_OUTPUT}"),
+                    Some("The app's server failed on …".into()),
+                ),
+                RunFailure::plain("serve_failed", 1, "exited 1".into(), None),
+            ],
+            ..Outcome::default()
+        };
+        let s = text(&o);
+        assert!(
+            s.starts_with(
+                "verify --run failed: `npm test` was not run (the serve command failed); 0 requests logged; the app's dependencies are missing\n"
+            ),
+            "{s}"
+        );
     }
 }

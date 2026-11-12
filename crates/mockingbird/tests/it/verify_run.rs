@@ -226,9 +226,8 @@ fn verify_run_reports_a_failing_command_with_its_exit_code() {
 }
 
 /// A command that fails on a missing module, in a folder with a
-/// requirements file: the step names that install command (outside the
-/// proxy, which blocks unmapped hosts here), and the failure does not
-/// point at the mock.
+/// requirements file: the step names that install command, to run outside
+/// `mockingbird run`, and the failure does not point at the mock.
 #[cfg(unix)]
 #[test]
 fn verify_run_names_the_install_command_when_test_dependencies_are_missing() {
@@ -249,21 +248,22 @@ fn verify_run_names_the_install_command_when_test_dependencies_are_missing() {
         failure["detail"]
             .as_str()
             .unwrap()
-            .contains("missing module `requests` (ModuleNotFoundError)"),
+            .contains("a missing module `requests` (ModuleNotFoundError)"),
         "{failure}"
     );
     let step = failure["next_step"].as_str().unwrap();
     assert!(
-        step.starts_with("The tests could not start")
+        step.starts_with("The tests failed on a missing module `requests`")
             && step.contains("app && pip install -r requirements.txt`")
             && step.contains("run verify --run again")
-            && step.contains("outside the proxy"),
+            && step.contains("not under `mockingbird run`"),
         "{step}"
     );
 }
 
 /// A serve command that fails on a missing Node module, in a folder with a
-/// package-lock.json: the step names `npm ci`, beside `serve_failed`.
+/// package-lock.json: the step names `npm ci`, and `serve_failed` defers
+/// to it.
 #[cfg(unix)]
 #[test]
 fn verify_run_names_the_install_command_when_the_serve_command_misses_a_module() {
@@ -290,9 +290,14 @@ fn verify_run_names_the_install_command_when_the_serve_command_misses_a_module()
     );
     let step = json["failures"][0]["next_step"].as_str().unwrap();
     assert!(
-        step.starts_with("The app's server could not start: missing module `express`")
+        step.starts_with("The app's server failed on a missing module `express`")
             && step.contains("&& npm ci`"),
         "{step}"
+    );
+    let serve_step = json["failures"][1]["next_step"].as_str().unwrap();
+    assert!(
+        serve_step.contains("missing_dependencies failure"),
+        "{serve_step}"
     );
 }
 

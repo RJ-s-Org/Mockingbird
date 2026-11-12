@@ -270,32 +270,60 @@ mockingbird verify -c mockingbird.yaml --run "bundle exec rspec spec/checkout_sp
 - <a id="missing-dependencies"></a>**Missing dependencies.** When the
   command exits non-zero, or the serve command fails before it is ready
   (or exits non-zero while a command that fails runs), the last lines of
-  its output are read for a runtime's own error: Ruby `Could not find gem`, `Bundler::GemNotFound`, `cannot
-  load such file -- X` (`LoadError`); Node `Cannot find module 'X'`,
-  `Cannot find package 'X'` (`ERR_MODULE_NOT_FOUND`); Python `No module
-  named X` (`ModuleNotFoundError`); Go `cannot find package`, `no required
-  module provides package`, `missing go.sum entry`; Java
-  `ClassNotFoundException`, `NoClassDefFoundError`; or, failing those, the
-  shell's `command not found` (a test runner such as `rspec`, `pytest` or
-  `jest`, or a toolchain such as `mvn`). A path of the project's own
-  (`./routes`, `/app/x.js`) is not a dependency. The next step names the
-  project's install command, from the files of the folder the failing
-  command runs in (after its leading `cd <dir> &&`), else of the nearest
-  folder above it up to the project root: `Gemfile` → `bundle install`;
-  `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, `yarn.lock` → `yarn
-  install --frozen-lockfile`, `package-lock.json` → `npm ci`, a
-  `package.json` alone → `npm install`; `requirements*.txt` → `pip install
-  -r <file>`, else `pyproject.toml` → `uv sync` or `poetry install` when
-  their lock is there, else `pip install -e .`; `go.mod` → `go mod
-  download`; `pom.xml` → `mvn -q -DskipTests package` (`./mvnw` when the
-  project has it); `build.gradle` → `./gradlew build -x test` (`gradle`
-  without the wrapper). For example: "The tests could not start: missing
+  its output are read for a runtime's own error, where the runtime prints
+  it: at the start of a line (after `E `, `Error: ` or `Error [ERR_…]: `),
+  so a test's assertion that quotes the text does not count. Ruby `Could
+  not find gem`, `Bundler::GemNotFound`, `cannot load such file -- X`
+  (`LoadError`), also at the end of a raised line; Node `Cannot find
+  module 'X'`, `Cannot find package 'X'` (`ERR_MODULE_NOT_FOUND`); Python
+  `No module named X` (`ModuleNotFoundError`, `ImportError`, `python -m`);
+  Go `cannot find package`, `no required module provides package`,
+  `missing go.sum entry`, also after `go: ` or a file position; Java
+  `ClassNotFoundException`, `NoClassDefFoundError` after `Exception in
+  thread`, after `Caused by:` or at the start of a line a stack frame
+  follows (a class probe a library logs is not one); failing those, the
+  shell's `command not found`. The last such error wins. A name that is
+  the project's own module is not a missing dependency: a path
+  (`./routes`, `/app/x.js`), a Node alias (`@/…`, `#…`, `~/…`) or a file
+  a `baseUrl` resolves (`x.js`, `x.ts`, `src/x`), a Python package or
+  module (`x/`, `x.py`, `src/x`), or a Ruby file (`lib/x.rb`, `x.rb`), in
+  the folder the command runs in or the project root.
+  The next step names the project's install command, from the files of
+  the folder the failing command runs in (after its leading `cd <dir>`
+  steps joined with `&&` or `;`; a `|| exit` after one is skipped and
+  `cd -` goes back), else of the nearest folder above it up to the
+  project root:
+
+  | Project files | Install command |
+  |---|---|
+  | `Gemfile` | `bundle install` |
+  | `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` |
+  | `yarn.lock` | `yarn install --immutable` with `.yarnrc.yml` (Yarn 2+), else `yarn install --frozen-lockfile` |
+  | `bun.lock`, `bun.lockb` | `bun install` |
+  | `package-lock.json` | `npm ci` |
+  | `package.json` alone | `npm install` |
+  | `uv.lock`, `poetry.lock`, `pdm.lock`, `Pipfile` | `uv sync`, `poetry install`, `pdm install`, `pipenv install --dev` |
+  | `requirements.txt` | `pip install -r requirements.txt`, with an `-r` for each of its test and development variants (`requirements-dev.txt`, `requirements_test.txt`, ...); without it, a `requirements/` folder's `test.txt`, `dev.txt`, ... (else `base.txt`), else any `requirements*.txt` (at most 4 files) |
+  | `pyproject.toml`, `setup.py` | `pip install -e '.[test]'` when `[project.optional-dependencies]` has a `test`, `tests`, `testing` or `dev` extra, else `pip install -e .` |
+  | `go.mod` | `go mod tidy` |
+  | `pom.xml` | `mvn -q -DskipTests package` (`./mvnw` when the project has it) |
+  | `build.gradle` | `./gradlew build -x test` (`gradle` without the wrapper) |
+
+  A folder with a `package.json` or `pyproject.toml` but no lockfile is
+  taken as a workspace member: the install runs from the nearest folder
+  above it, up to the git root, with a lockfile or a workspace
+  (`pnpm-workspace.yaml` → `pnpm install`, a `package.json` with
+  `workspaces` → `npm install`, `uv.lock` or `[tool.uv.workspace]` → `uv
+  sync --all-packages`). For example: "The tests failed on a missing
   module `requests` (ModuleNotFoundError). Install the project's
-  dependencies (`cd /app/api && pip install -r requirements.txt`), then run
-  verify --run again." Under `proxy.unmapped: block` the step adds to run
-  the install outside the proxy, which would otherwise block the package
-  registry; under the default `pass` the registries are reachable either
-  way. A failure with none of these errors gets no such step.
+  dependencies (`cd /app/api && pip install -r requirements.txt`), then
+  run verify --run again. Run the install in your own shell, not under
+  `mockingbird run`." (its proxy may block the package registry). A
+  missing toolchain (`mvn`, `bundle`, `node`) is named to install first;
+  a missing command no runtime claims gets no project install, only "not
+  installed on this machine (or not on PATH)". When the serve command
+  failed this way, its `serve_failed` step defers to this one. A failure
+  with none of these errors gets no such step.
 - **Exit code** 1 when the command exits non-zero, is stopped at the
   timeout or interrupted, or any failure is found; 0 otherwise.
 - **Caps.** `--timeout` (default `10m`; the MCP tool's `timeout_secs`
