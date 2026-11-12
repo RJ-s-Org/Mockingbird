@@ -65,10 +65,11 @@
 //! and is never changed.
 //!
 //! What a type's links are built from is worked out once per type ([`TypeLinks`]); a call
-//! only matches its values against it. Only the record's top-level members are looked
-//! at. For a type with no read by path, the record's own link placed from a relative
-//! value is made absolute, but a path-like member (`resourcePath`, or one whose example
-//! is a path) stays a path.
+//! only matches its values against it. Only the record's top-level members are settled
+//! so; the records an answer nests only have a link no client can follow repaired
+//! ([`settle_nested`]). For a type with no read by path, the record's own link placed
+//! from a relative value is made absolute, but a path-like member (`resourcePath`, or
+//! one whose example is a path) stays a path.
 
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError};
@@ -1417,6 +1418,36 @@ pub(super) async fn settle(
         ),
         false => (Vec::new(), None),
     };
+    let known = known(
+        rt,
+        (t, &*links),
+        record,
+        read_params(&links.read, op, call),
+        (&held, twin.as_deref()),
+    );
+    let Value::Object(members) = record else {
+        return;
+    };
+    for name in urls {
+        let Some(Value::String(text)) = members.get(&name) else {
+            continue;
+        };
+        if let Some(settled) = known.settle(&name, text) {
+            members.insert(name, Value::String(settled));
+        }
+    }
+}
+
+/// What is known of `record`, a record of type `t` whose `links` are its type's, to
+/// settle its links by: `params` the read's parameters' values, `held` the records its
+/// call's id arguments name and `twin` its type's twin.
+fn known<'a>(
+    rt: &'a MockRuntime,
+    (t, links): (&str, &'a TypeLinks),
+    record: &Value,
+    params: HashMap<String, String>,
+    (held, twin): (&'a [StoredResource], Option<&'a Twin>),
+) -> Known<'a> {
     let own = links
         .own
         .as_deref()
@@ -1488,9 +1519,9 @@ pub(super) async fn settle(
         true => None,
         false => held.iter().find_map(|p| parent_place(rt, p, host)),
     };
-    let known = Known {
-        links: &links,
-        params: read_params(&links.read, op, call),
+    Known {
+        links,
+        params,
         own,
         owns,
         base: rt
@@ -1505,23 +1536,285 @@ pub(super) async fn settle(
             .unwrap_or_default(),
         host,
         accepted,
-        parents: &held,
+        parents: held,
         collection: plural(t),
-        twin: twin.as_deref(),
+        twin,
         twin_owns,
         built_parent,
+    }
+}
+
+/// How many objects of an answer [`settle_nested`] looks at, at most.
+const MAX_NESTED: usize = 256;
+/// How deep in an answer [`settle_nested`] looks.
+const NESTED_DEPTH: usize = 12;
+
+/// Whether `text` is a link a client can follow: an absolute URI (`https://host/…`,
+/// `mailto:a@b.test`), a path (`/acme/roadmap`), a network-path, query or fragment
+/// reference. `https//host/…`, `https:/host/…` and a drawn word are not.
+fn followable(text: &str) -> bool {
+    if text.is_empty() || text.contains(char::is_whitespace) {
+        return false;
+    }
+    if text.starts_with(['/', '?', '#']) {
+        return true;
+    }
+    let Some((scheme, rest)) = text.split_once(':') else {
+        return false;
     };
-    let Value::Object(members) = record else {
-        return;
+    let named = scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c));
+    if !named || rest.is_empty() {
+        return false;
+    }
+    match scheme.to_ascii_lowercase().as_str() {
+        "http" | "https" | "ws" | "wss" | "ftp" => {
+            rest.strip_prefix("//").is_some_and(|authority| {
+                !authority.is_empty() && !authority.starts_with(['/', '?', '#'])
+            })
+        }
+        _ => true,
+    }
+}
+
+/// `text` with its mistyped `http`/`https` scheme mended (`https//host/…`,
+/// `https:/host/…`, `https:host/…` → `https://host/…`); `None` when it starts with no
+/// such scheme followed by a host.
+fn mended(text: &str) -> Option<String> {
+    ["https", "http"].iter().find_map(|scheme| {
+        let head = text.get(..scheme.len())?;
+        if !head.eq_ignore_ascii_case(scheme) {
+            return None;
+        }
+        let rest = &text[scheme.len()..];
+        let after = rest
+            .trim_start_matches([':', ';'])
+            .trim_start_matches(['/', '\\']);
+        if after.len() == rest.len() {
+            return None;
+        }
+        let host = &after[..after.find(['/', '?', '#']).unwrap_or(after.len())];
+        let hostlike = !host.is_empty()
+            && host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-.:".contains(c))
+            && (host.contains('.') || host.split(':').next() == Some("localhost"));
+        hostlike.then(|| format!("{scheme}://{after}"))
+    })
+}
+
+/// `text`, a link, on the mock's first host `host` when its own is a placeholder.
+fn off_placeholder(text: String, host: Option<&str>) -> String {
+    let Some(host) = host else {
+        return text;
     };
-    for name in urls {
-        let Some(Value::String(text)) = members.get(&name) else {
-            continue;
-        };
-        if let Some(settled) = known.settle(&name, text) {
-            members.insert(name, Value::String(settled));
+    let moved = Url::parse(&text).and_then(|url| {
+        let origin = url.origin?;
+        if !placeholder(&host_of(origin)) {
+            return None;
+        }
+        let scheme = origin.split_once("://").map_or("https", |(s, _)| s);
+        let segments: Vec<String> = url.segments.iter().map(|s| (*s).to_owned()).collect();
+        Some(url.render(Some(&format!("{scheme}://{host}")), &segments, url.slash))
+    });
+    moved.unwrap_or(text)
+}
+
+/// Repairs the links of the records `body`, an answer `schema` describes, nests below
+/// its top level (which [`settle`] settles): a URL member whose value is no link a
+/// client can follow ([`followable`]: a drawn word, `https//host/…`) is rebuilt as
+/// [`settle`] builds its record type's own link, when the record's type (its
+/// `__typename`, else the schema's) and identity say where it is; else its scheme is
+/// mended ([`mended`]) and a placeholder host takes the mock's. A link that can be
+/// followed stays as it is, as does a value the request sent. At most [`MAX_NESTED`]
+/// objects, [`NESTED_DEPTH`] levels down, are looked at.
+pub(super) fn settle_nested(
+    rt: &MockRuntime,
+    schema: Option<&Value>,
+    call: &OperationCall,
+    body: &mut Value,
+) {
+    fn strings<'v>(value: &'v Value, out: &mut Vec<&'v str>) {
+        if out.len() >= MAX_NESTED {
+            return;
+        }
+        match value {
+            Value::String(s) => out.push(s),
+            Value::Array(items) => items.iter().for_each(|v| strings(v, out)),
+            Value::Object(members) => members.values().for_each(|v| strings(v, out)),
+            _ => {}
         }
     }
+    let mut sent = Vec::new();
+    if let Some(body) = &call.body {
+        strings(body, &mut sent);
+    }
+    let mut walk = Nested {
+        rt,
+        sent,
+        budget: MAX_NESTED,
+    };
+    walk.value(schema, body, 0);
+}
+
+/// The walk of [`settle_nested`].
+struct Nested<'a> {
+    rt: &'a MockRuntime,
+    /// The strings the request sent.
+    sent: Vec<&'a str>,
+    /// How many more objects it looks at.
+    budget: usize,
+}
+
+impl Nested<'_> {
+    fn value(&mut self, schema: Option<&Value>, value: &mut Value, depth: usize) {
+        if depth > NESTED_DEPTH {
+            return;
+        }
+        let rt = self.rt;
+        let defs = &rt.bundle().defs;
+        match value {
+            Value::Array(items) => {
+                let items_schema = schema.and_then(|s| resolved(defs, s).1.get("items"));
+                for item in items {
+                    if self.budget == 0 {
+                        return;
+                    }
+                    self.value(items_schema, item, depth + 1);
+                }
+            }
+            Value::Object(_) => {
+                if self.budget == 0 {
+                    return;
+                }
+                self.budget -= 1;
+                let typename = value
+                    .get("__typename")
+                    .and_then(Value::as_str)
+                    .filter(|t| defs.contains_key(*t))
+                    .map(str::to_owned);
+                let (named, schema) = match (&typename, schema) {
+                    (Some(t), _) => (Some(t.as_str()), defs.get(t)),
+                    (None, Some(s)) => {
+                        let (named, s) = resolved(defs, s);
+                        (named, Some(s))
+                    }
+                    (None, None) => (None, None),
+                };
+                let named = named.map(str::to_owned);
+                let props = schema
+                    .and_then(|s| s.get("properties"))
+                    .and_then(Value::as_object);
+                if depth > 0 {
+                    self.repair(named.as_deref(), props, value);
+                }
+                let Value::Object(members) = value else {
+                    return;
+                };
+                for (key, member) in members.iter_mut() {
+                    if member.is_object() || member.is_array() {
+                        self.value(props.and_then(|p| p.get(key)), member, depth + 1);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The unfollowable links of `record`, of type `t` when known, whose members
+    /// `props` declares, repaired.
+    fn repair(&self, t: Option<&str>, props: Option<&Map<String, Value>>, record: &mut Value) {
+        let rt = self.rt;
+        let links = t.map(|t| type_links(rt, t));
+        let Value::Object(members) = &*record else {
+            return;
+        };
+        let broken: Vec<String> = members
+            .iter()
+            .filter(|(name, value)| {
+                let Some(text) = value.as_str() else {
+                    return false;
+                };
+                let link = links.as_ref().is_some_and(|l| l.is_url_member(name))
+                    || url_named(name)
+                    || props
+                        .and_then(|p| p.get(*name))
+                        .is_some_and(|m| pages::is_url(rt.bundle(), m));
+                link && !text.is_empty() && !followable(text) && !self.sent.contains(&text)
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        if broken.is_empty() {
+            return;
+        }
+        let host = rt
+            .hosts
+            .iter()
+            .map(String::as_str)
+            .find(|h| !placeholder(h));
+        let twin = match (t, links.as_ref()) {
+            (Some(t), Some(l)) if l.read.is_empty() => rt.shared_types.twin(rt, t),
+            _ => None,
+        };
+        let known = t
+            .zip(links.as_deref())
+            .map(|(t, l)| known(rt, (t, l), record, HashMap::new(), (&[], twin.as_deref())));
+        let mut repaired: Vec<(String, String)> = Vec::new();
+        for name in broken {
+            let Some(text) = members.get(&name).and_then(Value::as_str) else {
+                continue;
+            };
+            let mended = mended(text);
+            let candidate = mended.as_deref().unwrap_or(text);
+            let settled = known
+                .as_ref()
+                .and_then(|k| k.settle(&name, candidate))
+                .filter(|s| followable(s))
+                .or_else(|| mended.map(|m| off_placeholder(m, host)))
+                .filter(|s| followable(s));
+            if let Some(settled) = settled {
+                repaired.push((name, settled));
+            }
+        }
+        if let Value::Object(members) = record {
+            for (name, settled) in repaired {
+                members.insert(name, Value::String(settled));
+            }
+        }
+    }
+}
+
+/// `schema` past its `$ref`s and an `anyOf`/`oneOf` of one type and `null`, and the
+/// name of the last definition it went through. A union or an interface (a `oneOf` of
+/// types) is left as it is: its record's `__typename` names its type.
+fn resolved<'a>(defs: &'a Map<String, Value>, schema: &'a Value) -> (Option<&'a str>, &'a Value) {
+    let mut schema = schema;
+    let mut named = None;
+    for _ in 0..6 {
+        if let Some((name, def)) = schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+            .and_then(|n| defs.get_key_value(n))
+        {
+            named = Some(name.as_str());
+            schema = def;
+            continue;
+        }
+        let branches: Vec<&Value> = ["anyOf", "oneOf"]
+            .iter()
+            .filter_map(|k| schema.get(*k).and_then(Value::as_array))
+            .flatten()
+            .filter(|b| b.get("type").and_then(Value::as_str) != Some("null"))
+            .collect();
+        match branches.as_slice() {
+            [one] => schema = one,
+            _ => break,
+        }
+    }
+    (named, schema)
 }
 
 #[cfg(test)]
@@ -1533,6 +1826,54 @@ mod tests {
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
             .collect()
+    }
+
+    #[test]
+    fn links_a_client_cannot_follow_are_told_and_their_scheme_mended() {
+        for good in [
+            "https://tracker.test/acme/roadmap/tickets/1",
+            "/acme/roadmap",
+            "//tracker.test/x",
+            "#top",
+            "mailto:a@b.test",
+            "urn:isbn:0451450523",
+        ] {
+            assert!(followable(good), "{good}");
+        }
+        for bad in [
+            "https//tracker.test/acme/issues/412#issuecomment-3521",
+            "https:/tracker.test/x",
+            "https://",
+            "harbor",
+            "acme/roadmap",
+            "",
+            "https://tracker.test/a b",
+        ] {
+            assert!(!followable(bad), "{bad}");
+        }
+        assert_eq!(
+            mended("https//tracker.test/acme/issues/412#issuecomment-3521").as_deref(),
+            Some("https://tracker.test/acme/issues/412#issuecomment-3521")
+        );
+        assert_eq!(
+            mended("http:/localhost:8080/x").as_deref(),
+            Some("http://localhost:8080/x")
+        );
+        assert_eq!(
+            mended("HTTPS:tracker.test").as_deref(),
+            Some("https://tracker.test")
+        );
+        for unmendable in ["harbor", "httpsharbor", "https//harbor/x", "https://"] {
+            assert_eq!(mended(unmendable), None, "{unmendable}");
+        }
+        assert_eq!(
+            off_placeholder("https://example.com/a/1?x#y".into(), Some("tracker.test")),
+            "https://tracker.test/a/1?x#y"
+        );
+        assert_eq!(
+            off_placeholder("https://real.test/a".into(), Some("tracker.test")),
+            "https://real.test/a"
+        );
     }
 
     #[test]

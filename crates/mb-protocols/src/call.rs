@@ -1173,6 +1173,18 @@ pub(crate) async fn complete(
     let acted_on = target_id.clone();
     let op = plan.op;
     let session = &plan.session;
+    // The links of the records the answer nests are ones a client can follow (see
+    // [`links::settle_nested`]); its own record's are settled once it is stored.
+    if matches!(generated.source, Source::Llm | Source::Repaired)
+        && (200..300).contains(&generated.status)
+        && let Some(body) = generated.body.as_mut()
+    {
+        let schema = response_schema.or_else(|| {
+            op.output_for_status(generated.status)
+                .and_then(|o| o.schema.as_ref())
+        });
+        links::settle_nested(rt, schema, call, body);
+    }
     // A record of the answer reusing another's id gets one of its own, before anything
     // stores or serves it.
     if rt.consistency
