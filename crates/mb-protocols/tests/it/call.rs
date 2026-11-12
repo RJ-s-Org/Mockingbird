@@ -4642,7 +4642,7 @@ async fn a_path_with_namespace_shows_its_owner() {
         .replace("full_name: {type: string}\n        stargazers_count", "path_with_namespace: {type: string}\n        path: {type: string}\n        stargazers_count");
     assert_ne!(contract, REPOS);
     let item = json!({"id": 7, "name": "Hello World", "path": "hello", "path_with_namespace": "octo/hello", "stargazers_count": 42});
-    let api = actions_generating(
+    let api = actions_of(
         &contract,
         vec![
             Ok(json!({"total_count": 1, "items": [item]}).to_string()),
@@ -4880,14 +4880,16 @@ async fn a_plain_string_member_is_not_a_name() {
         &contract,
         vec![
             Ok(json!({"total_count": 1, "items": [site]}).to_string()),
+            Ok(
+                json!({"id": 2, "name": "hello", "full_name": "octo/hello", "stargazers_count": 1})
+                    .to_string(),
+            ),
             Ok(json!({"deleted": true}).to_string()),
         ],
     );
     read(&api, "/search/repositories?q=x").await;
-    // `site`'s description is no name: the read misses, a 404 as the session listed a
-    // repository it can create.
-    let (status, _, other) = api.call("GET", "/repos/octo/hello", None).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{other}");
+    let (source, other) = read(&api, "/repos/octo/hello").await;
+    assert_ne!(source, "state", "{other}");
     let (status, _, _) = api.call("DELETE", "/repos/octo/main", None).await;
     assert!(status.is_success(), "{status}");
     let (source, kept) = read(&api, "/repos/octo/site").await;

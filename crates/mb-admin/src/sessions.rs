@@ -172,9 +172,29 @@ pub async fn seed(
     access.require(Permission::Edit)?;
     let key = key(&st, &access.ws, path).await?;
     let resources = body.len();
-    st.state
-        .seed(&key, body.into_iter().map(Into::into).collect())
-        .await?;
+    let seeded: Vec<mb_state::StoredResource> = body.into_iter().map(Into::into).collect();
+    let mut types: Vec<String> = seeded
+        .iter()
+        .map(|r| r.resource_type.clone())
+        .filter(|t| t != mb_state::INTERNAL_TYPE)
+        .collect();
+    types.sort_unstable();
+    types.dedup();
+    st.state.seed(&key, seeded).await?;
+    // Seeded records are the app's own: under `unknown_ids` left unset, an id of a
+    // creatable seeded type the session does not hold answers 404.
+    for t in types {
+        st.state
+            .upsert(
+                &key,
+                mb_state::StoredResource {
+                    resource_type: mb_state::INTERNAL_TYPE.to_owned(),
+                    id: mb_state::owned_type_id(&t),
+                    data: serde_json::json!({"owns": t}),
+                },
+            )
+            .await?;
+    }
     // The seeded data is not recorded, only how much of it there was.
     access
         .audit(

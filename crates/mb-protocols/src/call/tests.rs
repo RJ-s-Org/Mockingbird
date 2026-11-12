@@ -1488,3 +1488,23 @@ async fn path_read_timing() {
 
 #[path = "nested_write_tests.rs"]
 mod nested_writes;
+
+/// The parameter a route ends at is the identity `unknown_ids` goes by, a literal suffix
+/// of its segment aside; one a static segment follows is not.
+#[test]
+fn only_a_parameter_ending_the_route_trails_it() {
+    assert_eq!(
+        trailing_path_param("/v1/customers/{customer}").as_deref(),
+        Some("customer")
+    );
+    assert_eq!(
+        trailing_path_param("/2010-04-01/Accounts/{AccountSid}/Messages/{Sid}.json").as_deref(),
+        Some("Sid")
+    );
+    assert_eq!(trailing_path_param("/a/{x}/b"), None);
+    assert_eq!(
+        trailing_path_param("/v1/customers/{customer}/balance"),
+        None
+    );
+    assert_eq!(trailing_path_param("/v1/customers"), None);
+}

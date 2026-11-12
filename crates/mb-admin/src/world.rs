@@ -37,10 +37,11 @@ use mb_auth::Permission;
 
 use mb_mcm::Bundle;
 use mb_mcm::world::{
-    Author, ChangeDesc, OpDesc, OpKind, Pointer, Refusal, RefusalCode, TypeDesc, Validation, World,
+    Author, ChangeDesc, OpDesc, Pointer, Refusal, RefusalCode, TypeDesc, Validation, World,
     check_size, effective_validated, tier0, validate, written_path_targets,
 };
 use mb_protocols::world_gaps::{Gap, GapCode, gaps};
+use mb_protocols::{UnknownIdTypes, unknown_id_types};
 use mb_store::{
     ContractStatus, ContractVersion, ControlStore, Mock, NewWorldRevision, StoreError, UnknownIds,
     WorldRevision, WorldRevisionInfo,
@@ -707,40 +708,24 @@ pub struct UnknownIdsView {
 #[derive(Serialize, ToSchema, Debug, PartialEq)]
 pub struct UnknownIdAnswer {
     /// `404` (the read's declared 404) or `generate`. An inferred `404` applies once
-    /// the session holds a record of the type it created or listed; before that the
-    /// read generates.
+    /// the session has written a record of the type (created, changed, deleted or
+    /// seeded one); before that the read generates.
     pub answer: String,
     /// Why: the mock's setting, or whether an operation of kind create makes the type.
     pub why: String,
 }
 
 impl UnknownIdsView {
-    /// The answer of each type `world` reads by a path parameter under `setting`. Left
-    /// unset, a type an operation of kind create makes answers 404 once the session
-    /// holds one of its records; any other generates (reference data the app reads).
-    fn new(world: &World, setting: UnknownIds) -> Self {
-        let mut creates: BTreeMap<&str, &str> = BTreeMap::new();
-        let mut read: BTreeSet<&str> = BTreeSet::new();
-        for (id, op) in &world.operations {
-            let Some(t) = op.r#type.as_deref() else {
-                continue;
-            };
-            match op.kind {
-                Some(OpKind::Create) => {
-                    creates.entry(t).or_insert(id);
-                }
-                Some(OpKind::Read)
-                    if op.target.as_ref().is_some_and(|t| t.path_param.is_some()) =>
-                {
-                    read.insert(t);
-                }
-                _ => {}
-            }
-        }
-        let types = read
-            .into_iter()
+    /// The answer under `setting` of each type `types` reads by a path parameter that
+    /// selects one record, as the runtime decides it ([`mb_protocols::unknown_id_types`]).
+    /// Left unset, a creatable type answers 404 once the session wrote a record of it; any
+    /// other generates (reference data the app reads).
+    fn new(types: &UnknownIdTypes, setting: UnknownIds) -> Self {
+        let types = types
+            .read
+            .iter()
             .map(|t| {
-                let (answer, why) = match (setting, creates.get(t)) {
+                let (answer, why) = match (setting, types.creatable.get(t)) {
                     (UnknownIds::NotFound, _) => ("404", "the mock sets unknown_ids: 404".to_owned()),
                     (UnknownIds::Generate, _) => {
                         ("generate", "the mock sets unknown_ids: generate".to_owned())
@@ -748,7 +733,7 @@ impl UnknownIdsView {
                     (UnknownIds::Inferred, Some(create)) => (
                         "404",
                         format!(
-                            "creatable ({create}): 404 once the session holds a record of it it created or listed; generated before that"
+                            "creatable ({create}): 404 once the session has written a record of this type (created, changed, deleted or seeded one); generated before that"
                         ),
                     ),
                     (UnknownIds::Inferred, None) => (
@@ -757,7 +742,7 @@ impl UnknownIdsView {
                     ),
                 };
                 (
-                    t.to_owned(),
+                    t.clone(),
                     UnknownIdAnswer {
                         answer: answer.to_owned(),
                         why,
@@ -770,8 +755,7 @@ impl UnknownIdsView {
 }
 
 impl WorldView {
-    fn new(version: i64, eff: EffectiveWorld, unknown_ids: UnknownIds) -> Self {
-        let unknown_ids = UnknownIdsView::new(&eff.world, unknown_ids);
+    fn new(version: i64, eff: EffectiveWorld, unknown_ids: UnknownIdsView) -> Self {
         Self {
             version,
             world: eff.world,
@@ -1049,7 +1033,19 @@ pub async fn get_world(
     let m = st.mock(&access.ws, &mock).await?;
     let v = resolve_version(&st, &m, &version).await?;
     let eff = effective_world(st.store.as_ref(), m.id, v.version, &v.bundle).await?;
-    let mut view = WorldView::new(v.version, eff, m.behavior.unknown_ids);
+    // The types as the mock's runtime serves them: its world applied to the bundle.
+    let base = tier0(&v.bundle);
+    let (served, _, written) =
+        runtime_world(st.store.as_ref(), m.id, v.version, &v.bundle, &base).await?;
+    let applied = mb_mcm::world::apply(&v.bundle, &base, &served);
+    let types = unknown_id_types(
+        &applied,
+        &served,
+        &written,
+        m.behavior.consistency == mb_store::Consistency::On,
+    );
+    let unknown_ids = UnknownIdsView::new(&types, m.behavior.unknown_ids);
+    let mut view = WorldView::new(v.version, eff, unknown_ids);
     // Read from the whole view, before `narrow` drops the gaps whose types
     // it takes.
     let called = if filter.called {

@@ -3122,7 +3122,9 @@ service Items {
         };
         generate_once(&rt, &plan, &call).await.unwrap();
         let session = plan.session.clone();
-        let memory = store.list(&session, INTERNAL_TYPE, 10).await.unwrap();
+        let mut memory = store.list(&session, INTERNAL_TYPE, 10).await.unwrap();
+        // The marker that the session owns the type (`unknown_ids`) is no memory.
+        memory.retain(|doc| !doc.id.starts_with("#owns/"));
         (memory, op.binding.clone())
     }
 

@@ -1606,7 +1606,15 @@ async fn failed_state_reset_keeps_the_mock() {
 
 #[tokio::test]
 async fn sessions_export_seed_reset() {
-    let h = harness().await;
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let h = harness_full(
+        DEFAULT_API_SECRET_REFS
+            .iter()
+            .map(|r| r.to_string())
+            .collect(),
+        Arc::clone(&state),
+    )
+    .await;
     h.create_mock("orders").await;
 
     let r = h.get("/api/v1/mocks/orders/sessions").await;
@@ -1625,6 +1633,23 @@ async fn sessions_export_seed_reset() {
         )
         .await;
     assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.text);
+    // Seeded records are the session's own: the marker `unknown_ids` goes by.
+    let alice = mb_state::SessionKey {
+        workspace: "default".into(),
+        mock: "orders".into(),
+        session: "alice".into(),
+    };
+    assert!(
+        state
+            .get(
+                &alice,
+                mb_state::INTERNAL_TYPE,
+                &mb_state::owned_type_id("orders")
+            )
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     let r = h.get("/api/v1/mocks/orders/sessions").await;
     let list = r.json();

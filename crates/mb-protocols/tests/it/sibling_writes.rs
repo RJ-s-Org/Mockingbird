@@ -518,8 +518,9 @@ async fn a_childs_delete_under_no_held_parent_tells_nothing() {
         .await
         .unwrap();
     assert!(
-        kept.iter()
-            .all(|d| d.id.starts_with("#deleted") || d.id == "#last-write"),
+        kept.iter().all(|d| d.id.starts_with("#deleted")
+            || d.id.starts_with("#owns/")
+            || d.id == "#last-write"),
         "only the delete's own markers: {kept:?}"
     );
     assert_eq!(h.calls(), 0);

@@ -2290,8 +2290,8 @@ export interface components {
         UnknownIdAnswer: {
             /**
              * @description `404` (the read's declared 404) or `generate`. An inferred `404` applies once
-             *     the session holds a record of the type it created or listed; before that the
-             *     read generates.
+             *     the session has written a record of the type (created, changed, deleted or
+             *     seeded one); before that the read generates.
              */
             answer: string;
             /** @description Why: the mock's setting, or whether an operation of kind create makes the type. */

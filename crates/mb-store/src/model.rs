@@ -322,8 +322,8 @@ impl<'de> Deserialize<'de> for Consistency {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UnknownIds {
     /// Unset: decided per resource type. A type the contract can create, of which the
-    /// session holds a record (created or listed), answers the operation's 404; any
-    /// other type generates.
+    /// session has written a record (created, changed, deleted or seeded one), answers
+    /// the operation's 404; any other type generates.
     #[default]
     Inferred,
     /// Generate a resource for the id, whatever the type.

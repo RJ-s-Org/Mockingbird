@@ -341,6 +341,8 @@ async fn a_page_of_parents_lists_the_children_once() {
 #[tokio::test]
 async fn a_children_listing_cut_at_max_scan_sets_nothing() {
     let h = support::described(CONTRACT, world_by_member(), vec![order("o1")]);
+    // Seeded, so the order is `o1` itself: a plain create mints another id, and a read of
+    // `o1` would then be an id of a type the session wrote, a 404 under the default.
     seeded(&h, "POST", "/orders", Some(json!({}))).await;
     let session = SessionKey {
         workspace: h.rt.workspace.clone(),

@@ -1235,7 +1235,7 @@ pub struct FileMock {
     pub consistency: Consistency,
     /// How a read of an id the session does not hold is answered. Unset
     /// (`inferred`): per resource type, the operation's 404 for a type the
-    /// contract can create once the session holds one of its records, else
+    /// contract can create once the session has written a record of it, else
     /// generated. `generate` or `404` decides for every type of the mock.
     #[serde(default)]
     pub unknown_ids: UnknownIds,

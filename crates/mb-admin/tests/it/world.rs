@@ -1409,7 +1409,7 @@ async fn get_world_shows_each_types_unknown_id_answer() {
     assert_eq!(customers["answer"], "404", "{unknown}");
     let why = customers["why"].as_str().unwrap();
     assert!(
-        why.contains("creatable (PostCustomers)") && why.contains("holds"),
+        why.contains("creatable (PostCustomers)") && why.contains("has written"),
         "{why}"
     );
     let prices = &types["prices"];

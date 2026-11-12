@@ -272,6 +272,9 @@ pub(super) async fn mark(
     held: Option<&StoredResource>,
 ) {
     let rt = state.rt;
+    // The session deleted a record of `t`: it works with its own records of the type,
+    // as long after the last one is gone (see [`unknown_ids`]).
+    state.own(session, t).await;
     // A soft-deleted record is kept, in its deleted state: it is no deleted marker.
     if let Some(gone) = lifecycle::exclusion(rt, t)
         && let Some(kept) = state.get(session, t, id).await

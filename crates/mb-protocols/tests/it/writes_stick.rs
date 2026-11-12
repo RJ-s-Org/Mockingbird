@@ -2107,11 +2107,12 @@ async fn a_recreate_clears_the_marker() {
     let (status, source, _) = h.call("GET", "/items/i1", None).await;
     assert_eq!((status, source.as_str()), (StatusCode::OK, "state"));
     let markers = h.store.list(&session(), MARKERS, 10).await.unwrap();
-    // Only the index documents stay: the id's and its identity text's markers are gone.
+    // Only the index documents (and that the session owns items) stay: the id's and its
+    // identity text's markers are gone.
     assert!(
         markers
             .iter()
-            .all(|m| [INDEX, VALUES_INDEX].contains(&m.id.as_str())),
+            .all(|m| [INDEX, VALUES_INDEX, "#owns/items"].contains(&m.id.as_str())),
         "{markers:?}"
     );
 
@@ -2231,13 +2232,20 @@ async fn offline_keeps_generating() {
 /// How many are kept is bounded: the oldest is forgotten, the newest still holds.
 #[tokio::test]
 async fn markers_are_bounded() {
-    let h = deletes(vec![json!({"code": 1101, "message": "gone"}), item("old")]);
+    // Under `generate`, so the oldest id, its marker dropped, is generated: inferred, the
+    // session that deleted items answers any id it does not hold with the 404.
+    let h = harness_with(
+        DELETES.as_bytes(),
+        vec![json!({"code": 1101, "message": "gone"}), item("old")],
+        |rt| rt.unknown_ids = mb_protocols::UnknownIds::Generate,
+    );
     for n in 0..1030 {
         h.call("DELETE", &format!("/items/i{n}"), None).await;
     }
     let held = h.store.list(&session(), MARKERS, 5000).await.unwrap();
-    // The markers and their index, and the latest write a client may retry.
-    assert!(held.len() <= 1026, "{}", held.len());
+    // The markers and their index, the latest write a client may retry, and that the
+    // session owns items.
+    assert!(held.len() <= 1027, "{}", held.len());
     assert_eq!(
         h.call("GET", "/items/i1029", None).await.0,
         StatusCode::NOT_FOUND
