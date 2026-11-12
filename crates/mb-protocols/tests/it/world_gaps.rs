@@ -441,3 +441,116 @@ fn a_described_paging_replaces_the_page_size_detection() {
     assert!(open[0].message.contains("`limit`"), "{}", open[0].message);
     assert!(!open[0].message.contains("`page`"), "{}", open[0].message);
 }
+
+/// Gadgets: a read and an update by `gadgetId`, a create and a list, and a record
+/// with no member the path parameter names.
+const GADGETS: &str = r##"
+openapi: 3.0.0
+info: {title: Gadgets, version: "1"}
+paths:
+  /gadgets:
+    get:
+      operationId: listGadgets
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Gadget"}}}}}}
+    post:
+      operationId: createGadget
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Gadget"}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Gadget"}}}}}
+  /gadgets/{gadgetId}:
+    parameters: [{name: gadgetId, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getGadget
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Gadget"}}}}}
+    patch:
+      operationId: updateGadget
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Gadget"}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Gadget"}}}}}
+components:
+  schemas:
+    Gadget:
+      type: object
+      properties: {name: {type: string}, size: {type: string}}
+"##;
+
+#[test]
+fn writes_with_a_read_by_id_are_identified_while_a_list_of_the_type_is_not() {
+    let mut b = compile(GADGETS.as_bytes()).unwrap();
+    let t = b
+        .operation("getGadget")
+        .unwrap()
+        .resource_type
+        .clone()
+        .unwrap();
+    // The read and the update name the record by `gadgetId`, a field the record
+    // does not have: their own identity, and none for the type in tier 0.
+    for op in b.operations.iter_mut() {
+        if op.id == "getGadget" || op.id == "updateGadget" {
+            op.identity = Some(mb_mcm::Identity {
+                path_param: Some("gadgetId".into()),
+                field: "gadgetId".into(),
+                input_field: None,
+                path_field: None,
+                record: None,
+            });
+        }
+    }
+    let world = tier0(&b);
+    assert!(
+        world
+            .types
+            .get(&t)
+            .and_then(|d| d.identity.as_ref())
+            .is_none(),
+        "{world:?}"
+    );
+    let v = validate(&world, &b);
+    let applied = mb_mcm::world::apply(&b, &world, &v.applied);
+    // The executor's rule: the create and the update work with the read by id's
+    // identity, or their own; the list needs the type's identity member.
+    let unidentified = mb_protocols::world_gaps::unidentified(&applied, &v.applied);
+    assert_eq!(
+        unidentified.get(&t).map(Vec::as_slice),
+        Some(&["listGadgets".to_owned()][..]),
+        "{unidentified:?}"
+    );
+    let all = gaps(&b, &v.applied, &v.refused);
+    let none = codes(&all, GapCode::NoIdentity);
+    assert_eq!(none.len(), 1, "{all:?}");
+    assert_eq!(none[0].r#type.as_deref(), Some(t.as_str()));
+    assert!(
+        none[0].message.contains("`listGadgets`"),
+        "{}",
+        none[0].message
+    );
+    assert!(!none[0].message.contains("Gadget`"), "{}", none[0].message);
+}
+
+#[test]
+fn identified_needs_an_identity_member_for_a_list() {
+    use mb_mcm::world::{IdentityDesc, OpKind};
+    use mb_protocols::world_gaps::identified;
+    let with_member = IdentityDesc {
+        member: Some("id".into()),
+        ..IdentityDesc::default()
+    };
+    let no_member = IdentityDesc::default();
+    // A list: its own identity, or its type's identity member; a read by id is
+    // no help.
+    assert!(identified(OpKind::List, true, None, false));
+    assert!(identified(OpKind::List, false, Some(&with_member), false));
+    assert!(!identified(OpKind::List, false, Some(&no_member), false));
+    assert!(!identified(OpKind::List, false, None, true));
+    // Any other kind: its own, its type's (member or not), or a read by id's.
+    for kind in [
+        OpKind::Create,
+        OpKind::Read,
+        OpKind::Update,
+        OpKind::Delete,
+        OpKind::Action,
+    ] {
+        assert!(identified(kind, true, None, false), "{kind:?}");
+        assert!(identified(kind, false, Some(&no_member), false), "{kind:?}");
+        assert!(identified(kind, false, None, true), "{kind:?}");
+        assert!(!identified(kind, false, None, false), "{kind:?}");
+    }
+}

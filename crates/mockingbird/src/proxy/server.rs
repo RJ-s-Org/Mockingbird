@@ -11,6 +11,7 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use mb_protocols::http_rest::problem;
+use serde_json::json;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tower::ServiceExt as _;
@@ -103,6 +104,32 @@ fn blocked(host: &str) -> Response {
     )
 }
 
+/// The `type` of the problem answered for a blocked vendor sibling.
+pub const VENDOR_SUBDOMAIN_PROBLEM: &str = "urn:mockingbird:proxy:vendor-subdomain";
+
+/// 502 problem+json for `host`, unmapped but sharing a registrable domain
+/// with the mocked `mapped` hosts: naming them and how to fix it.
+fn sibling_blocked(host: &str, mapped: &[String]) -> Response {
+    let detail = format!(
+        "{host} is not served by any mock, but shares its domain with mocked {}; it is blocked so test traffic does not reach the real vendor. Add {host} to a mock's hosts (e.g. a mock for that product), or set proxy.vendor_subdomains: pass to send it to the real host.",
+        mapped.join(", ")
+    );
+    let body = json!({
+        "type": VENDOR_SUBDOMAIN_PROBLEM,
+        "title": "Vendor host not mocked",
+        "status": 502,
+        "detail": detail,
+        "host": host,
+        "mapped_hosts": mapped,
+    });
+    (
+        axum::http::StatusCode::BAD_GATEWAY,
+        [(header::CONTENT_TYPE, "application/problem+json")],
+        body.to_string(),
+    )
+        .into_response()
+}
+
 async fn handle(state: Arc<ProxyState>, req: Request) -> Response {
     if req.method() == Method::CONNECT {
         return connect(state, req);
@@ -123,7 +150,11 @@ async fn handle(state: Arc<ProxyState>, req: Request) -> Response {
     if state.claims.claims(&host) {
         return serve_mapped(&state, req).await;
     }
-    state.note_unmapped(&host);
+    let siblings = state.blocking_siblings(&host);
+    state.note_unmapped(&host, &siblings);
+    if !siblings.is_empty() {
+        return sibling_blocked(&host, &siblings);
+    }
     if state.unmapped == Unmapped::Block {
         return blocked(&host);
     }
@@ -148,8 +179,25 @@ async fn serve_mapped(state: &ProxyState, req: Request) -> Response {
     }
 }
 
+/// What an intercepted tunnel answers its requests with.
+#[derive(Clone)]
+enum Answer {
+    /// The data plane: a mapped host.
+    Mock,
+    /// [`sibling_blocked`], naming the mocked hosts of the domain.
+    Sibling(Arc<[String]>),
+    /// [`blocked`]: `proxy.unmapped` is `block`.
+    Blocked,
+}
+
 /// Answers a `CONNECT`: intercepts a mapped host (TLS with a leaf from the
-/// local CA, then the data plane), tunnels or blocks any other.
+/// local CA, then the data plane), tunnels any other host, or intercepts it
+/// to answer every request with a 502 problem when it is blocked on a web
+/// port, 80 or 443 (a vendor
+/// sibling unless `proxy.vendor_subdomains` is `pass`, or any host under
+/// `proxy.unmapped: block`), so a client trusting the CA reads why instead
+/// of only "tunnel connection failed". The host is counted once here, per
+/// `CONNECT`, not again per request inside the tunnel.
 fn connect(state: Arc<ProxyState>, req: Request) -> Response {
     let Some(authority) = req.uri().authority().cloned() else {
         return problem(400, "Invalid CONNECT", "CONNECT needs a host:port target");
@@ -158,13 +206,28 @@ fn connect(state: Arc<ProxyState>, req: Request) -> Response {
         return problem(400, "Invalid CONNECT", "CONNECT needs a host:port target");
     };
     let port = authority.port_u16().unwrap_or(443);
-    let mapped = state.is_mapped(&host);
-    if !mapped {
-        state.note_unmapped(&host);
-        if state.unmapped == Unmapped::Block {
-            return blocked(&host);
+    let answer = if state.is_mapped(&host) {
+        Some(Answer::Mock)
+    } else {
+        let siblings = state.blocking_siblings(&host);
+        state.note_unmapped(&host, &siblings);
+        // Only a web port is intercepted to explain the block: a protocol whose server
+        // speaks first (SMTP, a database) would wait on the tunnel instead of failing.
+        let web = matches!(port, 80 | 443);
+        if !siblings.is_empty() {
+            if !web {
+                return sibling_blocked(&host, &siblings);
+            }
+            Some(Answer::Sibling(siblings.into()))
+        } else if state.unmapped == Unmapped::Block {
+            if !web {
+                return blocked(&host);
+            }
+            Some(Answer::Blocked)
+        } else {
+            None
         }
-    }
+    };
     tokio::spawn(async move {
         let upgraded = match hyper::upgrade::on(req).await {
             Ok(upgraded) => TokioIo::new(upgraded),
@@ -173,10 +236,9 @@ fn connect(state: Arc<ProxyState>, req: Request) -> Response {
                 return;
             }
         };
-        let result = if mapped {
-            intercept(state, host.clone(), upgraded).await
-        } else {
-            tunnel(&host, port, upgraded).await
+        let result = match answer {
+            Some(answer) => intercept(state, host.clone(), answer, upgraded).await,
+            None => tunnel(&host, port, upgraded).await,
         };
         if let Err(error) = result {
             tracing::debug!(%host, error = %format!("{error:#}"), "proxy: CONNECT ended with an error");
@@ -195,12 +257,13 @@ async fn tunnel(
     Ok(())
 }
 
-/// Serves a tunnel to a mapped host: TLS with a leaf from the local CA
-/// when the client starts a handshake, else plain HTTP (a client that
-/// tunnels `http://` requests too, like the Node.js preload).
+/// Serves an intercepted tunnel with `answer`: TLS with a leaf from the
+/// local CA when the client starts a handshake, else plain HTTP (a client
+/// that tunnels `http://` requests too, like the Node.js preload).
 async fn intercept(
     state: Arc<ProxyState>,
     host: String,
+    answer: Answer,
     client: TokioIo<hyper::upgrade::Upgraded>,
 ) -> anyhow::Result<()> {
     use tokio::io::AsyncBufReadExt as _;
@@ -215,15 +278,16 @@ async fn intercept(
             let tls = tokio_rustls::TlsAcceptor::from(config)
                 .accept(client)
                 .await?;
-            serve_tunnel(state, host_value, tls).await
+            serve_tunnel(state, host_value, answer, tls).await
         }
-        Some(_) => serve_tunnel(state, host_value, client).await,
+        Some(_) => serve_tunnel(state, host_value, answer, client).await,
     }
 }
 
 async fn serve_tunnel<S>(
     state: Arc<ProxyState>,
     host_value: HeaderValue,
+    answer: Answer,
     io: S,
 ) -> anyhow::Result<()>
 where
@@ -232,16 +296,20 @@ where
     let svc = service_fn(move |req: Request<Incoming>| {
         let state = Arc::clone(&state);
         let host_value = host_value.clone();
+        let answer = answer.clone();
         async move {
             let mut req = req.map(Body::new);
             if req.uri().authority().is_none() && !req.headers().contains_key(header::HOST) {
                 req.headers_mut().insert(header::HOST, host_value.clone());
             }
             let host = host_value.to_str().unwrap_or_default().to_owned();
-            let resp = if state.is_image(&host, req.uri().path()) {
-                placeholder_response(req.method(), req.uri().path())
-            } else {
-                serve_mapped(&state, req).await
+            let resp = match answer {
+                Answer::Sibling(mapped) => sibling_blocked(&host, &mapped),
+                Answer::Blocked => blocked(&host),
+                Answer::Mock if state.is_image(&host, req.uri().path()) => {
+                    placeholder_response(req.method(), req.uri().path())
+                }
+                Answer::Mock => serve_mapped(&state, req).await,
             };
             Ok::<_, Infallible>(resp)
         }

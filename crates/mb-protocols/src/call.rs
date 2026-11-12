@@ -46,6 +46,7 @@ mod exec;
 mod exprs;
 mod header_ids;
 mod lifecycle;
+mod links;
 mod list_exprs;
 mod list_query;
 mod lists;
@@ -335,19 +336,27 @@ pub(crate) async fn generate_pending(
     mut pending: Pending<'_>,
     response_schema: Option<&Value>,
 ) -> Result<GeneratedResponse, EngineError> {
-    // A read in another language is shown its held record beside it, not as the target
-    // its answer takes members from: the language's values are its own.
-    let target = pending.target.as_ref().filter(|_| !pending.variant);
-    let guard =
-        target
-            .filter(|_| response_schema.is_none())
-            .map(|held| write_memory::SettleGuard {
-                rt,
-                plan,
-                call,
-                held,
-                advancing: &pending.tokens.advancing,
-            });
+    // A read in another language restates its held record (see [`variants`]): the record
+    // is its target, and only its text is the answer's own. Not while writes the record
+    // does not show yet are remembered: it catches up with them as any read does, and
+    // what it answers is no variant to keep.
+    if pending.variant && !pending.earlier.told.is_empty() {
+        pending.variant = false;
+    }
+    let target = pending.target.as_ref();
+    let representation = pending
+        .variant
+        .then(|| variants::representation(plan.op, call))
+        .flatten();
+    let guard = target
+        .filter(|_| response_schema.is_none() && !pending.variant)
+        .map(|held| write_memory::SettleGuard {
+            rt,
+            plan,
+            call,
+            held,
+            advancing: &pending.tokens.advancing,
+        });
     // A client's retry of a write answering no body is shown nothing beyond its target,
     // so it is asked for no effects a second time (see [`write_memory::is_retry`]).
     pending.retry = write_memory::is_retry(&mut pending.state, plan, call)
@@ -360,8 +369,8 @@ pub(crate) async fn generate_pending(
     let restated = pending.target.as_ref().filter(|_| pending.variant);
     let (related, created_since): (&[StoredResource], &[StoredResource]) = if repeat {
         (&[], &[])
-    } else if let Some(held) = restated {
-        (std::slice::from_ref(held), &pending.created_since)
+    } else if restated.is_some() {
+        (&[], &pending.created_since)
     } else {
         (&pending.related, &pending.created_since)
     };
@@ -381,13 +390,17 @@ pub(crate) async fn generate_pending(
         created_since,
         alongside: &pending.alongside,
         same_values: &pending.same_values,
-        changes_by_effects: write_memory::by_effects(&pending.earlier, target),
+        changes_by_effects: write_memory::by_effects(
+            &pending.earlier,
+            target.filter(|_| !pending.variant),
+        ),
         update_guard: guard.as_ref().map(|g| g as &dyn mb_engine::UpdateGuard),
         answer_records: rt
             .described()
             .op(&plan.op.id)
             .and_then(|d| d.answer.as_ref())
             .and_then(|a| a.records.as_ref()),
+        restates: representation.as_deref(),
     };
     let mut generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
     // The request log counts the executor's fill as well as the generation.
@@ -422,7 +435,9 @@ pub(crate) async fn generate_pending(
             pending.target.as_ref(),
             &pending.earlier,
         );
-        return Ok(answer);
+        return Ok(plan
+            .engine
+            .encode_base64(&rt.bundle, plan.op, response_schema, answer));
     }
     Ok(complete(rt, plan, call, pending, generated, response_schema).await)
 }
@@ -505,8 +520,28 @@ fn graphql_marks(
 }
 
 /// Reads the call's state and answers what needs no generation: an unknown
-/// id (404), a stored resource, a cached answer.
+/// id (404), a stored resource, a cached answer. An answer's base64 fields are
+/// valid base64 whatever made it (see [`mb_engine::Engine::encode_base64`]), as
+/// are [`complete`]'s.
 pub(crate) async fn prepare<'a>(
+    rt: &'a MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    response_schema: Option<&Value>,
+) -> Prepared<'a> {
+    match prepare_state(rt, plan, call, response_schema).await {
+        Prepared::Answered(answer) => Prepared::Answered(Box::new(plan.engine.encode_base64(
+            &rt.bundle,
+            plan.op,
+            response_schema,
+            *answer,
+        ))),
+        pending @ Prepared::Pending(_) => pending,
+    }
+}
+
+/// [`prepare`] but for the base64 fields of its answer.
+async fn prepare_state<'a>(
     rt: &'a MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,
@@ -1268,6 +1303,27 @@ pub(crate) async fn complete(
             {
                 lists::no_content(rt.bundle(), op, &mut generated);
             }
+            // A generated list agrees with the session as a page from state does: its
+            // parent-shaped envelope member is the held parent, and what its envelope
+            // says of a listed record names one it lists. What a scenario sets still
+            // stands over it.
+            if is_query
+                && target_id.is_none()
+                && answered.is_none()
+                && rt.consistency
+                && let Some(body) = generated.body.as_mut()
+            {
+                let changed = exec::agree_generated_list(&mut state, (plan, call), body)
+                    .instrument(state_span())
+                    .await;
+                // The engine applies a scenario's `set` to an object body only.
+                if changed
+                    && body.is_object()
+                    && let Some(set) = plan.scenario.and_then(|s| s.spec.set.as_ref())
+                {
+                    *body = mb_engine::apply_set(body, set);
+                }
+            }
             if matches!(op.kind, OperationKind::Command(Effect::Create)) {
                 // The answer as the model gave it, before a fresh id replaces one a stored
                 // record holds: whether it is that record (see [`repeats`]).
@@ -1390,6 +1446,39 @@ pub(crate) async fn complete(
                         }
                     }
                     None => {}
+                }
+                // The record's URL members show the place the call names (see [`links`]).
+                // What the request sent stays, and the parents are found from the
+                // call as sent. Settled once the record is known to be stored.
+                if !unstored
+                    && matches!(generated.source, Source::Llm | Source::Repaired)
+                    && (200..300).contains(&generated.status)
+                {
+                    let kept = links::sent_members(call);
+                    // The body is the record, unless the description says where the
+                    // answer holds it and the identity did not take it out already.
+                    let at = rt
+                        .described()
+                        .op(&op.id)
+                        .and_then(|d| d.answer.as_ref())
+                        .and_then(|a| a.record.as_ref())
+                        .map(|p| p.as_str().to_owned())
+                        .filter(|_| answered.is_none());
+                    let record = generated
+                        .body
+                        .as_mut()
+                        .and_then(|body| match at.as_deref() {
+                            None | Some("") => Some(body),
+                            Some(pointer) => body.pointer_mut(pointer),
+                        });
+                    if let Some(record) = record {
+                        links::settle(&mut state, session, (op, call), (t, &kept), record).await;
+                    }
+                    if let (Some(identity), Some(answer)) = (held_in, answered.as_mut())
+                        && let Some(record) = identity.record_in_mut(answer)
+                    {
+                        links::settle(&mut state, session, (op, call), (t, &kept), record).await;
+                    }
                 }
             }
             // An action's new record goes under its own id, not over another's.
@@ -1956,6 +2045,10 @@ pub(crate) async fn complete(
     ))]
     crate::webhooks::emit::emit_effects(rt, op, &generated.effect_outcomes, session);
 
+    // Whatever made it, a base64 field is served (and cached) as valid base64.
+    let generated = plan
+        .engine
+        .encode_base64(&rt.bundle, op, response_schema, generated);
     // Seeded first, then cached: a later list never clears a cached one.
     // A fallback is cached too: repeats are answered with it at once, except
     // that a timed-out one is retried by the next repeat (see `prepare`), so

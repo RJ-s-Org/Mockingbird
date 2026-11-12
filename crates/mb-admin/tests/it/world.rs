@@ -1169,6 +1169,94 @@ async fn get_world_returns_tier0_and_gaps() {
     assert_eq!(ctype, "application/problem+json");
 }
 
+/// A `POST` that lists accounts: its answer is a list of objects with an id-like
+/// member, and nothing names one account.
+const POST_LIST_SRC: &str = r##"
+openapi: 3.0.0
+info: {title: Accounts, version: "1"}
+paths:
+  /accounts/get:
+    post:
+      operationId: accountsGet
+      requestBody: {content: {application/json: {schema: {type: object, properties: {access_token: {type: string}}}}}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accounts:
+                    type: array
+                    items: {$ref: "#/components/schemas/Account"}
+components:
+  schemas:
+    Account:
+      type: object
+      properties:
+        account_id: {type: string}
+        name: {type: string}
+"##;
+
+#[tokio::test]
+async fn get_world_reports_no_identity_for_a_type_only_a_list_names() {
+    let (_st, app) = admin().await;
+    let uploaded = send(
+        &app,
+        Method::POST,
+        &format!("{BASE}/widgets/contracts"),
+        "application/yaml",
+        POST_LIST_SRC.as_bytes().to_vec(),
+    )
+    .await;
+    let version = uploaded["version"].as_i64().unwrap();
+    let uri = format!("{BASE}/widgets/contracts/{version}/world");
+    // Described as a list of `accounts`, a type with no identity: the executor
+    // falls back to the model on its calls (`no_identity`), so the gap report
+    // names the type.
+    put_world(
+        &app,
+        &uri,
+        &json!({"operations": {"accountsGet": {"kind": "list", "type": "accounts"}}}),
+    )
+    .await;
+    let view = send(&app, Method::GET, &uri, "application/json", Vec::new()).await;
+    assert!(
+        gap_names(&view).contains(&"no_identity accounts".to_owned()),
+        "{view}"
+    );
+    let gap = view["gaps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|g| g["code"] == "no_identity")
+        .unwrap();
+    assert!(
+        gap["message"].as_str().unwrap().contains("`accountsGet`"),
+        "{gap}"
+    );
+
+    // Naming the identity member (with where the answer holds the records) closes
+    // the gap.
+    let put = put_world(
+        &app,
+        &uri,
+        &json!({
+            "operations": {"accountsGet": {"kind": "list", "type": "accounts",
+                "answer": {"records": "/accounts"}}},
+            "types": {"accounts": {"identity": {"member": "account_id"}}}
+        }),
+    )
+    .await;
+    assert_eq!(put["refused"], json!([]), "{put}");
+    let view = send(&app, Method::GET, &uri, "application/json", Vec::new()).await;
+    assert!(
+        !gap_names(&view).contains(&"no_identity accounts".to_owned()),
+        "{view}"
+    );
+}
+
 #[tokio::test]
 async fn get_world_narrows_to_the_operations_and_types_asked_for() {
     let (_st, app) = admin().await;

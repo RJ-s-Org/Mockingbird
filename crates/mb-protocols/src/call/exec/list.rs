@@ -88,7 +88,7 @@ use crate::MockRuntime;
 use crate::call::state_lists::Shape;
 use crate::call::{
     CallPlan, MAX_SCAN, OperationCall, StateAccess, bundle_index, cursors, id_string,
-    item_identity, list_exprs, list_query, lists, pages, property_schema, ranges, runs,
+    item_identity, list_exprs, list_query, lists, pages, property_schema, ranges, records, runs,
     schema_parts, state_lists, state_span,
 };
 
@@ -246,6 +246,7 @@ async fn answer(
         return Err("unscoped_list".into());
     }
     let envelope = envelope(rt, plan, call, &shape).ok_or(Stop::from("render_failed"))?;
+    let envelope = with_held_parent(state, (plan, call), t, &shape, envelope).await;
     let mut records = state.list(&plan.session, t, MAX_SCAN + 1).await;
     if records.len() > MAX_SCAN {
         return Err("over_cap".into());
@@ -355,6 +356,10 @@ async fn answer(
     state_lists::mark_listed(state, (plan, call), t, &served, ids).await;
     // A list paged by its `Range` header: ordered and cut by it.
     ranges::serve(bundle, (plan, call), &mut served);
+    // What the envelope says of a listed record names one the page lists.
+    if let Some(body) = served.body.as_mut() {
+        with_listed_references(rt, &shape, t, body);
+    }
     // A list the query leaves nothing of answers the bodiless status declared for that.
     if none_kept {
         lists::no_content(bundle, op, &mut served);
@@ -437,7 +442,7 @@ fn unread(
     let members = body.as_object()?;
     members.iter().find_map(|(name, value)| {
         let here = format!("{at}/{}", name.replace('~', "~0").replace('/', "~1"));
-        if !asks(value) || q.is_some_and(|q| q.reads_body(&here)) {
+        if !list_query::asks(value) || q.is_some_and(|q| q.reads_body(&here)) {
             return None;
         }
         if value.is_object() && q.is_some_and(|q| q.reads_below(&here)) {
@@ -450,18 +455,6 @@ fn unread(
         }
         Some(here.trim_start_matches('/').to_owned())
     })
-}
-
-/// Whether body member value `value` asks something of the list: not `null`, blank,
-/// or an empty object or array.
-fn asks(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::String(text) => !text.trim().is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(members) => !members.is_empty(),
-        _ => true,
-    }
 }
 
 /// Whether the call's path names the parent of type `t` by its described link: the
@@ -582,6 +575,285 @@ fn envelope(
         }
     }
     shape.envelope(rt, plan, Some(&kept))
+}
+
+/// `envelope` with its one top member beside the list that is a record of the type of
+/// the items' described parent (Plaid's `item` beside an Item's `accounts`) filled from
+/// that parent as held, when the call names it ([`held_parent`]). A member is of the
+/// parent's type as an answer's nested record is ([`bundle_index::entity_type`]): by
+/// its definition, else by its name; of several such, the one named for the type is
+/// it, and with none or more than one so named, nothing is filled. Only a member the
+/// envelope holds is filled: the held record's members that its schema declares go over
+/// what the envelope was filled with, which keeps the rest, and the member is changed
+/// only when it then suits its schema.
+async fn with_held_parent(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: &str,
+    shape: &Shape,
+    mut envelope: Value,
+) -> Value {
+    let rt = state.rt;
+    let (Some(list), Some(parent_type)) = (
+        shape.top_member(),
+        rt.described()
+            .type_desc(t)
+            .and_then(|d| d.parent.as_ref())
+            .map(|link| link.r#type.clone()),
+    ) else {
+        return envelope;
+    };
+    let Some((name, member_schema)) = parent_member(rt, shape, list, &parent_type, &envelope)
+    else {
+        return envelope;
+    };
+    let Some(parent) = held_parent(state, (plan, call), t).await else {
+        return envelope;
+    };
+    let bundle = rt.bundle();
+    let Value::Object(held) = lists::projected(bundle, Some(&member_schema), &parent.data, 0)
+    else {
+        return envelope;
+    };
+    let Some(members) = envelope.as_object_mut() else {
+        return envelope;
+    };
+    let Some(mut filled) = members.get(&name).and_then(Value::as_object).cloned() else {
+        return envelope;
+    };
+    filled.extend(held);
+    let filled = Value::Object(filled);
+    if plan
+        .engine
+        .schema_violations(bundle, &member_schema, &filled)
+        .is_some_and(|violations| violations.is_empty())
+    {
+        members.insert(name, filled);
+    }
+    envelope
+}
+
+/// The one top member of `envelope` beside `list` that is a record of type
+/// `parent_type` (see [`with_held_parent`]), with its schema: of those its definition
+/// or its name says are of the type, the one its name says is, else the only one.
+fn parent_member(
+    rt: &MockRuntime,
+    shape: &Shape,
+    list: &str,
+    parent_type: &str,
+    envelope: &Value,
+) -> Option<(String, Value)> {
+    let bundle = rt.bundle();
+    let index = rt.index();
+    let held = envelope.as_object()?;
+    let (parts, _) = schema_parts(bundle, Some(shape.schema()));
+    let mut by_def = Vec::new();
+    let mut by_name = Vec::new();
+    let names = parts
+        .iter()
+        .filter_map(|p| p.get("properties").and_then(Value::as_object))
+        .flat_map(|p| p.keys())
+        .filter(|name| name.as_str() != list && held.contains_key(name.as_str()));
+    for name in names {
+        let Some(member_schema) = property_schema(bundle, shape.schema(), name) else {
+            continue;
+        };
+        let named = bundle_index::entity_type(index, None, name).as_deref() == Some(parent_type);
+        let (_, defs) = schema_parts(bundle, Some(&member_schema));
+        let defined = defs
+            .iter()
+            .find_map(|d| index.types_by_def.get(*d))
+            .is_some_and(|d| d == parent_type);
+        let found = (name.clone(), member_schema.clone());
+        if named {
+            by_name.push(found);
+        } else if defined {
+            by_def.push(found);
+        }
+    }
+    let mut chosen = if by_name.is_empty() { by_def } else { by_name };
+    match chosen.len() {
+        1 => chosen.pop(),
+        _ => None,
+    }
+}
+
+/// The held parent of the items of type `t` the call names: by a value it was issued
+/// ([`state_lists::issued_scope`], Plaid's `access_token`), else by the path parameter
+/// of the type's described `parent` link.
+async fn held_parent(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: &str,
+) -> Option<mb_state::StoredResource> {
+    let rt = state.rt;
+    if let Some((parent, _, value)) = state_lists::issued_scope(rt, plan.op, call) {
+        return records::by_extra_fields(state, &plan.session, &parent, (&[], &value), None).await;
+    }
+    let link = rt.described().type_desc(t)?.parent.as_ref()?;
+    let id = call
+        .path_params
+        .get(link.path_param.as_deref()?)
+        .and_then(id_string)?;
+    state.get(&plan.session, &link.r#type, &id).await
+}
+
+/// A generated answer `body` to list `call`, before it is served and recorded, made to
+/// agree with the session as a page from state does: its parent-shaped envelope member
+/// is the held parent ([`with_held_parent`]) and what its envelope says of a listed
+/// record names one it lists ([`with_listed_references`]). Only for a list whose items
+/// have a described identity ([`identified`]). Whether it changed `body`.
+pub(in crate::call) async fn agree_generated(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    body: &mut Value,
+) -> bool {
+    let rt = state.rt;
+    let op = plan.op;
+    let kind = rt
+        .described()
+        .op(&op.id)
+        .and_then(|d| d.kind)
+        .or_else(|| OpKind::of(op));
+    if kind != Some(OpKind::List) || !identified(rt, op, OpKind::List) {
+        return false;
+    }
+    let (Some(t), Some(shape)) = (item_type(rt, op), Shape::of(rt, op)) else {
+        return false;
+    };
+    let before = body.clone();
+    let answer = std::mem::take(body);
+    *body = with_held_parent(state, (plan, call), t, &shape, answer).await;
+    with_listed_references(rt, &shape, t, body);
+    *body != before
+}
+
+/// Nested members deeper than this in an envelope are not looked into for references.
+const MAX_REFERENCE_DEPTH: usize = 8;
+
+/// What [`repoint`] reads: the listed type's identity member, the members its items'
+/// schema declares, and the listed records' ids.
+struct Listed {
+    /// The identity member of the listed type (`account_id`).
+    member: String,
+    /// The members the list's item schema declares.
+    declared: std::collections::HashSet<String>,
+    /// Each listed record's id, as text and as held.
+    ids: Vec<(String, Value)>,
+}
+
+/// `body`, a list answer of `shape` whose items are of type `t`, with each reference to
+/// a record of the type outside its list naming one it lists (Plaid's
+/// `numbers.ach[].account_id` beside `accounts`).
+///
+/// A reference is a member named as the type's described identity member is, where
+/// that name refers to the type (`account_id` to `account`, as `reference_prefix` and
+/// `type_stem` read it; `id` refers to no type), in a top member other than the list's
+/// and the parent-shaped one ([`parent_member`]), and below. An object holding that
+/// member whose every member is one the list's item schema declares is a record of
+/// the type, whole or in part (a `modified` record, a `removed` stub naming one), not a
+/// reference to one: it and what it holds are left as they are. The reference sits in
+/// an object holding something the item schema does not declare (`ach`'s `routing`).
+///
+/// Each reference naming no listed record names, instead, the listed record at its
+/// position among the references, cycling through them. Nothing is dropped, and with
+/// no record listed, or no members declared for the items, nothing changes.
+fn with_listed_references(rt: &MockRuntime, shape: &Shape, t: &str, body: &mut Value) {
+    let Some(list) = shape.top_member() else {
+        return;
+    };
+    let Some(member) = rt
+        .described()
+        .type_desc(t)
+        .and_then(|d| d.identity.as_ref())
+        .and_then(|i| i.member.as_deref())
+        .filter(|m| !m.contains('/'))
+    else {
+        return;
+    };
+    let refers = crate::call::reference_prefix(member).is_some_and(|prefix| {
+        crate::call::effects::type_stem(prefix) == crate::call::effects::type_stem(t)
+    });
+    if !refers {
+        return;
+    }
+    let Some(declared) = mb_engine::consistency::declared_members(rt.bundle(), &shape.items) else {
+        return;
+    };
+    let ids: Vec<(String, Value)> = shape
+        .items_in(body)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let id = item.get(member)?;
+            Some((id_string(id)?, id.clone()))
+        })
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let parent = rt
+        .described()
+        .type_desc(t)
+        .and_then(|d| d.parent.as_ref())
+        .and_then(|link| parent_member(rt, shape, list, &link.r#type, body))
+        .map(|(name, _)| name);
+    let listed = Listed {
+        member: member.to_owned(),
+        declared,
+        ids,
+    };
+    let Some(members) = body.as_object_mut() else {
+        return;
+    };
+    let mut at = 0;
+    for (name, value) in members.iter_mut() {
+        if name != list && parent.as_deref() != Some(name.as_str()) {
+            repoint(value, &listed, &mut at, 0);
+        }
+    }
+}
+
+/// Points each reference in `value` (at nesting `depth`, see
+/// [`with_listed_references`]) holding an id no listed record has at the listed record
+/// at its position `at` among them all, when that record's id is held as the reference
+/// is (a string or a number).
+fn repoint(value: &mut Value, listed: &Listed, at: &mut usize, depth: usize) {
+    if depth > MAX_REFERENCE_DEPTH {
+        return;
+    }
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                repoint(item, listed, at, depth + 1);
+            }
+        }
+        Value::Object(members) => {
+            // A record of the listed type, or a part of one: no reference.
+            if members.contains_key(&listed.member)
+                && members.keys().all(|name| listed.declared.contains(name))
+            {
+                return;
+            }
+            for (name, held) in members.iter_mut() {
+                if *name != listed.member {
+                    repoint(held, listed, at, depth + 1);
+                    continue;
+                }
+                let Some(id) = id_string(held) else {
+                    continue;
+                };
+                if !listed.ids.iter().any(|(listed_id, _)| *listed_id == id)
+                    && let Some((_, named)) = listed.ids.get(*at % listed.ids.len())
+                    && named.is_string() == held.is_string()
+                {
+                    *held = named.clone();
+                }
+                *at += 1;
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Whether member `name` of answer `schema` may be `null` (a `previous` link of a

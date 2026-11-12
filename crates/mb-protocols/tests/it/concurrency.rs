@@ -604,7 +604,9 @@ async fn a_read_only_enum_state_is_no_token() {
 /// `readOnly` member anew to the model.)
 #[tokio::test]
 async fn a_token_the_query_sets_is_the_clients() {
-    let h = harness(vec![doc("a", 1), answer(doc("b", 2))]);
+    // The create fills nothing but structured members (no model call); the replace's
+    // answer is the model's.
+    let h = harness(vec![answer(doc("b", 2))]);
     h.send("POST", "/docs", Some(json!({"title": "a"})), &[])
         .await;
     let (status, body) = h

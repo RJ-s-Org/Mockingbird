@@ -56,6 +56,7 @@ fn ctx() -> GenerationContext<'static> {
         changes_by_effects: false,
         update_guard: None,
         answer_records: None,
+        restates: None,
     }
 }
 
@@ -316,6 +317,7 @@ async fn prompt_contains_request_and_state_as_data() {
                     changes_by_effects: false,
                     update_guard: None,
                     answer_records: None,
+                    restates: None,
                 },
             )
             .await
@@ -3357,6 +3359,169 @@ async fn base64_fields_are_encoded_locally() {
     assert!(readme.starts_with("# Trellis\n"), "{readme:?}");
     // Valid base64 is kept as it is.
     assert_eq!(body["avatar"], "aGk=");
+}
+
+/// [`CONTENTS`] with its `encoding` an enum naming base64: a declared pair.
+fn declared_contents() -> Bundle {
+    compile(
+        CONTENTS
+            .replace(
+                "encoding: {type: string}",
+                "encoding: {type: string, enum: [base64, utf-8]}",
+            )
+            .as_bytes(),
+    )
+    .unwrap()
+}
+
+/// A `content` declared beside an `encoding` that lists base64 is asked for as
+/// plain text, and a model may then say so (`encoding: "utf-8"`, the `gh`
+/// trial's README): the server encodes it and makes `encoding` say `"base64"`.
+/// An `encoding` whose enum does not admit base64 names no base64 field; a
+/// free-form one (GitHub's) does.
+#[tokio::test]
+async fn declared_content_is_encoded_whatever_encoding_the_model_wrote() {
+    let bundle = declared_contents();
+    let op = bundle.operation("getReadme").unwrap();
+    let (provider, engine) = scripted(vec![
+        Ok(json!({"name": "README.md", "encoding": "utf-8", "content": "# Trellis — a router", "avatar": "aGk="}).to_string()),
+    ]);
+    let body = engine
+        .generate(&bundle, op, &call("getReadme"), ctx())
+        .await
+        .unwrap()
+        .body
+        .unwrap();
+    assert_eq!(body["encoding"], "base64", "{body}");
+    assert_eq!(
+        decode64(body["content"].as_str().unwrap()),
+        "# Trellis — a router".as_bytes()
+    );
+    let prompt = &provider.requests()[0].messages[0].content;
+    assert!(prompt.contains("plain decoded text"), "{prompt}");
+
+    // Any answer, served by the protocols through `encode_base64`: a stored one.
+    let stored = json!({"name": "README.md", "encoding": "utf-8", "content": "plain", "avatar": "raw bytes"});
+    let served = engine
+        .serve_stored(&bundle, op, &stored, None)
+        .map(|r| engine.encode_base64(&bundle, op, None, r))
+        .unwrap();
+    let body = served.body.unwrap();
+    assert_eq!(body["encoding"], "base64");
+    assert_eq!(decode64(body["content"].as_str().unwrap()), b"plain");
+    assert_eq!(decode64(body["avatar"].as_str().unwrap()), b"raw bytes");
+
+    let stored =
+        json!({"name": "README.md", "encoding": "utf-8", "content": "# plain", "avatar": "aGk="});
+    let free_form = compile(CONTENTS.as_bytes()).unwrap();
+    let op = free_form.operation("getReadme").unwrap();
+    let body = engine
+        .serve_stored(&free_form, op, &stored, None)
+        .map(|r| engine.encode_base64(&free_form, op, None, r))
+        .unwrap()
+        .body
+        .unwrap();
+    assert_eq!(body["encoding"], "base64");
+    assert_eq!(decode64(body["content"].as_str().unwrap()), b"# plain");
+    let text_only = compile(
+        CONTENTS
+            .replace(
+                "encoding: {type: string}",
+                "encoding: {type: string, enum: [utf-8, latin1]}",
+            )
+            .as_bytes(),
+    )
+    .unwrap();
+    let op = text_only.operation("getReadme").unwrap();
+    let served = engine
+        .serve_stored(&text_only, op, &stored, None)
+        .map(|r| engine.encode_base64(&text_only, op, None, r))
+        .unwrap();
+    assert_eq!(served.body.unwrap(), stored);
+}
+
+/// A scenario's `set` is checked like any answer: its text is encoded, while a
+/// value of its that decodes (to any bytes) is kept.
+#[tokio::test]
+async fn a_scenario_set_s_base64_fields_are_checked() {
+    use base64::Engine as _;
+    let bundle = declared_contents();
+    let op = bundle.operation("getReadme").unwrap();
+    let png =
+        base64::engine::general_purpose::STANDARD.encode([0x89, b'P', b'N', b'G', 0xff, 0x00]);
+    for (set, expected) in [
+        (json!({"content": "# From the scenario"}), None),
+        (
+            json!({"content": png, "encoding": "base64"}),
+            Some(png.clone()),
+        ),
+    ] {
+        let scenario = ScenarioSpec {
+            name: "readme".into(),
+            instructions: None,
+            set: Some(set.clone()),
+            status: None,
+        };
+        let (_, engine) = scripted(vec![Ok(json!({"name": "README.md", "encoding": "base64",
+            "content": base64::engine::general_purpose::STANDARD.encode("# Model"), "avatar": "aGk="}).to_string())]);
+        let body = engine
+            .generate(
+                &bundle,
+                op,
+                &call("getReadme"),
+                GenerationContext {
+                    scenario: Some(&scenario),
+                    ..ctx()
+                },
+            )
+            .await
+            .unwrap()
+            .body
+            .unwrap();
+        assert_eq!(body["encoding"], "base64", "{body}");
+        match expected {
+            Some(kept) => assert_eq!(body["content"], kept, "{body}"),
+            None => assert_eq!(
+                decode64(body["content"].as_str().unwrap()),
+                b"# From the scenario"
+            ),
+        }
+    }
+}
+
+/// Only a 2xx body is looked at: an error body's `content` stays as written.
+#[tokio::test]
+async fn an_error_body_s_content_is_left_alone() {
+    let bundle = compile(
+        CONTENTS
+            .replace("encoding: {type: string}", "encoding: {type: string, enum: [base64, utf-8]}")
+            .replace(
+                "                  avatar: {type: string, format: byte}\n",
+                "                  avatar: {type: string, format: byte}\n        \"404\":\n          description: missing\n          content:\n            application/json:\n              schema:\n                type: object\n                properties:\n                  content: {type: string}\n                  encoding: {type: string, enum: [base64]}\n                  avatar: {type: string, format: byte}\n",
+            )
+            .as_bytes(),
+    )
+    .unwrap();
+    let op = bundle.operation("getReadme").unwrap();
+    assert!(op.output_for_status(404).is_some());
+    let error = json!({"content": "# not base64", "encoding": "base64", "avatar": "not bytes"});
+    let (_, engine) = scripted(vec![Ok(error.to_string())]);
+    let out = engine
+        .generate(
+            &bundle,
+            op,
+            &call("getReadme"),
+            GenerationContext {
+                forced_status: Some(404),
+                ..ctx()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.status, 404);
+    assert_eq!(out.body.clone().unwrap(), error);
+    let again = engine.encode_base64(&bundle, op, None, out);
+    assert_eq!(again.body.unwrap(), error);
 }
 
 /// Plaid-style lists: items identified by `<singular>_id`, and the list

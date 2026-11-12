@@ -170,3 +170,52 @@ These are outside the repo, in `mockingbird-trials/accept-a-payment/mb-trial-111
 - `run2.txt`, the spec output, and `run3.txt` and `run4.txt`, the flow output;
 - `rerun.sh` and `score.py`, and the 2026-11-11 rerun's `rerun-r5.txt` (specs), `rerun-r5.json` (request log) and `rerun-r5-world.json`.
 - The real-install rerun: `mockingbird-trials/stripe-real/` (the clone, with the agent's `mockingbird/` folder) and `mockingbird-trials/stripe-real-trial/` (`prompt.txt`, `agent.jsonl`, `run.txt`/`run2.txt`, `run-requests.json`/`run2-requests.json`).
+
+## User-path rerun (2026-11-11): a fresh Claude Code given one prompt
+
+`main` at `0d68585b`, model `deepseek/deepseek-v4.1-flash-1017`.
+
+**Setup:**
+- A fresh headless Claude Code (`claude -p`, default model) worked in a clean clone of the sample. Each server had its git-ignored `.env` with placeholder keys, and the specs' gems were in `.gems`.
+- The plugin was installed the README way. `main`'s binary was on `PATH`, because the plugin would install the stale `v0.1.0` release.
+- The agent was given only this prompt:
+
+> I want to run this Stripe sample's Node servers and its RSpec server specs without a real Stripe account. Use Mockingbird to mock the Stripe API, serving the mock with the OpenRouter model deepseek/deepseek-v4.1-flash-1017; my key is in OPENROUTER_API_KEY. The specs are spec/*_server_spec.rb and spec/prebuilt_checkout_page_spec.rb; each runs against its integration's Node server (custom-payment-flow, payment-element, prebuilt-checkout-page, elements-with-checkout-sessions, under <integration>/server/node) on port 4242. Each server's .env already has placeholder keys, and the specs' gems are installed in .gems (use it as GEM_HOME). Don't change the app or the specs. Get as many specs passing as you can, and tell me which still fail and why.
+
+**How the agent built it:**
+- **Contract:** it started from the catalog's Stripe example with the full upstream spec, and cut that down to the six operations the apps call. It then made three edits:
+  - put `payment_method_types` back on the PaymentIntent create, since the apps pin API version 2023-10-16;
+  - declared 400 and 404 responses, where Stripe's spec declares only `default`;
+  - slimmed the error body.
+- **World:**
+  - Stripe id prefixes and client secrets;
+  - Checkout Sessions start `open`/`unpaid`, with a hosted `url` and a fragment;
+  - a `refuse` for `au_becs_debit` with a non-AUD currency;
+  - 404 `resource_missing` rules on reads of ids never created.
+- **Ruby:** stripe-ruby ignores `HTTPS_PROXY` and trusts only its own CA bundle, so the agent wrote a `RUBYOPT` preload (`Stripe.proxy`, `Stripe.ca_bundle_path`), as the earlier trial did.
+- **Workarounds:** it ended on `storage.state_url: memory` (failure 1).
+- **Tools:** 107 turns. **44.5 min**. Agent cost $5.01 at API prices (on the subscription here).
+
+**Result: 16/16 spec examples pass:** custom-payment-flow 6/6, payment-element 3/3, prebuilt-checkout-page 2/2, elements-with-checkout-sessions 5/5. A measured rerun of the agent's harness also passed 16/16, in 2 min.
+
+### Scorecard (measured run)
+
+| # | Measure | Result |
+| --- | --- | --- |
+| 1 | Tests and flows pass | **16/16** spec examples, app and specs unchanged |
+| 2 | Consistency the specs check | every retrieve of a created PaymentIntent or Checkout Session came from `state` (7 of 7), with the request's currency, payment method types and `line_items` |
+| 3 | Agent build | **44.5 min** (fails ≤ 15). Most of it went to failures 1 and 2 |
+| 4 | State-served latency | 16 of 16 calls from `state`. Reads p50 2 ms. **Creates 6–18 s** (fill prompts of 4–36k tokens on Stripe's schemas); p50 over all calls 4.0 s, p95 17.1 s |
+| 5 | Model-served latency | no call needed the model directly |
+| 6 | Spend per session | $0.0021 (112k prompt / 2.8k completion tokens) |
+| 7 | Errors | the `au_becs_debit` refusal answers Stripe's 400 and an unknown session 404 `resource_missing`, both from world rules the agent wrote. `unknown_ids: 404` alone had no effect |
+
+### Failures
+
+| # | Repro | Class | Status |
+| --- | --- | --- | --- |
+| 1 | With the default state store, refusals and world-described 404s answered after **75–160 s** with 0 LLM tokens, logging `pool timed out while waiting for an open connection`. With `state_url: memory`: about 1 s. The machine was heavily loaded by parallel builds. | engine (under load) | dropped: pre-production; reproduces only under heavy load. Not reproduced in isolation. Without `storage.url` the state store is `sqlite::memory:` with one pooled connection. Refusals took 0.6–9 ms in tests (up to 60 concurrent) and 0.03–2.7 s on the real server with the trial's world and model. Only 25–30 requests at once at a debug build at load average ~50 gave the same pool timeouts and 8–11 s refusals. |
+| 2 | `unknown_ids: 404`: unknown `GET /v1/checkout/sessions/cs_test_invalid` still answered 200 with an invented session. Stripe's path parameters (`{session}`, `{intent}`) aren't id-like by name. | engine | open |
+| 3 | stripe-ruby ignores `HTTPS_PROXY` and its CA, so specs need a preload. | proxy | reported to the proxy owner |
+| 4 | The prebuilt-checkout spec follows the 303 to `checkout.stripe.com`, which the proxy passed through to the real site. `verify --no-unmapped` flags it. | proxy | reported to the proxy owner |
+| 5 | Creates answered from state take 6–18 s because of the fill call on Stripe's large schemas. | engine (fill latency) | reported to the engine owner |

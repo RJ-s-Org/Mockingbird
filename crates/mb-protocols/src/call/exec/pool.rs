@@ -223,6 +223,55 @@ fn pooled_types(rt: &MockRuntime) -> Vec<(String, usize, usize)> {
     out
 }
 
+/// Compiles, off the request path, the answer validators of the operations the
+/// executor answers from state, reads first, then lists and creates, so that the first
+/// read of a record a create stored does not wait seconds on compiling a large
+/// contract's schema ([`mb_engine::Engine::warm_validator`]). Only for a runtime that
+/// keeps state ([`MockRuntime::consistency`]). Each compile runs on a blocking thread
+/// of its own, holding the runtime for that compile alone; it stops when the runtime
+/// is gone (rebuilt or unmounted), and a shutdown waits for one compile at most.
+pub async fn warm_validators(rt: Weak<MockRuntime>) {
+    let order = |kind: OpKind| match kind {
+        OpKind::Read => Some(0u8),
+        OpKind::List => Some(1),
+        OpKind::Create => Some(2),
+        _ => None,
+    };
+    let mut ops: Vec<(u8, usize)> = {
+        let Some(rt) = rt.upgrade() else { return };
+        if !rt.consistency {
+            return;
+        }
+        rt.bundle()
+            .operations
+            .iter()
+            .enumerate()
+            .filter_map(|(i, op)| {
+                let kind = rt
+                    .described()
+                    .op(&op.id)
+                    .and_then(|d| d.kind)
+                    .or_else(|| OpKind::of(op))?;
+                Some((order(kind)?, i))
+            })
+            .collect()
+    };
+    ops.sort_unstable();
+    for (_, i) in ops {
+        let Some(held) = rt.upgrade() else { return };
+        let warmed = tokio::task::spawn_blocking(move || {
+            if let Some(op) = held.bundle().operations.get(i) {
+                held.engine.warm_validator(held.bundle(), op);
+            }
+        })
+        .await;
+        if let Err(error) = warmed {
+            tracing::warn!(%error, "warming the answer validators stopped");
+            return;
+        }
+    }
+}
+
 /// Fills the pool of the runtime `rt` points to, in the background: each type up to
 /// [`POOL_SIZE`] records, until `cap` tokens are spent by this fill. Stops when the
 /// runtime is gone (rebuilt or unmounted) or a later fill began; a later runtime's fill

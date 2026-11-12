@@ -7,6 +7,7 @@ use crate::Ctx;
 use crate::schema::defs_name;
 use mb_mcm::{
     Binding, Effect, HttpMethod, Identity, Operation, OperationKind, OutputVariant, StatusSelector,
+    member_key,
 };
 use serde_json::{Map, Value};
 
@@ -359,16 +360,6 @@ fn update_members(path: &str, answered: &Value, defs: &Map<String, Value>) -> Ha
         })
         .map(|(member, _)| member_key(member))
         .filter(|key| key != "id" && !ID_FALLBACKS.contains(&key.as_str()) && !params.contains(key))
-        .collect()
-}
-
-/// A member name with case, `_` and `-` left out: `SmsUrl`, `sms_url` and `sms-url`
-/// are one member.
-fn member_key(member: &str) -> String {
-    member
-        .chars()
-        .filter(|c| !matches!(c, '_' | '-'))
-        .map(|c| c.to_ascii_lowercase())
         .collect()
 }
 

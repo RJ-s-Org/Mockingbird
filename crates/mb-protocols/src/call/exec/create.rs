@@ -2,7 +2,9 @@
 //! and the members [`mb_engine::Engine::fill`] writes, stored and answered.
 //!
 //! - The record is what the request holds at the described `request.record`, else the
-//!   body: the members the type's records declare (all of them when it declares none),
+//!   body: the members the type's records declare (all of them when it declares none;
+//!   a top-level member sent by another name, a form API's `FriendlyName`, under the
+//!   one of the same [`mb_mcm::member_key`] when exactly one has it, as an update),
 //!   with those of an object member the type does not declare itself (an input wrapper,
 //!   GraphQL's `input: {...}`) one level down, the members a declared query parameter
 //!   names (`POST /boards?name=…`), and the path values naming its parent or a member
@@ -82,12 +84,42 @@ use crate::call::owners::{Compound, schema_members};
 use crate::call::writes::type_members;
 use crate::call::{
     CallPlan, MAX_SCAN, OperationCall, StateAccess, computed, header_ids, id_string,
-    in_create_collection, lifecycle, path_set, records, repeats, replays, request_values,
+    in_create_collection, lifecycle, links, path_set, records, repeats, replays, request_values,
     serve_held, state_lists, state_span, target_id, transitions, value_index,
 };
 
 /// Whether the executor takes these calls.
 pub(super) const EXECUTES: bool = true;
+
+/// What says who the caller is, for fill ([`mb_engine::FillContext::caller`]): what the
+/// session's routes with no parameters answered (a `/user`, a `/users/@me`, see
+/// [`crate::call::world::recall_answers`]), the newest first, each with its read's
+/// answer schema and its scalar members. Fill takes one only into an object of the
+/// record of that very schema (an issue's `user`), never by a name alone.
+async fn caller(state: &mut StateAccess<'_>, plan: &CallPlan<'_>) -> Vec<mb_engine::CallerAnswer> {
+    let rt = state.rt;
+    let (answers, _) = crate::call::world::recall_answers(state, plan).await;
+    answers
+        .iter()
+        .rev()
+        .filter_map(|entry| {
+            let path = entry.get("path")?.as_str()?;
+            let read = rt
+                .bundle()
+                .operations
+                .get(*rt.index().single_reads.get(path)?)?;
+            let schema = read.success_output()?.schema.clone()?;
+            let members: Map<String, Value> = entry
+                .get("answer")?
+                .as_object()?
+                .iter()
+                .filter(|(_, v)| matches!(v, Value::String(_) | Value::Number(_) | Value::Bool(_)))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            (!members.is_empty()).then_some(mb_engine::CallerAnswer { schema, members })
+        })
+        .collect()
+}
 
 /// Executes the call.
 pub(super) async fn run(
@@ -147,7 +179,9 @@ pub(super) async fn run(
         .body
         .as_ref()
         .map(|b| records::request_record(rt, op, b));
-    let Some(mut record) = shape.request_record(rt, request) else {
+    let expressions = rt.described().expressions(&op.id);
+    let set_reads = |name: &str| expressions.is_some_and(|e| e.sets_from_body(name));
+    let Some(mut record) = shape.request_record(rt, request, &set_reads) else {
         return fall("no_record");
     };
     // A record member the query names is set as the body sets it, as an update's is.
@@ -399,6 +433,7 @@ pub(super) async fn run(
                 .filter(|(name, _)| names.contains(name))
                 .cloned()
                 .collect();
+            let caller = caller(state, plan).instrument(state_span()).await;
             let filled = plan
                 .engine
                 .fill(
@@ -406,7 +441,12 @@ pub(super) async fn run(
                     &fill_schema(&asked, &required),
                     known,
                     &names,
-                    FillContext { op, call },
+                    FillContext {
+                        op,
+                        call,
+                        sent: sent.as_object(),
+                        caller: &caller,
+                    },
                 )
                 .await;
             usage = filled.usage;
@@ -417,6 +457,14 @@ pub(super) async fn run(
     // Issued values name their record as alternate keys do: unique among the type's.
     let drawn: Vec<(String, Value)> = filled_keys.into_iter().chain(issued).collect();
     unique_keys(state, (seed, t), &drawn, &mut data)
+        .instrument(state_span())
+        .await;
+    // Its URL members show the place the call names, under the mock's host, but what
+    // the request sent and the description sets.
+    let mut kept = links::sent_members(call);
+    kept.extend(sent.as_object().into_iter().flat_map(|s| s.keys().cloned()));
+    kept.extend(set.iter().cloned());
+    links::settle(state, &plan.session, (op, call), (t, &kept), &mut data)
         .instrument(state_span())
         .await;
 
@@ -1059,13 +1107,17 @@ impl Shape {
     }
 
     /// The record `request` (the request's record) holds: the members the type
-    /// declares (all of them when it declares none), and those of an object member the
-    /// type does not declare, one level down, that the record holds no value for.
-    /// Empty with no request; `None` for a request that is not an object.
+    /// declares (all of them when it declares none), a member sent by another name
+    /// (`FriendlyName`) under the declared one of its key (`friendly_name`, as an
+    /// update takes it: [`super::writes::by_record_names`]) unless a described `set`
+    /// reads it (`set_reads`), and those of an object member the type does not declare,
+    /// one level down, that the record holds no value for. Empty with no request;
+    /// `None` for a request that is not an object.
     fn request_record(
         &self,
         rt: &crate::MockRuntime,
         request: Option<&Value>,
+        set_reads: &dyn Fn(&str) -> bool,
     ) -> Option<Map<String, Value>> {
         let sent = match request {
             None => return Some(Map::new()),
@@ -1075,6 +1127,8 @@ impl Shape {
         if self.members.is_empty() {
             return Some(sent.clone());
         }
+        let names: Vec<&str> = self.members.iter().map(|(m, _)| m.as_str()).collect();
+        let sent = &super::writes::by_record_names(sent, &names, set_reads);
         let declares = |name: &str| self.members.iter().any(|(m, _)| m == name);
         let mut record: Map<String, Value> = sent
             .iter()

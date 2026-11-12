@@ -17,7 +17,7 @@ use mb_store::{
     SqliteControlStore,
 };
 use mockingbird::config::{ServeArgs, apply_flags, build_app};
-use mockingbird::file_config::{FileConfig, Unmapped};
+use mockingbird::file_config::{FileConfig, Unmapped, VendorSubdomains};
 use mockingbird::proxy::ca::LocalCa;
 use mockingbird::proxy::{ProxyState, StandaloneOptions, run_standalone, serve};
 use mockingbird::registry::MockRegistry;
@@ -48,6 +48,7 @@ fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
         mode: mockingbird::runtime::ServeMode::Full,
         webhook_log: Default::default(),
         record_pools: Default::default(),
+        shared_types: Default::default(),
     }
 }
 
@@ -114,9 +115,26 @@ async fn start_proxy(
     unmapped: Unmapped,
     images: Vec<String>,
 ) -> (String, TempDir, watch::Sender<bool>) {
+    start_proxy_with(registry, unmapped, VendorSubdomains::Block, images).await
+}
+
+async fn start_proxy_with(
+    registry: Arc<MockRegistry>,
+    unmapped: Unmapped,
+    vendor_subdomains: VendorSubdomains,
+    images: Vec<String>,
+) -> (String, TempDir, watch::Sender<bool>) {
     let dir = tempfile::tempdir().unwrap();
     let ca = Arc::new(LocalCa::load_or_create(dir.path()).unwrap());
-    let state = ProxyState::new(registry.clone(), registry.router(), ca, unmapped, images).unwrap();
+    let state = ProxyState::new(
+        registry.clone(),
+        registry.router(),
+        ca,
+        unmapped,
+        vendor_subdomains,
+        images,
+    )
+    .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stop_rx) = watch::channel(false);
@@ -201,7 +219,145 @@ async fn block_mode_answers_502_naming_the_host() {
     assert_eq!(r.status(), 502);
     assert_eq!(r.headers()["content-type"], "application/problem+json");
     assert!(r.text().await.unwrap().contains("elsewhere.test"));
-    assert!(c.get("https://elsewhere.test/x").send().await.is_err());
+    // Over HTTPS the proxy accepts the CONNECT and answers inside the
+    // tunnel, so a client trusting the local CA reads the problem too.
+    let r = c.get("https://elsewhere.test/x").send().await.unwrap();
+    assert_eq!(r.status(), 502);
+    assert_eq!(r.headers()["content-type"], "application/problem+json");
+    assert!(r.text().await.unwrap().contains("elsewhere.test"));
+    // Another port is refused at the CONNECT itself.
+    let (status, body) = connect_status(&proxy, "elsewhere.test:3306").await;
+    assert_eq!(status, 502);
+    assert!(body.contains("elsewhere.test"), "{body}");
+}
+
+/// Sends `CONNECT authority` to the proxy and returns the response status
+/// and body. A `200` means the proxy accepted the tunnel: it passes it
+/// through (here to a `.test` host that does not resolve, so nothing
+/// leaves the machine) or intercepts it.
+async fn connect_status(proxy_url: &str, authority: &str) -> (u16, String) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut tcp = tokio::net::TcpStream::connect(proxy_url.trim_start_matches("http://"))
+        .await
+        .unwrap();
+    tcp.write_all(format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let head_end = loop {
+        let n = tcp.read(&mut chunk).await.unwrap();
+        assert!(n > 0, "the proxy closed before answering");
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i + 4;
+        }
+    };
+    let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+    let status: u16 = head[9..12].parse().unwrap();
+    let len: usize = head
+        .lines()
+        .find_map(|l| l.strip_prefix("content-length:"))
+        .map_or(0, |v| v.trim().parse().unwrap());
+    while buf.len() < head_end + len {
+        let n = tcp.read(&mut chunk).await.unwrap();
+        assert!(n > 0, "the proxy closed mid-body");
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    let body = String::from_utf8_lossy(&buf[head_end..head_end + len]).into_owned();
+    (status, body)
+}
+
+#[tokio::test]
+async fn vendor_siblings_are_blocked_under_pass() {
+    let registry = hosted_registry("api.orders.test").await;
+    let (proxy, ca_dir, _stop) = start_proxy(registry, Unmapped::Pass, vec![]).await;
+    let ca = std::fs::read(ca_dir.path().join("ca.pem")).unwrap();
+    let c = client(&proxy, &ca);
+    for url in [
+        "http://verify.orders.test/v2/Services",
+        "http://orders.test/",
+    ] {
+        let r = c.get(url).send().await.unwrap();
+        assert_eq!(r.status(), 502, "{url}");
+        assert_eq!(r.headers()["content-type"], "application/problem+json");
+        let body: Value = r.json().await.unwrap();
+        assert_eq!(body["type"], mockingbird::proxy::VENDOR_SUBDOMAIN_PROBLEM);
+        assert_eq!(body["mapped_hosts"], json!(["api.orders.test"]));
+        let detail = body["detail"].as_str().unwrap();
+        assert!(detail.contains("api.orders.test"), "{detail}");
+        assert!(detail.contains("proxy.vendor_subdomains: pass"), "{detail}");
+    }
+    // HTTPS: the CONNECT is accepted and intercepted with a leaf from the
+    // local CA, and every request inside answers the same problem.
+    for _ in 0..2 {
+        let r = c
+            .get("https://verify.orders.test/v2/Services")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 502);
+        assert_eq!(r.headers()["content-type"], "application/problem+json");
+        let body: Value = r.json().await.unwrap();
+        assert_eq!(body["type"], mockingbird::proxy::VENDOR_SUBDOMAIN_PROBLEM);
+        assert_eq!(body["title"], "Vendor host not mocked");
+        assert_eq!(body["host"], "verify.orders.test");
+        assert_eq!(body["mapped_hosts"], json!(["api.orders.test"]));
+        let detail = body["detail"].as_str().unwrap();
+        assert!(detail.starts_with("verify.orders.test "), "{detail}");
+    }
+    // A client that does not trust the local CA gets a TLS error.
+    let fixture_ca = std::fs::read(fixture("tls/ca.pem")).unwrap();
+    assert!(
+        client(&proxy, &fixture_ca)
+            .get("https://verify.orders.test/")
+            .send()
+            .await
+            .is_err()
+    );
+    // Another domain still passes through.
+    assert_eq!(connect_status(&proxy, "elsewhere.test:443").await.0, 200);
+    // A non-web port is refused at the CONNECT: its server would speak first.
+    let (status, body) = connect_status(&proxy, "db.orders.test:5432").await;
+    assert_eq!(status, 502);
+    assert!(body.contains("db.orders.test"), "{body}");
+}
+
+#[tokio::test]
+async fn vendor_subdomains_pass_restores_passthrough() {
+    let registry = hosted_registry("api.orders.test").await;
+    let (proxy, ca_dir, _stop) =
+        start_proxy_with(registry, Unmapped::Pass, VendorSubdomains::Pass, vec![]).await;
+    assert_eq!(
+        connect_status(&proxy, "verify.orders.test:443").await.0,
+        200
+    );
+    // Tunnelled to the real host (a `.test` name that does not resolve),
+    // not intercepted: no 502 problem comes back.
+    let ca = std::fs::read(ca_dir.path().join("ca.pem")).unwrap();
+    assert!(
+        client(&proxy, &ca)
+            .get("https://verify.orders.test/")
+            .send()
+            .await
+            .is_err()
+    );
+    let registry = hosted_registry("api.orders.test").await;
+    let (proxy, ca_dir, _stop) =
+        start_proxy_with(registry, Unmapped::Block, VendorSubdomains::Pass, vec![]).await;
+    let ca = std::fs::read(ca_dir.path().join("ca.pem")).unwrap();
+    let r = client(&proxy, &ca)
+        .get("https://verify.orders.test/")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 502);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("proxy.unmapped is block"), "{body}");
+    assert!(
+        !body.contains(mockingbird::proxy::VENDOR_SUBDOMAIN_PROBLEM),
+        "{body}"
+    );
 }
 
 #[tokio::test]
@@ -231,6 +387,7 @@ fn unmapped_hosts_are_logged_once() {
         registry.router(),
         ca,
         Unmapped::Pass,
+        VendorSubdomains::Block,
         vec![],
     )
     .unwrap();
@@ -250,6 +407,7 @@ fn unmapped_hosts_past_the_cap_are_counted_as_other() {
         registry.router(),
         ca,
         Unmapped::Pass,
+        VendorSubdomains::Block,
         vec![],
     )
     .unwrap();
@@ -341,6 +499,82 @@ async fn serve_starts_the_proxy_from_config() {
     assert_eq!(hosts, json!({"hosts": ["api.orders.test"]}));
 }
 
+#[tokio::test]
+async fn report_lists_a_blocked_vendor_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca_dir = dir.path().join("ca");
+    let cfg = dir.path().join("mockingbird.yaml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "storage:\n  url: \"sqlite::memory:\"\nproxy:\n  enabled: true\n  ca_dir: {}\nmocks:\n  orders:\n    contract: {}\n    route_prefix: /\n    hosts: [api.siblings.test]\n",
+            ca_dir.display(),
+            fixture("openapi/orders-3.0.yaml").display()
+        ),
+    )
+    .unwrap();
+    let app = build_app(
+        &ServeArgs {
+            config: Some(cfg),
+            offline: true,
+            ..ServeArgs::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let (data, admin, proxy) = (ephemeral().await, ephemeral().await, ephemeral().await);
+    let (admin_url, proxy_url) = (
+        format!("http://{}", admin.local_addr().unwrap()),
+        format!("http://{}", proxy.local_addr().unwrap()),
+    );
+    let (_stop, stop_rx) = watch::channel(false);
+    tokio::spawn(serve_app(
+        app,
+        Listeners {
+            data: Some(data),
+            admin: Some(admin),
+            grpc: None,
+            proxy: Some(proxy),
+        },
+        stop_rx,
+    ));
+    let ca = std::fs::read(ca_dir.join("ca.pem")).unwrap();
+    let r = client(&proxy_url, &ca)
+        .get("http://verify.siblings.test/x")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 502);
+    // Over HTTPS the host is counted once per CONNECT, not again for the
+    // request served inside the tunnel.
+    let r = client(&proxy_url, &ca)
+        .get("https://checkout.siblings.test/pay")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 502);
+    let report = mockingbird::report::collect(&admin_url, None, DEFAULT_WORKSPACE)
+        .await
+        .unwrap();
+    let host = report
+        .unmapped_hosts
+        .iter()
+        .find(|h| h.host == "verify.siblings.test")
+        .unwrap_or_else(|| panic!("{:?}", report.unmapped_hosts));
+    assert_eq!(host.mode, "block");
+    assert_eq!(host.sibling_of, ["api.siblings.test"]);
+    assert_eq!(host.requests, 1);
+    let host = report
+        .unmapped_hosts
+        .iter()
+        .find(|h| h.host == "checkout.siblings.test")
+        .unwrap_or_else(|| panic!("{:?}", report.unmapped_hosts));
+    assert_eq!(host.mode, "block");
+    assert_eq!(host.sibling_of, ["api.siblings.test"]);
+    assert_eq!(host.requests, 1);
+}
+
 #[test]
 fn proxy_flags_override_config() {
     let mut cfg = FileConfig::default();
@@ -356,6 +590,10 @@ fn proxy_flags_override_config() {
     assert_eq!(cfg.proxy.port, 9999);
     assert_eq!(FileConfig::default().proxy.port, 8888);
     assert_eq!(FileConfig::default().proxy.unmapped, Unmapped::Pass);
+    assert_eq!(
+        FileConfig::default().proxy.vendor_subdomains,
+        VendorSubdomains::Block
+    );
 }
 
 #[test]
@@ -385,6 +623,7 @@ fn proxy_env_prints_exports_and_json() {
         assert_cmd::Command::cargo_bin("mockingbird")
             .unwrap()
             .env("MB_CA_DIR", dir.path())
+            .current_dir(dir.path())
             .args(args)
             .assert()
             .success()
@@ -396,6 +635,15 @@ fn proxy_env_prints_exports_and_json() {
     assert!(text.contains("export NODE_USE_ENV_PROXY='1'"), "{text}");
     let json: Value = serde_json::from_slice(&cmd(&["proxy", "env", "--json"])).unwrap();
     assert_eq!(json["vars"]["HTTPS_PROXY"], "http://127.0.0.1:8888");
+    // Without -c, ./mockingbird.yaml's proxy.port (as `init` or `server
+    // start` wrote it) applies.
+    std::fs::write(
+        dir.path().join("mockingbird.yaml"),
+        "proxy:\n  port: 8899\n",
+    )
+    .unwrap();
+    let json: Value = serde_json::from_slice(&cmd(&["proxy", "env", "--json"])).unwrap();
+    assert_eq!(json["vars"]["HTTPS_PROXY"], "http://127.0.0.1:8899");
 }
 
 /// Serves an app with the `orders` mock on `host` (proxy disabled): data
@@ -455,6 +703,7 @@ async fn standalone_proxy_forwards_to_a_running_server() {
             admin_url,
             ca_dir: ca_dir.path().into(),
             unmapped: Unmapped::Block,
+            vendor_subdomains: VendorSubdomains::Block,
             images: vec![],
         },
         rx,
@@ -712,6 +961,99 @@ print("pool=%d" % r.status)
         "pool=200",
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `ruby`, when installed.
+fn ruby() -> Option<PathBuf> {
+    let out = std::process::Command::new("ruby")
+        .arg("--version")
+        .output()
+        .ok()?;
+    out.status.success().then(|| PathBuf::from("ruby"))
+}
+
+/// `Net::HTTP.new(host, port, nil)` (an explicit nil proxy, as stripe-ruby
+/// passes) reaches the mock through the preload, verifying TLS with the
+/// local CA although the client names an unrelated `ca_file` or its own
+/// cert store. Unmapped hosts are blocked and the host does not resolve, so
+/// a request that bypassed the proxy would fail; without the preload it
+/// does.
+#[tokio::test(flavor = "multi_thread")]
+async fn ruby_preload_routes_net_http_with_an_explicit_nil_proxy() {
+    let Some(ruby) = ruby() else {
+        eprintln!("skipped: ruby is not installed");
+        return;
+    };
+    let registry = hosted_registry("api.orders.test").await;
+    let (proxy, ca_dir, _stop) = start_proxy(registry, Unmapped::Block, vec![]).await;
+    let port: u16 = proxy.rsplit(':').next().unwrap().parse().unwrap();
+    let env = mockingbird::proxy::env::proxy_env_with(
+        &mockingbird::proxy::env::ProxyEnvOptions {
+            host: "127.0.0.1".into(),
+            port,
+            ca_dir: ca_dir.path().into(),
+        },
+        |_| None,
+    )
+    .unwrap();
+    // Another CA: trusting only it would fail verification.
+    let other = tempfile::tempdir().unwrap();
+    let other_ca = LocalCa::load_or_create(other.path()).unwrap().cert_path();
+    let script = r#"
+require 'net/http'
+require 'openssl'
+def get(ssl)
+  http = Net::HTTP.new('api.orders.test', ssl ? 443 : 80, nil)
+  if ssl
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_PEER
+    yield http if block_given?
+  end
+  http.start { |h| h.get('/orders').code }
+rescue StandardError => e
+  e.class.name
+end
+ca_file = get(true) { |h| h.ca_file = ARGV[0] }
+store = get(true) do |h|
+  s = OpenSSL::X509::Store.new
+  s.add_file(ARGV[0])
+  h.cert_store = s
+end
+puts "ca_file=#{ca_file} store=#{store} default=#{get(true)} http=#{get(false)}"
+"#;
+    let run = |with_preload: bool| {
+        let mut vars = env.vars.clone();
+        if !with_preload {
+            vars.remove("RUBYOPT");
+        }
+        let ruby = ruby.clone();
+        let script = script.to_owned();
+        let other_ca = other_ca.clone();
+        tokio::task::spawn_blocking(move || {
+            std::process::Command::new(ruby)
+                .arg("-e")
+                .arg(script)
+                .arg(other_ca)
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .envs(&vars)
+                .output()
+                .unwrap()
+        })
+    };
+    let out = run(true).await.unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "ca_file=200 store=200 default=200 http=200",
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = run(false).await.unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("ca_file=200") && !stdout.contains("http=200"),
+        "without the preload: {stdout}"
     );
 }
 

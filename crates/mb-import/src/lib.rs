@@ -69,7 +69,7 @@ pub use archive::{
 };
 use std::collections::{HashMap, HashSet};
 
-pub use base_paths::base_paths;
+pub use base_paths::{base_paths, server_hosts};
 use mb_mcm::Bundle;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

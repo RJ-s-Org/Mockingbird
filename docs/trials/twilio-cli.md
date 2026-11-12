@@ -57,7 +57,7 @@ Run 1 was on `main`. Run 2 was the same mock on a binary with #469.
 
 | # | Class | Finding | Status |
 | --- | --- | --- | --- |
-| F1 | Skills gap / proxy default | Requests to `verify.twilio.com` passed through to the real Twilio. The agent mocked only the hosts in the catalog example, and `proxy.unmapped: pass` sends every other host upstream. The CLI got real 401s (code 20003) for its placeholder account. `mockingbird report` lists the host under `unmapped_hosts`, but nothing made the agent look | Open. Two options. (a) The setup skill tells the agent to cover each vendor host the app's SDK can call, or to say which hosts it left out. (b) The proxy blocks unmapped subdomains of a mapped host's registrable domain (`*.twilio.com` when `api.twilio.com` is mapped), so test traffic never reaches the vendor |
+| F1 | Skills gap / proxy default | Requests to `verify.twilio.com` passed through to the real Twilio. The agent mocked only the hosts in the catalog example, and `proxy.unmapped: pass` sends every other host upstream. The CLI got real 401s (code 20003) for its placeholder account. `mockingbird report` lists the host under `unmapped_hosts`, but nothing made the agent look | **Fixed.** (a) The proxy now blocks an unmapped host that shares a mocked host's registrable domain, with a 502 problem+json naming the host and the fix (`proxy.vendor_subdomains: pass` turns this off); `report` lists it (this PR). (b) The main skill's hand-back checklist covers vendor hosts (#500). |
 | F2 | Engine | An update sending form parameters under other names (`SmsUrl` for `sms_url`) fell back to the model with `undeclared_member`, even though the world's `set` placed every one: 3.0–3.4 s and 6.6–11.4k prompt tokens per update | **Fixed in #469**: a request member that a described `set` reads is no longer a fallback. In run 2, `UpdateIncomingPhoneNumber` came from state in 20 ms |
 | F2b | Engine heuristic | Tier 0 classes a `POST` to the record's own path (`POST /Messages/{Sid}.json`, Stripe's `POST /v1/customers/{customer}`) as an action. Form APIs update that way, so every such update is a `no_effect` gap the agent has to describe, and an undescribed one goes to the model (`UpdateMessage`: 3.7 s) | Open; proposed. Class a `POST` whose last path segment is the record's parameter as an update when its body declares members of the record (names compared ignoring case and `_`). This changes classification for every API that updates by POST, so it needs the orchestrator's go |
 | F3 | Default | A read of a SID the session never held is generated: 200 with an invented message. The skill says to set `unknown_ids: "404"` "when the app or its tests expect" a 404, but nothing in a one-line prompt says so. Stripe hit the same thing (F2 there) | Open; proposed. Either default `unknown_ids` to `404`, or have the mock-api skill set it unless the app reads fixtures it never created |
@@ -108,6 +108,37 @@ The rerun used `main` plus #483 and #484 (both merged since); the marketplace sk
 
 The MCP server's instructions say the same in one sentence.
 
+## Second rerun: the vendor-domain block (2026-11-11)
+
+Built on `main` plus this PR. The skills came from the marketplace, so they include #500's hand-back checklist. A fresh agent got the same prompt in a clean copy of the app.
+
+**Build.** 352 s, 40 turns, $1.84 of Claude Code usage. This time the agent:
+- used `init_example twilio` with `full: true`, which gives the upstream Api v2010 spec, so phone numbers are mocked;
+- described Message, Call and phone-number creates and lists;
+- handed back `mockingbird run -c mockingbird/mockingbird.yaml -- ./bin/run …` (with the `eval` form only as an option, and a warning about `PATH`);
+- named what it left out: "Commands for other Twilio hosts, like `api:messaging:v1:…`, `api:verify:…` or `serverless`, are blocked by the proxy".
+
+It still didn't set `unknown_ids`.
+
+**Flows (run under `mockingbird run`): 11 of 21.**
+- Messages: 8 of 9. The unknown SID is still generated (F3).
+- Phone numbers: 3 of 3.
+- Verify: 0 of 9, but each call now gets the proxy's 502 problem+json instead of reaching `verify.twilio.com`. The CLI prints the detail: "verify.twilio.com is not served by any mock, but shares its domain with mocked api.twilio.com, lookups.twilio.com; it is blocked so test traffic does not reach the real vendor. Add …".
+
+| # | Measure | First run | Second rerun |
+| --- | --- | --- | --- |
+| 1 | Flows | 11/21 (9 Verify calls reached the real Twilio) | 11/21 (9 Verify calls blocked locally) |
+| 2 | Consistency | 8/8 | 8/8 |
+| 3 | Agent build | 195 s | 352 s |
+| 4 | State latency | p50 8–20 ms | p50 30 ms (7 calls, load average about 60) |
+| 5 | Model latency | 5 of 12, p50 2.8 s | 5 of 12, p50 2.2 s, max 3.9 s |
+| 6 | Model spend | $0.0008 | about $0.001 (29.8k prompt / 1.7k completion) |
+| 7 | Errors | deleted 404, unknown 200 | the same; Verify gets a declared 502 problem |
+
+**Still open.**
+- **Form-named updates go to the model.** #483 now classes `UpdateMessage` as an update. But a form update sends `Body`/`SmsUrl` against a record holding `body`/`sms_url`, so with no world `set` it falls back with `undeclared_member` (2.2 s each). The fix: the update executor matches request members to record members ignoring case and `_`, as #483's classifier already does.
+- **`unknown_ids` left at `generate`** (F3), although the checklist says to set it.
+
 ## Files
 
 These are outside the repo, in `mockingbird-trials/twilio/`:
@@ -118,3 +149,4 @@ These are outside the repo, in `mockingbird-trials/twilio/`:
 - `trial/run{1,2}.txt` and `trial/run{1,2}-requests.jsonl`: the runs and their request logs (cumulative: ids 1–16 are the agent's self-test, 17–28 run 1, 29–40 run 2);
 - `trial/run1-report.json`: `mockingbird report` after run 1;
 - `app2/` and `trial2/`: the rerun's app copy (with the agent's `mock/` folder), transcript, flows and request log.
+- `app3/` and `trial3/`: the second rerun's app copy (with the agent's `mockingbird/` folder), transcript, flows and request log.

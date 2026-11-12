@@ -103,6 +103,8 @@ struct Mounted {
     world: LoadedWorld,
     /// The build that made it, from [`MockRegistry::generations`].
     generation: u64,
+    /// What it adds to the record types of its `shares` group, when it has one.
+    shared: Option<mb_protocols::SharedEntry>,
 }
 
 /// How a mounted mock is reached.
@@ -549,7 +551,7 @@ impl MockRegistry {
             }
             next.push(mounted);
         }
-        self.publish(next).await;
+        self.publish(deps, next).await;
         if let Ok(mut slot) = self.failed.lock() {
             *slot = failed;
         }
@@ -817,7 +819,7 @@ impl MockRegistry {
                 next.push(mounted);
             }
         }
-        self.publish(next).await;
+        self.publish(deps, next).await;
         false
     }
 
@@ -1142,7 +1144,13 @@ impl MockRegistry {
 
     /// Installs `next` as the mounted set and publishes its gRPC mocks.
     /// Callers hold `self.reload`, so publishes do not interleave.
-    async fn publish(&self, mut next: Vec<Mounted>) {
+    async fn publish(&self, deps: &RuntimeDeps, mut next: Vec<Mounted>) {
+        // The record types of the `shares` groups are the mounted mocks': a mock
+        // deleted, unmounted or left without a contract leaves them here.
+        deps.shared_types.mounted(next.iter().filter_map(|m| {
+            let shared = m.shared.clone()?;
+            Some(((m.workspace.clone(), m.name.clone()), shared))
+        }));
         let prefix_len = |m: &Mounted| m.prefix().map_or(0, str::len);
         // Longest prefix first; at equal length host-specific mocks first.
         next.sort_by(|a, b| {
@@ -1371,9 +1379,12 @@ async fn build_mounted(
         }
     };
     let state_health = Arc::clone(&runtime.state_health);
+    let shared = mb_protocols::SharedEntry::of(&runtime);
     let protocol = runtime.bundle().protocol();
     let channels = runtime.bundle().channels.clone();
     let runtime = Arc::new(runtime);
+    // The answer validators compile in the background, so no first read waits on one.
+    tokio::spawn(mb_protocols::warm_validators(Arc::downgrade(&runtime)));
     // The record pool fills in the background, never in the way of mounting the mock.
     // At most a tenth of a daily token budget, which requests need more.
     let pool_cap = match mock.limits.daily_token_budget {
@@ -1449,6 +1460,7 @@ async fn build_mounted(
             uses_default: mock.llm_profile.is_none(),
             world,
             generation,
+            shared,
         })),
         Err(error) => {
             tracing::error!(mock = %label, %error, "cannot route mock; keeping any previous version mounted");

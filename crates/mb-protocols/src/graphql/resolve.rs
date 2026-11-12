@@ -338,6 +338,28 @@ async fn generate_in(
             });
             &widened
         }
+        // A read by a lookup argument (`user(login:)`) generates the key and that
+        // member, so the record is stored and found by it again.
+        (OperationKind::Query, Some(schema)) => {
+            let props = super::nested::def_of(&rt.bundle, schema)
+                .and_then(|d| d.get("properties"))
+                .and_then(Value::as_object);
+            let declared = |name: &str| props.is_some_and(|p| p.contains_key(name));
+            match op
+                .identity
+                .as_ref()
+                .and_then(|i| Some((i.field.as_str(), i.input_field.as_deref()?)))
+                .filter(|(_, input)| *input != "id" && declared(input))
+            {
+                Some((field, input)) => {
+                    let names: Vec<&str> =
+                        [field, input].into_iter().filter(|n| declared(n)).collect();
+                    widened = super::select::with_members(selection, &names);
+                    &widened
+                }
+                None => selection,
+            }
+        }
         _ => selection,
     };
     let mut report = Report {

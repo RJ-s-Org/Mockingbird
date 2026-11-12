@@ -167,17 +167,74 @@ async fn world_gap_marks_an_operation_whose_type_has_no_identity() {
         .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(gaps_of(&h.records()[0]), Some(&json!(["no_identity"])));
-    // Only the writing operations of the type are marked: the read carries no
-    // `no_identity`.
+    // The read of the type is marked too: the executor falls back to the model on
+    // it for the same reason (`exec_fallback`), by the same rule.
     h.send("GET", "/widgets/a", None, &[]).await;
     let read = &h.records()[1];
     assert_eq!(read.operation_id.as_deref(), Some("getWidget"));
-    assert!(
-        !gaps_of(read)
-            .and_then(Value::as_array)
-            .is_some_and(|g| g.contains(&json!("no_identity"))),
+    assert_eq!(
+        read.request["exec_fallback"], "no_identity",
         "{:?}",
         read.request
+    );
+    assert_eq!(gaps_of(read), Some(&json!(["no_identity"])));
+}
+
+/// A `POST` that lists accounts, objects with an id-like member.
+const POST_LIST_CONTRACT: &str = r##"
+openapi: 3.0.0
+info: {title: Accounts, version: "1"}
+paths:
+  /accounts/get:
+    post:
+      operationId: accountsGet
+      requestBody: {content: {application/json: {schema: {type: object, properties: {access_token: {type: string}}}}}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accounts: {type: array, items: {$ref: "#/components/schemas/Account"}}
+components:
+  schemas:
+    Account:
+      type: object
+      properties: {account_id: {type: string}, name: {type: string}}
+"##;
+
+#[tokio::test]
+async fn a_list_of_a_type_with_no_identity_is_marked_as_the_gap_report_says() {
+    let world = json!({"operations": {"accountsGet": {"kind": "list", "type": "accounts"}}});
+    let h = support::described(
+        POST_LIST_CONTRACT,
+        world.clone(),
+        vec![json!({"accounts": [{"account_id": "a1", "name": "Checking"}]})],
+    );
+    h.send(
+        "POST",
+        "/accounts/get",
+        Some(json!({"access_token": "t"})),
+        &[],
+    )
+    .await;
+    let request = &h.records()[0].request;
+    // The executor falls back to the model, and the log marks the same gap the
+    // report lists.
+    assert_eq!(request["exec_fallback"], "no_identity", "{request}");
+    assert_eq!(gaps_of(&h.records()[0]), Some(&json!(["no_identity"])));
+    let bundle = mb_import::compile(POST_LIST_CONTRACT.as_bytes()).unwrap();
+    let base = mb_mcm::world::tier0(&bundle);
+    let authored: mb_mcm::world::World = serde_json::from_value(world).unwrap();
+    let effective = mb_mcm::world::overlay(&base, &authored);
+    let report = mb_protocols::world_gaps::gaps(&bundle, &effective, &[]);
+    assert!(
+        report
+            .iter()
+            .any(|g| g.code == GapCode::NoIdentity && g.r#type.as_deref() == Some("accounts")),
+        "{report:?}"
     );
 }
 

@@ -5,12 +5,14 @@
 //! Every command prints one JSON document on stdout, so agents and scripts
 //! can read the outcome.
 
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
 use clap::{Args, Subcommand};
 use serde_json::{Map, Value, json};
 
+use crate::daemon::PortSlot;
 use crate::file_config::{self, FileProfile};
 use crate::providers::{self, PRESETS, ProviderArgs};
 
@@ -32,13 +34,16 @@ pub struct InitArgs {
     /// Control-plane storage [default: sqlite://./mockingbird.db].
     #[arg(long)]
     pub storage_url: Option<String>,
-    /// Data-plane port (`server.port`) [default: 8080].
+    /// Data-plane port (`server.port`) [default: 8080; when it is taken, a
+    /// free port above it, written into the config].
     #[arg(long)]
     pub port: Option<u16>,
-    /// Admin API and console port (`server.admin_port`) [default: 9090].
+    /// Admin API and console port (`server.admin_port`) [default: 9090;
+    /// when it is taken, a free port above it, written into the config].
     #[arg(long)]
     pub admin_port: Option<u16>,
-    /// gRPC port (`server.grpc_port`) [default: 50051].
+    /// gRPC port (`server.grpc_port`) [default: 50051; when it is taken, a
+    /// free port above it, written into the config].
     #[arg(long)]
     pub grpc_port: Option<u16>,
     /// File to write.
@@ -188,6 +193,11 @@ fn secret_steps(profile: &FileProfile, preset: &str) -> (Vec<Value>, Vec<String>
 /// or mock name, or when the config file cannot be written or does not load
 /// afterwards.
 pub fn init(args: &InitArgs) -> anyhow::Result<Value> {
+    init_with(args, crate::daemon::port_free)
+}
+
+/// [`init`], with `is_free` saying whether a port is free.
+fn init_with(args: &InitArgs, is_free: impl Fn(IpAddr, u16) -> bool) -> anyhow::Result<Value> {
     if args.output.exists() && !args.force {
         bail!(
             "{} already exists; pass --force to overwrite it, or `mockingbird llm configure` to add a profile",
@@ -196,14 +206,46 @@ pub fn init(args: &InitArgs) -> anyhow::Result<Value> {
     }
     let mut doc = Map::new();
     let mut server = Map::new();
-    for (key, port) in [
-        ("port", args.port),
-        ("admin_port", args.admin_port),
-        ("grpc_port", args.grpc_port),
-    ] {
+    // A default port another process (often another project's Mockingbird
+    // server) holds is replaced by a free one, written into the config so
+    // that every command reading it finds this project's server; a port
+    // given explicitly is kept, with a warning when it is taken.
+    let defaults = file_config::ServerConfig::default();
+    let host = defaults.host;
+    let given = [
+        ("server.port", args.port, defaults.port),
+        ("server.admin_port", args.admin_port, defaults.admin_port),
+        ("server.grpc_port", args.grpc_port, defaults.grpc_port),
+    ];
+    let slots: Vec<PortSlot> = given
+        .iter()
+        .map(|&(key, port, default)| PortSlot {
+            key,
+            host,
+            port: port.unwrap_or(default),
+            defaulted: port.is_none(),
+        })
+        .collect();
+    let mut warnings = Vec::new();
+    for (key, port, _) in given {
         if let Some(port) = port {
-            server.insert(key.into(), json!(port));
+            server.insert(key.trim_start_matches("server.").into(), json!(port));
+            if port != 0 && !is_free(host, port) {
+                warnings.push(format!(
+                    "{key} {port} (given explicitly) is taken on {host}; `server start` will fail until it is free, or pick another"
+                ));
+            }
         }
+    }
+    let mut ports_chosen = Vec::new();
+    for (i, port) in crate::daemon::choose_free_ports(&slots, &is_free)? {
+        let key = slots[i].key;
+        server.insert(key.trim_start_matches("server.").into(), json!(port));
+        ports_chosen.push(json!({
+            "key": key,
+            "busy": slots[i].port,
+            "port": port,
+        }));
     }
     if !server.is_empty() {
         doc.insert("server".into(), Value::Object(server));
@@ -284,13 +326,20 @@ pub fn init(args: &InitArgs) -> anyhow::Result<Value> {
         args.output.display(),
         args.output.display()
     ));
-    Ok(json!({
+    let mut out = json!({
         "written": args.output,
         "profile": profile_name,
         "secrets": secrets,
         "config": text,
         "next_steps": next,
-    }))
+    });
+    if !ports_chosen.is_empty() {
+        out["ports_chosen"] = json!(ports_chosen);
+    }
+    if !warnings.is_empty() {
+        out["warnings"] = json!(warnings);
+    }
+    Ok(out)
 }
 
 /// A mock name from a file stem: lowercase, other characters as `-`.
@@ -381,7 +430,7 @@ pub fn configure_file(args: &ConfigureArgs) -> anyhow::Result<Value> {
 /// comments are lost in the rewrite, so the original is then kept as
 /// `.yaml.bak` (returned). A result that does not load is rolled back.
 /// Nothing is written when `edit` fails.
-fn rewrite_config(
+pub(crate) fn rewrite_config(
     path: &Path,
     edit: impl FnOnce(&mut Map<String, Value>) -> anyhow::Result<()>,
 ) -> anyhow::Result<Option<PathBuf>> {
@@ -689,5 +738,73 @@ mod tests {
         assert_eq!(mock_name("Orders API"), "orders-api");
         assert_eq!(mock_name("petstore.v3"), "petstore-v3");
         assert_eq!(mock_name("__"), "mock");
+    }
+
+    fn offline_init(dir: &Path, admin_port: Option<u16>) -> InitArgs {
+        InitArgs {
+            provider: ProviderArgs::default(),
+            offline: true,
+            profile_name: None,
+            contracts: Vec::new(),
+            storage_url: None,
+            port: None,
+            admin_port,
+            grpc_port: None,
+            output: dir.join("mockingbird.yaml"),
+            force: false,
+        }
+    }
+
+    #[test]
+    fn init_writes_free_ports_in_place_of_taken_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        // 8080, 8081 and 9090 are taken; 50051 is free.
+        let out = init_with(&offline_init(dir.path(), None), |_, p| {
+            !matches!(p, 8080 | 8081 | 9090)
+        })
+        .unwrap();
+        let cfg = file_config::load(&dir.path().join("mockingbird.yaml")).unwrap();
+        assert_eq!(cfg.server.port, 8082);
+        assert_eq!(cfg.server.admin_port, 9091);
+        assert_eq!(cfg.server.grpc_port, 50051);
+        assert!(
+            !out["config"].as_str().unwrap().contains("grpc_port"),
+            "{out}"
+        );
+        assert_eq!(
+            out["ports_chosen"],
+            json!([
+                {"key": "server.port", "busy": 8080, "port": 8082},
+                {"key": "server.admin_port", "busy": 9090, "port": 9091},
+            ])
+        );
+        assert!(out.get("warnings").is_none(), "{out}");
+    }
+
+    #[test]
+    fn init_keeps_a_taken_explicit_port_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = init_with(&offline_init(dir.path(), Some(9090)), |_, p| p != 9090).unwrap();
+        let cfg = file_config::load(&dir.path().join("mockingbird.yaml")).unwrap();
+        assert_eq!(cfg.server.admin_port, 9090);
+        assert!(out.get("ports_chosen").is_none(), "{out}");
+        assert!(
+            out["warnings"][0]
+                .as_str()
+                .unwrap()
+                .contains("server.admin_port 9090 (given explicitly) is taken"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn init_with_free_defaults_writes_no_ports() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = init_with(&offline_init(dir.path(), None), |_, _| true).unwrap();
+        assert!(
+            !out["config"].as_str().unwrap().contains("server:"),
+            "{out}"
+        );
+        assert!(out.get("ports_chosen").is_none(), "{out}");
     }
 }

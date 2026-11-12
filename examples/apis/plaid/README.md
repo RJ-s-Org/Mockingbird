@@ -10,6 +10,7 @@ Identity and `/transactions/sync`, all POST with JSON bodies like the real API, 
 | Contract | [`plaid.openapi.yaml`](plaid.openapi.yaml), a hand-written subset that keeps Plaid's operation ids (`linkTokenCreate`, `accountsGet`, ...) |
 | Upstream | [plaid/plaid-openapi](https://github.com/plaid/plaid-openapi) `2020-09-14.yml`, not pinned: the repository has no license file (see [`example.json`](example.json)) |
 | Hosts | `sandbox.plaid.com`, `production.plaid.com` |
+| World | [`plaid.world.yaml`](plaid.world.yaml), wired as `world:`: Items named by the `access_token` the exchange issues, accounts and transactions under their Item ([world descriptions](../../../docs/world.md)) |
 | Scenarios | `item-login-required` (400), `rate-limited` (429), `outage` (500) |
 | Webhooks | `SYNC_UPDATES_AVAILABLE` after `/transactions/sync` to `http://127.0.0.1:8000/plaid/webhook`, signed `hmac-sha256` with `env:PLAID_WEBHOOK_SECRET` |
 
@@ -23,9 +24,13 @@ mockingbird serve -c mockingbird.yaml --offline
 In another shell:
 
 ```bash
-curl -s localhost:8080/accounts/get -H 'Host: sandbox.plaid.com' -H 'content-type: application/json' \
-  -d '{"client_id":"test_client_id","secret":"test_secret","access_token":"access-sandbox-de3ce8ef-33f8-452c-a685-8671031fc0f6"}'
+plaid() { curl -s "localhost:8080$1" -H 'Host: sandbox.plaid.com' -H 'content-type: application/json' \
+  -H 'PLAID-CLIENT-ID: test_client_id' -H 'PLAID-SECRET: test_secret' -d "$2"; }
+token=$(plaid /item/public_token/exchange '{"public_token":"public-sandbox-5c224a01-8314-4491-a06f-39e193d5cddc"}' | jq -r .access_token)
+plaid /accounts/get "{\"access_token\":\"$token\"}"
 ```
+
+An `access_token` no exchange issued answers 400.
 
 The official Python SDK, unmodified, through the proxy. `plaid-python` is generated
 by OpenAPI Generator and reads neither the proxy variables nor the system CA bundle,
@@ -62,6 +67,27 @@ PY
 Drop `--offline` (and configure an LLM, see [the configuration reference](../../../docs/configuration.md#llm))
 for answers that follow the persona: the Plaid Checking / Saving / Credit Card
 accounts, Alberta Charleson as the owner, everyday US merchants in the transactions.
+
+## World description
+
+[`plaid.world.yaml`](plaid.world.yaml) says how the API behaves as a world, from Plaid's API
+reference only: `/item/public_token/exchange` creates an Item and issues its `access_token`,
+`/item/get` reads the Item by that token, and `/accounts/get`, `/accounts/balance/get`,
+`/auth/get`, `/identity/get` and `/transactions/sync` list the Item's accounts and
+transactions scoped by it (`/transactions/sync` pages with `cursor`, `next_cursor` and
+`count`). With an LLM configured, the first of those lists after an exchange is generated,
+and later account lists answer from the session's state (`x-mockingbird-source: state`)
+with the same accounts in milliseconds (`/identity/get` has the model add the owners the
+stored accounts lack). `/item/get` answers the Item the exchange created, and a token no
+exchange issued answers 400. A `/transactions/sync` that re-syncs with the last
+`next_cursor` is answered by the model.
+
+Known limits: only the accounts come from state. The `item` in a list's answer is
+generated on each call, so its `item_id` does not match the exchanged Item's, and the
+`numbers.ach[].account_id` of `/auth/get` can name an account the list does not hold.
+
+Check the description with `mockingbird world show plaid`; edit the file to change it (see
+[In a config file](../../../docs/world.md#in-a-config-file)).
 
 ## Expected output
 

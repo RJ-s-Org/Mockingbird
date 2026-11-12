@@ -275,6 +275,7 @@ fn chat() -> ChatRequest {
         max_tokens: 50,
         max_answer_bytes: None,
         timeout: Duration::from_secs(5),
+        hedge: 0,
     }
 }
 

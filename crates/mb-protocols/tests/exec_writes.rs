@@ -501,6 +501,298 @@ async fn an_undeclared_member_a_described_set_reads_is_set_not_a_fallback() {
     assert_eq!(capture.of("updateItem")[1], undeclared);
 }
 
+/// A form API names its parameters otherwise than its records (`Note`, `SIZE` for
+/// `note`, `size`): each is the record member of its key, merged from state with no
+/// model call.
+#[tokio::test]
+async fn a_member_sent_by_another_case_or_separator_is_the_record_s_member() {
+    let (capture, _guard) = Capture::install();
+    let h = with_item(json!({}), vec![item(), decoy()]).await;
+    let (status, headers, body) = h
+        .send(
+            "PATCH",
+            "/items/i1",
+            Some(json!({"Note": "renamed", "SIZE": 2})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let merged =
+        json!({"id": "i1", "name": "a", "size": 2, "note": "renamed", "created": "2026-01-01"});
+    assert_eq!(body, merged);
+    assert_eq!(
+        h.provider.requests().len(),
+        1,
+        "the update made no LLM call"
+    );
+    // A member sent by the record's own name wins over one sent by another.
+    let (status, _, body) = h
+        .send(
+            "PATCH",
+            "/items/i1",
+            Some(json!({"Note": "other", "note": "exact"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["note"], json!("exact"), "{body}");
+    assert_eq!(
+        capture.of("updateItem"),
+        vec![line("updateItem", "update", None); 2]
+    );
+    // A new value of a read-only member is refused under its record name.
+    let (status, _, body) = h
+        .send(
+            "PATCH",
+            "/items/i1",
+            Some(json!({"Created": "2030-01-01"})),
+            &[],
+        )
+        .await;
+    assert!(status.is_success(), "{body}");
+    let read_only = ExecLine {
+        exec_fallback_on: Some("created".to_owned()),
+        ..line("updateItem", "update", Some("read_only_member"))
+    };
+    assert_eq!(capture.of("updateItem")[2], read_only);
+}
+
+/// Numbers are updated with form-style names (`FriendlyName`, `SmsUrl`) and created
+/// so; twins declare two members of one key (`sms_url`, `smsUrl`).
+const FORM: &str = r##"
+openapi: 3.0.0
+info: {title: Form, version: "1"}
+paths:
+  /numbers:
+    post:
+      operationId: createNumber
+      requestBody: {content: {application/json: {schema: {type: object, properties: {FriendlyName: {type: string}, SmsUrl: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Number"}}}}}
+  /numbers/{sid}:
+    parameters: [{name: sid, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getNumber
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Number"}}}}, "404": {description: missing}}
+    patch:
+      operationId: updateNumber
+      requestBody: {content: {application/json: {schema: {type: object, properties: {FriendlyName: {type: string}, SmsUrl: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Number"}}}}}
+  /twins/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getTwin
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Twin"}}}}, "404": {description: missing}}
+    patch:
+      operationId: updateTwin
+      requestBody: {content: {application/json: {schema: {type: object, properties: {SmsUrl: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Twin"}}}}}
+  /accounts/{account_sid}:
+    parameters: [{name: account_sid, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getAccount
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Account"}}}}, "404": {description: missing}}
+  /accounts/{account_sid}/messages/{name}:
+    parameters:
+      - {name: account_sid, in: path, required: true, schema: {type: string}}
+      - {name: name, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getMessage
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}, "404": {description: missing}}
+    patch:
+      operationId: updateMessage
+      requestBody: {content: {application/json: {schema: {type: object, properties: {AccountSid: {type: string}, Body: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}}
+components:
+  schemas:
+    Account:
+      type: object
+      required: [sid]
+      properties: {sid: {type: string}}
+    Message:
+      type: object
+      required: [name, account_sid, body]
+      properties: {name: {type: string}, account_sid: {type: string}, body: {type: string}}
+    Number:
+      type: object
+      required: [sid, friendly_name, sms_url]
+      properties:
+        sid: {type: string, readOnly: true}
+        friendly_name: {type: string}
+        sms_url: {type: string}
+    Twin:
+      type: object
+      required: [id]
+      properties: {id: {type: string}, sms_url: {type: string}, smsUrl: {type: string}}
+"##;
+
+#[tokio::test]
+async fn a_form_create_and_update_land_members_under_the_record_s_names() {
+    let (capture, _guard) = Capture::install();
+    let h = support::described(FORM, json!({}), Vec::new());
+    let (status, headers, created) = h
+        .send(
+            "POST",
+            "/numbers",
+            Some(json!({"FriendlyName": "main", "SmsUrl": "https://a.test/sms"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(source(&headers), "state", "{created}");
+    assert_eq!(
+        (&created["friendly_name"], &created["sms_url"]),
+        (&json!("main"), &json!("https://a.test/sms")),
+        "{created}"
+    );
+    assert!(created.get("FriendlyName").is_none(), "{created}");
+    let sid = created["sid"].as_str().unwrap().to_owned();
+    let (status, headers, updated) = h
+        .send(
+            "PATCH",
+            &format!("/numbers/{sid}"),
+            Some(json!({"SmsUrl": "https://b.test/sms"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(source(&headers), "state", "{updated}");
+    let expected = json!({"sid": sid, "friendly_name": "main", "sms_url": "https://b.test/sms"});
+    assert_eq!(updated, expected);
+    assert!(h.provider.requests().is_empty(), "no LLM call");
+    assert_eq!(
+        capture.of("createNumber"),
+        vec![line("createNumber", "create", None)]
+    );
+    assert_eq!(
+        capture.of("updateNumber"),
+        vec![line("updateNumber", "update", None)]
+    );
+}
+
+/// A form route's body naming another parent by another name (`AccountSid` for
+/// `account_sid`) does not move the record: the path's owner wins.
+#[tokio::test]
+async fn a_member_sent_by_another_name_naming_another_owner_keeps_the_path_s() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"types": {"messages": {"parent": {
+        "type": "accounts", "member": "account_sid", "path_param": "account_sid"
+    }}}});
+    let h = support::described(FORM, world, Vec::new());
+    let t = type_of(&h, "getMessage");
+    h.hold_by(
+        &t,
+        "name",
+        &[json!({"name": "m1", "account_sid": "AC1", "body": "old"})],
+    )
+    .await;
+    let (status, _, body) = h
+        .send(
+            "PATCH",
+            "/accounts/AC1/messages/m1",
+            Some(json!({"AccountSid": "AC2", "Body": "new"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({"name": "m1", "account_sid": "AC1", "body": "new"})
+    );
+    assert_eq!(
+        capture.of("updateMessage"),
+        vec![line("updateMessage", "update", None)]
+    );
+}
+
+/// Two names of one member sending different values (`SmsUrl`, `SMS_URL`) say nothing
+/// of which it takes: undeclared. The identity sent by another name (`Sid`) is kept
+/// as held, as `sid` is.
+#[tokio::test]
+async fn names_of_one_member_disagreeing_fall_back_and_the_identity_is_kept() {
+    let (capture, _guard) = Capture::install();
+    let h = support::described(FORM, json!({}), vec![json!({"sid": "PN1"})]);
+    let t = type_of(&h, "getNumber");
+    h.hold_by(
+        &t,
+        "sid",
+        &[json!({"sid": "PN1", "friendly_name": "a", "sms_url": "u"})],
+    )
+    .await;
+    let (status, _, body) = h
+        .send(
+            "PATCH",
+            "/numbers/PN1",
+            Some(json!({"Sid": "PN2", "FriendlyName": "b"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({"sid": "PN1", "friendly_name": "b", "sms_url": "u"})
+    );
+    let (status, _, body) = h
+        .send(
+            "PATCH",
+            "/numbers/PN1",
+            Some(json!({"SmsUrl": "x", "SMS_URL": "y"})),
+            &[],
+        )
+        .await;
+    assert!(status.is_success(), "{body}");
+    let lines = capture.of("updateNumber");
+    assert_eq!(lines[0], line("updateNumber", "update", None));
+    assert_eq!(lines[1].exec_fallback.as_deref(), Some("undeclared_member"));
+}
+
+/// A create sending the identity by another name (`Sid`) where its request takes no
+/// id is minted one, as one sending `sid` is; a member a described `set` reads
+/// (`SmsUrl`) is left to the `set`.
+#[tokio::test]
+async fn a_create_asks_for_its_id_by_another_name_and_leaves_set_members_to_set() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({"operations": {"createNumber": {"set": {
+        "sms_url": "'https://set.test/' + request.body.SmsUrl"
+    }}}});
+    let h = support::described(FORM, world, Vec::new());
+    let (status, headers, created) = h
+        .send(
+            "POST",
+            "/numbers",
+            Some(json!({"Sid": "PNchosen", "FriendlyName": "main", "SmsUrl": "x"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(source(&headers), "state", "{created}");
+    assert_ne!(created["sid"], json!("PNchosen"), "{created}");
+    assert!(created["sid"].is_string(), "{created}");
+    assert_eq!(
+        (&created["friendly_name"], &created["sms_url"]),
+        (&json!("main"), &json!("https://set.test/x"))
+    );
+}
+
+/// Two record members of one key (`sms_url`, `smsUrl`) leave `SmsUrl` undeclared.
+#[tokio::test]
+async fn a_member_two_record_members_share_the_key_of_falls_back() {
+    let (capture, _guard) = Capture::install();
+    let h = support::described(FORM, json!({}), vec![json!({"id": "t1"})]);
+    let t = type_of(&h, "getTwin");
+    h.hold(&t, &[json!({"id": "t1", "sms_url": "a", "smsUrl": "b"})])
+        .await;
+    let (status, _, body) = h
+        .send("PATCH", "/twins/t1", Some(json!({"SmsUrl": "c"})), &[])
+        .await;
+    assert!(status.is_success(), "{body}");
+    let undeclared = ExecLine {
+        exec_fallback_on: Some("SmsUrl".to_owned()),
+        ..line("updateTwin", "update", Some("undeclared_member"))
+    };
+    assert_eq!(capture.of("updateTwin"), vec![undeclared]);
+}
+
 #[tokio::test]
 async fn an_update_whose_body_is_no_record_falls_back() {
     let (capture, _guard) = Capture::install();
@@ -1155,24 +1447,23 @@ async fn a_replace_keeps_the_id_and_server_owned_members_and_drops_the_rest() {
 #[tokio::test]
 async fn a_replace_missing_a_required_member_has_it_filled() {
     let (capture, _guard) = Capture::install();
-    // The create's answer, then the fill's: a value for `size`, and a `name` it never
-    // takes (the replace sent one).
-    let h = with_item(
-        replacing(),
-        vec![item(), json!({"size": 5, "name": "not sent"})],
-    )
-    .await;
+    // The create's answer; the fill of `size`, a number, is the faker's.
+    let h = with_item(replacing(), vec![item()]).await;
     let t = type_of(&h, "getItem");
     let (status, headers, body) = h
         .send("PUT", "/items/i1", Some(json!({"name": "c"})), &[])
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(source(&headers), "state", "{body}");
-    let replaced =
-        json!({"id": "i1", "name": "c", "size": 5, "created": "2026-01-01", "status": "open"});
+    assert!(body["size"].is_i64(), "{body}");
+    let replaced = json!({"id": "i1", "name": "c", "size": body["size"], "created": "2026-01-01", "status": "open"});
     assert_eq!(body, replaced);
     assert_eq!(h.stored(&t, "i1").await, Some(replaced.clone()));
-    assert_eq!(h.provider.requests().len(), 2, "the fill's one LLM call");
+    assert_eq!(
+        h.provider.requests().len(),
+        1,
+        "the fill of a number makes no LLM call"
+    );
     assert_eq!(
         capture.of("replaceItem"),
         vec![line("replaceItem", "replace", None)]

@@ -19,6 +19,20 @@ pub struct ProxyEnvOptions {
     pub ca_dir: PathBuf,
 }
 
+/// `config`, else `./mockingbird.yaml` when it exists: the config whose
+/// `proxy` section `proxy env`, `proxy browser` and `proxy` use, so they
+/// find the port `init` or `server start` wrote there.
+#[must_use]
+pub fn config_or_local(config: Option<&Path>) -> Option<PathBuf> {
+    match config {
+        Some(path) => Some(path.to_path_buf()),
+        None => {
+            let local = PathBuf::from(crate::client::DEFAULT_CONFIG);
+            local.is_file().then_some(local)
+        }
+    }
+}
+
 /// The options for the proxy `config` (a config file, with the `MB_*`
 /// environment applied; defaults without one) describes:
 /// - port: `port`, else `proxy.port` (8888 by default);
@@ -59,6 +73,18 @@ pub const PYTHON_PRELOAD: &str = include_str!("python-preload.py");
 /// The directory in the CA directory that holds the Python preload.
 const PYTHON_PRELOAD_DIR: &str = "python";
 
+/// The Ruby preload, found through `RUBYLIB` and required by
+/// `RUBYOPT=-rmockingbird_proxy` (see the file).
+pub const RUBY_PRELOAD: &str = include_str!("ruby-preload.rb");
+
+/// The directory in the CA directory that holds the Ruby preload.
+const RUBY_PRELOAD_DIR: &str = "ruby";
+
+/// The `RUBYOPT` switch that loads the Ruby preload. A library name on
+/// `RUBYLIB` rather than a path: Ruby splits `RUBYOPT` on spaces with no
+/// quoting, and the CA directory may contain one.
+const RUBY_PRELOAD_SWITCH: &str = "-rmockingbird_proxy";
+
 /// Go 1.27+ on macOS and Windows verifies with `SSL_CERT_FILE` instead of
 /// the platform verifier when this is on (the default only for modules
 /// declaring `go 1.27` or later); older toolchains ignore it.
@@ -74,6 +100,8 @@ pub struct ProxyEnv {
     pub node_preload: PathBuf,
     /// The directory with the Python preload (`PYTHONPATH`).
     pub python_preload_dir: PathBuf,
+    /// The directory with the Ruby preload (`RUBYLIB`).
+    pub ruby_preload_dir: PathBuf,
     /// The Java truststore (`JAVA_TOOL_OPTIONS`).
     pub truststore_path: PathBuf,
     /// Base64 SHA-256 of the CA's public key, for Chrome's
@@ -94,7 +122,8 @@ impl ProxyEnv {
 }
 
 /// The proxy variables for `opts`, merged with this process's
-/// `NODE_OPTIONS`, `JAVA_TOOL_OPTIONS`, `PYTHONPATH` and `GODEBUG`; see
+/// `NODE_OPTIONS`, `JAVA_TOOL_OPTIONS`, `PYTHONPATH`, `RUBYLIB`, `RUBYOPT`
+/// and `GODEBUG`; see
 /// [`proxy_env_with`].
 ///
 /// # Errors
@@ -115,12 +144,16 @@ pub fn proxy_env(opts: &ProxyEnvOptions) -> anyhow::Result<ProxyEnv> {
 /// - Python: `PYTHONPATH=<preload dir>`, whose `sitecustomize` points
 ///   certifi at the bundle and sends plain `urllib3.PoolManager`s through
 ///   the proxy;
+/// - Ruby: `RUBYLIB=<preload dir>` and `RUBYOPT=-rmockingbird_proxy`, whose
+///   preload sends `Net::HTTP` connections made with an explicit nil proxy
+///   through the proxy and adds the CA to their verification;
 /// - Go: `GODEBUG=x509sslcertoverrideplatform=1`, so Go 1.27+ binaries on
 ///   macOS and Windows trust `SSL_CERT_FILE`;
 /// - Java: `JAVA_TOOL_OPTIONS` with the proxy properties and a truststore.
 ///
 /// `inherited` reads the current `NODE_OPTIONS`/`JAVA_TOOL_OPTIONS`/
-/// `PYTHONPATH`/`GODEBUG`, which are kept after ours (once). Creates the CA
+/// `PYTHONPATH`/`RUBYLIB`/`GODEBUG`, which are kept after ours, and
+/// `RUBYOPT`, which is kept before ours (each once). Creates the CA
 /// when it is missing and rewrites the bundle, the truststore and the
 /// preloads.
 ///
@@ -144,6 +177,10 @@ pub fn proxy_env_with(
     std::fs::create_dir_all(&python_preload_dir)
         .with_context(|| format!("creating {}", python_preload_dir.display()))?;
     write_if_changed(&python_preload_dir.join("sitecustomize.py"), PYTHON_PRELOAD)?;
+    let ruby_preload_dir = opts.ca_dir.join(RUBY_PRELOAD_DIR);
+    std::fs::create_dir_all(&ruby_preload_dir)
+        .with_context(|| format!("creating {}", ruby_preload_dir.display()))?;
+    write_if_changed(&ruby_preload_dir.join("mockingbird_proxy.rb"), RUBY_PRELOAD)?;
     let ca_path = ca.cert_path();
     let host = if opts.host.contains(':') {
         format!("[{}]", opts.host)
@@ -179,6 +216,12 @@ pub fn proxy_env_with(
     let python_dir = python_preload_dir.display().to_string();
     let path_sep = if cfg!(windows) { ';' } else { ':' };
     let python_path = merge_list(&python_dir, path_sep, inherited("PYTHONPATH"));
+    let ruby_lib = merge_list(
+        &ruby_preload_dir.display().to_string(),
+        path_sep,
+        inherited("RUBYLIB"),
+    );
+    let ruby_opt = append_option(RUBY_PRELOAD_SWITCH, inherited("RUBYOPT"));
     let godebug = merge_list(GO_CERT_FILE_DEBUG, ',', inherited("GODEBUG"));
     let vars = BTreeMap::from([
         ("HTTPS_PROXY".to_owned(), proxy.clone()),
@@ -197,6 +240,8 @@ pub fn proxy_env_with(
         ("NODE_OPTIONS".to_owned(), node_options),
         ("JAVA_TOOL_OPTIONS".to_owned(), java),
         ("PYTHONPATH".to_owned(), python_path),
+        ("RUBYLIB".to_owned(), ruby_lib),
+        ("RUBYOPT".to_owned(), ruby_opt),
         ("GODEBUG".to_owned(), godebug),
     ]);
     Ok(ProxyEnv {
@@ -205,6 +250,7 @@ pub fn proxy_env_with(
         bundle_path,
         node_preload,
         python_preload_dir,
+        ruby_preload_dir,
         truststore_path,
         ca_spki_sha256: ca.spki_sha256(),
         proxy_url: proxy,
@@ -217,6 +263,16 @@ fn merge_options(ours: &str, marker: &str, existing: Option<String>) -> String {
     match existing.map(|e| e.trim().to_owned()) {
         Some(e) if e.contains(marker) => e,
         Some(e) if !e.is_empty() => format!("{ours} {e}"),
+        _ => ours.to_owned(),
+    }
+}
+
+/// `existing` followed by `ours`, unless `existing` already has `ours` as
+/// a word (Bundler's `-rbundler/setup` stays first).
+fn append_option(ours: &str, existing: Option<String>) -> String {
+    match existing.map(|e| e.trim().to_owned()) {
+        Some(e) if e.split_whitespace().any(|word| word == ours) => e,
+        Some(e) if !e.is_empty() => format!("{e} {ours}"),
         _ => ours.to_owned(),
     }
 }
@@ -299,7 +355,13 @@ mod tests {
             std::fs::read_to_string(dir.path().join("python").join("sitecustomize.py")).unwrap(),
             PYTHON_PRELOAD
         );
-        assert_eq!(env.vars.len(), 17);
+        assert_eq!(v("RUBYOPT"), "-rmockingbird_proxy");
+        assert_eq!(PathBuf::from(v("RUBYLIB")), dir.path().join("ruby"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("ruby").join("mockingbird_proxy.rb")).unwrap(),
+            RUBY_PRELOAD
+        );
+        assert_eq!(env.vars.len(), 19);
         assert!(
             env.to_shell()
                 .contains("export HTTPS_PROXY='http://127.0.0.1:9999'\n")
@@ -341,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn godebug_and_pythonpath_keep_what_the_shell_had() {
+    fn godebug_pythonpath_and_ruby_keep_what_the_shell_had() {
         let dir = tempfile::tempdir().unwrap();
         let opts = ProxyEnvOptions {
             host: "127.0.0.1".into(),
@@ -351,6 +413,8 @@ mod tests {
         let env = proxy_env_with(&opts, |name| match name {
             "GODEBUG" => Some("http2client=0".to_owned()),
             "PYTHONPATH" => Some("/app/src".to_owned()),
+            "RUBYLIB" => Some("/app/lib".to_owned()),
+            "RUBYOPT" => Some("-W0 -rbundler/setup".to_owned()),
             _ => None,
         })
         .unwrap();
@@ -365,10 +429,20 @@ mod tests {
             env.vars["PYTHONPATH"],
             format!("{}{sep}/app/src", python.display())
         );
+        assert_eq!(
+            env.vars["RUBYLIB"],
+            format!("{}{sep}/app/lib", dir.path().join("ruby").display())
+        );
+        // Appended: Bundler's setup keeps loading first.
+        assert_eq!(
+            env.vars["RUBYOPT"],
+            "-W0 -rbundler/setup -rmockingbird_proxy"
+        );
         // A second run in a shell that already has them changes nothing.
         let again = proxy_env_with(&opts, |name| env.vars.get(name).cloned()).unwrap();
-        assert_eq!(again.vars["GODEBUG"], env.vars["GODEBUG"]);
-        assert_eq!(again.vars["PYTHONPATH"], env.vars["PYTHONPATH"]);
+        for name in ["GODEBUG", "PYTHONPATH", "RUBYLIB", "RUBYOPT"] {
+            assert_eq!(again.vars[name], env.vars[name], "{name}");
+        }
     }
 
     #[test]

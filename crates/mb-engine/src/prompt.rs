@@ -652,6 +652,7 @@ fn stream_user_message(
         changes_by_effects: false,
         update_guard: None,
         answer_records: None,
+        restates: None,
     };
     let mut s = user_message(call, &unary, false, None, false, false, notes);
     if !ctx.request_stream.is_empty() {
@@ -1024,6 +1025,15 @@ must follow them.\n{}\n</scenario>",
             "<existing_resource>\n{}\n</existing_resource>",
             data(&target.data)
         );
+        if let Some(representation) = ctx.restates {
+            let _ = writeln!(
+                s,
+                "The request asks for <existing_resource> itself in another representation \
+(`{}`): answer that same resource, with the same identity and facts, its text written in that \
+representation.",
+                escape(representation)
+            );
+        }
     }
     if !ctx.related.is_empty() {
         s.push_str(

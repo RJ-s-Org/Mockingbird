@@ -283,6 +283,13 @@ pub(super) fn read_schema<'a>(rt: &'a MockRuntime, t: &str) -> Option<&'a Value>
     }
 }
 
+/// The schema an effect on a record of type `t` is checked and merged against: its
+/// [`read_schema`], else, for a type with no read, its own definition (see
+/// [`BundleIndex::def_schemas`]).
+pub(super) fn effect_schema<'a>(rt: &'a MockRuntime, t: &str) -> Option<&'a Value> {
+    read_schema(rt, t).or_else(|| rt.index().def_schemas.get(t))
+}
+
 /// Whether `op`'s success answer is what its resource type's read by path
 /// answers, so that it can replace what the session holds.
 fn reads_the_resource(rt: &MockRuntime, op: &Operation) -> bool {
@@ -592,7 +599,7 @@ pub(super) fn rehomed_members(
     set: Map<String, Value>,
 ) -> Map<String, Value> {
     let bundle = rt.bundle();
-    let top = Level::of(bundle, read_schema(rt, t));
+    let top = Level::of(bundle, effect_schema(rt, t));
     if top.union || top.map.is_some() || top.properties.is_empty() {
         return set;
     }
