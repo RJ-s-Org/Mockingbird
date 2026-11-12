@@ -207,3 +207,192 @@ async fn run_refuses_another_configs_server_on_its_admin_port() {
     assert!(!marker.exists(), "the command did not run");
     assert!(!dir.path().join("state/server.pid").exists());
 }
+
+/// Stops the background server of a state directory when dropped.
+struct StopServer(std::path::PathBuf);
+
+impl Drop for StopServer {
+    fn drop(&mut self) {
+        let _ = assert_cmd::Command::cargo_bin("mockingbird")
+            .unwrap()
+            .args(["server", "stop", "--state-dir"])
+            .arg(&self.0)
+            .output();
+    }
+}
+
+/// The field trial: another project's Mockingbird proxy holds the proxy
+/// port of this project's config, and this project's server runs no proxy
+/// (`server start` without `--proxy`). Neither `proxy env` nor `run` ever
+/// sends the app to that proxy, which has none of these mocks and would
+/// pass the app's calls on to the real API. Once the port is free, `run`
+/// puts this project's own proxy in front of the server and the app reaches
+/// the mock.
+#[tokio::test]
+async fn a_foreign_proxy_on_the_proxy_port_is_never_handed_out() {
+    use wiremock::matchers::path;
+    // Not from wiremock's pool, so that dropping it frees the port.
+    let foreign = wiremock::MockServer::builder().start().await;
+    let other = "/elsewhere/other/mockingbird.yaml";
+    wiremock::Mock::given(path("/mockingbird-proxy.json"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "proxy": "mockingbird",
+                "config": other,
+                "dir": "/elsewhere/other",
+            })),
+        )
+        .mount(&foreign)
+        .await;
+    let proxy_port = foreign.address().port();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("mockingbird.yaml");
+    let state = dir.path().join("state");
+    let mockingbird = {
+        let dir = dir.path().to_path_buf();
+        move |args: &[&str]| {
+            assert_cmd::Command::cargo_bin("mockingbird")
+                .unwrap()
+                .current_dir(&dir)
+                .env("MB_CA_DIR", dir.join("ca"))
+                .env_remove("HTTPS_PROXY")
+                .env_remove("HTTP_PROXY")
+                .env_remove("https_proxy")
+                .env_remove("http_proxy")
+                .args(args)
+                .timeout(std::time::Duration::from_secs(90))
+                .output()
+                .unwrap()
+        }
+    };
+    let blocking = |args: Vec<String>| {
+        let mockingbird = mockingbird.clone();
+        tokio::task::spawn_blocking(move || {
+            mockingbird(&args.iter().map(String::as_str).collect::<Vec<_>>())
+        })
+    };
+    let s = |args: &[&str]| args.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
+    // This project's server, without a proxy.
+    let _server = StopServer(state.clone());
+    let started = {
+        let (config, state, mockingbird) = (config.clone(), state.clone(), mockingbird.clone());
+        let dir = dir.path().to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            on_free_ports(|| {
+                let admin = free_port();
+                std::fs::write(
+                    &config,
+                    format!(
+                        "storage:\n  url: \"sqlite::memory:\"\nserver:\n  port: {}\n  admin_port: {admin}\n  grpc_port: {}\nproxy:\n  port: {proxy_port}\n  unmapped: block\nmocks:\n  orders:\n    contract: {}\n    route_prefix: /\n    hosts: [api.orders.test]\n",
+                        free_port(),
+                        free_port(),
+                        fixture("openapi/orders-3.0.yaml").display()
+                    ),
+                )
+                .unwrap();
+                let out = mockingbird(&[
+                    "server",
+                    "start",
+                    "--state-dir",
+                    state.to_str().unwrap(),
+                    "-c",
+                    config.to_str().unwrap(),
+                    "--offline",
+                    "--wait",
+                    "60s",
+                ]);
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                if !out.status.success() {
+                    return Err(text);
+                }
+                logged_admin(&dir.join("state/server.log"), admin).map(|()| admin)
+            })
+        })
+        .await
+        .unwrap()
+    };
+    assert!(admin_answers(started));
+    let config_arg = config.to_str().unwrap().to_owned();
+
+    // `proxy env` names the other project's proxy and hands out nothing.
+    let out = blocking(s(&["proxy", "env", "--json", "-c", &config_arg]))
+        .await
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains(other), "{stderr}");
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // `run` reuses this project's server but refuses the proxy port, which
+    // the config sets, and runs nothing.
+    let marker = dir.path().join("ran");
+    let out = blocking(s(&[
+        "run",
+        "-c",
+        &config_arg,
+        "--state-dir",
+        state.to_str().unwrap(),
+        "--",
+        "touch",
+        marker.to_str().unwrap(),
+    ]))
+    .await
+    .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains(other), "{stderr}");
+    assert!(!marker.exists(), "the command did not run");
+
+    // With the port free, `proxy env` says this project's server has no
+    // proxy instead of handing out an address nothing of it serves.
+    drop(foreign);
+    crate::support::wait_until(
+        "the other proxy lets go of its port",
+        std::time::Duration::from_secs(10),
+        || std::net::TcpStream::connect(("127.0.0.1", proxy_port)).is_err(),
+    )
+    .await;
+    let out = blocking(s(&["proxy", "env", "--json", "-c", &config_arg]))
+        .await
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("runs no proxy"), "{stderr}");
+
+    // `run` puts this project's proxy in front of its server: the app
+    // reaches the mock by its real host, through a proxy that says it is
+    // this config's.
+    let out = blocking(s(&[
+        "run",
+        "-c",
+        &config_arg,
+        "--state-dir",
+        state.to_str().unwrap(),
+        "--",
+        "sh",
+        "-c",
+        "curl -sSf -o /dev/null -w '%{http_code} ' https://api.orders.test/orders && curl -sSf \"$HTTPS_PROXY/mockingbird-proxy.json\"",
+    ]))
+    .await
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
+    let (code, origin) = stdout.split_once(' ').unwrap();
+    assert_eq!(code, "200", "{stdout}");
+    let origin: serde_json::Value = serde_json::from_str(origin).unwrap();
+    let ours = std::fs::canonicalize(&config).unwrap();
+    assert_eq!(origin["config"], ours.to_str().unwrap(), "{origin}");
+    assert!(
+        stderr.contains(&format!("proxy http://127.0.0.1:{proxy_port} in front")),
+        "{stderr}"
+    );
+}

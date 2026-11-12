@@ -71,7 +71,7 @@ Another project's Mockingbird server often holds the default ports. `mockingbird
 - `server start -c mockingbird.yaml` does the same for each port that no flag, `MB_*` variable or config key sets, and for `proxy.port` when the proxy runs (`--proxy` or `proxy.enabled`). It writes the ports it picks into the config and lists them under `ports_chosen`. Because they are in the config, the client subcommands (`server status`, `mocks`, `import`, ...), `proxy env`, `run` and the MCP server all find this project's server there; nothing assumes 9090. A port that is set and taken fails the start before anything is spawned. The error names the listener and address and, when the port belongs to another Mockingbird server, that server's config and folder (from its `/readyz`). This project's commands never use that server.
 - `mockingbird run -c mockingbird.yaml` reuses a server already answering at the config's admin port only when it was started with that config. A server started with another config is left alone, and `run` starts this config's own server on free ports.
 
-`proxy env`, `proxy browser` and `proxy` read `./mockingbird.yaml` when you give no `-c`, so they find the proxy port written there.
+`proxy env`, `proxy browser` and `proxy` read `./mockingbird.yaml` when you give no `-c`, so they find the proxy port written there. `run`, `proxy env` and `proxy browser` hand an app only this project's own proxy, never another project's that holds the port; see [Whose proxy](proxy.md#whose-proxy).
 
 ## Run it in the background
 

@@ -541,6 +541,7 @@ fn ops_state(
         reload: Default::default(),
         data_plane: None,
         origin: Default::default(),
+        proxy: None,
     }
 }
 
@@ -928,6 +929,7 @@ async fn readyz_reports_the_data_plane_and_origin() {
             config: Some("/work/app/mockingbird.yaml".into()),
             dir: Some("/work/app".into()),
         },
+        proxy: Some("127.0.0.1:48888".parse().unwrap()),
         ..ops_state(store, memory_state(), MockRegistry::new())
     }))
     .await;
@@ -940,6 +942,25 @@ async fn readyz_reports_the_data_plane_and_origin() {
     assert_eq!(body["data_plane"], json!({"port": 43080, "tls": false}));
     assert_eq!(body["config"], "/work/app/mockingbird.yaml");
     assert_eq!(body["dir"], "/work/app");
+    assert_eq!(body["proxy"], "127.0.0.1:48888");
+    // A server without a proxy says so.
+    let store: Arc<dyn ControlStore> = stub_store().await;
+    let base = serve(ops::router(ops_state(
+        store,
+        memory_state(),
+        MockRegistry::new(),
+    )))
+    .await;
+    let body: Value = reqwest::get(format!("{base}/readyz"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        body["proxy"].is_null() && body.get("proxy").is_some(),
+        "{body}"
+    );
 }
 
 #[tokio::test]
@@ -1094,6 +1115,7 @@ async fn metrics_exposes_request_counters() {
         reload: Default::default(),
         data_plane: None,
         origin: Default::default(),
+        proxy: None,
     }))
     .await;
     let r = reqwest::get(format!("{base}/metrics")).await.unwrap();
