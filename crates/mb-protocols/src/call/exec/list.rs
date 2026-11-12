@@ -88,7 +88,7 @@ use crate::MockRuntime;
 use crate::call::state_lists::Shape;
 use crate::call::{
     CallPlan, MAX_SCAN, OperationCall, StateAccess, bundle_index, cursors, id_string,
-    item_identity, list_exprs, list_query, lists, pages, property_schema, ranges, runs,
+    item_identity, list_exprs, list_query, lists, pages, property_schema, ranges, records, runs,
     schema_parts, state_lists, state_span,
 };
 
@@ -246,6 +246,7 @@ async fn answer(
         return Err("unscoped_list".into());
     }
     let envelope = envelope(rt, plan, call, &shape).ok_or(Stop::from("render_failed"))?;
+    let envelope = with_held_parent(state, (plan, call), t, &shape, envelope).await;
     let mut records = state.list(&plan.session, t, MAX_SCAN + 1).await;
     if records.len() > MAX_SCAN {
         return Err("over_cap".into());
@@ -582,6 +583,127 @@ fn envelope(
         }
     }
     shape.envelope(rt, plan, Some(&kept))
+}
+
+/// `envelope` with its one top member beside the list that is a record of the type of
+/// the items' described parent (Plaid's `item` beside an Item's `accounts`) filled from
+/// that parent as held, when the call names it ([`held_parent`]). A member is of the
+/// parent's type as an answer's nested record is ([`bundle_index::entity_type`]): by
+/// its definition, else by its name; of several such, the one named for the type is
+/// it, and with none or more than one so named, nothing is filled. Only a member the
+/// envelope holds is filled: the held record's members that its schema declares go over
+/// what the envelope was filled with, which keeps the rest, and the member is changed
+/// only when it then suits its schema.
+async fn with_held_parent(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: &str,
+    shape: &Shape,
+    mut envelope: Value,
+) -> Value {
+    let rt = state.rt;
+    let (Some(list), Some(parent_type)) = (
+        shape.top_member(),
+        rt.described()
+            .type_desc(t)
+            .and_then(|d| d.parent.as_ref())
+            .map(|link| link.r#type.clone()),
+    ) else {
+        return envelope;
+    };
+    let Some((name, member_schema)) = parent_member(rt, shape, list, &parent_type, &envelope)
+    else {
+        return envelope;
+    };
+    let Some(parent) = held_parent(state, (plan, call), t).await else {
+        return envelope;
+    };
+    let bundle = rt.bundle();
+    let Value::Object(held) = lists::projected(bundle, Some(&member_schema), &parent.data, 0)
+    else {
+        return envelope;
+    };
+    let Some(members) = envelope.as_object_mut() else {
+        return envelope;
+    };
+    let Some(mut filled) = members.get(&name).and_then(Value::as_object).cloned() else {
+        return envelope;
+    };
+    filled.extend(held);
+    let filled = Value::Object(filled);
+    if plan
+        .engine
+        .schema_violations(bundle, &member_schema, &filled)
+        .is_some_and(|violations| violations.is_empty())
+    {
+        members.insert(name, filled);
+    }
+    envelope
+}
+
+/// The one top member of `envelope` beside `list` that is a record of type
+/// `parent_type` (see [`with_held_parent`]), with its schema: of those its definition
+/// or its name says are of the type, the one its name says is, else the only one.
+fn parent_member(
+    rt: &MockRuntime,
+    shape: &Shape,
+    list: &str,
+    parent_type: &str,
+    envelope: &Value,
+) -> Option<(String, Value)> {
+    let bundle = rt.bundle();
+    let index = rt.index();
+    let held = envelope.as_object()?;
+    let (parts, _) = schema_parts(bundle, Some(shape.schema()));
+    let mut by_def = Vec::new();
+    let mut by_name = Vec::new();
+    let names = parts
+        .iter()
+        .filter_map(|p| p.get("properties").and_then(Value::as_object))
+        .flat_map(|p| p.keys())
+        .filter(|name| name.as_str() != list && held.contains_key(name.as_str()));
+    for name in names {
+        let Some(member_schema) = property_schema(bundle, shape.schema(), name) else {
+            continue;
+        };
+        let named = bundle_index::entity_type(index, None, name).as_deref() == Some(parent_type);
+        let (_, defs) = schema_parts(bundle, Some(&member_schema));
+        let defined = defs
+            .iter()
+            .find_map(|d| index.types_by_def.get(*d))
+            .is_some_and(|d| d == parent_type);
+        let found = (name.clone(), member_schema.clone());
+        if named {
+            by_name.push(found);
+        } else if defined {
+            by_def.push(found);
+        }
+    }
+    let mut chosen = if by_name.is_empty() { by_def } else { by_name };
+    match chosen.len() {
+        1 => chosen.pop(),
+        _ => None,
+    }
+}
+
+/// The held parent of the items of type `t` the call names: by a value it was issued
+/// ([`state_lists::issued_scope`], Plaid's `access_token`), else by the path parameter
+/// of the type's described `parent` link.
+async fn held_parent(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: &str,
+) -> Option<mb_state::StoredResource> {
+    let rt = state.rt;
+    if let Some((parent, _, value)) = state_lists::issued_scope(rt, plan.op, call) {
+        return records::by_extra_fields(state, &plan.session, &parent, (&[], &value), None).await;
+    }
+    let link = rt.described().type_desc(t)?.parent.as_ref()?;
+    let id = call
+        .path_params
+        .get(link.path_param.as_deref()?)
+        .and_then(id_string)?;
+    state.get(&plan.session, &link.r#type, &id).await
 }
 
 /// Whether member `name` of answer `schema` may be `null` (a `previous` link of a

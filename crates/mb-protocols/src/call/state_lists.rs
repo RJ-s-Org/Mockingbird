@@ -552,6 +552,12 @@ impl Shape {
         self.path.split_last().map_or(&[], |(_, parents)| parents)
     }
 
+    /// The envelope's top member holding the list (the list itself or one above it);
+    /// `None` for an answer that is the array.
+    pub(super) fn top_member(&self) -> Option<&str> {
+        self.path.first().map(String::as_str)
+    }
+
     /// The envelope of an empty page, its other required members filled as a held
     /// answer's are, from `kept` first (see [`mb_engine::Engine::fill_envelope`]);
     /// `None` when one cannot be.
