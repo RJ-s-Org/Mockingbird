@@ -302,3 +302,60 @@ fn integer_enum_options_written_as_floats_are_kept() {
         assert!(value.is_number(), "{value}");
     }
 }
+
+/// Every value under `key` in `value`, at any depth.
+fn values_at<'a>(value: &'a serde_json::Value, key: &str, out: &mut Vec<&'a serde_json::Value>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                if k == key {
+                    out.push(v);
+                }
+                values_at(v, key, out);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|v| values_at(v, key, out)),
+        _ => {}
+    }
+}
+
+/// `^-?[0-9]+(\.[0-9]+)?$`, the pattern a decimal string scalar imports with.
+fn decimal_string(text: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let unsigned = text.strip_prefix('-').unwrap_or(text);
+    match unsigned.split_once('.') {
+        Some((whole, fraction)) => digits(whole) && digits(fraction),
+        None => digits(unsigned),
+    }
+}
+
+/// Shopify's `Decimal` ("a signed decimal number serialized as a string") is
+/// faked as a number in a string, so an offline price is `"12.5"`, not a word.
+#[test]
+fn a_decimal_serialized_as_a_string_is_faked_as_a_number() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/apis/shopify-storefront-graphql/shopify-storefront.graphql");
+    let bundle = compile(&std::fs::read(path).unwrap()).unwrap();
+    let faker = Faker::default().with_now(mb_engine::seed::SEEDED_NOW);
+    let mut amounts = 0usize;
+    for op in &bundle.operations {
+        let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+            continue;
+        };
+        let doc = bundle.with_reachable_defs(schema);
+        let costs = Costs::compute(&doc);
+        for seed in 0..SEEDS {
+            let value = faker.fake_with_costs(&doc, None, &costs, &mut StdRng::seed_from_u64(seed));
+            let mut found = Vec::new();
+            values_at(&value, "amount", &mut found);
+            for amount in found {
+                let text = amount
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{} {amount}", op.id));
+                assert!(decimal_string(text), "{}: amount {text:?}", op.id);
+                amounts += 1;
+            }
+        }
+    }
+    assert!(amounts > 0, "no amount faked");
+}

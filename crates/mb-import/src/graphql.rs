@@ -623,6 +623,32 @@ fn scalar_format(name: &str, description: Option<&str>) -> Option<Option<&'stati
     None
 }
 
+/// The pattern of a decimal number serialized as a string.
+const DECIMAL_STRING: &str = r"^-?[0-9]+(\.[0-9]+)?$";
+
+/// The pattern a custom scalar's string values match, when its name and
+/// description pin one: a scalar whose name ends in the word `decimal`, or in
+/// `decimal string` (`Decimal`, `BigDecimal`, `DecimalString`), whose
+/// description says it is serialized "as a string" (Shopify's "A signed decimal
+/// number ... serialized as a string") holds a number written as a string,
+/// `"29.99"`. A decimal scalar not described so ("a string or a number", none)
+/// may be a JSON number, and is left untyped.
+fn scalar_pattern(name: &str, description: Option<&str>) -> Option<&'static str> {
+    let words = name_words(name);
+    let decimal = match words.as_slice() {
+        [.., last] => last == "decimal",
+        _ => false,
+    } || matches!(words.as_slice(), [.., a, b] if a == "decimal" && b == "string");
+    let lower = description.unwrap_or_default().to_lowercase();
+    let as_string = ["as a string", "as string"]
+        .iter()
+        .any(|p| lower.contains(p))
+        && !["not as a string", "or as a string", "never as a string"]
+            .iter()
+            .any(|p| lower.contains(p));
+    (decimal && as_string).then_some(DECIMAL_STRING)
+}
+
 /// Whether a scalar's description says it holds a URI: it names RFC 3986 or
 /// RFC 3987 and a URI, URL or IRI, and not as an encoding (`URL-safe`,
 /// `percent-encoded`, `unreserved`), or its first sentence is no more than an article, up to two
@@ -748,7 +774,10 @@ fn def_schema(
     let mut obj = match &def.kind {
         Kind::Scalar => {
             let mut out = json!({ "description": format!("GraphQL scalar {name}") });
-            if let Some(format) = scalar_format(name, def.description.as_deref()) {
+            if let Some(pattern) = scalar_pattern(name, def.description.as_deref()) {
+                out["type"] = json!("string");
+                out["pattern"] = json!(pattern);
+            } else if let Some(format) = scalar_format(name, def.description.as_deref()) {
                 out["type"] = json!("string");
                 if let Some(format) = format {
                     out["format"] = json!(format);
@@ -1560,6 +1589,32 @@ mod tests {
         ] {
             assert_eq!(name_words(name), words, "{name}");
         }
+    }
+
+    #[test]
+    fn a_decimal_serialized_as_a_string_is_a_numeric_string() {
+        let shopify = "A signed decimal number, which supports arbitrary precision and is serialized as a string.";
+        for name in ["Decimal", "BigDecimal", "DecimalString"] {
+            assert_eq!(
+                scalar_pattern(name, Some(shopify)),
+                Some(DECIMAL_STRING),
+                "{name}"
+            );
+        }
+        for description in [
+            None,
+            Some("A decimal number."),
+            Some("A decimal, serialized as a number, not as a string."),
+            Some("A decimal sent as a JSON number or as a string."),
+        ] {
+            assert_eq!(
+                scalar_pattern("Decimal", description),
+                None,
+                "{description:?}"
+            );
+        }
+        assert_eq!(scalar_pattern("Price", Some(shopify)), None);
+        assert_eq!(scalar_pattern("DecimalPlaces", Some(shopify)), None);
     }
 
     #[test]

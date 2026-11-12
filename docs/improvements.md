@@ -93,7 +93,7 @@ Found while building the 21 [API examples](examples.md) and 3 sample apps, offli
 
 **Generated data**
 
-- **Offline faker**: optional fields are always filled (a `cursor` or `next_page_uri: "cedar"` sends SDK pagers into endless loops or `GET /cedar`; a healthy OTLP export gets a random `partialSuccess`); GraphQL `ID` and custom scalars (`DateTime`, `URI`, `Decimal`) are random words; a union member is picked ignoring arguments (`search(type: REPOSITORY)` returned a `User`); `format: uri` wins over `pattern`; patterns like `^[\S\s]*$` produce non-ASCII ids; path and query params are not reflected (`account_sid`, `channel_id`, the queried email); a nested request object (HubSpot/Notion `properties`) is not copied on create.
+- **Offline faker**: optional fields are always filled (a `cursor` or `next_page_uri: "cedar"` sends SDK pagers into endless loops or `GET /cedar`; a healthy OTLP export gets a random `partialSuccess`); GraphQL `ID` and custom scalars the import cannot type (an untyped `Decimal`, `JSON`) are random words; a union member is picked ignoring arguments (`search(type: REPOSITORY)` returned a `User`); `format: uri` wins over `pattern`; patterns like `^[\S\s]*$` produce non-ASCII ids; path and query params are not reflected (`account_sid`, `channel_id`, the queried email); a nested request object (HubSpot/Notion `properties`) is not copied on create.
 - With an LLM, a 200 whose schema is `anyOf [success, error]` sometimes gets the error branch (Slack); prefer the first branch unless a scenario applies.
 - Large list schemas are still slow or fall back: GitHub `GET /pulls` (10 pull objects) fell back after 29 s; GitHub issue lists and Twilio message lists took 18–19 s.
 
