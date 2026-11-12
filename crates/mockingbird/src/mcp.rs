@@ -464,7 +464,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "start_server",
             title: "Start Mockingbird in the background",
-            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env. With a config, also world_review: for each mock whose world description has gaps, the next_steps and world_gaps an import answers (review them as after import_contract, the mockingbird-world skill); and next_steps naming mocks that answer for one host without a common shares group (give mocks of one API the same mocks.<name>.shares); and unknown_ids: per mock, how a read of an id the session does not hold is answered (its setting, or the types inferred to answer 404 once the session has written one of their records, and those that generate; get_world says why).",
+            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env (or proxy_env_error, why this project's proxy could not be handed out). With a config, also world_review: for each mock whose world description has gaps, the next_steps and world_gaps an import answers (review them as after import_contract, the mockingbird-world skill); and next_steps naming mocks that answer for one host without a common shares group (give mocks of one API the same mocks.<name>.shares); and unknown_ids: per mock, how a read of an id the session does not hold is answered (its setting, or the types inferred to answer 404 once the session has written one of their records, and those that generate; get_world says why).",
             schema: obj(
                 json!({
                     "config": s("Config file (preferred)."),
@@ -483,7 +483,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "proxy_env",
             title: "Proxy variables for an app",
-            description: "The environment variables that send an app's HTTP(S) traffic through Mockingbird's proxy (start_server with proxy: true) and make it trust the local CA: vars, ca_path, bundle_path, and export (shell lines). Mocks with hosts: [api.example.com] then answer for those hosts with no change to the app.",
+            description: "The environment variables that send an app's HTTP(S) traffic through Mockingbird's proxy (start_server with proxy: true) and make it trust the local CA: vars, ca_path, bundle_path, and export (shell lines). Mocks with hosts: [api.example.com] then answer for those hosts with no change to the app. With a config, only that project's own proxy is handed out: it fails when the project's server runs no proxy, or another project's proxy holds the port.",
             schema: obj(
                 json!({
                     "config": s("Config file (proxy.host, proxy.port, proxy.ca_dir); default: the one start_server used, else ./mockingbird.yaml when it exists, else defaults."),
@@ -1470,12 +1470,18 @@ impl McpServer {
         }
     }
 
-    /// `proxy env` as JSON, with the shell lines under `export`.
-    fn proxy_env(&self, config: Option<&std::path::Path>, port: Option<u16>) -> ToolResult {
-        let opts = crate::proxy::env::options_for(config, port)?;
+    /// `proxy env` as JSON, with the shell lines under `export`: only for
+    /// the proxy of the config's own server (see
+    /// [`crate::proxy::owner::checked_options`]), with a `warning` when
+    /// nothing listens there yet.
+    async fn proxy_env(&self, config: Option<&std::path::Path>, port: Option<u16>) -> ToolResult {
+        let (opts, warning) = crate::proxy::owner::checked_options(config, port).await?;
         let env = crate::proxy::env::proxy_env(&opts)?;
         let mut out = serde_json::to_value(&env).map_err(anyhow::Error::from)?;
         out["export"] = json!(env.to_shell());
+        if let Some(warning) = warning {
+            out["warning"] = json!(warning);
+        }
         Ok(out)
     }
 
@@ -1706,7 +1712,12 @@ impl McpServer {
                     Err(e) => return Err(self.start_failed(e).await),
                 };
                 if args.proxy {
-                    started["proxy_env"] = self.proxy_env(args.config.as_deref(), None)?;
+                    // The server runs either way: a proxy check that fails
+                    // is reported beside it, not in place of it.
+                    match self.proxy_env(args.config.as_deref(), None).await {
+                        Ok(env) => started["proxy_env"] = env,
+                        Err(error) => started["proxy_env_error"] = json!(error.0),
+                    }
                 }
                 if let Some(config) = &args.config {
                     self.add_start_review(&mut started, config).await;
@@ -1726,6 +1737,7 @@ impl McpServer {
                 });
                 let config = crate::proxy::env::config_or_local(config.as_deref());
                 self.proxy_env(config.as_deref(), opt_port(a, "port")?)
+                    .await
             }
             "open_key_setup" => self.open_key_setup(a).await,
             "server_status" => Ok(daemon::status(&self.server_state(a)).await?),

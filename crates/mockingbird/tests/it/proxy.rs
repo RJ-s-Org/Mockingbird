@@ -637,13 +637,17 @@ fn proxy_env_prints_exports_and_json() {
     assert_eq!(json["vars"]["HTTPS_PROXY"], "http://127.0.0.1:8888");
     // Without -c, ./mockingbird.yaml's proxy.port (as `init` or `server
     // start` wrote it) applies.
+    let (admin, proxy) = (crate::support::free_port(), crate::support::free_port());
     std::fs::write(
         dir.path().join("mockingbird.yaml"),
-        "proxy:\n  port: 8899\n",
+        format!("server:\n  admin_port: {admin}\nproxy:\n  port: {proxy}\n"),
     )
     .unwrap();
     let json: Value = serde_json::from_slice(&cmd(&["proxy", "env", "--json"])).unwrap();
-    assert_eq!(json["vars"]["HTTPS_PROXY"], "http://127.0.0.1:8899");
+    assert_eq!(
+        json["vars"]["HTTPS_PROXY"],
+        format!("http://127.0.0.1:{proxy}")
+    );
 }
 
 /// Serves an app with the `orders` mock on `host` (proxy disabled): data
@@ -705,6 +709,7 @@ async fn standalone_proxy_forwards_to_a_running_server() {
             unmapped: Unmapped::Block,
             vendor_subdomains: VendorSubdomains::Block,
             images: vec![],
+            origin: None,
         },
         rx,
     ));

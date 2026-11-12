@@ -15,7 +15,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use super::ca::LocalCa;
-use super::env::{options_for, proxy_env};
+use super::env::proxy_env;
 use super::forward::{forward, forward_client};
 use super::{HostClaims, ProxyState};
 use crate::file_config::{self, FileConfig, Unmapped, VendorSubdomains};
@@ -109,6 +109,9 @@ pub struct StandaloneOptions {
     pub unmapped: Unmapped,
     pub vendor_subdomains: VendorSubdomains,
     pub images: Vec<String>,
+    /// The project it serves, answered at [`super::ORIGIN_PATH`]; `None`
+    /// leaves that answer without a config and folder.
+    pub origin: Option<crate::ops::Origin>,
 }
 
 /// The hosts a running server claims, refreshed from its `/proxy/hosts`.
@@ -202,7 +205,7 @@ pub async fn run_standalone(
     });
     let ca = LocalCa::load_or_create(&opts.ca_dir)
         .with_context(|| format!("loading the local CA in {}", opts.ca_dir.display()))?;
-    let state = ProxyState::new(
+    let mut state = ProxyState::new(
         claims,
         upstream,
         Arc::new(ca),
@@ -210,6 +213,9 @@ pub async fn run_standalone(
         opts.vendor_subdomains,
         opts.images,
     )?;
+    if let Some(origin) = opts.origin {
+        state = state.with_origin(origin);
+    }
     let served = super::serve(listener, state, stop).await;
     refresher.abort();
     served.map_err(|e| anyhow!("proxy: {e}"))
@@ -256,7 +262,11 @@ pub async fn run(args: ProxyArgs, admin_url: &str) -> anyhow::Result<()> {
     }
     if let Some(ProxyCommand::Env(env)) = args.cmd {
         let config = super::env::config_or_local(env.config.as_deref());
-        let vars = proxy_env(&options_for(config.as_deref(), env.port)?)?;
+        let (opts, warning) = super::owner::checked_options(config.as_deref(), env.port).await?;
+        if let Some(warning) = warning {
+            eprintln!("mockingbird: {warning}");
+        }
+        let vars = proxy_env(&opts)?;
         if env.json {
             println!("{}", serde_json::to_string_pretty(&vars)?);
         } else {
@@ -265,8 +275,9 @@ pub async fn run(args: ProxyArgs, admin_url: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     let run = args.run;
-    let mut cfg = match super::env::config_or_local(run.config.as_deref()) {
-        Some(path) => file_config::load(&path)?,
+    let config = super::env::config_or_local(run.config.as_deref());
+    let mut cfg = match &config {
+        Some(path) => file_config::load(path)?,
         None => FileConfig::default(),
     };
     file_config::apply_env(&mut cfg)?;
@@ -299,6 +310,7 @@ pub async fn run(args: ProxyArgs, admin_url: &str) -> anyhow::Result<()> {
         unmapped,
         vendor_subdomains: run.vendor_subdomains.unwrap_or(cfg.proxy.vendor_subdomains),
         images,
+        origin: Some(crate::ops::Origin::current(config.as_deref())),
     };
     let addr = SocketAddr::new(host, port);
     let listener = TcpListener::bind(addr)

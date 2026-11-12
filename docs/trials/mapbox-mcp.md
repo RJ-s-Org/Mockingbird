@@ -80,3 +80,40 @@ The app's own unit tests (1267, all passing) stub `fetch`, so they never reach t
 - a list item's content member outlasts the page size.
 
 They turned four unusable steps into working ones. What's left is on the build side. The plugin's MCP should talk to the project's own server (B1). The skills should have the agent run the app's own calls against the mock before it finishes, so a path the contract lacks (B2) shows up then.
+
+## Run 2: with another project's server on the default ports (2026-11-11)
+
+This run checks B1 and the port collisions from three trials. The fixes under test:
+- #493: the MCP server acts only on the project's own server;
+- #505: `init` and `server start` pick free ports;
+- #506: `put_llm_profile` takes a secret reference in one call;
+- this PR: an app is handed only the project's own proxy.
+
+A decoy Mockingbird server from another folder held 8080, 9090, 50051 and its proxy on 8888, with one mock (`pets`). A fresh Claude Code with only the plugin got the same prompt, "mock the Mapbox API for this app". The build ran on `main` with #505 and #506; the flows ran on this PR.
+
+**Agent build: 171 s, 23 turns, $0.57**, against 434 s, 48 turns and $0.92 in run 1.
+- `doctor` showed the server on 9090 as another project's.
+- `init_config` chose 8081, 9091 and 50052 by itself, and `start_server` started the project's own server.
+- The contract covers 20 operations, including the `/places/v1/details/retrieve` path run 1 missed (B2).
+- The agent didn't run the app's own calls against the mock either, and it suggested `mockingbird run`.
+
+**Isolation.** The decoy's mocks, LLM profiles and request log were unchanged, and it got no calls from the build or the flows.
+- **Before this PR:** `proxy env` and `run` handed the app `HTTPS_PROXY=127.0.0.1:8888`, the decoy's proxy, because the agent's config has no `proxy:` block. Every Mapbox call went through the decoy's proxy to the real api.mapbox.com and came back 401; the decoy logged `unmapped host api.mapbox.com (pass)`.
+- **With this PR:** `proxy env` refuses, saying 8888 is held by something that is not this project's proxy. `mockingbird run -c mockingbird/mockingbird.yaml -- <app>` starts the project's server with its own proxy on 8889, and every Mapbox call reaches the project's mock.
+
+| Step | Run 2, through `mockingbird run` |
+| --- | --- |
+| Search "Eiffel Tower" (first) | ✗ The model call timed out at 20 s; the fallback answer has no names. A second search came back right. |
+| Place details for that result | ✗ No id, because the first search fell back |
+| Place details, unknown id | Invented 200 record with no name (12.2 s) |
+| Reverse geocoding | ✓ "350 5th Ave, New York, New York 10118" |
+| Category search, directions, matrix, isochrone, optimization, map matching, static map, ground location, tokens | ✓ |
+
+| Calls | Sources | Model latency | Tokens (prompt / completion) |
+| --- | --- | --- | --- |
+| 13 flow calls (plus the agent's 4 checks) | 16 `llm`, 1 fallback (timeout) | p50 2.5 s, max 13.6 s (category search); matrix 7.6 s | 20.3k / 5.4k, all 17 calls |
+
+**Scorecard changes from run 1.**
+- **3:** ✓ in 171 s, and nothing was written to the other project's server.
+- **5:** ✗ p50 2.5 s, three calls over 5 s, and one 20 s timeout. This agent wrote a larger contract than run 1's and no persona; why these answers are slow is still open.
+- The other measures are as in run 1.

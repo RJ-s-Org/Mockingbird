@@ -554,6 +554,14 @@ impl Shape {
         self.path.first().map(String::as_str)
     }
 
+    /// The items `body`, an answer of this shape, holds where the shape places them.
+    pub(super) fn items_in<'b>(&self, body: &'b Value) -> Option<&'b Vec<Value>> {
+        self.path
+            .iter()
+            .try_fold(body, |at, member| at.get(member))?
+            .as_array()
+    }
+
     /// The envelope of an empty page, its other required members filled as a held
     /// answer's are, from `kept` first (see [`mb_engine::Engine::fill_envelope`]);
     /// `None` when one cannot be.

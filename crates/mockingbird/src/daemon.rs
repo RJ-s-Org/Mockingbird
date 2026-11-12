@@ -233,9 +233,17 @@ fn check_free(listeners: &[(&'static str, SocketAddr)]) -> Result<(), BindError>
 
 /// Which Mockingbird server holds `address`, from its `/readyz` there: the
 /// config it was started with and its folder (since servers report them),
-/// else that some Mockingbird server does. `None` when nothing there
-/// answers like one.
+/// else that some Mockingbird server does; or, on a proxy port, which
+/// Mockingbird proxy (from its [`crate::proxy::ORIGIN_PATH`]). `None` when
+/// nothing there answers like one.
 pub async fn holder(address: SocketAddr) -> Option<String> {
+    // The proxy first: a proxy would count `/readyz` as a request for an
+    // unmapped host in its project's report.
+    let mut proxy = address;
+    proxy.set_ip(reach(address.ip()));
+    if let crate::proxy::owner::Listener::Proxy(body) = crate::proxy::owner::probe(proxy).await {
+        return Some(crate::proxy::owner::describe_proxy(&body));
+    }
     let (_, _, body) = readyz(&url(address.ip(), address.port())).await;
     describe_holder(&body)
 }
@@ -457,7 +465,7 @@ fn reach(host: IpAddr) -> IpAddr {
     }
 }
 
-fn url(host: IpAddr, port: u16) -> String {
+pub(crate) fn url(host: IpAddr, port: u16) -> String {
     match reach(host) {
         IpAddr::V6(v6) => format!("http://[{v6}]:{port}"),
         IpAddr::V4(v4) => format!("http://{v4}:{port}"),
@@ -473,7 +481,7 @@ fn http() -> reqwest::Client {
 }
 
 /// `GET <admin>/readyz`: `(reachable, ready, body)`.
-async fn readyz(admin_url: &str) -> (bool, bool, Value) {
+pub(crate) async fn readyz(admin_url: &str) -> (bool, bool, Value) {
     match http().get(format!("{admin_url}/readyz")).send().await {
         Ok(resp) => {
             let ready = resp.status().is_success();

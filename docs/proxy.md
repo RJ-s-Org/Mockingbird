@@ -12,7 +12,7 @@ mockingbird run -c mockingbird.yaml -- npm test
 mockingbird run [-c <config>] [--offline] [--record <dir> | --replay <dir>] [--wait <duration>] [--keep] [--state-dir <dir>] -- <command> [args…]
 ```
 
-1. Starts the server with its proxy (`server start --proxy`, watching the config) unless something already answers on the config's admin port. A running server without its proxy gets one in front of it for the duration of the command. `--offline`, `--record`, `--replay` and `-c` shape only a server `run` starts: when it reuses a running one, `run` prints a warning naming the flags that do not apply to it (stop that server with `mockingbird server stop` to use them).
+1. Starts the server with its proxy (`server start --proxy`, watching the config) unless the config's own server already answers on its admin port. A running server without its proxy gets one in front of it for the duration of the command. The command only ever gets this config's own proxy (see [Whose proxy](#whose-proxy)): when another listener, such as another project's Mockingbird proxy, holds the proxy port, `run` names it and leaves it alone. With `proxy.port` unset it runs its proxy on the first free port above the default instead; with `proxy.port` set it exits 1 without running the command. `--offline`, `--record`, `--replay` and `-c` shape only a server `run` starts: when it reuses a running one, `run` prints a warning naming the flags that do not apply to it (stop that server with `mockingbird server stop` to use them).
 2. Waits until `/readyz` is ready (`--wait`, default `60s`); if it is not, prints the end of the server log and exits 1.
 3. Runs the command with the [proxy variables](#the-variables) for every runtime, stdin/stdout/stderr attached. SIGINT and SIGTERM sent to `run` reach the command.
 4. Stops what it started (unless `--keep`) and exits with the command's exit code: `128 + n` when signal `n` ended it, `127` when it cannot be started, `1` when Mockingbird itself failed before the command ran.
@@ -68,6 +68,18 @@ mockingbird proxy --data-url http://127.0.0.1:8080 --admin-url http://127.0.0.1:
 ```
 
 It reads the hosts the server's mocks claim from `GET /proxy/hosts` on the admin port (refreshed every 2 seconds) and forwards intercepted requests to the data plane with their `Host` header, so they dispatch the same way.
+
+### Whose proxy
+
+Several projects on one machine each run their own Mockingbird server, and another project's proxy may hold this config's proxy port (8888 by default). That proxy has none of this project's mocks, so it would pass the app's calls on to the real APIs. `run`, `proxy env`, `proxy browser` and the MCP `proxy_env` tool therefore hand out only the proxy of the config's own server:
+
+- A server's `/readyz` reports its `proxy` address, or `null` when it runs no proxy. Every proxy answers `GET /mockingbird-proxy.json`, sent to the proxy itself, with the `config` and `dir` of the project it serves (to callers on this machine). This works for a server's own proxy, a standalone `mockingbird proxy` and the proxy `run` puts in front of a server.
+- With a config (`-c`, else `./mockingbird.yaml`), these commands look up the proxy address in the config's own server's `/readyz`, falling back to `proxy.port`. They then check that the proxy there answers with this config.
+- When another listener holds that address, they fail and name it (for another Mockingbird proxy, the config and folder it serves). Leave it running. Give this project's proxy a free port with `proxy.port`, or leave `proxy.port` unset: `server start -c mockingbird.yaml --proxy` then picks a free port and writes it into the config.
+- When the config's server runs and has no proxy, `proxy env` fails with that message instead of printing an address. `run` puts a proxy in front of that server instead.
+- When nothing listens there yet, `proxy env` prints the variables and warns on stderr that no proxy listens yet.
+
+Without any config there is no project to check against, and `proxy env` prints the defaults as before.
 
 ## How it works
 

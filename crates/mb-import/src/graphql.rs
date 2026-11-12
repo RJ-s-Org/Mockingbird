@@ -567,13 +567,110 @@ fn implementors(schema: &Schema) -> BTreeMap<&str, Vec<&str>> {
     out
 }
 
-/// The string format a custom scalar's values take when its name or its
-/// description says it holds a date or a time: `DateTime`, `Timestamp`,
-/// `ISO8601DateTime` → `date-time`; `Date`, `ISO8601Date` → `date`;
-/// otherwise a description naming ISO 8601 or RFC 3339. A description of
-/// seconds or milliseconds since the epoch (and naming neither) keeps the
+/// The format of a link scalar's values.
+const LINK_FORMAT: &str = "uri-reference";
+
+/// What a custom scalar's values are, by the whole words of its name
+/// ([`name_words`]) and its description: `Some(format)` for a string, with the
+/// JSON Schema format it takes when one is clear-cut, `None` for a scalar left
+/// untyped.
+///
+/// - A link: a name ending in the word `uri` or `url` (`URI`, `HttpUrl`,
+///   `URIString`, not `Curl` or `Base64URL`), or a description that says so
+///   ([`link_described`]) → `uri-reference`, not `uri`: a link scalar holds
+///   relative references too (GitHub's `URI` is both `url` and `resourcePath`),
+///   and an asserted `uri` would have a relative one replaced.
+/// - A date or time ([`date_format`]) → `date-time` or `date`.
+/// - `Email`, `EmailAddress` → `email`; `UUID` → `uuid`.
+/// - `HTML`, `ObjectID` (`GitObjectID`) → a string with no format.
+fn scalar_format(name: &str, description: Option<&str>) -> Option<Option<&'static str>> {
+    let words = name_words(name);
+    let ends = |tail: &[&str]| {
+        words.len() >= tail.len()
+            && words[words.len() - tail.len()..]
+                .iter()
+                .zip(tail)
+                .all(|(w, t)| w == t)
+    };
+    // The link word, last or before a last `string`, not encoding one (`Base64URL`).
+    let link_at = words
+        .iter()
+        .rposition(|w| w == "uri" || w == "url")
+        .filter(|&at| {
+            at + 1 == words.len() || (at + 2 == words.len() && words[at + 1] == "string")
+        });
+    let encoded = link_at
+        .and_then(|at| at.checked_sub(1))
+        .is_some_and(|before| matches!(words[before].as_str(), "base64" | "base32"));
+    if link_at.is_some() && !encoded {
+        return Some(Some(LINK_FORMAT));
+    }
+    if let Some(format) = date_format(&words, description) {
+        return Some(Some(format));
+    }
+    if link_described(description.unwrap_or_default()) {
+        return Some(Some(LINK_FORMAT));
+    }
+    if ends(&["email"]) || ends(&["email", "address"]) {
+        return Some(Some("email"));
+    }
+    if ends(&["uuid"]) {
+        return Some(Some("uuid"));
+    }
+    if ends(&["html"]) || ends(&["object", "id"]) {
+        return Some(None);
+    }
+    None
+}
+
+/// Whether a scalar's description says it holds a URI: it names RFC 3986 or
+/// RFC 3987 and a URI, URL or IRI, and not as an encoding (`URL-safe`,
+/// `percent-encoded`, `unreserved`), or its first sentence is no more than an article, up to two
+/// words and `URI` or `URL` (`An absolute URL.`, `Represents a valid URL
+/// string.`), a trailing `string` or `value` aside.
+fn link_described(description: &str) -> bool {
+    let lower = description.to_lowercase();
+    let rfc = ["rfc 3986", "rfc3986", "rfc 3987", "rfc3987"]
+        .iter()
+        .any(|rfc| lower.contains(rfc));
+    let named = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| matches!(w, "uri" | "url" | "iri"));
+    let encoding = ["safe", "encod", "escap", "unreserved"]
+        .iter()
+        .any(|w| lower.contains(w));
+    if rfc && named && !encoding {
+        return true;
+    }
+    let first = lower.split(['.', '\n']).next().unwrap_or_default();
+    let mut words: Vec<&str> = first.split_whitespace().collect();
+    if words.first() == Some(&"represents") {
+        words.remove(0);
+    }
+    if matches!(words.last(), Some(&("string" | "value"))) {
+        words.pop();
+    }
+    let article = matches!(words.first(), Some(&("a" | "an" | "the")));
+    let link = matches!(words.last(), Some(&("uri" | "url")));
+    let between = words
+        .get(1..words.len().saturating_sub(1))
+        .unwrap_or_default();
+    article
+        && link
+        && words.len() >= 2
+        && between.len() <= 2
+        && between
+            .iter()
+            .all(|w| w.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+}
+
+/// The string format a custom scalar's values take when its name (by its
+/// `words`) or its description says it holds a date or a time: `DateTime`,
+/// `Timestamp`, `ISO8601DateTime` → `date-time`; `Date`, `ISO8601Date` →
+/// `date`; otherwise a description naming ISO 8601 or RFC 3339. A description
+/// of seconds or milliseconds since the epoch (and naming neither) keeps the
 /// scalar untyped: those values are numbers.
-fn date_format(name: &str, description: Option<&str>) -> Option<&'static str> {
+fn date_format(words: &[String], description: Option<&str>) -> Option<&'static str> {
     let description = description.unwrap_or_default().to_lowercase();
     let standard = ["iso-8601", "iso 8601", "iso8601", "rfc 3339", "rfc3339"]
         .iter()
@@ -587,7 +684,6 @@ fn date_format(name: &str, description: Option<&str>) -> Option<&'static str> {
     }
     // By whole words of the name: `DateTime`, `ISO8601Date`, `Timestamp`, not
     // `Update` or `Runtime`.
-    let words = name_words(name);
     let last = words.last().map(String::as_str);
     if words.windows(2).any(|w| w[0] == "date" && w[1] == "time") || last == Some("timestamp") {
         return Some("date-time");
@@ -611,15 +707,25 @@ fn date_format(name: &str, description: Option<&str>) -> Option<&'static str> {
     }
 }
 
-/// `ISO8601DateTime` → `iso8601`, `date`, `time`: lowercased words split at
-/// capitals (after a lowercase letter or a digit) and at `_`.
+/// `ISO8601DateTime` → `iso8601`, `date`, `time`; `URIString` → `uri`,
+/// `string`: lowercased words split at `_`, at a capital after a lowercase
+/// letter or a digit, and at the last capital of a run of them followed by a
+/// lowercase letter, but a plural's last `s` (`URLs` → `urls`).
 fn name_words(name: &str) -> Vec<String> {
+    let chars: Vec<char> = name.chars().collect();
     let mut words: Vec<String> = Vec::new();
-    let mut prev: Option<char> = None;
-    for c in name.chars() {
+    for (i, &c) in chars.iter().enumerate() {
+        let prev = i.checked_sub(1).and_then(|p| chars.get(p));
+        let next = chars.get(i + 1);
         let boundary = c == '_'
             || (c.is_ascii_uppercase()
-                && prev.is_some_and(|p| p.is_ascii_lowercase() || p.is_ascii_digit()));
+                && prev.is_some_and(|p| {
+                    p.is_ascii_lowercase()
+                        || p.is_ascii_digit()
+                        || (p.is_ascii_uppercase()
+                            && next.is_some_and(char::is_ascii_lowercase)
+                            && !(next == Some(&'s') && i + 2 == chars.len()))
+                }));
         if boundary || words.is_empty() {
             words.push(String::new());
         }
@@ -628,7 +734,6 @@ fn name_words(name: &str) -> Vec<String> {
         {
             word.push(c.to_ascii_lowercase());
         }
-        prev = Some(c);
     }
     words.retain(|w| !w.is_empty());
     words
@@ -643,9 +748,11 @@ fn def_schema(
     let mut obj = match &def.kind {
         Kind::Scalar => {
             let mut out = json!({ "description": format!("GraphQL scalar {name}") });
-            if let Some(format) = date_format(name, def.description.as_deref()) {
+            if let Some(format) = scalar_format(name, def.description.as_deref()) {
                 out["type"] = json!("string");
-                out["format"] = json!(format);
+                if let Some(format) = format {
+                    out["format"] = json!(format);
+                }
             }
             return out;
         }
@@ -1362,4 +1469,116 @@ fn render_introspection(doc: &Value) -> Result<(String, Option<String>), ImportE
         .and_then(Value::as_str)
         .map(str::to_owned);
     Ok((out, description))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_split_into_words_at_case_changes_and_acronyms() {
+        for (name, words) in [
+            ("ISO8601DateTime", vec!["iso8601", "date", "time"]),
+            ("URIString", vec!["uri", "string"]),
+            ("GitSSHRemote", vec!["git", "ssh", "remote"]),
+            ("GitObjectID", vec!["git", "object", "id"]),
+            ("HttpUrl", vec!["http", "url"]),
+            ("date_time", vec!["date", "time"]),
+            ("HTML", vec!["html"]),
+            ("URLs", vec!["urls"]),
+            ("UUIDs", vec!["uuids"]),
+            ("ObjectIDs", vec!["object", "ids"]),
+        ] {
+            assert_eq!(name_words(name), words, "{name}");
+        }
+    }
+
+    #[test]
+    fn link_scalars_are_uri_reference_strings_by_name_or_description() {
+        for name in [
+            "URI",
+            "URL",
+            "Uri",
+            "Url",
+            "HttpUrl",
+            "URIString",
+            "UrlString",
+            "AbsoluteURL",
+            "RelativeUrl",
+        ] {
+            assert_eq!(
+                scalar_format(name, None),
+                Some(Some("uri-reference")),
+                "{name}"
+            );
+        }
+        for description in [
+            "An RFC 3986, RFC 3987, and RFC 6570 (level 4) compliant URI string.",
+            "Represents an RFC 3986 and RFC 3987-compliant URI string.",
+            "An absolute URL.",
+            "Represents a valid URL string.",
+            "The URL",
+        ] {
+            assert_eq!(
+                scalar_format("Link", Some(description)),
+                Some(Some("uri-reference")),
+                "{description}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_clear_cut_scalars_get_their_format() {
+        assert_eq!(scalar_format("Email", None), Some(Some("email")));
+        assert_eq!(scalar_format("EmailAddress", None), Some(Some("email")));
+        assert_eq!(scalar_format("UUID", None), Some(Some("uuid")));
+        assert_eq!(scalar_format("HTML", None), Some(None));
+        assert_eq!(scalar_format("GitObjectID", None), Some(None));
+        // Dates keep their mapping, and an epoch scalar stays untyped.
+        assert_eq!(scalar_format("DateTime", None), Some(Some("date-time")));
+        assert_eq!(scalar_format("ISODateTime", None), Some(Some("date-time")));
+        assert_eq!(
+            scalar_format("Timestamp", Some("Seconds since the Unix epoch.")),
+            None
+        );
+    }
+
+    #[test]
+    fn ambiguous_scalars_stay_untyped() {
+        for name in [
+            "Curl",
+            "Hurl",
+            "Base64URL",
+            "Base64UrlString",
+            "URLs",
+            "UrlEncoded",
+            "URISchema",
+            "Emails",
+            "EmailSettings",
+            "UUIDs",
+            "Html5Video",
+            "ObjectIDs",
+            "ID2",
+            "JSON",
+            "Decimal",
+            "GitSSHRemote",
+        ] {
+            assert_eq!(scalar_format(name, None), None, "{name}");
+        }
+        for description in [
+            "A URL slug, without its host.",
+            "The page's URL, and its title, as an object",
+            "A value parsed from a URL.",
+            "A slug, URL-safe per RFC 3986 unreserved characters.",
+            "Text percent-encoded as RFC 3986 says, for a URL.",
+            "Conforms to RFC 3986.",
+            "Seconds since the Unix epoch.",
+        ] {
+            assert_eq!(
+                scalar_format("Slug", Some(description)),
+                None,
+                "{description}"
+            );
+        }
+    }
 }

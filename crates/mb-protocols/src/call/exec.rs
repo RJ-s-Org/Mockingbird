@@ -89,6 +89,7 @@ mod queue;
 mod writes;
 
 pub(super) use create::{initial_token, unreadable};
+pub(super) use list::agree_generated as agree_generated_list;
 pub(super) use queue::forget as forget_queue;
 
 /// What [`run`] did with a call.

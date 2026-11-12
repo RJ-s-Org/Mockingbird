@@ -9,18 +9,20 @@ pub mod ca;
 pub mod env;
 pub mod forward;
 pub mod images;
+pub mod owner;
 mod server;
 pub mod siblings;
 mod standalone;
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::file_config::{Unmapped, VendorSubdomains};
+use crate::ops::Origin;
 use crate::registry::MockRegistry;
 
-pub use server::{PAC_PATH, VENDOR_SUBDOMAIN_PROBLEM, pac_script, serve};
+pub use server::{ORIGIN_PATH, PAC_PATH, VENDOR_SUBDOMAIN_PROBLEM, pac_script, serve};
 pub use standalone::{
     CaCommand, ProxyArgs, ProxyCommand, ProxyEnvArgs, ProxyRunArgs, StandaloneOptions, ca_command,
     run, run_standalone,
@@ -81,6 +83,8 @@ pub struct ProxyState {
     seen: Mutex<HashSet<String>>,
     /// Whether reaching [`MAX_UNMAPPED_HOSTS`] was logged.
     seen_full: AtomicBool,
+    /// Which project this proxy serves (see [`ProxyState::with_origin`]).
+    origin: OnceLock<Origin>,
 }
 
 impl std::fmt::Debug for ProxyState {
@@ -127,7 +131,22 @@ impl ProxyState {
             client,
             seen: Mutex::new(HashSet::new()),
             seen_full: AtomicBool::new(false),
+            origin: OnceLock::new(),
         }))
+    }
+
+    /// This proxy, answering [`ORIGIN_PATH`] with `origin`: the config and
+    /// folder of the project it serves, so that `proxy env` and `run` hand
+    /// out only their own project's proxy. Only the first origin set counts.
+    #[must_use]
+    pub fn with_origin(self: Arc<Self>, origin: Origin) -> Arc<Self> {
+        let _ = self.origin.set(origin);
+        self
+    }
+
+    /// The origin [`ProxyState::with_origin`] set.
+    pub(crate) fn origin(&self) -> Option<&Origin> {
+        self.origin.get()
     }
 
     /// `true` the first time `host` is seen, so each unmapped host is

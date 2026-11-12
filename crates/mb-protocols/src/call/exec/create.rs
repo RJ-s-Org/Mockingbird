@@ -84,7 +84,7 @@ use crate::call::owners::{Compound, schema_members};
 use crate::call::writes::type_members;
 use crate::call::{
     CallPlan, MAX_SCAN, OperationCall, StateAccess, computed, header_ids, id_string,
-    in_create_collection, lifecycle, path_set, records, repeats, replays, request_values,
+    in_create_collection, lifecycle, links, path_set, records, repeats, replays, request_values,
     serve_held, state_lists, state_span, target_id, transitions, value_index,
 };
 
@@ -457,6 +457,14 @@ pub(super) async fn run(
     // Issued values name their record as alternate keys do: unique among the type's.
     let drawn: Vec<(String, Value)> = filled_keys.into_iter().chain(issued).collect();
     unique_keys(state, (seed, t), &drawn, &mut data)
+        .instrument(state_span())
+        .await;
+    // Its URL members show the place the call names, under the mock's host, but what
+    // the request sent and the description sets.
+    let mut kept = links::sent_members(call);
+    kept.extend(sent.as_object().into_iter().flat_map(|s| s.keys().cloned()));
+    kept.extend(set.iter().cloned());
+    links::settle(state, &plan.session, (op, call), (t, &kept), &mut data)
         .instrument(state_span())
         .await;
 

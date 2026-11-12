@@ -77,6 +77,21 @@ A `POST` with no path parameter whose last segment's action starts with `create`
 
 A GraphQL create or delete whose name names a record type with an `id` (`issueCreate`, `commentDelete`) and that answers a payload holding the record in one member (`IssuePayload.issue`) is identified by that member, and a delete by its `id` (or `<type>Id`) argument. A mutation on a record its payload holds in one member, named by a `<type>Id` argument (`cartLinesAdd(cartId:)` answering `{cart}`), is an action on that record. A mutation whose only argument is an input object (the Relay convention, as GitHub's `closeIssue(input: CloseIssueInput!)`) has its record named by that object's `id` or `<type>Id` member, by the same rules, and its target is that member's dotted path (`input.issueId`): `closeIssue` is an action on the issue its input names, and the model is told that issue. As at the top level, a bare `input.id` does not name a record the payload holds (it may name a part of it), a member that names no type (`subjectId`) names no target, and a mutation with other arguments beside its input object, or a query, is not looked into. An update keeps no identity: its `input` is applied by name. A SOAP answer with no `id` that holds a record in a member named for the operation's type is read by the type's key (`GetItem` answering `Item` keyed by `ItemID`, taken from the request's `ItemID`). A create that answers only an acknowledgement and the new key (`AddFixedPriceItem` answering `{Ack, ItemID}`) keeps the type its name gives and no identity, since its answer is not the record it sends.
 
+A GraphQL custom scalar is an untyped value unless its name's whole words (split at case changes, acronyms and `_`) or its description say what it holds, and then it imports as a string with the JSON Schema format that says so, which the faker and the executor's local fill then draw in:
+
+| Scalar | Imports as |
+|---|---|
+| A name ending in the word `URI` or `URL` (`URI`, `Url`, `HttpUrl`, `URIString`, not `Base64URL`); a description naming RFC 3986 or RFC 3987 and a URI, URL or IRI, not as an encoding (`URL-safe`, `percent-encoded`); or a first sentence that is only an article, up to two words and `URI` or `URL`, a leading `Represents` and a trailing `string` or `value` aside (`An absolute URL.`) | `{type: string, format: uri-reference}` |
+| `DateTime`, `Timestamp`, `ISO8601DateTime`, or a description naming ISO 8601 or RFC 3339 and a time | `{type: string, format: date-time}` |
+| `Date`, `ISO8601Date`, or a description naming ISO 8601 or RFC 3339 and a date | `{type: string, format: date}` |
+| `Email`, `EmailAddress` | `{type: string, format: email}` |
+| `UUID` | `{type: string, format: uuid}` |
+| `HTML`, a name ending in `ObjectID` (`GitObjectID`) | `{type: string}` |
+
+A link scalar is a `uri-reference`, not a `uri`: one scalar often holds absolute and relative links alike (GitHub's `URI` types both `url` and `resourcePath`), and a `uri` is asserted on answers, so a relative path would be replaced. Other names stay untyped, so a guess never makes a value wrong: `Curl` is not a URL, `Time` has no format (a JSON Schema `time` needs an offset), and a description of seconds or milliseconds since the epoch keeps a date-named scalar untyped, since its values are numbers.
+
+A created record's own link (`url`, `href`, `html_url`, `htmlUrl`) of a type nothing reads by path (a GraphQL type), holding a drawn word or a drawn link that shows no identity (relative, or on a placeholder host), is placed under the URL its parent, the record a required id argument names, holds in the same member: the type's name in the plural (simple English plurals: `tickets`, `entries`) and the record's numeric identity follow, so `createTicket(input: {projectId})` gives `…/acme/roadmap/tickets/82`.
+
 ### Correcting it: `x-mockingbird-resource`
 
 Inference needs no help from a contract. When it is wrong, an OpenAPI 3 or Swagger 2.0 operation can say so:

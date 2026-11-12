@@ -417,6 +417,11 @@ pub struct MockRuntime {
     /// source: Swagger `basePath`, OpenAPI `servers[].url` paths). Read
     /// when the REST router is built. Empty by default.
     pub base_paths: Vec<String>,
+    /// The hosts the records this mock answers link under, the first one
+    /// preferred: the mock's own `hosts`, then those its contract's `servers`
+    /// name (`mb_import::server_hosts`). The URL members of a record it stores
+    /// are built on them (see `call::links`). Empty by default.
+    pub hosts: Vec<String>,
     /// The credential header and query names derived from
     /// `data_plane_auth` and `bundle`, recomputed whenever either changes
     /// (see [`MockRuntime::credential_names`]).
@@ -488,6 +493,7 @@ impl std::fmt::Debug for MockRuntime {
             .field("default_scenario", &self.default_scenario)
             .field("webhooks", &self.webhooks)
             .field("base_paths", &self.base_paths)
+            .field("hosts", &self.hosts)
             .finish_non_exhaustive()
     }
 }
@@ -580,6 +586,7 @@ impl MockRuntime {
             strict_requests: false,
             webhooks: None,
             base_paths: Vec::new(),
+            hosts: Vec::new(),
             credential_names,
             index,
             path_aliases: call::PathAliases::default(),

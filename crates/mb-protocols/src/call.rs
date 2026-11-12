@@ -46,6 +46,7 @@ mod exec;
 mod exprs;
 mod header_ids;
 mod lifecycle;
+mod links;
 mod list_exprs;
 mod list_query;
 mod lists;
@@ -1175,9 +1176,15 @@ pub(crate) async fn complete(
             .filter(|i| i.path_param.is_none())
             .and_then(|i| i.input_field.as_deref().filter(|f| *f != i.field))
             .zip(acted_on.as_deref());
-        reused_ids::remint(&mut state, session, rt, body, schema, (skip, named_by))
+        let shown = reused_ids::remint(&mut state, session, rt, body, schema, (skip, named_by))
             .instrument(state_span())
             .await;
+        // A read's answer shows what the session holds of the records it nests. GraphQL
+        // answers do in their own walk (see `graphql::nested`), by response key.
+        if matches!(op.kind, OperationKind::Query) && op.protocol != mb_mcm::Protocol::Graphql {
+            let listed = lists::overlays_own_items(rt, plan, target_id.as_deref());
+            reused_ids::show_held(rt, body, &shown, listed);
+        }
     }
     let resource_type = op.resource_type.as_deref();
     let is_query = matches!(op.kind, OperationKind::Query);
@@ -1217,10 +1224,9 @@ pub(crate) async fn complete(
         // answer holding one record (`/users/me` answering `{user}`) is no list.
         let fallback = transient_fallback(&generated);
         if is_query
-            && target_id.is_none()
+            && lists::overlays_own_items(rt, plan, target_id.as_deref())
             && answered.is_none()
             && (200..300).contains(&generated.status)
-            && deleted::applies(rt, plan)
             && let Some(body) = generated.body.as_mut()
         {
             // The model's own next page, after a rest the mock served: not those again,
@@ -1304,6 +1310,27 @@ pub(crate) async fn complete(
                 && deleted::applies(rt, plan)
             {
                 lists::no_content(rt.bundle(), op, &mut generated);
+            }
+            // A generated list agrees with the session as a page from state does: its
+            // parent-shaped envelope member is the held parent, and what its envelope
+            // says of a listed record names one it lists. What a scenario sets still
+            // stands over it.
+            if is_query
+                && target_id.is_none()
+                && answered.is_none()
+                && rt.consistency
+                && let Some(body) = generated.body.as_mut()
+            {
+                let changed = exec::agree_generated_list(&mut state, (plan, call), body)
+                    .instrument(state_span())
+                    .await;
+                // The engine applies a scenario's `set` to an object body only.
+                if changed
+                    && body.is_object()
+                    && let Some(set) = plan.scenario.and_then(|s| s.spec.set.as_ref())
+                {
+                    *body = mb_engine::apply_set(body, set);
+                }
             }
             if matches!(op.kind, OperationKind::Command(Effect::Create)) {
                 // The answer as the model gave it, before a fresh id replaces one a stored
@@ -1427,6 +1454,39 @@ pub(crate) async fn complete(
                         }
                     }
                     None => {}
+                }
+                // The record's URL members show the place the call names (see [`links`]).
+                // What the request sent stays, and the parents are found from the
+                // call as sent. Settled once the record is known to be stored.
+                if !unstored
+                    && matches!(generated.source, Source::Llm | Source::Repaired)
+                    && (200..300).contains(&generated.status)
+                {
+                    let kept = links::sent_members(call);
+                    // The body is the record, unless the description says where the
+                    // answer holds it and the identity did not take it out already.
+                    let at = rt
+                        .described()
+                        .op(&op.id)
+                        .and_then(|d| d.answer.as_ref())
+                        .and_then(|a| a.record.as_ref())
+                        .map(|p| p.as_str().to_owned())
+                        .filter(|_| answered.is_none());
+                    let record = generated
+                        .body
+                        .as_mut()
+                        .and_then(|body| match at.as_deref() {
+                            None | Some("") => Some(body),
+                            Some(pointer) => body.pointer_mut(pointer),
+                        });
+                    if let Some(record) = record {
+                        links::settle(&mut state, session, (op, call), (t, &kept), record).await;
+                    }
+                    if let (Some(identity), Some(answer)) = (held_in, answered.as_mut())
+                        && let Some(record) = identity.record_in_mut(answer)
+                    {
+                        links::settle(&mut state, session, (op, call), (t, &kept), record).await;
+                    }
                 }
             }
             // An action's new record goes under its own id, not over another's.

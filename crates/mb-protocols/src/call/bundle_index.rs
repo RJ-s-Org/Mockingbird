@@ -96,6 +96,9 @@ pub(crate) struct BundleIndex {
     /// of, whose unknown ids `unknown_ids` left unset answers 404 once the session holds
     /// one (see [`crate::UnknownIds::Inferred`]).
     pub(super) creatable: HashSet<String>,
+    /// Per resource type, what its URL members are built from (see [`links`]), worked
+    /// out on first use.
+    pub(super) links: std::sync::RwLock<HashMap<String, std::sync::Arc<links::TypeLinks>>>,
 }
 
 /// The schema of the record an answer of `schema` holds where `identity` says: an
@@ -466,6 +469,7 @@ impl BundleIndex {
                 .filter(|op| mb_mcm::world::OpKind::of(op) == Some(mb_mcm::world::OpKind::Create))
                 .filter_map(|op| op.resource_type.clone())
                 .collect(),
+            links: std::sync::RwLock::default(),
         }
     }
 
