@@ -285,6 +285,11 @@ async fn answer(
     // The described default filter, over each record as held.
     let mut listed_where = list_exprs::Where::of(state, rt, (plan, call)).await;
     let mut in_scope = false;
+    // What completing records cost, and how many were.
+    let mut filled = mb_llm::Usage::default();
+    let mut completions = 0;
+    // No model to answer: none configured, or the provider marked unusable for now.
+    let local = !plan.engine.has_provider() || plan.engine.provider_blocked().is_some();
     for r in &records {
         let placed_here = placed.contains_key(r.id.as_str());
         // Another parent's records are in no collection of this one.
@@ -304,12 +309,38 @@ async fn answer(
         let item = lists::projected(bundle, Some(&shape.items), &r.data, 0);
         // The described keys, else the name-matched filters; and those the description
         // does not name besides.
-        let kept = list_query::keeps(q.as_ref(), &item, |i| {
-            filters.iter().all(|(_, f)| lists::holds_wanted(i, f))
-        }) && filters
-            .iter()
-            .all(|(param, f)| knows(param) || lists::holds_wanted(&item, f));
-        if kept {
+        let keeps = |item: &Value| {
+            list_query::keeps(q.as_ref(), item, |i| {
+                filters.iter().all(|(_, f)| lists::holds_wanted(i, f))
+            }) && filters
+                .iter()
+                .all(|(param, f)| knows(param) || lists::holds_wanted(item, f))
+        };
+        if !keeps(&item) {
+            continue;
+        }
+        // With no model, a kept record lacking what an item requires is completed, as a
+        // read of it is ([`super::held_gaps`]), rather than the page drawn whole by the
+        // faker; at most [`MAX_COMPLETED`] in one list, past which the page is drawn as
+        // before. A model generates the page in one call instead of a fill per record.
+        let done = match local && completions < MAX_COMPLETED {
+            true => super::held_gaps::completed_item(state, (plan, call), r, &shape.items).await,
+            false => None,
+        };
+        let (r, item) = match &done {
+            Some(done) => {
+                completions += 1;
+                super::held_gaps::keep(state, plan, r, done).await;
+                filled = filled + done.usage;
+                let item = lists::projected(bundle, Some(&shape.items), &done.record.data, 0);
+                if !keeps(&item) {
+                    continue;
+                }
+                (&done.record, item)
+            }
+            None => (r, item),
+        };
+        {
             let held = if computes {
                 r.data.clone()
             } else {
@@ -352,6 +383,7 @@ async fn answer(
         state_lists::Unserved::Render => Stop::from("render_failed"),
         state_lists::Unserved::NoPlace => Stop::from("no_next_place"),
     })?;
+    served.usage = served.usage + filled;
     // The collection is marked listed: its creates are placed in it from now on.
     state_lists::mark_listed(state, (plan, call), t, &served, ids).await;
     // A list paged by its `Range` header: ordered and cut by it.
@@ -379,6 +411,10 @@ async fn answer(
 /// description gives type `t`. A search (one whose query requires a parameter,
 /// [`bundle_index::searches`]) beside the type's written collection is no second list
 /// of the type (`BundleIndex::sole_unscoped`).
+/// The most records one list completes ([`super::held_gaps::completed_item`]): each may
+/// take a fill, so a collection of many records held in part is generated instead.
+const MAX_COMPLETED: usize = 50;
+
 fn only_unscoped(rt: &MockRuntime, op: &Operation, path: Option<&str>, t: &str) -> bool {
     let index = rt.index();
     let search = bundle_index::searches(op);

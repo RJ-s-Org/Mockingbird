@@ -33,6 +33,11 @@
 //!   completion again, with no fill; once the writer changed it, what the record now
 //!   holds wins, what was completed before fills what it still lacks, and only what is
 //!   left is filled anew.
+//!
+//! With no model to answer (none configured, or the provider marked unusable), a list
+//! of the executor completes each record it keeps the same way, against its items'
+//! schema ([`completed_item`]), rather than the faker drawing the page whole; with a
+//! model the page is generated in one call, not a fill per record.
 
 use mb_engine::FillContext;
 use mb_mcm::Protocol;
@@ -43,7 +48,7 @@ use tracing::Instrument;
 use super::create::{self, Unsent};
 use super::redraw;
 use crate::call::bundle_index::record_schema_of;
-use crate::call::{CallPlan, OperationCall, StateAccess, links, state_span};
+use crate::call::{CallPlan, OperationCall, StateAccess, links, state_span, write_memory};
 
 /// A held record completed for a read.
 pub(super) struct Completed {
@@ -55,6 +60,9 @@ pub(super) struct Completed {
     own: bool,
     /// Whether it is a completion kept before, of the record as it is now.
     reused: bool,
+    /// Whether it completes the record for a list's items ([`completed_item`]), kept
+    /// apart from a read's: an item's schema may require less than a read's.
+    item: bool,
 }
 
 /// What a completion of a record held under another key (another mock's) is kept as,
@@ -66,9 +74,13 @@ struct Kept {
 }
 
 /// The reserved document a completion of `read` is kept under by the reading mock
-/// `mock`.
-fn kept_key(mock: &str, read: &StoredResource) -> String {
-    format!("#completed/{mock}/{}/{}", read.resource_type, read.id)
+/// `mock`, for a read of it or (`item`) a list's items.
+fn kept_key(mock: &str, read: &StoredResource, item: bool) -> String {
+    let base = format!("#completed/{mock}/{}/{}", read.resource_type, read.id);
+    match item {
+        true => format!("{base}/item"),
+        false => base,
+    }
 }
 
 /// Whether the session holds `read` under its own type and key, as read.
@@ -85,8 +97,9 @@ async fn kept(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
     read: &StoredResource,
+    item: bool,
 ) -> Option<Kept> {
-    let key = kept_key(&state.rt.name, read);
+    let key = kept_key(&state.rt.name, read, item);
     let doc = state
         .get(&plan.session, INTERNAL_TYPE, &key)
         .instrument(state_span())
@@ -153,6 +166,54 @@ pub(super) async fn completed(
         Some(identity) => record_schema_of(bundle, identity, answer)?,
         None => answer.clone(),
     };
+    complete(state, (plan, call), stored, (schema, false)).await
+}
+
+/// `stored`, a record a list of `plan` lists, with what `item`, the schema of the
+/// list's items, requires that it lacks, as [`completed`] completes a read's record.
+/// `None` for a GraphQL list, a record that is no object or lacks nothing the item
+/// requires, or one whose item does not validate for another reason.
+pub(super) async fn completed_item(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    stored: &StoredResource,
+    item: &Value,
+) -> Option<Completed> {
+    let rt = state.rt;
+    if plan.op.protocol == Protocol::Graphql || !stored.data.is_object() {
+        return None;
+    }
+    let projected = crate::call::lists::projected(rt.bundle(), Some(item), &stored.data, 0);
+    let found = rt.engine.schema_violations(rt.bundle(), item, &projected)?;
+    let mut found = found
+        .into_iter()
+        .flat_map(|(at, keyword)| redraw::narrowed(rt, item, &projected, at, keyword, 0))
+        .peekable();
+    if found.peek().is_none() || !found.all(|(_, keyword)| keyword == "required") {
+        return None;
+    }
+    // Not one with remembered writes it does not show yet: generation catches up on
+    // them, as for a read.
+    if write_memory::remembers(state, &plan.session, &stored.resource_type, &stored.id)
+        .instrument(state_span())
+        .await
+    {
+        return None;
+    }
+    complete(state, (plan, call), stored, (item.clone(), true)).await
+}
+
+/// `stored` with what `schema` (its record schema) requires that it lacks: the
+/// completion of [`completed`] and [`completed_item`].
+async fn complete(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    stored: &StoredResource,
+    (schema, item): (Value, bool),
+) -> Option<Completed> {
+    let rt = state.rt;
+    let op = plan.op;
+    let bundle = rt.bundle();
     let schemas = [schema];
     let t = stored.resource_type.as_str();
     // The members the description derives are answered from state, never stored: the
@@ -175,7 +236,7 @@ pub(super) async fn completed(
     let own = own(state, plan, stored).await;
     let earlier = match own {
         true => None,
-        false => kept(state, plan, stored).await,
+        false => kept(state, plan, stored, item).await,
     };
     let Value::Object(known) = &mut data else {
         return None;
@@ -191,6 +252,7 @@ pub(super) async fn completed(
                 usage: mb_llm::Usage::default(),
                 own,
                 reused: true,
+                item,
             });
         }
         // The writer changed it: what it holds wins, the earlier completion fills what
@@ -272,6 +334,7 @@ pub(super) async fn completed(
         usage,
         own,
         reused: false,
+        item,
     })
 }
 
@@ -343,7 +406,7 @@ pub(super) async fn keep(
     if !completed.own {
         let doc = StoredResource {
             resource_type: INTERNAL_TYPE.to_owned(),
-            id: kept_key(&state.rt.name, read),
+            id: kept_key(&state.rt.name, read, completed.item),
             data: json!({"basis": read.data, "data": completed.record.data}),
         };
         return state
