@@ -215,6 +215,80 @@ components:
     assert!(validate(&world, &b).refused.is_empty());
 }
 
+/// A read answering a choice of objects that share their identity (a record or its
+/// deleted stub, as Stripe's `customer` or `deleted_customer`) is a read of that
+/// record, and a form `POST` to the same route writing its members an update. A
+/// choice whose branches are keyed differently (an error with no `id`) stays a list.
+#[test]
+fn tier0_reads_a_choice_of_one_record() {
+    let b = mb_import::compile(
+        br##"
+openapi: 3.0.0
+info: {title: Choice, version: "1"}
+paths:
+  /v1/customers:
+    post:
+      operationId: PostCustomers
+      requestBody: {content: {application/x-www-form-urlencoded: {schema: {type: object, properties: {email: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/customer"}}}}}
+  /v1/customers/{customer}:
+    parameters: [{name: customer, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: GetCustomersCustomer
+      responses: {"200": {description: ok, content: {application/json: {schema: {anyOf: [{$ref: "#/components/schemas/customer"}, {$ref: "#/components/schemas/deleted_customer"}]}}}}}
+    post:
+      operationId: PostCustomersCustomer
+      requestBody: {content: {application/x-www-form-urlencoded: {schema: {type: object, properties: {email: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/customer"}}}}}
+    delete:
+      operationId: DeleteCustomersCustomer
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/deleted_customer"}}}}}
+  /v1/plans/{plan}:
+    parameters: [{name: plan, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: GetPlan
+      responses: {"200": {description: ok, content: {application/json: {schema: {oneOf: [{$ref: "#/components/schemas/plan"}, {$ref: "#/components/schemas/deleted_plan"}, {type: "null"}]}}}}}
+  /v1/pets/{pet}:
+    parameters: [{name: pet, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: GetPet
+      responses: {"200": {description: ok, content: {application/json: {schema: {oneOf: [{$ref: "#/components/schemas/report"}, {$ref: "#/components/schemas/tagged"}]}}}}}
+  /v1/reports/{report}:
+    parameters: [{name: report, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: GetReport
+      responses: {"200": {description: ok, content: {application/json: {schema: {oneOf: [{$ref: "#/components/schemas/report"}, {$ref: "#/components/schemas/problem"}]}}}}}
+components:
+  schemas:
+    customer: {type: object, properties: {id: {type: string}, object: {type: string, enum: [customer]}, email: {type: string}}}
+    deleted_customer: {type: object, properties: {id: {type: string}, object: {type: string, enum: [customer]}, deleted: {type: boolean, enum: [true]}}}
+    report: {type: object, properties: {id: {type: string}, rows: {type: integer}}}
+    problem: {type: object, properties: {title: {type: string}, detail: {type: string}}}
+    plan: {type: object, properties: {id: {type: string}, nickname: {type: string}}}
+    deleted_plan: {type: object, properties: {id: {type: string}, deleted: {type: boolean}}}
+    tagged: {type: object, properties: {uuid: {type: string}, tag: {type: string}}}
+"##,
+    )
+    .unwrap();
+    let world = tier0(&b);
+    let op = |id: &str| &world.operations[id];
+    assert_eq!(op("GetCustomersCustomer").kind, Some(OpKind::Read));
+    assert_eq!(
+        op("GetCustomersCustomer")
+            .target
+            .as_ref()
+            .and_then(|t| t.path_param.as_deref()),
+        Some("customer")
+    );
+    assert_eq!(op("PostCustomersCustomer").kind, Some(OpKind::Update));
+    assert_eq!(op("GetReport").kind, Some(OpKind::List));
+    // A `null` branch is no form of the record.
+    assert_eq!(op("GetPlan").kind, Some(OpKind::Read));
+    // Branches keyed by different members (`id`, `uuid`) are no one record.
+    assert_eq!(op("GetPet").kind, Some(OpKind::List));
+    assert!(validate(&world, &b).refused.is_empty());
+}
+
 #[test]
 fn tier0_keeps_a_literal_dotted_identity_member() {
     let mut b = mb_import::compile(
