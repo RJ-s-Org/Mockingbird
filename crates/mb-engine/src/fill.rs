@@ -25,6 +25,11 @@ pub struct FillContext<'a> {
     /// `/user`, a `/users/@me`) answered, for the objects of the record of the same
     /// schema (an issue's `user`).
     pub caller: &'a [CallerAnswer],
+    /// The top-level enum members that are the record's state (a lifecycle member, one
+    /// a world rule moves between values) whose start nothing gave: the model picks
+    /// each, never the persona's single named value or the first listed one; its
+    /// `default`, else its first value, only when the model writes none.
+    pub states: &'a [String],
 }
 
 /// What a route that says who the caller is answered ([`FillContext::caller`]).
@@ -87,7 +92,8 @@ impl Engine {
     /// separators aside, is echoed where it fits (`To` into `to`); a scalar that may be null is null
     /// and a boolean false, as on a fresh record; an enum is the one value the persona
     /// names, the model's when the persona names it otherwise, else its `default`, else
-    /// its first value (`enum_choice`); and every other member (ids, numbers,
+    /// its first value (`enum_choice`), but one of [`FillContext::states`] is the
+    /// model's; and every other member (ids, numbers,
     /// formatted, patterned or timestamp strings, objects of nothing else) is the
     /// faker's, with no model call. Inside an object the faker draws, a member the
     /// call's context gives (`Context::nested`: the request at its path; inside an
@@ -112,6 +118,7 @@ impl Engine {
             call,
             sent,
             caller,
+            states,
         } = ctx;
         let declared: Vec<(&str, Value)> = missing
             .iter()
@@ -212,13 +219,18 @@ impl Engine {
             }
             // What nothing set of a fresh record: a nullable scalar is null, a
             // boolean false (not a coin's toss of `deleted` or `archived`), and an
-            // enum what the persona says of it (`enum_choice`).
+            // enum what the persona says of it (`enum_choice`); a state the caller
+            // found no start for is the model's.
             if fresh_null(bundle, schema) {
                 filled.members.insert(name.to_string(), Value::Null);
             } else if boolean(bundle, schema) {
                 filled.members.insert(name.to_string(), Value::Bool(false));
             } else {
-                match enum_choice(bundle, name, schema, &persona) {
+                let choice = match states.iter().any(|s| s == name) {
+                    true => enum_fallback(bundle, schema).map(|_| EnumChoice::Ask),
+                    false => enum_choice(bundle, name, schema, &persona),
+                };
+                match choice {
                     Some(EnumChoice::Value(value)) => {
                         filled.members.insert(name.to_string(), value);
                     }
@@ -266,6 +278,7 @@ impl Engine {
                     let shape = object_shape(bundle, &member);
                     drawn = self.fake_member(bundle, name, &shape, &hints, &mut draws);
                 }
+                mint_nested_ids(bundle, &member, &mut drawn, &mut draws.rng, 0);
                 let value = match drawn {
                     Value::Object(whole) => {
                         lay_under(&mut text, whole, only_text);
@@ -296,7 +309,8 @@ impl Engine {
                 continue;
             }
             let member = timestamp_string(bundle, name, member);
-            let value = self.fake_member(bundle, name, &member, &hints, &mut draws);
+            let mut value = self.fake_member(bundle, name, &member, &hints, &mut draws);
+            mint_nested_ids(bundle, &member, &mut value, &mut draws.rng, 0);
             let value = self.with_context(bundle, name, &member, value, &context);
             if !value.is_null() {
                 filled.members.insert((*name).to_string(), value);
@@ -581,6 +595,102 @@ fn structured_name(name: &str) -> bool {
             || lower.ends_with(&format!("-{word}"))
     }) || camel(&["Url", "URL", "Uri", "URI", "Href"]);
     id_like(name) || link_like || crate::faker::timestamp_field(name)
+}
+
+/// Gives each id member below the top of `value`, a faker draw of `schema` (an id
+/// [`one_id_name`] names, whose schema is a plain string: no format, pattern, enum or
+/// const), an id of 20 letters and digits drawn from `rng` in place of the faker's
+/// word, in objects and list items alike.
+fn mint_nested_ids(
+    bundle: &Bundle,
+    schema: &Value,
+    value: &mut Value,
+    rng: &mut rand::rngs::StdRng,
+    depth: usize,
+) {
+    use rand::RngExt;
+    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    if depth > FREE_TEXT_DEPTH {
+        return;
+    }
+    match value {
+        Value::Object(members) => {
+            for (key, inner) in members.iter_mut() {
+                let Some(member) = consistency::property_schema(bundle, schema, key) else {
+                    continue;
+                };
+                if inner.is_string() && one_id_name(key) && plain_string(bundle, &member) {
+                    let id: String = (0..20)
+                        .filter_map(|_| ALPHABET.get(rng.random_range(0..ALPHABET.len())))
+                        .map(|&b| char::from(b))
+                        .collect();
+                    *inner = Value::String(id);
+                } else {
+                    mint_nested_ids(bundle, &member, inner, rng, depth + 1);
+                }
+            }
+        }
+        Value::Array(items) => {
+            if let Some(item) = items_schema(bundle, schema) {
+                for inner in items {
+                    mint_nested_ids(bundle, &item, inner, rng, depth + 1);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The item schema of list `schema` (through `$ref`s and a nullable `anyOf`/`oneOf`).
+fn items_schema(bundle: &Bundle, schema: &Value) -> Option<Value> {
+    let s = bundle.resolve(schema);
+    if let Some(items) = s.get("items") {
+        return Some(items.clone());
+    }
+    ["anyOf", "oneOf"]
+        .iter()
+        .filter_map(|k| s.get(*k).and_then(Value::as_array))
+        .flatten()
+        .find_map(|branch| bundle.resolve(branch).get("items").cloned())
+}
+
+/// Whether `schema` (through `$ref`s and a nullable `anyOf`/`oneOf`) is a string of no
+/// declared form: no `format`, `pattern`, `enum` or `const`.
+fn plain_string(bundle: &Bundle, schema: &Value) -> bool {
+    let s = bundle.resolve(schema);
+    let branches: Vec<&Value> = ["anyOf", "oneOf"]
+        .iter()
+        .filter_map(|k| s.get(*k).and_then(Value::as_array))
+        .flatten()
+        .map(|b| bundle.resolve(b))
+        .filter(|b| b.get("type").and_then(Value::as_str) != Some("null"))
+        .collect();
+    let s = match branches.as_slice() {
+        [] => s,
+        [only] => *only,
+        _ => return false,
+    };
+    s.as_object().is_some_and(|o| {
+        string_typed(o)
+            && !["format", "pattern", "enum", "const"]
+                .iter()
+                .any(|k| o.contains_key(*k))
+    })
+}
+
+/// Whether member `name` names one identifier: `id`, `uuid`, `guid`, `*_id`, `*-id`, or
+/// a camel-case `*Id` / `*ID` (`nodeId`, `parentID`; not `PAID`).
+fn one_id_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ["id", "uuid", "guid"].contains(&lower.as_str())
+        || ["_id", "-id", "_uuid", "_guid"]
+            .iter()
+            .any(|suffix| lower.ends_with(suffix))
+        || ["Id", "ID", "Uuid", "UUID"].iter().any(|suffix| {
+            name.strip_suffix(suffix)
+                .and_then(|rest| rest.chars().next_back())
+                .is_some_and(char::is_lowercase)
+        })
 }
 
 /// Whether member `name` names an identifier (`id`, `*_id`, `*Id`, `uuid`).

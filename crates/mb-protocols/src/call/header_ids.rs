@@ -453,7 +453,8 @@ impl IdChecks {
 }
 
 /// An id drawn as the record declares its identity, else as the header declares
-/// itself, else a plain string: the first both the header and the record hold. A
+/// itself, else a plain string (in `shape` where it declares no form, else letters and
+/// digits for a member named as an id, [`id_named`]): the first both the header and the record hold. A
 /// string identity holds a number drawn for an integer header as its digits, so a read
 /// by the id the header serves finds the record.
 fn draw(
@@ -469,6 +470,10 @@ fn draw(
     let strict = strict.filter(|s| Some(*s) != declared);
     let schemas = [strict, declared, Some(header), Some(&string)];
     let (mut rng, faker) = seed.draws(rt, (t, field));
+    // A text id member nothing shows the form of is letters and digits, never a word.
+    let opaque = IdShape::opaque();
+    let text = string_identity || [strict, declared].iter().all(Option::is_none);
+    let shape = shape.or_else(|| (text && id_named(mb_mcm::leaf_member(field))).then_some(&opaque));
     // A shape the ids show goes first where the identity declares no form of its own.
     let shaped = shape
         .filter(|_| {
@@ -557,6 +562,47 @@ pub(super) fn draw_id_as(
     )
 }
 
+/// An id for member `field` of type `t`'s records that is no identity of theirs (a
+/// GraphQL node `id` beside a `number` identity, an `external_id`), drawn as
+/// [`draw_id_as`] draws one: as `declared` declares it (a `uuid` format, a pattern),
+/// else in `shape` (what the contract's examples or the session's records show of it),
+/// else, for a member named as an id ([`id_named`]), as letters and digits
+/// ([`IdShape::opaque`]), never a word. `None` when no draw is valid as declared.
+/// Whether a record holds it already is the caller's to check.
+pub(super) fn draw_member_id(
+    rt: &MockRuntime,
+    (seed, t, field): (MintSeed<'_>, &str, &str),
+    declared: &Value,
+    shape: Option<&IdShape>,
+) -> Option<Value> {
+    let string = json!({"type": "string"});
+    let string_identity = declared.get("type").and_then(Value::as_str) == Some("string");
+    let checks = IdChecks::new(rt, Some(declared), &string, false)?;
+    draw(
+        rt,
+        (seed, t, field),
+        (None, Some(declared)),
+        &string,
+        string_identity,
+        (&checks, shape),
+    )
+}
+
+/// Whether member `name` names an id: `id`, `uuid`, `guid`, `*_id`, `*-id`, `*Id`, `*ID`
+/// (and the same of `uuid` and `guid`).
+pub(super) fn id_named(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ["id", "uuid", "guid"].contains(&lower.as_str())
+        || ["_id", "-id", "_uuid", "_guid"]
+            .iter()
+            .any(|suffix| lower.ends_with(suffix))
+        || ["Id", "ID", "Uuid", "UUID"].iter().any(|suffix| {
+            name.strip_suffix(suffix)
+                .and_then(|rest| rest.chars().next_back())
+                .is_some_and(char::is_lowercase)
+        })
+}
+
 /// The shape of the ids a contract shows: a literal prefix (`pi_`) and the characters
 /// and length of the rest (24 letters and digits).
 #[derive(Clone, Debug, PartialEq)]
@@ -618,6 +664,18 @@ impl IdShape {
             alphabet,
             len,
         })
+    }
+
+    /// The shape of an id nothing shows a form of: 20 letters and digits.
+    pub(super) fn opaque() -> Self {
+        Self {
+            prefix: String::new(),
+            alphabet: (b'0'..=b'9')
+                .chain(b'a'..=b'z')
+                .chain(b'A'..=b'Z')
+                .collect(),
+            len: 20,
+        }
     }
 
     /// An id of this shape, drawn from `rng`.
@@ -745,6 +803,18 @@ fn filled_path(path: &str, call: &OperationCall) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn id_names_are_ids_and_their_suffixes() {
+        for name in ["id", "ID", "uuid", "node_id", "repositoryId", "parentID"] {
+            assert!(id_named(name), "{name}");
+        }
+        for name in [
+            "identity", "valid", "paid", "PAID", "VOID", "Id_card", "idle", "name",
+        ] {
+            assert!(!id_named(name), "{name}");
+        }
+    }
 
     #[test]
     fn an_item_route_is_one_parameter_segment_under_the_collection() {

@@ -507,3 +507,61 @@ pub async fn send_to(
     };
     (status, headers, body)
 }
+
+/// A GraphQL mock serving a world description as [`described`] builds one, with a
+/// scripted LLM.
+#[cfg(all(feature = "graphql", feature = "http-rest"))]
+#[allow(dead_code, reason = "used by `it`, not by the exec test binaries")]
+pub struct GraphqlHarness {
+    pub rt: std::sync::Arc<mb_protocols::MockRuntime>,
+    pub provider: std::sync::Arc<mb_llm::ScriptedProvider>,
+    router: axum::Router,
+}
+
+/// [`GraphqlHarness`] of `bundle` (compiled from SDL, edited after where a test needs
+/// what SDL cannot say) serving `world` (a revision document), its model answering
+/// `script` in order.
+#[cfg(all(feature = "graphql", feature = "http-rest"))]
+#[allow(dead_code, reason = "used by `it`, not by the exec test binaries")]
+pub fn graphql_described(
+    bundle: mb_mcm::Bundle,
+    world: serde_json::Value,
+    script: Vec<serde_json::Value>,
+) -> GraphqlHarness {
+    let h = harness_of(bundle, script, &HarnessOptions::default(), |rt| {
+        with_effective(rt, world, false)
+    });
+    GraphqlHarness {
+        router: mb_protocols::graphql::try_router(std::sync::Arc::clone(&h.rt)).unwrap(),
+        rt: h.rt,
+        provider: h.provider,
+    }
+}
+
+#[cfg(all(feature = "graphql", feature = "http-rest"))]
+#[allow(dead_code, reason = "used by `it`, not by the exec test binaries")]
+impl GraphqlHarness {
+    /// Sends `query` in the default session; answers the JSON body.
+    pub async fn query(&self, query: &str) -> serde_json::Value {
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/graphql")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "query": query }).to_string(),
+            ))
+            .unwrap();
+        send_to(&self.router, req).await.2
+    }
+
+    /// The records of type `t` the default session holds.
+    pub async fn held(&self, t: &str) -> Vec<serde_json::Value> {
+        let session = mb_state::SessionKey {
+            workspace: self.rt.workspace.clone(),
+            mock: self.rt.name.clone(),
+            session: "default".into(),
+        };
+        let held = self.rt.state.list(&session, t, 100).await.unwrap();
+        held.into_iter().map(|r| r.data).collect()
+    }
+}
