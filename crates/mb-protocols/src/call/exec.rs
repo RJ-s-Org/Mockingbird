@@ -60,6 +60,9 @@ pub(super) enum Fallback {
     /// The read asks for embedded members its held record does not hold yet
     /// ([`super::query_roles`]): they are generated, and kept with the record.
     EmbedMissing,
+    /// The read asks to expand a reference to a record the session does not hold
+    /// ([`super::expansions`]): it is generated, and stored under the id.
+    ReferenceUnheld,
 }
 
 impl Fallback {
@@ -77,6 +80,7 @@ impl Fallback {
             Fallback::RecordInvalid => "record_invalid",
             Fallback::OverCap => "over_cap",
             Fallback::EmbedMissing => "embed_missing",
+            Fallback::ReferenceUnheld => "reference_unheld",
         }
     }
 }
@@ -361,6 +365,10 @@ async fn read(
         fell_back(rt, plan, kind, Fallback::EmbedMissing.as_str());
         return Ran::Generate(None);
     }
+    if lacks_references(state, plan, call, &held).await {
+        fell_back(rt, plan, kind, Fallback::ReferenceUnheld.as_str());
+        return Ran::Generate(None);
+    }
     // One held in its parent's array member is that item.
     let within = embedded::current(state, plan, call, &held).await;
     // A missing record the session knows of (deleted, or unknown under
@@ -480,6 +488,23 @@ fn lacks_embeds(
     })
 }
 
+/// Whether the read asks to expand a reference that `held`, the session's record it
+/// targets, names by an id the session holds no record of ([`super::expansions`]): the
+/// read generates that record, and it is stored under the id.
+async fn lacks_references(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    held: &Held<'_>,
+) -> bool {
+    let Some(target) = held.target else {
+        return false;
+    };
+    !super::expansions::unbuilt(state, &plan.session, (plan.op, call), &target.data)
+        .await
+        .is_empty()
+}
+
 /// Today's path for a call the executor does not take: a plain read of a held record
 /// is still served from state when it can be.
 async fn unclassified(
@@ -494,6 +519,7 @@ async fn unclassified(
     };
     if !(matches!(plan.op.kind, OperationKind::Query) && plain(plan))
         || lacks_embeds(state.rt, plan, call, &held)
+        || lacks_references(state, plan, call, &held).await
     {
         return Ran::Generate(None);
     }
@@ -611,6 +637,12 @@ async fn held_read(
             fields::narrow_read(rt, op, call, served.body.as_mut());
             // Embedded members the read does not ask for are left out.
             super::query_roles::embeds(rt, op, call).leave_out_unasked(served.body.as_mut());
+            // References it asks to be expanded are the records the session holds.
+            if let Some(body) = served.body.as_mut() {
+                super::expansions::expand(state, &plan.session, (op, call), body)
+                    .instrument(state_span())
+                    .await;
+            }
             HeldRead::Served(Box::new(served))
         }
         None => HeldRead::Unrendered(Some(earlier), why(kept.as_ref())),

@@ -11,7 +11,9 @@
 //!   (`append_to_response=credits,videos`, `expand[]=customer`, `embed=author`). They
 //!   are built once, by the first read that asks for them, and kept with the record. A
 //!   read that asks for them is answered the kept ones; a read that does not leave out
-//!   those the contract offers ([`Embeds::offered`]).
+//!   those the contract offers ([`Embeds::offered`]), and the parts it returns only when
+//!   asked for. A member naming another record by its id is expanded into that record,
+//!   while the record keeps the id ([`super::expansions`]).
 //! - [`Role::Projection`]: anything else (`fields`, `include_image_language`). It is
 //!   applied to the stored record where it is described (a fields parameter) and is
 //!   otherwise ignored. It never makes another record.
@@ -299,16 +301,26 @@ pub(super) fn language_param(op: &Operation) -> Option<&String> {
 pub(super) struct Embeds {
     /// The members the read asks for that its answer may embed.
     pub(super) asked: Vec<String>,
-    /// The members any of `op`'s embedding parameters is said to name.
+    /// The members any of `op`'s embedding parameters is said to name, and the parts
+    /// the contract returns only when asked for ([`super::expansions::includable_parts`]).
     pub(super) offered: Vec<String>,
+    /// The asked members that are references ([`super::expansions`]): a record the
+    /// session holds is expanded in their place; the record keeps the id.
+    pub(super) references: Vec<String>,
+    /// The paths asked to be expanded that start at a reference, each step a member
+    /// (`latest_invoice.payment_intent` → `[latest_invoice, payment_intent]`).
+    pub(super) paths: Vec<Vec<String>>,
+    /// Whether the read declares an embedding parameter at all.
+    pub(super) embedding: bool,
 }
 
 impl Embeds {
-    /// The asked members `data` (the stored record) does not hold.
+    /// The asked members `data` (the stored record) does not hold. A reference it does
+    /// not hold is none: there is nothing to expand.
     pub(super) fn missing<'e>(&'e self, data: &Value) -> Vec<&'e str> {
         self.asked
             .iter()
-            .filter(|m| data.get(m.as_str()).is_none())
+            .filter(|m| data.get(m.as_str()).is_none() && !self.references.contains(m))
             .map(String::as_str)
             .collect()
     }
@@ -343,9 +355,9 @@ impl Embeds {
     }
 }
 
-/// The members a value of an embedding parameter names: a comma (or space) separated
-/// list, or an array of them; a dotted name (`data.customer`) by its first step.
-fn named_members(value: &Value) -> Vec<String> {
+/// The paths a value of an embedding parameter names: a comma (or space) separated
+/// list, or an array of them; each a dotted path (`data.customer`) of members.
+fn named_paths(value: &Value) -> Vec<Vec<String>> {
     let texts: Vec<&str> = match value {
         Value::String(text) => vec![text.as_str()],
         Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
@@ -357,11 +369,19 @@ fn named_members(value: &Value) -> Vec<String> {
         .map(|name| {
             name.trim()
                 .split('.')
-                .next()
-                .unwrap_or_default()
-                .to_string()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
         })
-        .filter(|name| !name.is_empty())
+        .filter(|path| path.first().is_some_and(|step| !step.is_empty()))
+        .collect()
+}
+
+/// The members a value of an embedding parameter names: each path's first step.
+#[cfg(test)]
+fn named_members(value: &Value) -> Vec<String> {
+    named_paths(value)
+        .into_iter()
+        .filter_map(|path| path.into_iter().next())
         .collect()
 }
 
@@ -373,12 +393,21 @@ pub(super) fn offered(rt: &MockRuntime, op: &Operation) -> Vec<String> {
         return out;
     }
     let members = embeddable_members(rt, op);
+    let mut embedding = false;
     for (name, schema) in declared(op) {
         if let Role::Embed { offered } = role(rt, op, (name, schema), &members) {
+            embedding = true;
             for member in offered {
-                if !out.contains(&member) {
+                if !out.contains(&member) && !super::expansions::is_reference(rt, op, &member) {
                     out.push(member);
                 }
+            }
+        }
+    }
+    if embedding {
+        for part in super::expansions::includable_parts(rt, op) {
+            if !out.contains(&part) {
+                out.push(part);
             }
         }
     }
@@ -393,19 +422,49 @@ pub(super) fn embeds(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> 
         return out;
     }
     let members = embeddable_members(rt, op);
-    for (name, schema) in declared(op) {
-        let Role::Embed { offered } = role(rt, op, (name, schema), &members) else {
-            continue;
-        };
+    let params: Vec<(&String, Vec<String>)> = declared(op)
+        .filter_map(
+            |(name, schema)| match role(rt, op, (name, schema), &members) {
+                Role::Embed { offered } => Some((name, offered)),
+                _ => None,
+            },
+        )
+        .collect();
+    if params.is_empty() {
+        return out;
+    }
+    out.embedding = true;
+    let includable = super::expansions::includable_parts(rt, op);
+    for (name, offered) in params {
         for member in offered {
-            if !out.offered.contains(&member) {
+            if !out.offered.contains(&member) && !super::expansions::is_reference(rt, op, &member) {
                 out.offered.push(member);
             }
         }
-        for member in call.query.get(name).map(named_members).unwrap_or_default() {
-            if members.contains(&member) && !out.asked.contains(&member) {
-                out.asked.push(member);
+        for path in call.query.get(name).map(named_paths).unwrap_or_default() {
+            let Some(member) = path.first().cloned() else {
+                continue;
+            };
+            let reference = super::expansions::is_reference(rt, op, &member);
+            if !(reference || members.contains(&member) || includable.contains(&member)) {
+                continue;
             }
+            if !out.asked.contains(&member) {
+                out.asked.push(member.clone());
+            }
+            if reference {
+                if !out.references.contains(&member) {
+                    out.references.push(member);
+                }
+                if !out.paths.contains(&path) {
+                    out.paths.push(path);
+                }
+            }
+        }
+    }
+    for part in includable {
+        if !out.offered.contains(&part) {
+            out.offered.push(part);
         }
     }
     out
