@@ -31,7 +31,14 @@
 //!   or a link showing no identity that is relative or on a placeholder host, is built
 //!   there: the
 //!   parent's URL, the type's name in the plural and the record's numeric identity
-//!   (`…/owner/repo/issues/7`), else its first.
+//!   (`…/owner/repo/issues/7`), else its first. When the type has a twin, the same type
+//!   in another mock of its `shares` group read by path ([`Twin`]), its own link (a
+//!   drawn word, or a value on a placeholder or known host not pointing at the
+//!   parent's place) follows the twin's link on the host the parent's URL is on (a
+//!   GraphQL `url` under a parent on the page host is the twin's `html_url`), the one of
+//!   the same name first, else with no parent URL the twin's link of the same name:
+//!   laid out as its example shows the record's place, the parameters before the
+//!   collection from the parent's URL or members, the record's number last.
 //! - **The host**: a value rebuilt along the read path takes the contract's example host
 //!   for its member, when it has one. Otherwise a placeholder (`example.com`,
 //!   `example.org`, `example.net`, `.invalid`, `.example`) is replaced by the example
@@ -90,6 +97,12 @@ struct Example {
     prefix: Vec<String>,
     /// Its spelling of the literals of `read` it shows, by position in `read`.
     spelled: HashMap<usize, String>,
+    /// Whether it ends where `read` does, with no suffix on its last segment
+    /// (`…/pull/1347`, not `…/pull/1347.diff` or `…/pull/1347/commits`): the record's
+    /// own place.
+    whole: bool,
+    /// Whether its last segment is a number.
+    numeric: bool,
 }
 
 impl TypeLinks {
@@ -185,6 +198,10 @@ impl TypeLinks {
         {
             example.start = Some(j);
             example.prefix = url.segments[..i].iter().map(|s| (*s).to_owned()).collect();
+            example.whole = i + k == url.segments.len()
+                && !url.segments[i + k - 1].contains('.')
+                && url.rest.is_empty();
+            example.numeric = url.segments[i + k - 1].bytes().all(|b| b.is_ascii_digit());
             for x in j..j + k {
                 if segment_param(&self.read[x]).is_none() {
                     example
@@ -216,6 +233,120 @@ fn type_links(rt: &MockRuntime, t: &str) -> Arc<TypeLinks> {
         .entry(t.to_owned())
         .or_insert_with(|| Arc::clone(&made));
     made
+}
+
+/// What a type of another mock of the `shares` group, the same type as one with no read
+/// by path (REST `merges` beside GraphQL `MergeRequest`, see [`shared::equivalents`]),
+/// shows of where its records live: the layout of each of its links whose contract
+/// example (or, for `url` and `href` with none, whose read path) shows the record's own
+/// place. Worked out once per type, when its mock joins the group.
+#[derive(Debug)]
+pub(crate) struct Twin {
+    layouts: Vec<Layout>,
+    /// The record member the read's last parameter names (`number`).
+    own: Option<String>,
+}
+
+/// One link of a [`Twin`] showing the record's own place.
+#[derive(Debug)]
+struct Layout {
+    /// The twin's member (`html_url`).
+    member: String,
+    /// Its origin (`https://tracker.test`), when known.
+    origin: Option<String>,
+    /// Its path: literals as the example spells them, the read's parameters, the
+    /// record's own last.
+    slots: Vec<Slot>,
+    /// Whether the example's last segment is a number.
+    numeric: bool,
+}
+
+#[derive(Debug)]
+enum Slot {
+    Literal(String),
+    Param(String),
+}
+
+/// The twin `rt` makes of its type `t`: `None` when `t` is not read by path or no link
+/// of it shows the record's own place.
+pub(crate) fn twin_of(rt: &MockRuntime, t: &str) -> Option<Twin> {
+    let (read, _) = type_check(rt, t)?;
+    if !matches!(read.binding, Binding::Http { .. }) {
+        return None;
+    }
+    let base: Vec<String> = rt
+        .base_paths
+        .first()
+        .map(|b| {
+            b.split('/')
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let host = rt
+        .hosts
+        .iter()
+        .map(String::as_str)
+        .find(|h| !placeholder(h));
+    Twin::of(&type_links(rt, t), host, base)
+}
+
+impl Twin {
+    /// The twin of a type of `links`, under `host` and base path `base`.
+    fn of(links: &TypeLinks, host: Option<&str>, base: Vec<String>) -> Option<Self> {
+        let read = &links.read;
+        if read.is_empty() {
+            return None;
+        }
+        let mut names: Vec<&String> = links.examples.keys().chain(&links.members).collect();
+        names.sort();
+        names.dedup();
+        let mut layouts = Vec::new();
+        for name in names {
+            let (origin, prefix, start, example) = match links.examples.get(name) {
+                Some(e) => match e.start {
+                    Some(start) if e.whole => (e.origin.clone(), e.prefix.clone(), start, Some(e)),
+                    _ => continue,
+                },
+                // A link with no example named as the record's own: its read path under
+                // the mock's host and base path.
+                None if matches!(name.as_str(), "url" | "href") => {
+                    (host.map(|h| format!("https://{h}")), base.clone(), 0, None)
+                }
+                None => continue,
+            };
+            let mut slots: Vec<Slot> = prefix.into_iter().map(Slot::Literal).collect();
+            for (x, segment) in read.iter().enumerate().skip(start) {
+                slots.push(match segment_param(segment) {
+                    Some(param) => Slot::Param(param.to_owned()),
+                    None => Slot::Literal(
+                        example
+                            .and_then(|e| e.spelled.get(&x).cloned())
+                            .unwrap_or_else(|| segment.clone()),
+                    ),
+                });
+            }
+            layouts.push(Layout {
+                member: name.clone(),
+                origin,
+                slots,
+                numeric: example.is_none_or(|e| e.numeric),
+            });
+        }
+        (!layouts.is_empty()).then(|| Twin {
+            layouts,
+            own: links.own.clone(),
+        })
+    }
+}
+
+/// `html_url`, `htmlUrl` → `htmlurl`: a member's name as REST and GraphQL both spell it.
+fn squash(name: &str) -> String {
+    name.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
 }
 
 /// Whether member `name` is named as a URL is: `url`, `href`, `resourcePath`, `<x>_url`,
@@ -418,6 +549,11 @@ struct Known<'a> {
     parents: &'a [StoredResource],
     /// The type's collection segment under a parent's URL (`tickets`).
     collection: String,
+    /// For a type with no read by path, its twin in another mock of the group.
+    twin: Option<&'a Twin>,
+    /// The record's identity values the twin's own parameter may take: its value of
+    /// the twin's own member first.
+    twin_owns: Vec<String>,
 }
 
 impl Known<'_> {
@@ -430,7 +566,10 @@ impl Known<'_> {
             // No URL at all (a drawn word): the record's own link is built, when its
             // read says where it is, else under its parent's.
             if self.links.read.is_empty() {
-                return self.own_under_parent(name);
+                return self
+                    .own_by_twin(name)
+                    .map(|(origin, path)| BLANK.render(origin.as_deref(), &path, false))
+                    .or_else(|| self.own_under_parent(name));
             }
             if !own_link {
                 return None;
@@ -444,19 +583,27 @@ impl Known<'_> {
                         .or_else(|| self.host.map(|h| format!("https://{h}")))?,
                 ),
             };
-            let blank = Url {
-                origin: None,
-                segments: Vec::new(),
-                slash: false,
-                rest: "",
-            };
-            return Some(blank.render(origin.as_deref(), &path, false));
+            return Some(BLANK.render(origin.as_deref(), &path, false));
         };
         let parent = self.parent_url(name);
         let rebuilt = if self.links.read.is_empty() {
             let placed = parent
                 .as_ref()
                 .and_then(|p| self.under_parent(&url.segments, &p.segments));
+            // The record's own link, unless it points at its parent's place or is on a
+            // host the mock does not know, follows its twin's layout.
+            let ours = url.origin.is_none_or(|o| {
+                let host = host_of(o);
+                placeholder(&host) || self.accepted.contains(&host)
+            });
+            if ours
+                && placed.as_ref().is_none_or(|(_, own_place)| *own_place)
+                && let Some((origin, path)) = self.own_by_twin(name)
+            {
+                let built = url.render(origin.as_deref(), &path, false);
+                return (built != text).then_some(built);
+            }
+            let placed = placed.map(|(path, _)| path);
             // A drawn link showing no identity, relative or on a placeholder host (the
             // faker's `/harbor/cedar` or `https://example.com/harbor`), is the record's
             // own link built afresh.
@@ -609,9 +756,10 @@ impl Known<'_> {
         Some(out)
     }
 
-    /// The path of a value placed under its parent's `parent` path; `None` when it shows
-    /// no identity to place.
-    fn under_parent(&self, segments: &[&str], parent: &[&str]) -> Option<Vec<String>> {
+    /// The path of a value placed under its parent's `parent` path, and whether it shows
+    /// the record's own place (not the parent's); `None` when it shows no identity to
+    /// place.
+    fn under_parent(&self, segments: &[&str], parent: &[&str]) -> Option<(Vec<String>, bool)> {
         if parent.is_empty() {
             return None;
         }
@@ -650,7 +798,85 @@ impl Known<'_> {
             out.push(own);
         }
         out.extend(segments[at + 1..].iter().map(|s| (*s).to_owned()));
-        Some(out)
+        Some((out, !names_parent))
+    }
+
+    /// For a type with no read by path, member `name` as its twin lays the record's own
+    /// link out: origin and path. The twin's link is the one on the host the parent's
+    /// URL in `name` is on (a GraphQL `url` whose parent's is on the page host is REST's
+    /// page link, `html_url`), the one named as `name` first; with no such parent URL,
+    /// the one named as `name`. Its parameters before the record's collection take what
+    /// the parent's URL shows there, else the parent's members of their names (an
+    /// `owner`'s `login` or `name`) or, for one naming the parent's type (`repo` of a
+    /// repository), its `name`; its last the record's own identity. `None` when there
+    /// is no twin, no link fits or a parameter has no value.
+    fn own_by_twin(&self, name: &str) -> Option<(Option<String>, Vec<String>)> {
+        let twin = self.twin?;
+        let parent = self.parent_url(name);
+        let parent_origin = parent
+            .as_ref()
+            .and_then(|p| p.origin)
+            .filter(|o| !placeholder(&host_of(o)));
+        let same = |l: &&Layout| squash(&l.member) == squash(name);
+        let layout = match parent_origin.map(host_of) {
+            Some(host) => {
+                let on_host: Vec<&Layout> = twin
+                    .layouts
+                    .iter()
+                    .filter(|l| l.origin.as_deref().is_some_and(|o| host_of(o) == host))
+                    .collect();
+                on_host.iter().copied().find(same).or_else(|| {
+                    matches!(name, "url" | "href" | "html_url" | "htmlUrl")
+                        .then(|| on_host.first().copied())
+                        .flatten()
+                })?
+            }
+            None => twin.layouts.iter().find(same)?,
+        };
+        let slots = &layout.slots;
+        let (Some(Slot::Param(_)), Some(before)) = (slots.last(), slots.len().checked_sub(1))
+        else {
+            return None;
+        };
+        let own = self.twin_owns.iter().find(|o| {
+            !o.is_empty() && (!layout.numeric || o.bytes().all(|b| b.is_ascii_digit()))
+        })?;
+        // What the parent's place is: the slots up to the record's collection.
+        let upto = slots[..before]
+            .iter()
+            .rposition(|s| matches!(s, Slot::Literal(_)))
+            .unwrap_or(0);
+        let shown: Option<&[&str]> =
+            parent
+                .as_ref()
+                .map(|p| p.segments.as_slice())
+                .filter(|segments| {
+                    segments.len() == upto
+                        && slots[..upto]
+                            .iter()
+                            .zip(segments.iter())
+                            .all(|(slot, s)| match slot {
+                                Slot::Literal(l) => fits(s, l),
+                                Slot::Param(_) => true,
+                            })
+                });
+        let mut path = Vec::with_capacity(slots.len());
+        for (x, slot) in slots.iter().enumerate() {
+            path.push(match slot {
+                Slot::Literal(l) => l.clone(),
+                Slot::Param(_) if x == before => own.clone(),
+                Slot::Param(param) => match shown {
+                    Some(segments) if x < upto => segments[x].to_owned(),
+                    _ => self.parents.iter().find_map(|p| param_of(param, p))?,
+                },
+            });
+        }
+        let origin = layout
+            .origin
+            .clone()
+            .or_else(|| parent_origin.map(str::to_owned))
+            .or_else(|| self.host.map(|h| format!("https://{h}")));
+        Some((origin, path))
     }
 
     /// For a type with no read by path, the record's own link (member `name` being
@@ -679,13 +905,7 @@ impl Known<'_> {
         let mut segments: Vec<String> = parent.segments.iter().map(|s| (*s).to_owned()).collect();
         segments.push(self.collection.clone());
         segments.push(own.clone());
-        let blank = Url {
-            origin: None,
-            segments: Vec::new(),
-            slash: false,
-            rest: "",
-        };
-        Some(blank.render(origin.as_deref(), &segments, false))
+        Some(BLANK.render(origin.as_deref(), &segments, false))
     }
 
     /// The URL the first parent holds in member `name`.
@@ -695,6 +915,40 @@ impl Known<'_> {
             (!url.segments.is_empty()).then_some(url)
         })
     }
+}
+
+/// No URL: what a link built afresh is rendered from.
+const BLANK: Url<'static> = Url {
+    origin: None,
+    segments: Vec::new(),
+    slash: false,
+    rest: "",
+};
+
+/// The value parent record `parent` gives path parameter `param`: its member of that
+/// name (as is, in snake_case or camelCase; an object's `login`, `name` or `slug`), else
+/// its `name` when `param` is its type's name or the start of it (`repo` of a
+/// `repository`, `project`; not `project_id`).
+fn param_of(param: &str, parent: &StoredResource) -> Option<String> {
+    let data = parent.data.as_object()?;
+    let wanted = squash(param);
+    let named = data.iter().find_map(|(key, value)| {
+        (squash(key) == wanted).then_some(value)?;
+        match value {
+            Value::Object(o) => ["login", "name", "slug"]
+                .iter()
+                .find_map(|k| o.get(*k).and_then(id_string)),
+            v => id_string(v),
+        }
+    });
+    if named.is_some() {
+        return named;
+    }
+    let kind = squash(&parent.resource_type);
+    let names_type = wanted.len() >= 3 && kind.starts_with(&wanted);
+    names_type
+        .then(|| data.get("name").and_then(id_string))
+        .flatten()
 }
 
 /// The records `call`'s required id arguments name (`input.repositoryId`), as the
@@ -786,9 +1040,12 @@ pub(super) async fn settle(
     if urls.is_empty() {
         return;
     }
-    let held = match links.read.is_empty() {
-        true => parents(state, session, op, call).await,
-        false => Vec::new(),
+    let (held, twin) = match links.read.is_empty() {
+        true => (
+            parents(state, session, op, call).await,
+            rt.shared_types.twin(rt, t),
+        ),
+        false => (Vec::new(), None),
     };
     let own = links
         .own
@@ -805,6 +1062,14 @@ pub(super) async fn settle(
             owns.push(value);
         }
     }
+    let twin_owns: Vec<String> = twin
+        .as_ref()
+        .and_then(|t| t.own.as_deref())
+        .and_then(|m| mb_mcm::member_at(record, m))
+        .and_then(id_string)
+        .into_iter()
+        .chain(owns.iter().cloned())
+        .collect();
     let mut accepted: Vec<String> = Vec::new();
     let parent_hosts = held
         .iter()
@@ -856,6 +1121,8 @@ pub(super) async fn settle(
         accepted,
         parents: &held,
         collection: plural(t),
+        twin: twin.as_deref(),
+        twin_owns,
     };
     let Value::Object(members) = record else {
         return;
@@ -973,6 +1240,8 @@ mod tests {
             accepted: vec!["api.tracker.test".to_owned(), "tracker.test".to_owned()],
             parents: &[],
             collection: "pulls".to_owned(),
+            twin: None,
+            twin_owns: Vec::new(),
         }
     }
 
@@ -1140,6 +1409,112 @@ mod tests {
         assert_eq!(
             placed.settle("url", "sable").as_deref(),
             Some("https://api.tracker.test/acme/roadmap/issues/7/comments/42")
+        );
+    }
+
+    /// A twin read at `/repos/{owner}/{repo}/pulls/{pull_number}`: its API link the
+    /// read path, its page link (and a diff link, which is not the record's own place)
+    /// under another host, the collection in the singular.
+    fn pulls_twin() -> Twin {
+        let mut links = TypeLinks {
+            read: template("/repos/{owner}/{repo}/pulls/{pull_number}"),
+            leading: 1,
+            own: Some("number".to_owned()),
+            members: vec!["url".to_owned()],
+            ..TypeLinks::default()
+        };
+        for (name, text) in [
+            ("diff_url", "https://pages.test/octo/demo/pull/1347.diff"),
+            ("html_url", "https://pages.test/octo/demo/pull/1347"),
+        ] {
+            let example = links.example(text).unwrap();
+            links.examples.insert(name.to_owned(), example);
+        }
+        Twin::of(&links, Some("api.pages.test"), Vec::new()).unwrap()
+    }
+
+    #[test]
+    fn a_type_with_a_twin_lays_its_own_link_out_as_the_twin_does() {
+        let links = TypeLinks::default();
+        let twin = pulls_twin();
+        let parents = [StoredResource {
+            resource_type: "repository".into(),
+            id: "R_1".into(),
+            data: serde_json::json!({"url": "https://pages.test/fernwood-labs/trellis",
+                "name": "trellis", "owner": {"login": "fernwood-labs"}}),
+        }];
+        let known = Known {
+            params: HashMap::new(),
+            own: None,
+            owns: vec!["PR_1".to_owned(), "128".to_owned()],
+            parents: &parents,
+            collection: "pullrequests".to_owned(),
+            twin: Some(&twin),
+            twin_owns: vec!["128".to_owned(), "PR_1".to_owned()],
+            ..known_of(&links)
+        };
+        // The parent's link is on the page host: the twin's page link, its number last.
+        let page = "https://pages.test/fernwood-labs/trellis/pull/128";
+        for drawn in ["sable", "https://example.com/harbor", "/pullrequests/128"] {
+            assert_eq!(known.settle("url", drawn).as_deref(), Some(page), "{drawn}");
+        }
+        assert_eq!(known.settle("url", page), None);
+        // The number is the link's last segment, as a client reading it back takes it.
+        let settled = known.settle("url", "sable").unwrap();
+        assert_eq!(settled.rsplit('/').next(), Some("128"));
+        // A parent on the API host: the twin's read path, its parameters from the
+        // parent's URL.
+        let api = [StoredResource {
+            data: serde_json::json!({"url": "https://api.pages.test/repos/fernwood-labs/trellis"}),
+            ..parents[0].clone()
+        }];
+        let on_api = Known {
+            parents: &api,
+            params: HashMap::new(),
+            own: None,
+            owns: vec!["128".to_owned()],
+            twin: Some(&twin),
+            twin_owns: vec!["128".to_owned()],
+            ..known_of(&links)
+        };
+        assert_eq!(
+            on_api.settle("url", "sable").as_deref(),
+            Some("https://api.pages.test/repos/fernwood-labs/trellis/pulls/128")
+        );
+        // A link on a host the mock does not know stays.
+        assert_eq!(known.settle("url", "https://elsewhere.test/harbor"), None);
+        // With no parent link, the twin's link of the same name, its parameters from
+        // the parent's members.
+        let bare = [StoredResource {
+            data: serde_json::json!({"name": "trellis", "owner": {"login": "fernwood-labs"}}),
+            ..parents[0].clone()
+        }];
+        let by_name = Known {
+            parents: &bare,
+            ..known
+        };
+        assert_eq!(
+            by_name.settle("url", "sable").as_deref(),
+            Some("https://api.pages.test/repos/fernwood-labs/trellis/pulls/128")
+        );
+        assert_eq!(
+            by_name.settle("htmlUrl", "sable").as_deref(),
+            Some("https://pages.test/fernwood-labs/trellis/pull/128")
+        );
+        // No twin link fits a link to anything else.
+        assert_eq!(by_name.settle("avatarUrl", "sable"), None);
+        // A parameter naming the parent's identity, not its name, takes no `name`.
+        let project = StoredResource {
+            resource_type: "project".into(),
+            id: "P_1".into(),
+            data: serde_json::json!({"name": "roadmap"}),
+        };
+        assert_eq!(param_of("project", &project).as_deref(), Some("roadmap"));
+        assert_eq!(param_of("proj", &project).as_deref(), Some("roadmap"));
+        assert_eq!(param_of("project_id", &project), None);
+        assert_eq!(
+            param_of("owner", &bare[0]).as_deref(),
+            Some("fernwood-labs")
         );
     }
 

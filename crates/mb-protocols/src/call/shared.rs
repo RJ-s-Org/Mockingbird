@@ -12,6 +12,7 @@
 
 use std::sync::{Arc, PoisonError, RwLock};
 
+use super::links::{Twin, twin_of};
 use super::*;
 
 /// Records of one equivalent type read, at most.
@@ -422,15 +423,24 @@ pub struct SharedTypes(Arc<RwLock<Registry>>);
 pub struct SharedEntry {
     group: String,
     types: Arc<Vec<RecordType>>,
+    /// What each of its types read by path shows of where its records live, by type.
+    twins: Arc<HashMap<String, Arc<Twin>>>,
 }
 
 impl SharedEntry {
     /// `rt`'s entry; `None` when it shares with no other mock.
     #[must_use]
     pub fn of(rt: &MockRuntime) -> Option<Self> {
+        let group = rt.shares.clone()?;
+        let types = record_types(&rt.bundle);
+        let twins = types
+            .iter()
+            .filter_map(|r| Some((r.key.to_lowercase(), Arc::new(twin_of(rt, &r.key)?))))
+            .collect();
         Some(Self {
-            group: rt.shares.clone()?,
-            types: Arc::new(record_types(&rt.bundle)),
+            group,
+            types: Arc::new(types),
+            twins: Arc::new(twins),
         })
     }
 }
@@ -442,6 +452,19 @@ struct Registry {
     /// What [`SharedTypes::inferred`] found, by workspace, mock and type; cleared
     /// whenever the mocks change.
     inferred: HashMap<(String, String, String), Arc<Vec<String>>>,
+    /// What [`SharedTypes::twin`] found, likewise.
+    twins: HashMap<(String, String, String), Option<Arc<Twin>>>,
+    /// Counts the changes of the mocks: a twin found across one is not kept.
+    generation: u64,
+}
+
+impl Registry {
+    /// Forgets what was worked out of the mocks, which changed.
+    fn changed(&mut self) {
+        self.inferred.clear();
+        self.twins.clear();
+        self.generation = self.generation.wrapping_add(1);
+    }
 }
 
 /// Inferred names kept at most, before the memo starts over.
@@ -469,7 +492,7 @@ impl SharedTypes {
         let key = (rt.workspace.clone(), rt.name.clone());
         let entry = SharedEntry::of(rt);
         let mut registry = self.0.write().unwrap_or_else(PoisonError::into_inner);
-        registry.inferred.clear();
+        registry.changed();
         match entry {
             Some(entry) => {
                 registry.mocks.insert(key, entry);
@@ -484,7 +507,7 @@ impl SharedTypes {
     pub fn mounted(&self, mocks: impl IntoIterator<Item = ((String, String), SharedEntry)>) {
         let mocks: HashMap<(String, String), SharedEntry> = mocks.into_iter().collect();
         let mut registry = self.0.write().unwrap_or_else(PoisonError::into_inner);
-        registry.inferred.clear();
+        registry.changed();
         registry.mocks = mocks;
     }
 
@@ -521,7 +544,61 @@ impl SharedTypes {
     }
 }
 
+impl SharedTypes {
+    /// The type of another mock of `rt`'s group that is `t` (see [`equivalents`]) and
+    /// shows where its records live ([`Twin`]): what a type with no read by path builds
+    /// its own links from. Remembered per type until the mocks change.
+    pub(crate) fn twin(&self, rt: &MockRuntime, t: &str) -> Option<Arc<Twin>> {
+        rt.shares.as_ref()?;
+        let memo = (rt.workspace.clone(), rt.name.clone(), t.to_string());
+        let generation = {
+            let registry = self.0.read().unwrap_or_else(PoisonError::into_inner);
+            if let Some(hit) = registry.twins.get(&memo) {
+                return hit.clone();
+            }
+            registry.generation
+        };
+        // Outside the lock: what `t` goes by in the group reads the registry itself.
+        // Its own name first: another mock may store the type under it.
+        let mut names = vec![t.to_lowercase()];
+        names.extend(equivalents(rt, t));
+        let mut registry = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        let found = registry.find_twin(rt, &names);
+        if registry.generation == generation {
+            if registry.twins.len() >= MAX_INFERRED {
+                registry.twins.clear();
+            }
+            registry.twins.insert(memo, found.clone());
+        }
+        found
+    }
+}
+
 impl Registry {
+    /// The first twin a type of another mock of `rt`'s group named one of `names`
+    /// has, by mock name.
+    fn find_twin(&self, rt: &MockRuntime, names: &[String]) -> Option<Arc<Twin>> {
+        let group = &self
+            .mocks
+            .get(&(rt.workspace.clone(), rt.name.clone()))?
+            .group;
+        let mut peers: Vec<(&String, &SharedEntry)> = self
+            .mocks
+            .iter()
+            .filter(|((workspace, mock), entry)| {
+                *workspace == rt.workspace && *mock != rt.name && entry.group == *group
+            })
+            .map(|((_, mock), entry)| (mock, entry))
+            .collect();
+        peers.sort_by(|a, b| a.0.cmp(b.0));
+        names.iter().find_map(|name| {
+            let name = name.to_lowercase();
+            peers
+                .iter()
+                .find_map(|(_, entry)| entry.twins.get(&name).cloned())
+        })
+    }
+
     /// [`SharedTypes::inferred`] without the memo.
     fn infer(&self, rt: &MockRuntime, t: &str) -> Vec<String> {
         let Some(mine) = self.mocks.get(&(rt.workspace.clone(), rt.name.clone())) else {
