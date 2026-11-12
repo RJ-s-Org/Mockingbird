@@ -205,6 +205,50 @@ pub fn find(name: &str) -> anyhow::Result<&'static Example> {
     })
 }
 
+/// A catalog example that serves a host: the example, the mock of its
+/// `mockingbird.yaml` that lists the host, and that mock's contract file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Serving {
+    pub example: &'static str,
+    pub mock: String,
+    pub contract: String,
+}
+
+/// The `mocks` of an example's `mockingbird.yaml`, as much as
+/// [`serving`] reads.
+#[derive(Deserialize)]
+struct CatalogConfig {
+    #[serde(default)]
+    mocks: std::collections::BTreeMap<String, CatalogMock>,
+}
+
+#[derive(Deserialize)]
+struct CatalogMock {
+    contract: String,
+    #[serde(default)]
+    hosts: Vec<String>,
+}
+
+/// The first catalog example (in [`EXAMPLES`] order) with a mock that lists
+/// `host` (normalized, see [`normalize_host`](crate::registry::normalize_host))
+/// in its `hosts`; `None` when no example serves it.
+pub fn serving(host: &str) -> Option<Serving> {
+    EXAMPLES.iter().find_map(|example| {
+        let config: CatalogConfig =
+            serde_saphyr::from_str(example.file("mockingbird.yaml")?).ok()?;
+        config.mocks.into_iter().find_map(|(mock, m)| {
+            m.hosts
+                .iter()
+                .any(|h| crate::registry::normalize_host(h).as_deref() == Some(host))
+                .then_some(Serving {
+                    example: example.name,
+                    mock,
+                    contract: m.contract,
+                })
+        })
+    })
+}
+
 /// Runs an `examples` subcommand and returns its JSON output.
 ///
 /// # Errors
@@ -584,6 +628,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn serving_finds_the_mock_and_contract_listing_a_host() {
+        assert_eq!(
+            serving("lookups.twilio.com"),
+            Some(Serving {
+                example: "twilio",
+                mock: "twilio-lookups".into(),
+                contract: "twilio-lookups.openapi.yaml".into(),
+            })
+        );
+        assert_eq!(serving("api.stripe.com").map(|s| s.example), Some("stripe"));
+        assert_eq!(serving("verify.twilio.com"), None);
+        assert_eq!(serving("twilio.com"), None);
     }
 
     /// Any examples can be combined in one config: no two mocks of the

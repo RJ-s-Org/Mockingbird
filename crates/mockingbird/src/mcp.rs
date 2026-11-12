@@ -513,7 +513,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "server_status",
             title: "Background server status",
-            description: "Whether the background server runs, and its /readyz (ready, degraded reasons).",
+            description: "Whether the background server runs, and its /readyz (ready, degraded reasons). After the app ran: next_steps, one per host the proxy blocked (called, but no mock serves it), naming the catalog example and contract that serves the host, if any. Mock those hosts before handing back.",
             schema: obj(
                 json!({ "config": s("Config file the server was started with; default: the one start_server used.") }),
                 &[],
@@ -1740,7 +1740,11 @@ impl McpServer {
                     .await
             }
             "open_key_setup" => self.open_key_setup(a).await,
-            "server_status" => Ok(daemon::status(&self.server_state(a)).await?),
+            "server_status" => {
+                let mut status = daemon::status(&self.server_state(a)).await?;
+                self.add_blocked_steps(&mut status).await;
+                Ok(status)
+            }
             "server_logs" => {
                 let lines = opt_u64(a, "lines").unwrap_or(100);
                 let text =
@@ -2545,6 +2549,25 @@ impl McpServer {
         }
         if !review.is_empty() {
             obj.insert("world_review".into(), Value::Array(review));
+        }
+    }
+
+    /// Adds `next_steps` to a `server_status` answer for each host the
+    /// server's proxy blocked so far ([`crate::report::blocked_host_steps`]): the
+    /// app called a host no mock serves, and the step names the catalog
+    /// contract for it, if any.
+    async fn add_blocked_steps(&self, status: &mut Value) {
+        if status.get("admin_reachable").and_then(Value::as_bool) != Some(true) {
+            return;
+        }
+        let Some(admin) = status["server"]["admin"].as_str().map(str::to_owned) else {
+            return;
+        };
+        let Ok(steps) = crate::report::blocked_steps(&admin, self.token.as_deref()).await else {
+            return;
+        };
+        if !steps.is_empty() {
+            status["next_steps"] = json!(steps);
         }
     }
 

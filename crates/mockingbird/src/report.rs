@@ -172,6 +172,10 @@ pub struct Report {
     /// Snapshot answers by result (`exact`, `operation`, `miss`,
     /// `recorded`); empty without `--record` / `--replay`.
     pub snapshot: BTreeMap<String, u64>,
+    /// What to do about the hosts the proxy blocked
+    /// ([`blocked_host_steps`]); omitted when none was blocked.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub next_steps: Vec<String>,
 }
 
 /// Request-log entries fetched per page (the API's maximum).
@@ -245,8 +249,23 @@ pub async fn collect(
         report.mocks.push(m);
     }
     let metrics = fetch_metrics(admin_url, token).await?;
-    for (labels, value) in samples(&metrics, crate::proxy::UNMAPPED_METRIC) {
-        report.unmapped_hosts.push(HostReport {
+    report.unmapped_hosts = unmapped_hosts(&metrics);
+    report.next_steps = blocked_host_steps(&report.unmapped_hosts);
+    for (labels, value) in samples(&metrics, crate::snapshot::ANSWERS_METRIC) {
+        let result = labels.get("result").cloned().unwrap_or_default();
+        *report.snapshot.entry(result).or_default() += value;
+    }
+    Ok(report)
+}
+
+/// The proxied hosts no mock claims, from the [`UNMAPPED_METRIC`]
+/// samples of a Prometheus text exposition, sorted by host and mode.
+///
+/// [`UNMAPPED_METRIC`]: crate::proxy::UNMAPPED_METRIC
+fn unmapped_hosts(metrics: &str) -> Vec<HostReport> {
+    let mut hosts: Vec<HostReport> = samples(metrics, crate::proxy::UNMAPPED_METRIC)
+        .into_iter()
+        .map(|(labels, value)| HostReport {
             host: labels.get("host").cloned().unwrap_or_default(),
             mode: labels.get("mode").cloned().unwrap_or_default(),
             requests: value,
@@ -260,16 +279,60 @@ pub async fn collect(
                         .collect()
                 })
                 .unwrap_or_default(),
-        });
+        })
+        .collect();
+    hosts.sort_by(|a, b| (&a.host, &a.mode).cmp(&(&b.host, &b.mode)));
+    hosts
+}
+
+/// The `next_steps` for the hosts the proxy blocked: per blocked host
+/// (not the [`OTHER_HOSTS_LABEL`] overflow), how many calls were blocked
+/// and the catalog example that serves the host
+/// ([`serving`](crate::examples::serving)), or, without one, how to mock
+/// it or let it through.
+///
+/// [`OTHER_HOSTS_LABEL`]: crate::proxy::OTHER_HOSTS_LABEL
+pub fn blocked_host_steps(hosts: &[HostReport]) -> Vec<String> {
+    hosts
+        .iter()
+        .filter(|h| h.mode == "block" && h.requests > 0)
+        .filter(|h| h.host != crate::proxy::OTHER_HOSTS_LABEL && !h.host.is_empty())
+        .map(blocked_host_step)
+        .collect()
+}
+
+fn blocked_host_step(h: &HostReport) -> String {
+    let host = &h.host;
+    let times = match h.requests {
+        1 => "once".to_string(),
+        n => format!("{n} times"),
+    };
+    let called = format!("{host} was called {times} and blocked: no mock serves it.");
+    if let Some(s) = crate::examples::serving(host) {
+        return format!(
+            "{called} The catalog example `{}` serves it (mock `{}`, contract `{}`): write it with init_example (name `{}`, a new dir; CLI `mockingbird examples init {} --dir <dir>`), add that mock and contract to your config, and rerun the app's flows before handing back.",
+            s.example, s.mock, s.contract, s.example, s.example
+        );
     }
-    report
-        .unmapped_hosts
-        .sort_by(|a, b| (&a.host, &a.mode).cmp(&(&b.host, &b.mode)));
-    for (labels, value) in samples(&metrics, crate::snapshot::ANSWERS_METRIC) {
-        let result = labels.get("result").cloned().unwrap_or_default();
-        *report.snapshot.entry(result).or_default() += value;
-    }
-    Ok(report)
+    let pass = if h.sibling_of.is_empty() {
+        "proxy.unmapped: pass"
+    } else {
+        "proxy.vendor_subdomains: pass"
+    };
+    format!(
+        "{called} The catalog has no contract for it: import its API's contract into a mock that lists {host} in hosts (import_contract), or set {pass} to send it to the real host, and rerun the app's flows before handing back."
+    )
+}
+
+/// The `next_steps` for the hosts the proxy of the server at `admin_url`
+/// blocked so far ([`blocked_host_steps`]).
+///
+/// # Errors
+///
+/// Fails when `/metrics` cannot be read.
+pub async fn blocked_steps(admin_url: &str, token: Option<&str>) -> anyhow::Result<Vec<String>> {
+    let metrics = fetch_metrics(admin_url, token).await?;
+    Ok(blocked_host_steps(&unmapped_hosts(&metrics)))
 }
 
 fn add_entry(m: &mut MockReport, e: &Value) {
@@ -566,6 +629,9 @@ fn text(report: &Report, failures: &[Failure]) -> String {
     for f in failures {
         let _ = writeln!(s, "  {}: {}", f.check, f.detail);
     }
+    for step in &report.next_steps {
+        let _ = writeln!(s, "Next: {step}");
+    }
     s.push_str("Details: mockingbird verify --format json (or mockingbird report)\n");
     s
 }
@@ -676,6 +742,13 @@ fn markdown(report: &Report, failures: Option<&[Failure]>) -> String {
                 cell(&mode),
                 h.requests
             );
+        }
+        s.push('\n');
+    }
+    if !report.next_steps.is_empty() {
+        s.push_str("**Next steps**\n\n");
+        for step in &report.next_steps {
+            let _ = writeln!(s, "- {}", cell(step));
         }
         s.push('\n');
     }
@@ -812,6 +885,76 @@ mod tests {
             v: VerifyArgs,
         }
         <Cli as clap::Parser>::parse_from(std::iter::once("verify").chain(args.iter().copied())).v
+    }
+
+    fn blocked(host: &str, requests: u64, sibling_of: &[&str]) -> HostReport {
+        HostReport {
+            host: host.into(),
+            mode: "block".into(),
+            requests,
+            sibling_of: sibling_of.iter().map(|h| (*h).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_blocked_host_the_catalog_serves_names_its_example_and_contract() {
+        let steps = blocked_host_steps(&[blocked("lookups.twilio.com", 3, &["api.twilio.com"])]);
+        assert_eq!(steps.len(), 1, "{steps:?}");
+        let step = &steps[0];
+        assert!(
+            step.starts_with(
+                "lookups.twilio.com was called 3 times and blocked: no mock serves it."
+            ),
+            "{step}"
+        );
+        assert!(step.contains("catalog example `twilio`"), "{step}");
+        assert!(step.contains("mock `twilio-lookups`"), "{step}");
+        assert!(
+            step.contains("contract `twilio-lookups.openapi.yaml`"),
+            "{step}"
+        );
+        assert!(step.contains("init_example"), "{step}");
+    }
+
+    #[test]
+    fn a_blocked_host_without_a_catalog_entry_says_how_to_mock_or_pass_it() {
+        let steps = blocked_host_steps(&[
+            blocked("verify.twilio.com", 9, &["api.twilio.com"]),
+            blocked("api.example.com", 1, &[]),
+            blocked(crate::proxy::OTHER_HOSTS_LABEL, 4, &[]),
+            HostReport {
+                host: "passed.example.org".into(),
+                mode: "pass".into(),
+                requests: 2,
+                sibling_of: Vec::new(),
+            },
+        ]);
+        assert_eq!(steps.len(), 2, "{steps:?}");
+        assert_eq!(
+            steps[0],
+            "verify.twilio.com was called 9 times and blocked: no mock serves it. The catalog has no contract for it: import its API's contract into a mock that lists verify.twilio.com in hosts (import_contract), or set proxy.vendor_subdomains: pass to send it to the real host, and rerun the app's flows before handing back."
+        );
+        assert!(
+            steps[1].starts_with("api.example.com was called once and blocked"),
+            "{}",
+            steps[1]
+        );
+        assert!(steps[1].contains("proxy.unmapped: pass"), "{}", steps[1]);
+    }
+
+    #[test]
+    fn unmapped_hosts_and_their_steps_come_from_the_metric() {
+        let metrics = format!(
+            "{m}{{host=\"verify.twilio.com\",mode=\"block\",sibling_of=\"api.twilio.com\"}} 9\n{m}{{host=\"example.org\",mode=\"pass\"}} 2\n",
+            m = crate::proxy::UNMAPPED_METRIC
+        );
+        let hosts = unmapped_hosts(&metrics);
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].host, "example.org");
+        assert_eq!(hosts[1].sibling_of, ["api.twilio.com"]);
+        let steps = blocked_host_steps(&hosts);
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0].starts_with("verify.twilio.com was called 9 times"));
     }
 
     #[test]
