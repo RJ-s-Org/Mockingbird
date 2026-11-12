@@ -706,7 +706,9 @@ type Member = (String, Value);
 
 /// Mints on `data`, a created record of type `t`, each of `keys` (its alternate keys,
 /// [`Shape::key_members`]) it holds no value for and that `owned` leaves to nobody: an
-/// integer member is one past the highest the type's records hold, added to `owned`, so
+/// integer member is one past the highest the type's records hold under the record's
+/// parent, those of the types numbering with it there included
+/// ([`StateAccess::numbered_with`]), added to `owned`, so
 /// fill never writes it; any other is left for fill, which [`unique_keys`] keeps
 /// unique. Returns the members left for fill.
 async fn mint_keys(
@@ -726,21 +728,20 @@ async fn mint_keys(
                 .iter()
                 .any(|a| a == "integer")
         });
-    if !integers.is_empty() {
-        let listed = state.list(session, t, MAX_SCAN).await;
-        for (name, member) in integers {
-            let top = listed
-                .iter()
-                .filter_map(|r| r.data.get(name)?.as_i64())
-                .max()
-                .unwrap_or(0);
-            let value = Value::from(top.saturating_add(1));
-            if fits(rt, member, &value)
-                && let Some(record) = data.as_object_mut()
-            {
-                record.insert(name.clone(), value);
-                owned.push(name.clone());
-            }
+    for (name, member) in integers {
+        // Under the record's parent, with the types numbering with it there.
+        let listed = state.numbered_with(session, t, name, MAX_SCAN).await;
+        let top = listed
+            .iter()
+            .filter_map(|r| r.data.get(name)?.as_i64())
+            .max()
+            .unwrap_or(0);
+        let value = Value::from(top.saturating_add(1));
+        if fits(rt, member, &value)
+            && let Some(record) = data.as_object_mut()
+        {
+            record.insert(name.clone(), value);
+            owned.push(name.clone());
         }
     }
     others.into_iter().cloned().collect()

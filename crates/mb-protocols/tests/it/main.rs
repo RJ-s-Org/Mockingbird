@@ -89,6 +89,7 @@ mod language_variants;
 mod list_prompt_size;
 mod nested_identity_patches;
 mod optional_null;
+mod parent_scopes;
 mod partial_creates;
 mod provider_policy;
 mod query_same_record;

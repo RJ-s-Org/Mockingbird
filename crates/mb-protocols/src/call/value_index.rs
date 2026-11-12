@@ -305,7 +305,9 @@ impl ValueIndex {
                 };
                 match change {
                     Ok(change) if change.kind == mb_state::ChangeKind::Deleted => {
-                        index.forget(&change.session, &change.resource_type, &change.id);
+                        // The index keeps records under their own ids (see [`super::scopes`]).
+                        let id = super::scopes::plain_id(&change.id);
+                        index.forget(&change.session, &change.resource_type, id);
                     }
                     Ok(_) => {}
                     Err(RecvError::Lagged(_)) => index.clear(),

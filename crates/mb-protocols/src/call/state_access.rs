@@ -25,6 +25,57 @@ pub(crate) struct StateAccess<'a> {
     pub(super) owns: Option<String>,
     /// The types this call marked already.
     marked: Vec<String>,
+    /// Parent-scoped records stored under no parent this call took for its parent's
+    /// (type, id): a write of one under the parent moves it there.
+    unplaced: Vec<(String, String)>,
+    /// Parent-scoped records this call found under the parent it names, by its key
+    /// there: (type, id) ([`Self::found_placed`]).
+    placed: HashSet<(String, String)>,
+    /// The call's type and path parameters, for the parent of a parent-scoped record
+    /// ([`scopes`]); `None` outside a call's path (a GraphQL helper), where a record's
+    /// links alone name its parent.
+    scope_call: Option<Box<CallScope>>,
+}
+
+/// What a call says of the parent of the records it reads and writes.
+struct CallScope {
+    /// The type the call acts on.
+    own: Option<String>,
+    /// Its route's path template.
+    route: String,
+    /// Its path parameters.
+    params: Map<String, Value>,
+}
+
+/// Where a record of a type is, in one call (see [`StateAccess::placement`]).
+enum Placement {
+    /// Its type is not parent-scoped: under its own id.
+    Global,
+    /// Under this parent.
+    In(Vec<String>),
+    /// Its type is parent-scoped, and nothing names its parent: stored under its own
+    /// id, found under it, and listed with every parent's.
+    Unknown,
+}
+
+/// Records of a parent-scoped type read to find one under a parent, at most.
+const MAX_SCOPED_SCAN: usize = 10_000;
+
+/// Whether a record of type `t` under `id` is none the call layer may name: its ids
+/// never hold the separator a parent-scoped key is joined by ([`scopes::SEP`]), so one
+/// sent so (`/repos/c/y/issues/a%1Fx%1F5`) names no record and stores none. The
+/// runtime's own documents ([`mb_state::INTERNAL_TYPE`]) key by scoped ids freely.
+fn refused(t: &str, id: &str) -> bool {
+    t != mb_state::INTERNAL_TYPE && id.contains(scopes::SEP)
+}
+
+/// `r` under its own id, whatever key the store holds it by; a document of the
+/// runtime's own as it is.
+fn unscoped(mut r: StoredResource) -> StoredResource {
+    if r.resource_type != mb_state::INTERNAL_TYPE && r.id.contains(scopes::SEP) {
+        r.id = scopes::plain_id(&r.id).to_string();
+    }
+    r
 }
 
 /// Whether this call may use the store.
@@ -48,6 +99,9 @@ impl<'a> StateAccess<'a> {
             call_params: None,
             owns: None,
             marked: Vec::new(),
+            unplaced: Vec::new(),
+            placed: HashSet::new(),
+            scope_call: None,
         }
     }
 
@@ -133,12 +187,116 @@ impl<'a> StateAccess<'a> {
         }
     }
 
-    pub(super) async fn get(
+    /// Has this call place parent-scoped records ([`scopes`]) by `op`'s type and
+    /// `call`'s path parameters.
+    pub(super) fn scope_to(&mut self, op: &Operation, call: &OperationCall) {
+        let route = match &op.binding {
+            mb_mcm::Binding::Http { path, .. } => Some(path.clone()),
+            _ => None,
+        };
+        self.scope_call = route.map(|route| {
+            Box::new(CallScope {
+                own: op.resource_type.clone(),
+                route,
+                params: call.path_params.clone(),
+            })
+        });
+    }
+
+    /// Where a record of type `t` (holding `data`, when known) is in this call: a type
+    /// that is not parent-scoped is global; the call's own type is under the parent the
+    /// call's path names, else under the one its links show; another type is under the
+    /// one its links show, else the one the call's path names.
+    fn placement(&self, t: &str, data: Option<&Value>) -> Placement {
+        let Some(scope) = self.rt.index().parent_scopes().get(t) else {
+            return Placement::Global;
+        };
+        let call = self.scope_call.as_deref();
+        let from_call = || call.and_then(|c| scope.of_route(&c.route, &c.params));
+        if call.is_some_and(|c| c.own.as_deref() == Some(t))
+            && let Some(found) = from_call()
+        {
+            return Placement::In(found);
+        }
+        if let Some(found) = data.and_then(|d| scope.of_data(d)) {
+            return Placement::In(found);
+        }
+        from_call().map_or(Placement::Unknown, Placement::In)
+    }
+
+    /// The parent this call places type `t`'s records under, when it is parent-scoped
+    /// and the call names one.
+    pub(super) fn parent_of(&self, t: &str) -> Option<Vec<String>> {
+        match self.placement(t, None) {
+            Placement::In(scope) => Some(scope),
+            Placement::Global | Placement::Unknown => None,
+        }
+    }
+
+    /// The records a new number of type `t`'s member `member` must pass (one past the
+    /// highest they hold). Of a parent-scoped type whose key `member` is, those under
+    /// the parent this call places `t`, of `t` and of the types numbering with it there
+    /// ([`scopes::ParentScopes::numbering`]); any other member of such a type counts
+    /// across every parent's records; any other type's as [`Self::list`] finds them. At
+    /// most `limit` of each type.
+    pub(super) async fn numbered_with(
         &mut self,
         s: &SessionKey,
         t: &str,
-        id: &str,
-    ) -> Option<StoredResource> {
+        member: &str,
+        limit: usize,
+    ) -> Vec<StoredResource> {
+        let scopes = self.rt.index().parent_scopes();
+        let Some(scope) = scopes.get(t) else {
+            return self.list(s, t, limit).await;
+        };
+        match self.parent_of(t) {
+            Some(parent) if scope.key_member() == member => {
+                let mut out = Vec::new();
+                for other in scopes.numbering(t, member) {
+                    out.extend(self.list_in(s, &other, &parent, limit).await);
+                }
+                out
+            }
+            _ => self
+                .raw_list(s, t, MAX_SCOPED_SCAN)
+                .await
+                .into_iter()
+                .map(unscoped)
+                .collect(),
+        }
+    }
+
+    /// What a document of the call's own (the write memory's, a concurrency token's)
+    /// names the record of type `t` under `id` by: its key under the parent this call
+    /// places it, so that two parents' records of one id keep two documents.
+    pub(super) fn key_id(&self, t: &str, id: &str) -> String {
+        match self.placement(t, None) {
+            Placement::In(scope) if !id.contains(scopes::SEP) => scopes::scoped_id(&scope, id),
+            Placement::In(_) | Placement::Global | Placement::Unknown => id.to_string(),
+        }
+    }
+
+    /// Whether this call found `r` (under its own id) under the parent it names, by
+    /// its key there: the parent's own record.
+    pub(super) fn found_placed(&self, r: &StoredResource) -> bool {
+        self.placed
+            .contains(&(r.resource_type.clone(), r.id.clone()))
+    }
+
+    /// Whether `r`, a record stored under no parent (before its type was scoped, by
+    /// the Admin API, or where nothing named one), may be the one under `scope`: its
+    /// own links show no other parent.
+    fn unplaced_fits(&self, r: &StoredResource, scope: &[String]) -> bool {
+        self.rt
+            .index()
+            .parent_scopes()
+            .get(&r.resource_type)
+            .and_then(|s| s.of_data(&r.data))
+            .is_none_or(|shown| shown == scope)
+    }
+
+    async fn raw_get(&mut self, s: &SessionKey, t: &str, id: &str) -> Option<StoredResource> {
         if !self.open() {
             return None;
         }
@@ -148,12 +306,7 @@ impl<'a> StateAccess<'a> {
         found.flatten()
     }
 
-    pub(super) async fn list(
-        &mut self,
-        s: &SessionKey,
-        t: &str,
-        limit: usize,
-    ) -> Vec<StoredResource> {
+    async fn raw_list(&mut self, s: &SessionKey, t: &str, limit: usize) -> Vec<StoredResource> {
         if !self.open() {
             return Vec::new();
         }
@@ -163,19 +316,150 @@ impl<'a> StateAccess<'a> {
         found.unwrap_or_default()
     }
 
-    /// Whether the store took the write.
+    /// The record of type `t` under `id`, placed as `placement`, as the store holds it:
+    /// under the parent, else an unplaced one that fits it (see
+    /// [`Self::unplaced_fits`]); with no parent known, the one stored under `id` itself:
+    /// a record under a parent is found by naming the parent, or listed.
+    async fn held(
+        &mut self,
+        s: &SessionKey,
+        t: &str,
+        id: &str,
+        placement: &Placement,
+    ) -> Option<StoredResource> {
+        // No id the call layer holds has the separator: one sent so is no record's.
+        if refused(t, id) {
+            return None;
+        }
+        match placement {
+            Placement::In(scope) => {
+                if let Some(hit) = self.raw_get(s, t, &scopes::scoped_id(scope, id)).await {
+                    self.placed.insert((t.to_string(), id.to_string()));
+                    return Some(hit);
+                }
+                let unplaced = self.raw_get(s, t, id).await?;
+                let fits = self.unplaced_fits(&unplaced, scope);
+                if fits {
+                    self.note_unplaced(t, id);
+                }
+                fits.then_some(unplaced)
+            }
+            // A record under a parent is found by naming the parent, or listed.
+            Placement::Global | Placement::Unknown => self.raw_get(s, t, id).await,
+        }
+    }
+
+    /// The record of type `t` under `id`, under the parent this call places it (see
+    /// [`scopes`]); always under its own id, whatever key the store holds it by.
+    pub(super) async fn get(
+        &mut self,
+        s: &SessionKey,
+        t: &str,
+        id: &str,
+    ) -> Option<StoredResource> {
+        let placement = self.placement(t, None);
+        self.held(s, t, id, &placement).await.map(unscoped)
+    }
+
+    /// Records of type `t`, most recent first, at most `limit`: of a parent-scoped type
+    /// those under the parent this call places it (and unplaced ones that fit it), else
+    /// all of them; always under their own ids.
+    pub(super) async fn list(
+        &mut self,
+        s: &SessionKey,
+        t: &str,
+        limit: usize,
+    ) -> Vec<StoredResource> {
+        match self.placement(t, None) {
+            Placement::In(scope) => self.list_in(s, t, &scope, limit).await,
+            Placement::Global | Placement::Unknown => self
+                .raw_list(s, t, limit)
+                .await
+                .into_iter()
+                .map(unscoped)
+                .collect(),
+        }
+    }
+
+    /// [`Self::list`] of type `t` under parent `scope`.
+    pub(super) async fn list_in(
+        &mut self,
+        s: &SessionKey,
+        t: &str,
+        scope: &[String],
+        limit: usize,
+    ) -> Vec<StoredResource> {
+        let all = self.raw_list(s, t, MAX_SCOPED_SCAN).await;
+        let prefix = scopes::scoped_id(scope, "");
+        let under = |id: &str| {
+            id.strip_prefix(prefix.as_str())
+                .filter(|rest| !rest.contains(scopes::SEP))
+                .map(str::to_string)
+        };
+        let placed: HashSet<String> = all.iter().filter_map(|r| under(&r.id)).collect();
+        let mut out = Vec::new();
+        for r in all {
+            if out.len() >= limit {
+                break;
+            }
+            if let Some(id) = under(&r.id) {
+                self.placed.insert((t.to_string(), id));
+                out.push(unscoped(r));
+            } else if !r.id.contains(scopes::SEP)
+                && !placed.contains(&r.id)
+                && self.unplaced_fits(&r, scope)
+            {
+                self.note_unplaced(t, &r.id);
+                out.push(r);
+            }
+        }
+        out
+    }
+
+    /// Records of type `t` as the store holds them, most recent first, at most `limit`,
+    /// each with the parent it is stored under (see [`scopes::split_id`]) and under its
+    /// own id: for a reader of another mock's records, which its own contract does not
+    /// scope.
+    #[cfg(feature = "graphql")]
+    pub(super) async fn list_with_parents(
+        &mut self,
+        s: &SessionKey,
+        t: &str,
+        limit: usize,
+    ) -> Vec<(Option<Vec<String>>, StoredResource)> {
+        self.raw_list(s, t, limit)
+            .await
+            .into_iter()
+            .map(|r| {
+                let parent = scopes::split_id(&r.id)
+                    .map(|(scope, _)| scope.into_iter().map(str::to_string).collect());
+                (parent, unscoped(r))
+            })
+            .collect()
+    }
+
+    /// Whether the store took the write. A parent-scoped record goes under the parent
+    /// this call places it ([`Self::placement`]), else under its own id.
     pub(super) async fn upsert(&mut self, s: &SessionKey, r: StoredResource) -> bool {
-        if !self.open() {
+        if refused(&r.resource_type, &r.id) || !self.open() {
             return false;
         }
         let rt = self.rt;
         let values = path_values(rt.index().path_fields(&r.resource_type), &r.data);
         let named = (!values.is_empty()).then(|| (r.resource_type.clone(), r.id.clone()));
         let t = r.resource_type.clone();
+        let plain = r.id.clone();
         let indexed = value_index::Indexed::of(rt, &r);
+        let r = self.placed(r);
+        let moved = r.id != plain;
         let r = rt.state.upsert(s, r).await;
         let ok = self.settle(r).is_some();
         self.wrote |= ok;
+        // The record found under no parent is this parent's now: it goes, so no other
+        // parent finds what it was.
+        if ok && moved {
+            self.retire_unplaced(s, &t, &plain).await;
+        }
         if ok && t != mb_state::INTERNAL_TYPE {
             rt.written_types().remember(s, &t);
         }
@@ -191,13 +475,76 @@ impl<'a> StateAccess<'a> {
         ok
     }
 
-    /// Whether the store took the delete.
+    /// `r` under the key the store holds it by: under its parent, for a parent-scoped
+    /// record this call places under one.
+    fn placed(&self, r: StoredResource) -> StoredResource {
+        match self.placement(&r.resource_type, Some(&r.data)) {
+            Placement::In(scope) => StoredResource {
+                id: scopes::scoped_id(&scope, &r.id),
+                ..r
+            },
+            Placement::Global | Placement::Unknown => r,
+        }
+    }
+
+    /// Notes that this call took `t` `id`, stored under no parent, for the parent it
+    /// places the type under.
+    fn note_unplaced(&mut self, t: &str, id: &str) {
+        if !self.unplaced.iter().any(|(ut, uid)| ut == t && uid == id) {
+            self.unplaced.push((t.to_string(), id.to_string()));
+        }
+    }
+
+    /// Removes `t` `id`, stored under no parent, when this call took it for its parent's
+    /// (see [`Self::note_unplaced`]) and has now stored it there.
+    async fn retire_unplaced(&mut self, s: &SessionKey, t: &str, id: &str) {
+        let Some(at) = self
+            .unplaced
+            .iter()
+            .position(|(ut, uid)| ut == t && uid == id)
+        else {
+            return;
+        };
+        self.unplaced.swap_remove(at);
+        if self.open() {
+            let r = self.rt.state.delete(s, t, id).await;
+            self.settle(r);
+        }
+    }
+
+    /// Whether the store took the delete of the record of type `t` under `id`, under
+    /// the parent this call places it.
     pub(super) async fn delete(&mut self, s: &SessionKey, t: &str, id: &str) -> bool {
+        if refused(t, id) || !self.open() {
+            return false;
+        }
+        let stored = match self.placement(t, None) {
+            Placement::Global => id.to_string(),
+            placement => match self.held(s, t, id, &placement).await {
+                Some(held) => held.id,
+                None => match placement {
+                    Placement::In(scope) => scopes::scoped_id(&scope, id),
+                    Placement::Global | Placement::Unknown => id.to_string(),
+                },
+            },
+        };
         if !self.open() {
             return false;
         }
-        let r = self.rt.state.delete(s, t, id).await;
-        let held = self.settle(r);
+        let r = self.rt.state.delete(s, t, &stored).await;
+        let mut held = self.settle(r);
+        // An unplaced record of that id that fits the parent goes too: it would read
+        // back as the deleted one.
+        if stored != id
+            && let Placement::In(scope) = self.placement(t, None)
+            && let Some(unplaced) = self.raw_get(s, t, id).await
+            && self.unplaced_fits(&unplaced, &scope)
+        {
+            let r = self.rt.state.delete(s, t, id).await;
+            if let Some(gone) = self.settle(r) {
+                held = Some(held.unwrap_or(false) || gone);
+            }
+        }
         let ok = held.is_some();
         self.wrote |= ok;
         if ok {
@@ -212,14 +559,23 @@ impl<'a> StateAccess<'a> {
         ok
     }
 
-    /// Stores a seeded resource unless one is stored under its id or it was
-    /// deleted; `true` when stored.
+    /// Stores a seeded resource unless one is stored under its id (under the parent
+    /// this call places it, an unplaced one that fits it included) or it was deleted;
+    /// `true` when stored.
     pub(crate) async fn insert_seeded(&mut self, s: &SessionKey, r: StoredResource) -> bool {
-        if !self.open() {
+        if refused(&r.resource_type, &r.id) || !self.open() {
             return false;
         }
         if self.tracks_deleted
             && deleted::mention_is_deleted(self, s, &r.resource_type, &r.id).await
+        {
+            return false;
+        }
+        if let Placement::In(scope) = self.placement(&r.resource_type, Some(&r.data))
+            && self
+                .raw_get(s, &r.resource_type, &r.id)
+                .await
+                .is_some_and(|unplaced| self.unplaced_fits(&unplaced, &scope))
         {
             return false;
         }
@@ -228,6 +584,10 @@ impl<'a> StateAccess<'a> {
         let named = (!values.is_empty()).then(|| (r.resource_type.clone(), r.id.clone()));
         let t = r.resource_type.clone();
         let indexed = value_index::Indexed::of(rt, &r);
+        let r = self.placed(r);
+        if !self.open() {
+            return false;
+        }
         let r = rt.state.insert_seeded(s, r).await;
         let stored = self.settle(r).unwrap_or(false);
         self.wrote |= stored;
@@ -320,6 +680,22 @@ pub(crate) async fn stored(
 ) -> Option<StoredResource> {
     let mut state = StateAccess::new(rt);
     async { state.get(session, t, id).await }
+        .instrument(state_span())
+        .await
+}
+
+/// The resources of type `t` the session holds, most recent first, at most `limit`,
+/// each with the parent it is stored under when another mock stores the type
+/// parent-scoped (see [`scopes`]).
+#[cfg(feature = "graphql")]
+pub(crate) async fn stored_with_parents(
+    rt: &MockRuntime,
+    session: &SessionKey,
+    t: &str,
+    limit: usize,
+) -> Vec<(Option<Vec<String>>, StoredResource)> {
+    let mut state = StateAccess::new(rt);
+    async { state.list_with_parents(session, t, limit).await }
         .instrument(state_span())
         .await
 }

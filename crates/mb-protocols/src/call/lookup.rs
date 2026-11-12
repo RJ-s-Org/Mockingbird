@@ -20,7 +20,9 @@ pub(super) async fn read_context(
     let target = match (op.resource_type.as_deref(), target_id) {
         (Some(t), Some(id)) => match records::held_by_key(state, session, t, id)
             .await
-            .filter(|hit| owner.is_none_or(|o| key_fits(rt, session, hit, o)))
+            .filter(|hit| {
+                owner.is_none_or(|o| placed_fits(state, hit, o) || key_fits(rt, session, hit, o))
+            })
             // Where the path names another member than the key (`/issues/{number}`),
             // a record keyed by the path's value is another one unless that member
             // says so too.
@@ -173,24 +175,30 @@ pub(super) async fn by_path_fields(
         return None;
     }
     let rt = state.rt;
-    let holds = |r: &StoredResource, field: &str| {
+    // `placed`: found under the parent the call names ([`placed_fits`]).
+    let holds = |r: &StoredResource, field: &str, placed: bool| {
         mb_mcm::member_at(&r.data, field)
             .and_then(id_string)
             .as_deref()
             == Some(value)
-            && owner.is_none_or(|o| owner_fits(rt, session, r, o, field))
+            && owner.is_none_or(|o| placed || owner_fits(rt, session, r, o, field))
     };
     for field in fields {
         if let Some(id) = state.rt.path_aliases().id_of(session, t, field, value)
             && let Some(hit) = state.get(session, t, &id).await
-            && holds(&hit, field)
+            && holds(
+                &hit,
+                field,
+                owner.is_some_and(|o| placed_fits(state, &hit, o)),
+            )
         {
             return Some(hit);
         }
     }
     let stored = state.list(session, t, MAX_SCAN).await;
+    let placed = |r: &StoredResource| owner.is_some_and(|o| placed_fits(state, r, o));
     let found = fields.iter().find_map(|field| {
-        let found = stored.iter().find(|r| holds(r, field))?;
+        let found = stored.iter().find(|r| holds(r, field, placed(r)))?;
         Some((*field, found))
     });
     let Some((field, found)) = found else {
@@ -203,7 +211,7 @@ pub(super) async fn by_path_fields(
                     m.values()
                         .filter_map(Value::as_str)
                         .any(|t| path_shows(t, owner))
-                }) && owner_fits(rt, session, r, owner, "")
+                }) && (placed(r) || owner_fits(rt, session, r, owner, ""))
             })
             .cloned();
     };
@@ -435,7 +443,9 @@ pub(super) async fn by_alternate_member(
             mb_mcm::member_at(&r.data, field)
                 .and_then(id_string)
                 .is_some_and(|held| held == value)
-                && owner.is_none_or(|o| owner_fits(rt, session, r, o, field))
+                && owner.is_none_or(|o| {
+                    placed_fits(state, r, o) || owner_fits(rt, session, r, o, field)
+                })
         })
     });
     match (holding.next(), holding.next()) {

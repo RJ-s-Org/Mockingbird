@@ -131,8 +131,9 @@ impl OwnReads {
 
 /// Numbers a create's answer must take above those the session holds: each
 /// integer field a read of the resource type takes from its path (GitHub's
-/// issue `number`). A clashing number moves past the highest stored one,
-/// and URLs naming it (`…/issues/412`) follow.
+/// issue `number`). A clashing number moves past the highest stored one under the
+/// record's parent, of its type or one numbering with it there
+/// ([`StateAccess::numbered_with`]), and URLs naming it (`…/issues/412`) follow.
 pub(super) async fn next_numbers(
     rt: &MockRuntime,
     state: &mut StateAccess<'_>,
@@ -147,11 +148,14 @@ pub(super) async fn next_numbers(
     let Some(body) = generated.body.as_mut() else {
         return;
     };
-    let stored = state.list(session, resource_type, MAX_SCAN).await;
     for field in fields.iter().map(String::as_str) {
         let Some(number) = mb_mcm::member_at(body, field).and_then(Value::as_i64) else {
             continue;
         };
+        // Under the record's parent, with the types numbering with it there.
+        let stored = state
+            .numbered_with(session, resource_type, field, MAX_SCAN)
+            .await;
         let highest = stored
             .iter()
             .filter_map(|r| mb_mcm::member_at(&r.data, field).and_then(Value::as_i64))

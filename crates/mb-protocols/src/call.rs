@@ -68,6 +68,7 @@ mod replays;
 mod reporting;
 mod reused_ids;
 mod runs;
+pub(crate) mod scopes;
 mod session_memory;
 pub(crate) mod shared;
 mod side_writes;
@@ -298,6 +299,7 @@ pub(crate) async fn read_state(
     call: &OperationCall,
 ) -> (Option<StoredResource>, Vec<StoredResource>) {
     let mut state = StateAccess::new(rt);
+    state.scope_to(plan.op, call);
     let target_id = target_id(plan.op, call);
     let (target, related, _) = read_context(
         &mut state,
@@ -594,6 +596,7 @@ async fn prepare_state<'a>(
     let op = plan.op;
     let session = &plan.session;
     let mut state = StateAccess::new(rt);
+    state.scope_to(op, call);
     // A write's records of its type are the app's own (see [`unknown_ids`]).
     if matches!(op.kind, OperationKind::Command(_)) {
         state.owns = op.resource_type.clone();

@@ -124,6 +124,15 @@ pub(super) fn guarded(rt: &MockRuntime, op: &Operation, call: &OperationCall) ->
     owner_of(op, call).filter(|_| rt.consistency)
 }
 
+/// Whether `r`, a record this call's state access found, is `owner`'s by where it is
+/// stored: under the parent the call names, its key there (see
+/// [`StateAccess::found_placed`]), and showing no other owner itself. What a write
+/// put in a collection ([`Collections::fits`]) speaks for one id only, which two
+/// parents' records of a parent-scoped type may share.
+pub(super) fn placed_fits(state: &StateAccess<'_>, r: &StoredResource, owner: &Owner) -> bool {
+    state.found_placed(r) && owner_evidence(state.rt, r, owner) != Some(false)
+}
+
 /// The collection a write or a list answer puts its resources in, when a path
 /// parameter makes it one of many: `/orgs/octo/teams` for a list there, a create
 /// there and an update of `/orgs/octo/teams/{slug}` alike. A target parameter in

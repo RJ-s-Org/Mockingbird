@@ -123,7 +123,7 @@ impl Harness {
             .await
             .unwrap()
             .into_iter()
-            .map(|r| (r.resource_type, r.id))
+            .map(|r| (r.resource_type, crate::support::plain_id(&r.id).to_string()))
             .collect();
         stored.sort();
         stored

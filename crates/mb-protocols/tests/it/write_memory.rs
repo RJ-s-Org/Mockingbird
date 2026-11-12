@@ -2074,8 +2074,13 @@ async fn a_member_naming_another_owner_is_not_applied() {
     assert_eq!(read["organization"], "octo");
     assert_eq!(read["name"], "Renamed");
     assert_eq!(h.calls(), 1, "no call");
-    let (_, source, _) = h.call("GET", "/orgs/acme/groups/core", None).await;
-    assert_ne!(source, "state", "no acme read serves it");
+    // A group is keyed under its org: acme holds none, so none answers its read.
+    let (status, _, read) = h.call("GET", "/orgs/acme/groups/core", None).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "no acme read serves it: {read}"
+    );
 }
 
 /// With a remainder too, a contradiction spends no catch-up.
@@ -2925,13 +2930,13 @@ async fn octos_team(h: &Harness) {
     assert!(h.memory().await.is_empty(), "{:?}", h.memory().await);
 }
 
-/// A write refused for another owner's key remembers nothing, though the same
-/// write by the owner does.
+/// A write through another owner's route remembers nothing of the owner's record, though
+/// the same write by the owner does.
 #[tokio::test]
-async fn a_write_for_another_owners_key_remembers_nothing() {
+async fn a_write_through_another_owners_route_remembers_nothing_of_the_owners() {
     let h = things(vec![team("octo", "Core")]);
     octos_team(&h).await;
-    // The key holds octo's team, so a write through acme's route is refused it.
+    // octo's team, stored under its own id: acme's route does not take it.
     h.store
         .upsert(
             &session(),
@@ -2963,7 +2968,10 @@ async fn a_write_for_another_owners_key_remembers_nothing() {
         )
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert!(h.memory().await.is_empty(), "{:?}", h.memory().await);
+    // A team is keyed under its org: acme's `core` is not octo's, so nothing of the
+    // write is remembered for octo's team, only for acme, its parent.
+    let remembered: Vec<String> = h.memory().await.into_iter().map(|m| m.id).collect();
+    assert_eq!(remembered, ["orgs/acme"]);
 
     let (status, _, _) = h
         .call(

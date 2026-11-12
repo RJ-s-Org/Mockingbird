@@ -114,8 +114,14 @@ pub(super) struct Written<'a> {
 
 /// Where a resource's memory is kept. By its stored id when there is one; a value
 /// no resource holds only came from a path, and may be the secret
-/// (`POST /tokens/{token}/revoke`), so it goes by a hash.
-fn memory_key(resource_type: &str, id: &str, stored: bool) -> String {
+/// (`POST /tokens/{token}/revoke`), so it goes by a hash. A parent-scoped record's
+/// goes by its key under the parent the call places it (see [`StateAccess::key_id`]).
+fn memory_key(state: &StateAccess<'_>, resource_type: &str, id: &str, stored: bool) -> String {
+    plain_key(resource_type, &state.key_id(resource_type, id), stored)
+}
+
+/// [`memory_key`] of what no parent scopes: a route's own.
+fn plain_key(resource_type: &str, id: &str, stored: bool) -> String {
     if stored {
         return format!("{resource_type}/{id}");
     }
@@ -157,7 +163,7 @@ pub(super) async fn recall(
     if !held && guarded(rt, plan.op, call).is_some() {
         return Earlier::default();
     }
-    let key = memory_key(t, id, held);
+    let key = memory_key(state, t, id, held);
     let memory = read_memory(state, &plan.session, &key).await;
     let referring = |r: &Value| r.get(REFERENCED) == Some(&Value::Bool(true));
     let all_referring = !memory.requests.is_empty() && memory.requests.iter().all(referring);
@@ -209,7 +215,7 @@ pub(super) async fn is_behind(
     if !applies(state.rt, plan) {
         return false;
     }
-    let key = memory_key(&held.resource_type, &held.id, true);
+    let key = memory_key(state, &held.resource_type, &held.id, true);
     !read_memory(state, &plan.session, &key)
         .await
         .requests
@@ -1438,16 +1444,14 @@ pub(super) async fn remembers(
     t: &str,
     id: &str,
 ) -> bool {
-    !read_memory(state, session, &memory_key(t, id, true))
-        .await
-        .requests
-        .is_empty()
+    let key = memory_key(state, t, id, true);
+    !read_memory(state, session, &key).await.requests.is_empty()
 }
 
 /// Forgets every request remembered for stored record `t` `id`: a write the executor
 /// decided made the stored record what it is, so nothing is left for it to catch up on.
 pub(super) async fn settled(state: &mut StateAccess<'_>, session: &SessionKey, t: &str, id: &str) {
-    let key = memory_key(t, id, true);
+    let key = memory_key(state, t, id, true);
     if state.get(session, INTERNAL_TYPE, &key).await.is_some() {
         state.delete(session, INTERNAL_TYPE, &key).await;
     }
@@ -1628,7 +1632,7 @@ pub(super) async fn after_write(
         }
         Effect::Delete => {
             if let Some(id) = acted_on {
-                let key = memory_key(t, id, w.held.is_some());
+                let key = memory_key(state, t, id, w.held.is_some());
                 state.delete(session, INTERNAL_TYPE, &key).await;
             }
         }
@@ -1653,7 +1657,12 @@ pub(super) async fn after_write(
         .iter()
         .filter(|o| o.rejected.is_none())
     {
-        let key = memory_key(&outcome.effect.resource_type, &outcome.effect.id, true);
+        let key = memory_key(
+            state,
+            &outcome.effect.resource_type,
+            &outcome.effect.id,
+            true,
+        );
         clear_own(state, session, &key).await;
     }
     if target.is_none()
@@ -1715,7 +1724,7 @@ pub(super) async fn after_write(
     }
     let created = created.as_deref().map(|id| (t, id));
     if let Some(tell) = target {
-        let key = memory_key(t, &tell.id, tell.stored);
+        let key = memory_key(state, t, &tell.id, tell.stored);
         remember(
             state,
             session,
@@ -1751,7 +1760,7 @@ pub(super) async fn after_write(
         );
     }
     if let Some(parent) = &parent {
-        let key = memory_key(&parent.resource_type, &parent.id, true);
+        let key = memory_key(state, &parent.resource_type, &parent.id, true);
         remember(state, session, &key, &entry, None, w.retry).await;
     }
     // What it only refers to is told so, and changes by effects alone (see
@@ -1760,7 +1769,7 @@ pub(super) async fn after_write(
         members.insert(REFERENCED.to_string(), Value::Bool(true));
     }
     for related in &referenced {
-        let key = memory_key(&related.resource_type, &related.id, true);
+        let key = memory_key(state, &related.resource_type, &related.id, true);
         let own = read_memory(state, session, &key).await.own;
         remember(state, session, &key, &entry, own, w.retry).await;
     }
@@ -1813,7 +1822,7 @@ fn route_memory_key(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> O
         return None;
     }
     let filled = fill_path(call, &path_segments(path))?;
-    Some(memory_key("#route", &filled.path, false))
+    Some(plain_key("#route", &filled.path, false))
 }
 
 /// What a list read is told of the writes to its own path, oldest first.
@@ -1923,7 +1932,7 @@ async fn forget_deleted_route(
         if below.len() > segments.len() && same_route(&segments, &below[..segments.len()]) {
             let rest = &below[segments.len()..];
             if rest.iter().all(|s| segment_param(s).is_none()) {
-                let key = memory_key("#route", &format!("{filled}/{}", rest.join("/")), false);
+                let key = plain_key("#route", &format!("{filled}/{}", rest.join("/")), false);
                 state.delete(&plan.session, INTERNAL_TYPE, &key).await;
             }
             continue;
@@ -1939,7 +1948,7 @@ async fn forget_deleted_route(
         let Some(child) = child.filter(|_| same_route(parent, &below)) else {
             continue;
         };
-        let key = memory_key("#route", parent_path, false);
+        let key = plain_key("#route", parent_path, false);
         let mut memory = read_memory(state, &plan.session, &key).await;
         let before = memory.requests.len();
         memory
@@ -2165,7 +2174,7 @@ async fn tell_siblings(
             continue;
         };
         let filled = format!("{}/{}", parent.path, sibling.rest.join("/"));
-        let key = memory_key("#route", &filled, false);
+        let key = plain_key("#route", &filled, false);
         remember(
             state,
             &plan.session,
@@ -2267,7 +2276,8 @@ async fn update_without_answer(
         // Stored whole by `write_state`: merging onto the copy held before would bring
         // back what the replace dropped.
         let own = request.and_then(|r| own_part(rt, t, r));
-        set_own(state, session, &memory_key(t, &held.id, true), own).await;
+        let key = memory_key(state, t, &held.id, true);
+        set_own(state, session, &key, own).await;
         return None;
     }
     // The path says whose it is: a member saying otherwise is not applied or told.
@@ -2290,7 +2300,8 @@ async fn update_without_answer(
     };
     let Some(kept) = kept.filter(|kept| !carries(kept, &merged) && !only_redacted(kept)) else {
         // Applied in full, but what is still told is older: this has the last word.
-        set_own(state, session, &memory_key(t, &held.id, true), own).await;
+        let key = memory_key(state, t, &held.id, true);
+        set_own(state, session, &key, own).await;
         return None;
     };
     Some(Tell {

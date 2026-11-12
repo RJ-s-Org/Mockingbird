@@ -246,10 +246,8 @@ impl Harness {
     }
 
     async fn held(&self, t: &str, id: &str) -> Value {
-        self.store
-            .get(&session(), t, id)
+        crate::support::find_stored(&*self.store, &session(), t, id)
             .await
-            .unwrap()
             .map_or(Value::Null, |r| r.data)
     }
 
@@ -629,8 +627,10 @@ async fn a_taken_id_counts_only_under_the_same_parent() {
     assert!(!prompt.contains("same_values"), "{prompt}");
     assert!(!prompt.contains("\"refusal\""), "{prompt}");
     assert_eq!(body["color"], "blue", "{body}");
-    // Not stored over repository a's label, which still reads from state.
-    assert_eq!(h.held("labels", "bug").await["color"], "red");
+    // Not stored over repository a's label, which still reads from state: each is
+    // stored under its repository.
+    assert_eq!(h.held("labels", "a\u{1f}bug").await["color"], "red");
+    assert_eq!(h.held("labels", "b\u{1f}bug").await["color"], "blue");
     let calls = h.provider.requests().len();
     let (status, read) = h.send("GET", "/repos/a/labels/bug", None, &[]).await;
     assert_eq!(status, StatusCode::OK, "{read}");

@@ -158,7 +158,8 @@ struct Kept {
 
 /// What the session keeps of `t` `id`'s tokens.
 async fn kept_of(state: &mut StateAccess<'_>, session: &SessionKey, t: &str, id: &str) -> Kept {
-    let doc = state.get(session, INTERNAL_TYPE, &key(t, id)).await;
+    let doc_id = key(state, t, id);
+    let doc = state.get(session, INTERNAL_TYPE, &doc_id).await;
     let part = |name: &str| doc.as_ref().and_then(|d| d.data.get(name));
     let list = |name: &str| -> Vec<String> {
         part(name)
@@ -639,9 +640,15 @@ fn holds(header: &str, values: &[String], held: &Value) -> bool {
     held.is_some_and(|held| values.contains(&held))
 }
 
-/// The document of `t` `id`'s tokens.
-fn key(t: &str, id: &str) -> String {
-    keyed(INDEX, t, id)
+/// The document of `t` `id`'s tokens: under the parent the call places a
+/// parent-scoped record (see [`StateAccess::key_id`]).
+fn key(state: &StateAccess<'_>, t: &str, id: &str) -> String {
+    keyed(INDEX, t, &state.key_id(t, id))
+}
+
+/// The document of `t` `id`'s baselines, placed as [`key`] places its tokens'.
+fn baseline_key(state: &StateAccess<'_>, t: &str, id: &str) -> String {
+    keyed(BASELINES, t, &state.key_id(t, id))
 }
 
 /// The document under `prefix` for `t` `id`.
@@ -1074,7 +1081,7 @@ pub(super) async fn after_update(
     if confirmed == tokens.confirmed && !pairings_moved {
         return;
     }
-    let id = key(t, &before.id);
+    let id = key(state, t, &before.id);
     state
         .upsert(
             session,
@@ -1153,10 +1160,9 @@ pub(super) fn advance(
 /// After any 2xx delete of `t` `id`, whatever answered it: its tokens go with it. The
 /// index keeps the entry, which the bound takes out.
 pub(super) async fn forget(state: &mut StateAccess<'_>, session: &SessionKey, t: &str, id: &str) {
-    state.delete(session, INTERNAL_TYPE, &key(t, id)).await;
-    state
-        .delete(session, INTERNAL_TYPE, &keyed(BASELINES, t, id))
-        .await;
+    let (tokens, baselines) = (key(state, t, id), baseline_key(state, t, id));
+    state.delete(session, INTERNAL_TYPE, &tokens).await;
+    state.delete(session, INTERNAL_TYPE, &baselines).await;
 }
 
 /// The declared `ETag` response header of a 2xx answer, by its name as declared, with
@@ -1195,9 +1201,9 @@ pub(super) async fn entity_tag(
     let id =
         target_id(op, call).or_else(|| mb_mcm::member_at(record?, field).and_then(id_string))?;
     let mut state = StateAccess::new(rt);
-    let doc = state
-        .get(&plan.session, INTERNAL_TYPE, &key(t, &id))
-        .await?;
+    state.scope_to(op, call);
+    let doc_id = key(&state, t, &id);
+    let doc = state.get(&plan.session, INTERNAL_TYPE, &doc_id).await?;
     let member = doc
         .data
         .get("headers")?
@@ -1304,7 +1310,7 @@ pub(super) async fn after_answer(
         return;
     };
     let digest = data_digest(&record.data);
-    let doc_id = keyed(BASELINES, t, id);
+    let doc_id = baseline_key(state, t, id);
     let was = state
         .get(session, INTERNAL_TYPE, &doc_id)
         .await
@@ -1372,7 +1378,7 @@ async fn unchanged_since(
     target: &StoredResource,
     (member, value): (&str, &str),
 ) -> bool {
-    let doc_id = keyed(BASELINES, &target.resource_type, &target.id);
+    let doc_id = baseline_key(state, &target.resource_type, &target.id);
     let Some(doc) = state.get(session, INTERNAL_TYPE, &doc_id).await else {
         return false;
     };
@@ -1400,8 +1406,9 @@ async fn current_etag(
         return None;
     };
     let fits = |member: &str| etag_member(rt, t, member);
+    let doc_id = key(state, t, &target.id);
     let paired = state
-        .get(session, INTERNAL_TYPE, &key(t, &target.id))
+        .get(session, INTERNAL_TYPE, &doc_id)
         .await
         .and_then(|doc| {
             doc.data
@@ -1502,6 +1509,7 @@ async fn not_modified_tag(
     let t = op.resource_type.as_deref()?;
     let id = target_id(op, call)?;
     let mut state = StateAccess::new(rt);
+    state.scope_to(op, call);
     let target = state.get(&plan.session, t, &id).await?;
     let tags = if_none_match(op, call)?;
     let (_, value) = current_etag(&mut state, &plan.session, &target, tags.as_deref()).await?;

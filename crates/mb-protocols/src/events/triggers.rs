@@ -296,7 +296,7 @@ async fn run_state_changes(
         let origin = json!({
             "kind": "on_state_change",
             "resource_type": change.resource_type,
-            "id": change.id,
+            "id": crate::call::scopes::plain_id(&change.id),
             "change": match change.kind {
                 ChangeKind::Upserted => "upserted",
                 ChangeKind::Deleted => "deleted",
@@ -345,6 +345,10 @@ async fn related(inner: &ChannelInner, change: &StateChanged) -> Option<Vec<Stor
             .filter(|r| r.id != change.id)
             .take(MAX_RELATED),
     );
+    // Under their own ids, as the call layer knows them (see [`crate::call::scopes`]).
+    for r in &mut out {
+        r.id = crate::call::scopes::plain_id(&r.id).to_string();
+    }
     Some(out)
 }
 

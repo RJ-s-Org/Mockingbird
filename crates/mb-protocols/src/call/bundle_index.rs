@@ -102,6 +102,8 @@ pub(crate) struct BundleIndex {
     /// Per resource type, what its URL members are built from (see [`links`]), worked
     /// out on first use.
     pub(super) links: std::sync::RwLock<HashMap<String, std::sync::Arc<links::TypeLinks>>>,
+    /// The types whose records are told apart by their parent (see [`super::scopes`]).
+    pub(super) parent_scopes: super::scopes::ParentScopes,
 }
 
 /// The schema of the record an answer of `schema` holds where `identity` says: an
@@ -536,6 +538,7 @@ impl BundleIndex {
             .map(|s| s.path.clone())
             .collect();
         let record_schemas = record_schemas_of(bundle, &detail_reads);
+        let parent_scopes = super::scopes::ParentScopes::of(bundle, &detail_reads);
         let mut effect_types: Vec<String> =
             detail_reads.keys().chain(shapes.keys()).cloned().collect();
         #[cfg(any(test, feature = "events"))]
@@ -619,6 +622,7 @@ impl BundleIndex {
                 .filter_map(|op| op.resource_type.clone())
                 .collect(),
             links: std::sync::RwLock::default(),
+            parent_scopes,
         }
     }
 
@@ -636,6 +640,11 @@ impl BundleIndex {
     #[cfg(any(test, feature = "events"))]
     pub(crate) fn channel(&self, id: &str) -> Option<usize> {
         self.channel_by_id.get(id).copied()
+    }
+
+    /// The parent-scoped types of the contract (see [`super::scopes`]).
+    pub(crate) fn parent_scopes(&self) -> &super::scopes::ParentScopes {
+        &self.parent_scopes
     }
 
     pub(super) fn path_fields(&self, resource_type: &str) -> &[String] {
