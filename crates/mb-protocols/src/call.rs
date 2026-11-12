@@ -1307,10 +1307,14 @@ pub(crate) async fn complete(
                 && rt.consistency
                 && let Some(body) = generated.body.as_mut()
             {
-                exec::agree_generated_list(&mut state, (plan, call), body)
+                let changed = exec::agree_generated_list(&mut state, (plan, call), body)
                     .instrument(state_span())
                     .await;
-                if let Some(set) = plan.scenario.and_then(|s| s.spec.set.as_ref()) {
+                // The engine applies a scenario's `set` to an object body only.
+                if changed
+                    && body.is_object()
+                    && let Some(set) = plan.scenario.and_then(|s| s.spec.set.as_ref())
+                {
                     *body = mb_engine::apply_set(body, set);
                 }
             }
