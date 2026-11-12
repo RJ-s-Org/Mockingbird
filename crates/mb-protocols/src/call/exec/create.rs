@@ -200,7 +200,27 @@ pub(super) async fn run(
     // A member sent in another shape than the record holds it (input lines naming
     // variants, where the record holds a connection of lines) is the API's to turn into
     // the record: generated knowing the request, never filled blind.
-    if let Some(member) = request.and_then(|r| unkept(rt, t, r)) {
+    // One a `set` of the create reads or writes is the description's to build. Its
+    // path in the body is under the request's record (`request.record`).
+    let under = desc
+        .and_then(|d| d.request.as_ref())
+        .and_then(|r| r.record.as_ref())
+        .filter(|p| {
+            call.body
+                .as_ref()
+                .is_some_and(|b| b.pointer(p.as_str()).is_some())
+        })
+        .map(|p| p.tokens())
+        .unwrap_or_default();
+    let built = |path: &[&str], member: &str| {
+        let path: Vec<&str> = under
+            .iter()
+            .map(String::as_str)
+            .chain(path.iter().copied())
+            .collect();
+        expressions.is_some_and(|e| e.create_builds(&path, member))
+    };
+    if let Some(member) = request.and_then(|r| unkept(rt, t, r, &built)) {
         tracing::debug!(member = %member, "a create sends a member in another shape");
         return fall("reshaped_member");
     }
@@ -1438,9 +1458,16 @@ pub(in crate::call) fn created_schemas(rt: &crate::MockRuntime, t: &str) -> Vec<
 /// and with no conversion that loses nothing ([`converted`]): Shopify's
 /// `cartCreate(input: {lines})`, a list of line inputs, beside the cart's connection of
 /// lines. A reference to a held record ([`references_object`]) is the record it names,
-/// so it is kept. A member at the request's top is [`reshape`]'s: one in another
-/// container is left out for fill ([`other_container`]).
-fn unkept(rt: &crate::MockRuntime, t: &str, request: &Value) -> Option<String> {
+/// so it is kept, and so is one the description builds (`built`, given the member's
+/// path in the request and its name: a create's `set` reading or writing it). A member
+/// at the request's top is [`reshape`]'s: one in another container is left out for
+/// fill ([`other_container`]).
+fn unkept(
+    rt: &crate::MockRuntime,
+    t: &str,
+    request: &Value,
+    built: &dyn Fn(&[&str], &str) -> bool,
+) -> Option<String> {
     let bundle = rt.bundle();
     let reads = read_shapes(rt, t);
     let schemas_of = |name: &str| -> Vec<(Value, bool)> {
@@ -1475,7 +1502,9 @@ fn unkept(rt: &crate::MockRuntime, t: &str, request: &Value) -> Option<String> {
     let top = request.as_object()?;
     top.iter().find_map(|(name, sent)| match sent {
         Value::Object(inner) if schemas_of(name).is_empty() => {
-            inner.iter().find_map(|(name, sent)| check(name, sent))
+            inner.iter().find_map(|(member, sent)| {
+                check(member, sent).filter(|_| !built(&[name.as_str(), member.as_str()], member))
+            })
         }
         _ => None,
     })

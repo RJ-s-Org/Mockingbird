@@ -515,6 +515,7 @@ pub async fn send_to(
 pub struct GraphqlHarness {
     pub rt: std::sync::Arc<mb_protocols::MockRuntime>,
     pub provider: std::sync::Arc<mb_llm::ScriptedProvider>,
+    pub recorded: std::sync::Arc<Records>,
     router: axum::Router,
 }
 
@@ -535,6 +536,7 @@ pub fn graphql_described(
         router: mb_protocols::graphql::try_router(std::sync::Arc::clone(&h.rt)).unwrap(),
         rt: h.rt,
         provider: h.provider,
+        recorded: h.recorded,
     }
 }
 

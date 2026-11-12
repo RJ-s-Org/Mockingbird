@@ -30,6 +30,7 @@ mod create_refusals;
 mod create_refusals_enforced;
 mod create_render_errors;
 mod create_repeats;
+mod create_set_builds;
 mod create_starts;
 mod create_target_overlay;
 mod data_plane_auth;
