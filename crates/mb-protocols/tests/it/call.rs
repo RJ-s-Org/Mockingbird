@@ -6639,3 +6639,76 @@ async fn an_own_effect_is_owner_checked_as_merged() {
         json!({"login": "octo", "plan": "pro"})
     );
 }
+
+/// GitHub's shape: a repository is read at `/repos/{owner}/{repo}`, and a team's view
+/// of one (a different schema) at a deeper route listed first. The direct route is
+/// the type's read, so what it answers is kept as a `repos` record.
+const TEAM_REPOS: &str = r##"
+openapi: 3.0.0
+info: {title: GitHub, version: "1"}
+paths:
+  /orgs/{org}/teams/{team_slug}/repos/{owner}/{repo}:
+    get:
+      operationId: teams/check-permissions-for-repo-in-org
+      parameters:
+        - {name: org, in: path, required: true, schema: {type: string}}
+        - {name: team_slug, in: path, required: true, schema: {type: string}}
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/team-repository"}}}}
+        "404": {description: not found}
+  /repos/{owner}/{repo}:
+    get:
+      operationId: repos/get
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/full-repository"}}}}
+        "404": {description: not found}
+components:
+  schemas:
+    full-repository:
+      type: object
+      required: [id, name, full_name]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        full_name: {type: string}
+        owner: {$ref: "#/components/schemas/simple-user"}
+        subscribers_count: {type: integer}
+    team-repository:
+      type: object
+      required: [id, name, full_name]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        full_name: {type: string}
+        role_name: {type: string}
+    simple-user:
+      type: object
+      required: [login]
+      properties:
+        login: {type: string}
+"##;
+
+#[tokio::test]
+async fn a_repository_read_at_its_own_route_is_kept_and_read_from_state() {
+    let repo = json!({
+        "id": 1,
+        "name": "r",
+        "full_name": "o/r",
+        "owner": {"login": "o"},
+        "subscribers_count": 3
+    });
+    let h = actions_of(TEAM_REPOS, vec![Ok(repo.to_string())]);
+    let (source, first) = read(&h, "/repos/o/r").await;
+    assert_ne!(source, "state", "{first}");
+    assert_eq!(h.provider.requests().len(), 1);
+
+    let (source, again) = read(&h, "/repos/o/r").await;
+    assert_eq!(source, "state", "{again}");
+    assert_eq!(again, first);
+    assert_eq!(h.provider.requests().len(), 1);
+}

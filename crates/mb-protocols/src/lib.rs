@@ -624,7 +624,7 @@ impl MockRuntime {
     ) -> Self {
         let bundle = Arc::new(mb_mcm::world::apply(&self.bundle, base, world));
         self.described = call::Described::new(&bundle, base, world, revision);
-        self.index = call::BundleIndex::new(&bundle);
+        self.index = call::BundleIndex::described(&bundle, &call::described_reads(base, world));
         self.credential_names = CredentialNames::new(&self.data_plane_auth, &bundle);
         #[cfg(feature = "graphql")]
         {

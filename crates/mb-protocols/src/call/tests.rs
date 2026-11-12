@@ -1508,3 +1508,148 @@ fn only_a_parameter_ending_the_route_trails_it() {
     );
     assert_eq!(trailing_path_param("/v1/customers"), None);
 }
+
+/// Two reads by path of `repos`: a team's view of a repository, listed first, and the
+/// repository's own route.
+const REPO_READS: &str = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /orgs/{org}/teams/{team_slug}/repos/{owner}/{repo}:
+    get:
+      operationId: teamRepo
+      parameters:
+        - {name: org, in: path, required: true, schema: {type: string}}
+        - {name: team_slug, in: path, required: true, schema: {type: string}}
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/team-repository"}}}}}
+  /repos/{owner}/{repo}:
+    get:
+      operationId: getRepo
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/full-repository"}}}}}
+components:
+  schemas:
+    full-repository: {type: object, properties: {id: {type: integer}, name: {type: string}, full_name: {type: string}}}
+    team-repository: {type: object, properties: {id: {type: integer}, name: {type: string}, role_name: {type: string}}}
+"##;
+
+fn read_of(bundle: &Bundle, index: &BundleIndex, t: &str) -> Option<String> {
+    let i = index.detail_reads.get(t)?;
+    Some(bundle.operations.get(*i)?.id.clone())
+}
+
+#[test]
+fn a_types_read_is_its_most_direct_route() {
+    let bundle = compile(REPO_READS.as_bytes()).unwrap();
+    let type_of = |id: &str| {
+        let op = bundle.operations.iter().find(|o| o.id == id).unwrap();
+        op.resource_type.clone()
+    };
+    assert_eq!(type_of("teamRepo").as_deref(), Some("repos"));
+    assert_eq!(type_of("getRepo").as_deref(), Some("repos"));
+    let index = BundleIndex::new(&bundle);
+    assert_eq!(
+        read_of(&bundle, &index, "repos").as_deref(),
+        Some("getRepo")
+    );
+    // A read the world description makes one goes first.
+    let described = HashSet::from(["teamRepo"]);
+    let index = BundleIndex::described(&bundle, &described);
+    assert_eq!(
+        read_of(&bundle, &index, "repos").as_deref(),
+        Some("teamRepo")
+    );
+}
+
+#[test]
+fn a_types_read_is_where_a_create_makes_it_and_answers_its_own_definition() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /teams/{team_id}:
+    get:
+      operationId: legacyTeam
+      parameters: [{name: team_id, in: path, required: true, schema: {type: integer}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/team"}}}}}
+  /orgs/{org}/teams:
+    post:
+      operationId: createTeam
+      parameters: [{name: org, in: path, required: true, schema: {type: string}}]
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/team"}}}}}
+  /orgs/{org}/teams/{team_slug}:
+    get:
+      operationId: getTeam
+      parameters:
+        - {name: org, in: path, required: true, schema: {type: string}}
+        - {name: team_slug, in: path, required: true, schema: {type: string}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/team"}}}}}
+  /issuing/cards/{card}:
+    get:
+      operationId: issuingCard
+      parameters: [{name: card, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/issuing.card"}}}}}
+  /customers/{customer}/cards/{id}:
+    get:
+      operationId: customerCard
+      parameters:
+        - {name: customer, in: path, required: true, schema: {type: string}}
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/card"}}}}}
+components:
+  schemas:
+    team: {type: object, properties: {id: {type: integer}, slug: {type: string}}}
+    card: {type: object, properties: {id: {type: string}, last4: {type: string}}}
+    issuing.card: {type: object, properties: {id: {type: string}, cardholder: {type: string}}}
+"##;
+    let bundle = compile(contract.as_bytes()).unwrap();
+    let index = BundleIndex::new(&bundle);
+    assert_eq!(
+        read_of(&bundle, &index, "teams").as_deref(),
+        Some("getTeam")
+    );
+    assert_eq!(
+        read_of(&bundle, &index, "cards").as_deref(),
+        Some("customerCard")
+    );
+}
+
+#[test]
+fn a_definition_is_named_for_its_type_by_any_plural() {
+    assert!(named_for("balance_transaction", "balance_transactions"));
+    assert!(named_for("policy", "policies"));
+    assert!(named_for("address", "addresses"));
+    assert!(named_for("Card", "cards"));
+    assert!(!named_for("issuing.card", "cards"));
+    assert!(!named_for(
+        "customer_balance_transaction",
+        "balance_transactions"
+    ));
+}
+
+/// A kind or type the description changes makes its read; a target written alone
+/// (`e`) only names the record.
+#[test]
+fn the_reads_a_description_writes_are_those_it_changes() {
+    let world = |v: Value| serde_json::from_value::<mb_mcm::world::World>(v).unwrap();
+    let base = world(json!({"operations": {
+        "a": {"kind": "read", "type": "x", "target": {"path_param": "id"}},
+        "b": {"kind": "read", "type": "x", "target": {"path_param": "id"}},
+        "c": {"kind": "list", "type": "x"},
+        "e": {"kind": "read", "type": "x", "target": {"path_param": "id"}}
+    }}));
+    let effective = world(json!({"operations": {
+        "a": {"kind": "read", "type": "x", "target": {"path_param": "id"}},
+        "b": {"kind": "read", "type": "y", "target": {"path_param": "id"}},
+        "c": {"kind": "read", "type": "x", "target": {"path_param": "id"}},
+        "d": {"kind": "read", "type": "x"},
+        "e": {"kind": "read", "type": "x", "target": {"path_param": "key"}}
+    }}));
+    let mut found: Vec<&str> = described_reads(&base, &effective).into_iter().collect();
+    found.sort_unstable();
+    assert_eq!(found, ["b", "c", "d"]);
+}
