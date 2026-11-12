@@ -808,6 +808,7 @@ async fn prepare_state<'a>(
             }
             exec::Ran::Generate(recalled) => (recalled, Usage::default()),
             exec::Ran::Filled(usage) => (None, usage),
+            exec::Ran::Spent(recalled, usage) => (recalled, usage),
         };
     if target.is_none()
         && let Some(served) = member_read(&mut state, plan, call, response_schema)

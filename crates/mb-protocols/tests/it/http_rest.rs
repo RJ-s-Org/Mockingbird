@@ -1325,7 +1325,7 @@ async fn get_after_create_is_served_from_state() {
 }
 
 #[tokio::test]
-async fn stored_partial_resource_is_generated_and_overlaid() {
+async fn stored_partial_resource_is_completed_from_state() {
     let h = offline();
     h.rt.state
         .upsert(
@@ -1339,7 +1339,7 @@ async fn stored_partial_resource_is_generated_and_overlaid() {
         .await
         .unwrap();
     let resp = send(&h, get("/orders/o1")).await;
-    assert_eq!(header_str(&resp, "x-mockingbird-source"), "fallback");
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "state");
     let body = body_json(resp).await;
     assert_eq!(body["customerId"], "c9");
     assert!(body["total"].is_number(), "{body}");

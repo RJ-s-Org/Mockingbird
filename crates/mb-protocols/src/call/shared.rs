@@ -8,7 +8,9 @@
 //! a GraphQL type (`PullRequest`, `Repository`) declaring the same identity. It is
 //! answered in the reading mock's shape: members renamed between camelCase and
 //! snake_case where only that differs, enum values in the reading schema's case,
-//! and REST's `node_id` as GraphQL's `id` (and back).
+//! REST's `node_id` as GraphQL's `id` (and back), and a scalar one shape holds
+//! flattened, named for the object the other holds it in, nested there (GraphQL's
+//! `headRefName` as REST's `head.ref`, and back).
 
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -394,7 +396,143 @@ fn reshape_at(
             out.insert(to.to_string(), value.clone());
         }
     }
+    unflattened(props, defs, data, &mut out);
+    flattened(props, defs, data, &mut out);
     Value::Object(out)
+}
+
+/// The names a member whose words are `words` may go by in a shape: as is in
+/// snake_case or in camelCase.
+fn spellings(words: &[String]) -> [String; 2] {
+    let snaked = words.join("_");
+    let camelled = camel(&snaked);
+    [snaked, camelled]
+}
+
+/// The word lists a flattened member named by `words` may stand for: its words, then,
+/// when they end in `name`, those before it (`headRefName` is the name of the head's
+/// ref, REST's `head.ref`).
+fn flat_forms(words: &[String]) -> Vec<&[String]> {
+    let mut forms = vec![words];
+    if words.len() > 2 && words.last().is_some_and(|w| w == "name") {
+        forms.push(&words[..words.len() - 1]);
+    }
+    forms
+}
+
+/// Whether `value` is a scalar a flattened member can carry.
+fn scalar(value: &Value) -> bool {
+    matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_))
+}
+
+/// The scalar members of `data` that the reading shape (`props`) holds one object down
+/// rather than at this level, set there in `out`: GraphQL's `headRefName` as REST's
+/// `head.ref`, a member named by the object's words and then the member's (with a
+/// trailing `name` read as the member itself, see [`flat_forms`]), of a JSON type the
+/// member allows. A member the shape declares at this level, a value `out` holds
+/// already, and a place two members of `data` would both fill are left alone.
+fn unflattened(
+    props: &Map<String, Value>,
+    defs: &Map<String, Value>,
+    data: &Value,
+    out: &mut Map<String, Value>,
+) {
+    let mut found: Vec<(String, String, Value)> = Vec::new();
+    let mut doubled: Vec<(String, String)> = Vec::new();
+    for (key, value) in data.as_object().into_iter().flatten() {
+        if !scalar(value)
+            || [key.clone(), snake(key), camel(key)]
+                .iter()
+                .any(|n| props.contains_key(n))
+        {
+            continue;
+        }
+        let named = words(key);
+        let place = flat_forms(&named).into_iter().find_map(|form| {
+            (1..form.len()).find_map(|split| {
+                spellings(&form[..split]).into_iter().find_map(|outer| {
+                    let inner_props = object_props(defs, props.get(&outer)?)?;
+                    spellings(&form[split..]).into_iter().find_map(|inner| {
+                        let schema = inner_props.get(&inner)?;
+                        let value = fit_enum(schema, defs, value);
+                        of_type(schema, defs, &value).then(|| (outer.clone(), inner, value))
+                    })
+                })
+            })
+        });
+        let Some((outer, inner, value)) = place else {
+            continue;
+        };
+        if found.iter().any(|(o, i, _)| *o == outer && *i == inner) {
+            doubled.push((outer, inner));
+            continue;
+        }
+        found.push((outer, inner, value));
+    }
+    for (outer, inner, value) in found {
+        if doubled.iter().any(|(o, i)| *o == outer && *i == inner) {
+            continue;
+        }
+        let holder = out
+            .entry(outer)
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Value::Object(holder) = holder {
+            holder.entry(inner).or_insert(value);
+        }
+    }
+}
+
+/// The scalar members of an object member of `data` that the reading shape (`props`)
+/// does not declare, set in `out` at this level where the shape holds them flattened:
+/// REST's `head.ref` as GraphQL's `headRefName`, the reverse of [`unflattened`] (the
+/// object's words and the member's, else with `name` after them). A member `out` holds
+/// already, and one two members would both fill, are left alone.
+fn flattened(
+    props: &Map<String, Value>,
+    defs: &Map<String, Value>,
+    data: &Value,
+    out: &mut Map<String, Value>,
+) {
+    let mut found: Vec<(String, Value)> = Vec::new();
+    let mut doubled: Vec<String> = Vec::new();
+    for (key, value) in data.as_object().into_iter().flatten() {
+        let Value::Object(inner) = value else {
+            continue;
+        };
+        if [key.clone(), snake(key), camel(key)]
+            .iter()
+            .any(|n| props.contains_key(n))
+        {
+            continue;
+        }
+        for (member, value) in inner.iter().filter(|(_, v)| scalar(v)) {
+            let mut path = words(key);
+            path.extend(words(member));
+            let named: Vec<String> = path.iter().cloned().chain(["name".to_string()]).collect();
+            let place = [path.as_slice(), named.as_slice()]
+                .into_iter()
+                .find_map(|form| {
+                    spellings(form).into_iter().find_map(|name| {
+                        let schema = props.get(&name)?;
+                        let value = fit_enum(schema, defs, value);
+                        of_type(schema, defs, &value).then_some((name, value))
+                    })
+                });
+            let Some((name, value)) = place else {
+                continue;
+            };
+            if found.iter().any(|(n, _)| *n == name) {
+                doubled.push(name);
+                continue;
+            }
+            found.push((name, value));
+        }
+    }
+    for (name, value) in found {
+        if !doubled.contains(&name) {
+            out.entry(name).or_insert(value);
+        }
+    }
 }
 
 /// Whether `value` is of a JSON type `schema` allows (through a `$ref` and the
@@ -1204,6 +1342,44 @@ type Mutation { createPullRequest(input: CreatePullRequestInput!): CreatePullReq
         assert_eq!(
             reshape(props.as_object().unwrap(), &Map::new(), &data),
             json!({"number": 7, "created_at": "2024-01-01T00:00:00Z", "state": "closed"})
+        );
+    }
+
+    #[test]
+    fn reshape_nests_and_flattens_a_member_named_for_its_object() {
+        // REST's `head.ref` from GraphQL's `headRefName`; `headRefOid` names nothing
+        // REST's head declares, so it is left out.
+        let rest = json!({
+            "number": {"type": "integer"},
+            "head": {"type": "object", "properties": {
+                "ref": {"type": "string"}, "sha": {"type": "string"}}},
+            "base": {"type": "object", "properties": {"ref": {"type": "string"}}}
+        });
+        let graphql = json!({"number": 7, "headRefName": "fix-empty-path",
+                             "headRefOid": "4b7e", "baseRefName": "main"});
+        assert_eq!(
+            reshape(rest.as_object().unwrap(), &Map::new(), &graphql),
+            json!({"number": 7, "head": {"ref": "fix-empty-path"}, "base": {"ref": "main"}})
+        );
+        // And back: REST's `head.ref` as GraphQL's `headRefName`; a member of
+        // another JSON type (`headRef`, an object) is passed over.
+        let gql = json!({
+            "number": {"type": "integer"},
+            "headRef": {"type": "object", "properties": {"name": {"type": "string"}}},
+            "headRefName": {"type": "string"},
+            "baseRefName": {"type": "string"}
+        });
+        let stored = json!({"number": 7, "head": {"ref": "fix-empty-path", "sha": "4b7e"},
+                            "base": {"ref": "main"}});
+        assert_eq!(
+            reshape(gql.as_object().unwrap(), &Map::new(), &stored),
+            json!({"number": 7, "headRefName": "fix-empty-path", "baseRefName": "main"})
+        );
+        // A place two members would both fill is left alone.
+        let both = json!({"number": 7, "headRef": "a", "headRefName": "b"});
+        assert_eq!(
+            reshape(rest.as_object().unwrap(), &Map::new(), &both),
+            json!({"number": 7})
         );
     }
 }

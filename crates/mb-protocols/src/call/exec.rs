@@ -86,6 +86,7 @@ mod create;
 pub(super) use create::issued_aliases;
 mod embedded;
 mod fields;
+mod held_gaps;
 mod linked;
 mod list;
 mod patches;
@@ -118,6 +119,10 @@ pub(super) enum Ran {
     /// The call generates after a fill it already spent these tokens on, which the
     /// generated answer's usage counts too.
     Filled(mb_llm::Usage),
+    /// [`Ran::Generate`] after a fill it already spent these tokens on (a held record
+    /// completed for a read that still does not render), which the generated answer's
+    /// usage counts too.
+    Spent(Option<Earlier>, mb_llm::Usage),
 }
 
 /// The call's target as [`super::prepare`] found it.
@@ -387,18 +392,11 @@ async fn read(
         false => None,
     };
     let stored = linked.as_ref().unwrap_or(stored);
-    let read = held_read(
-        state,
-        plan,
-        call,
-        stored,
-        match &pooled_id {
-            Some(id) => Some(id.as_str()),
-            None => held.target_id,
-        },
-        response_schema,
-        true,
-    );
+    let target_id = match &pooled_id {
+        Some(id) => Some(id.as_str()),
+        None => held.target_id,
+    };
+    let read = held_read(state, plan, call, stored, target_id, response_schema, true);
     match read.await {
         HeldRead::Served(served) => {
             answered(rt, plan, kind);
@@ -409,8 +407,59 @@ async fn read(
             Ran::Generate(Some(earlier))
         }
         HeldRead::Unrendered(earlier, why) => {
-            fell_back_unrendered(rt, plan, kind, Fallback::RenderFailed, &why);
-            Ran::Generate(earlier)
+            // A record lacking what the answer requires is completed from state, its
+            // stored values kept, rather than generated whole ([`held_gaps`]). Not one
+            // with remembered writes it does not show yet: generation catches up on them.
+            let remembered = match target_id {
+                Some(id) => {
+                    write_memory::remembers(state, &plan.session, &stored.resource_type, id)
+                        .instrument(state_span())
+                        .await
+                }
+                None => false,
+            };
+            let done = match remembered {
+                true => None,
+                false => held_gaps::completed(state, (plan, call), stored, response_schema).await,
+            };
+            let Some(done) = done else {
+                fell_back_unrendered(rt, plan, kind, Fallback::RenderFailed, &why);
+                return Ran::Generate(earlier);
+            };
+            let again = held_read(
+                state,
+                plan,
+                call,
+                &done.record,
+                target_id,
+                response_schema,
+                true,
+            );
+            let (earlier, usage) = match again.await {
+                HeldRead::Served(mut served) => {
+                    if !held_gaps::keep(state, plan, stored, &done).await {
+                        tracing::debug!(
+                            operation = %plan.op.id,
+                            "a completed record is answered, not stored"
+                        );
+                    }
+                    served.usage = served.usage + done.usage;
+                    answered(rt, plan, kind);
+                    return Ran::Answered(served);
+                }
+                HeldRead::Behind(recalled) => {
+                    fell_back(rt, plan, kind, Fallback::Behind.as_str());
+                    (Some(recalled), done.usage)
+                }
+                HeldRead::Unrendered(recalled, why) => {
+                    fell_back_unrendered(rt, plan, kind, Fallback::RenderFailed, &why);
+                    (recalled.or(earlier), done.usage)
+                }
+            };
+            match usage == mb_llm::Usage::default() {
+                true => Ran::Generate(earlier),
+                false => Ran::Spent(earlier, usage),
+            }
         }
     }
 }
