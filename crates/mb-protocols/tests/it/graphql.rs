@@ -3239,6 +3239,47 @@ async fn a_type_with_no_id_is_kept_by_its_lookup_member() {
     assert_eq!(provider.requests().len(), 2);
 }
 
+/// A nested lookup answers the value it was asked for, whatever the model drew, and
+/// a lookup by a value of another type, a list and an unselected member stay as drawn.
+#[tokio::test]
+async fn a_nested_lookup_answers_its_argument() {
+    const SDL: &str = r#"
+type Repo { id: ID! name: String! stars: Int! }
+type User { id: ID! login: String! repository(name: String!): Repo repositories(name: String): [Repo!]! }
+type Query { user(login: String!): User }
+"#;
+    let provider = scripted(vec![
+        json!({"__typename": "User", "id": "U_1", "login": "torvalds",
+        "repository": {"__typename": "Repo", "id": "R_1", "name": "alpha", "stars": 3},
+        "repositories": [{"__typename": "Repo", "id": "R_2", "name": "beta", "stars": 1}],
+        "other": {"__typename": "Repo", "id": "R_3", "stars": 5}}),
+    ]);
+    let base = serve(MockRuntime::new(
+        "gh",
+        Arc::new(compile(SDL.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    ))
+    .await;
+    let read = post(
+        &base,
+        json!({"query": r#"{ user(login: "torvalds") { login repository(name: "linux") { id name stars }
+            repositories(name: "linux") { name } other: repository(name: "git") { stars } } }"#}),
+        &[("x-mockingbird-session", "s1")],
+    )
+    .await;
+    let user = &read.body["data"]["user"];
+    assert_eq!(user["repository"]["name"], "linux", "{}", read.body);
+    assert_eq!(user["repository"]["stars"], 3, "{}", read.body);
+    // A list is not a lookup: its items are never renamed (the filter drops `beta`).
+    let listed = user["repositories"].as_array().unwrap();
+    assert!(listed.iter().all(|r| r["name"] != "linux"), "{}", read.body);
+    assert_eq!(user["other"]["stars"], 5, "{}", read.body);
+}
+
 const VARIANTS: &str = r#"
 type ProductVariant { id: ID! title: String! product: Product }
 type Product { id: ID! handle: String! title: String! variants: [ProductVariant!]! }

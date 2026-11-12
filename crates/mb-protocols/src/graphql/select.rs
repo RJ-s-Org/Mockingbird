@@ -443,6 +443,79 @@ fn lookup_argument<'a>(
     })
 }
 
+/// Bounds [`echo_lookups`] (recursive types).
+const MAX_ECHO_DEPTH: usize = 12;
+
+/// `value`, an answer to `sel` keyed by response key for an object of `schema`, with
+/// each nested lookup's argument in the member it names: below the root, a field
+/// returning one object and looked up by a value of its own ([`lookup_argument`]:
+/// `user { repository(name: "linux") { name } }`) answers that value there, as the
+/// API would for the record it found. A model or the faker may draw another; the
+/// record is then stored and read back under the name it was asked for. The root's
+/// own arguments are echoed elsewhere (the engine's identity and the faker's echoes).
+pub(crate) fn echo_lookups(
+    bundle: &mb_mcm::Bundle,
+    schema: &Value,
+    sel: &Selection,
+    value: &mut Value,
+) {
+    echo_in(bundle, schema, sel, value, 0);
+}
+
+fn echo_in(
+    bundle: &mb_mcm::Bundle,
+    schema: &Value,
+    sel: &Selection,
+    value: &mut Value,
+    depth: usize,
+) {
+    if depth > MAX_ECHO_DEPTH || sel.fields.is_empty() {
+        return;
+    }
+    match value {
+        Value::Array(items) => {
+            if let Some(item) = super::state::list_item(schema) {
+                for v in items {
+                    echo_in(bundle, item, sel, v, depth + 1);
+                }
+            }
+        }
+        Value::Object(obj) => {
+            let Some((_, def)) = super::state::object_type(bundle, schema, obj) else {
+                return;
+            };
+            let Some(props) = def.get("properties").and_then(Value::as_object) else {
+                return;
+            };
+            for (key, child) in &sel.fields {
+                let (Some(member), Some(field)) = (obj.get_mut(key), props.get(&child.name)) else {
+                    continue;
+                };
+                if let (Value::Object(found), Some(arg)) =
+                    (&mut *member, lookup_argument(field, &bundle.defs, child))
+                    && let Some(given) = child.args.get(arg)
+                {
+                    let fits = |held: &Value| match (held, given) {
+                        (Value::String(_), Value::String(_))
+                        | (Value::Number(_), Value::Number(_)) => Some(given.clone()),
+                        (Value::String(_), Value::Number(n)) => Some(Value::String(n.to_string())),
+                        _ => None,
+                    };
+                    for (k, grandchild) in &child.fields {
+                        if grandchild.name == arg
+                            && let Some(echo) = found.get(k).and_then(fits)
+                        {
+                            found.insert(k.clone(), echo);
+                        }
+                    }
+                }
+                echo_in(bundle, field, child, member, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Whether a scalar property schema is an enum (through a nullable `anyOf`
 /// or a `$ref`).
 fn is_enum(schema: &Value, defs: &Map<String, Value>) -> bool {
