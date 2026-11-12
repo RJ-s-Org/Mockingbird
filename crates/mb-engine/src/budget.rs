@@ -43,8 +43,13 @@ use std::collections::{HashMap, HashSet};
 pub use mb_mcm::stem;
 use serde_json::{Map, Value};
 
-/// Completion tokens an answer is shaped to by default.
-pub const DEFAULT_OUTPUT_BUDGET: u32 = 1500;
+/// Completion tokens an answer is shaped to by default. A realistic page fits: Plaid's
+/// `/transactions/sync` (eight transactions, two modified, one removed, three accounts)
+/// is estimated at about 2,850 and `/identity/get` (three accounts with owners) at
+/// about 1,700, which 1,500 cut to one transaction and two accounts. The answers it was
+/// made for still get shaped: a TMDB detail page with its appended sub-resources (about
+/// 5k) and GitHub's `search/commits`.
+pub const DEFAULT_OUTPUT_BUDGET: u32 = 4000;
 
 /// Characters per output token of compact JSON.
 const CHARS_PER_TOKEN: f64 = 3.5;

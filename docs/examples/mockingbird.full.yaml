@@ -47,7 +47,7 @@ limits:
   max_concurrent_generations: 64
   max_request_bytes: 1048576
   max_response_bytes: 1048576
-  output_budget_tokens: 1500
+  output_budget_tokens: 4000
   repetition_guard: true
   repetition_guard_span: 32768
   generation_timeout: 20s

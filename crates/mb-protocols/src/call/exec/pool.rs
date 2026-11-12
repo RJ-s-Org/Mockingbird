@@ -481,6 +481,15 @@ fn keyed_alone(op: &Operation) -> bool {
     }
 }
 
+/// The `id_member` value of one of the pool's records of type `t` (the first), for a
+/// reference that must name a record of the type; `None` when the pool holds none.
+pub(super) fn an_id(rt: &MockRuntime, t: &str, id_member: &str) -> Option<Value> {
+    rt.pool
+        .records(t, &digest(rt, t))
+        .into_iter()
+        .find_map(|record| record.get(id_member).cloned())
+}
+
 /// A read by id of a record the session does not hold, from the pool (see the module's
 /// doc): the record stored in the session under `id`.
 pub(super) async fn read(

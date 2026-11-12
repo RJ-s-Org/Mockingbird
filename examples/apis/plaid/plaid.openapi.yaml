@@ -425,7 +425,7 @@ components:
       required: [item_id, webhook, error, available_products, billed_products, consent_expiration_time, update_type]
       properties:
         item_id: { $ref: "#/components/schemas/ItemId" }
-        institution_id: { type: [string, "null"], pattern: "^ins_[0-9]{1,6}$" }
+        institution_id: { type: [string, "null"], pattern: "^ins_[0-9]{1,6}$", examples: [ins_109508] }
         institution_name: { type: [string, "null"] }
         webhook: { type: [string, "null"] }
         auth_method: { type: [string, "null"], enum: [INSTANT_AUTH, INSTANT_MATCH, AUTOMATED_MICRODEPOSITS, SAME_DAY_MICRODEPOSITS, INSTANT_MICRODEPOSITS, DATABASE_MATCH, DATABASE_INSIGHTS, TRANSFER_MIGRATED, INVESTMENTS_FALLBACK, null] }

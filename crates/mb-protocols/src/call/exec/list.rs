@@ -356,9 +356,12 @@ async fn answer(
     state_lists::mark_listed(state, (plan, call), t, &served, ids).await;
     // A list paged by its `Range` header: ordered and cut by it.
     ranges::serve(bundle, (plan, call), &mut served);
-    // What the envelope says of a listed record names one the page lists.
+    // What the envelope says of a listed record names one the page lists, and what it
+    // says of another type's record names one it lists beside, or the session listed.
     if let Some(body) = served.body.as_mut() {
         with_listed_references(rt, &shape, t, body);
+        with_held_beside(state, (plan, call), t, &shape, body).await;
+        with_beside_references(state, (plan, call), t, body, false).await;
     }
     // A list the query leaves nothing of answers the bodiless status declared for that.
     if none_kept {
@@ -725,7 +728,215 @@ pub(in crate::call) async fn agree_generated(
     let answer = std::mem::take(body);
     *body = with_held_parent(state, (plan, call), t, &shape, answer).await;
     with_listed_references(rt, &shape, t, body);
+    with_beside_references(state, (plan, call), t, body, true).await;
     *body != before
+}
+
+/// `body`, a list answer to `call` whose items are of type `t`, with each reference to a
+/// record of another described type naming one of that type that the answer lists
+/// beside its items ([`state_lists::beside`]: a sync's `accounts`), else one the session
+/// listed under the same issued parent ([`state_lists::issued_marked`]: the Item's
+/// accounts `/accounts/get` listed). A sync's transactions then name its accounts.
+///
+/// For each described type `u` other than `t` whose identity member refers to it
+/// (`account_id` to `account`, as [`with_listed_references`] reads it), that member is a
+/// reference wherever it sits outside the arrays of `u` records, in an object holding a
+/// member `u`'s records do not declare (a transaction's `amount`). Each reference naming
+/// none of those records names, instead, the one at its position among the references,
+/// cycling. With none listed, nothing changes. A page from state (`items` false) keeps
+/// its items as held: only what its envelope drew is pointed.
+async fn with_beside_references(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: &str,
+    body: &mut Value,
+    items: bool,
+) {
+    let rt = state.rt;
+    let Some(world) = rt.described().world().cloned() else {
+        return;
+    };
+    let beside = state_lists::beside(rt, plan.op, t, body);
+    let list = state_lists::list_top(rt, plan.op, body).filter(|_| !items);
+    for (u, desc) in &world.types {
+        let Some(member) = desc
+            .identity
+            .as_ref()
+            .and_then(|i| i.member.as_deref())
+            .filter(|m| u != t && !m.contains('/'))
+        else {
+            continue;
+        };
+        let refers = crate::call::reference_prefix(member).is_some_and(|prefix| {
+            crate::call::effects::type_stem(prefix) == crate::call::effects::type_stem(u)
+        });
+        if !refers {
+            continue;
+        }
+        let arrays: Vec<&str> = beside
+            .iter()
+            .filter(|b| b.t == *u)
+            .map(|b| b.member.as_str())
+            .collect();
+        let mut ids: Vec<(String, Value)> = arrays
+            .iter()
+            .filter_map(|name| body.get(*name)?.as_array())
+            .flatten()
+            .filter_map(|record| {
+                let id = record.get(member)?;
+                Some((id_string(id)?, id.clone()))
+            })
+            .collect();
+        for id in state_lists::issued_marked(state, (plan, call), u).await {
+            if !ids.iter().any(|(held, _)| *held == id) {
+                ids.push((id.clone(), Value::String(id)));
+            }
+        }
+        if ids.is_empty() {
+            continue;
+        }
+        // A reference naming a record the session holds names one already.
+        let mut held = Vec::new();
+        for value in references(body, member, &arrays) {
+            if let Some(id) = id_string(&value)
+                && !ids.iter().any(|(listed, _)| *listed == id)
+                && !held.iter().any(|(kept, _)| *kept == id)
+                && state.get(&plan.session, u, &id).await.is_some()
+            {
+                held.push((id, value));
+            }
+        }
+        let listed = Listed {
+            member: member.to_owned(),
+            declared: record_members(rt, u),
+            ids,
+            kept: held.into_iter().map(|(id, _)| id).collect(),
+        };
+        let Some(members) = body.as_object_mut() else {
+            return;
+        };
+        let mut at = 0;
+        for (name, value) in members.iter_mut() {
+            if !arrays.contains(&name.as_str()) && list.as_deref() != Some(name.as_str()) {
+                repoint(value, &listed, &mut at, 0);
+            }
+        }
+    }
+}
+
+/// The values of each `member` in `body` outside its top members `skipped`, at most
+/// [`MAX_REFERENCE_DEPTH`] deep.
+fn references(body: &Value, member: &str, skipped: &[&str]) -> Vec<Value> {
+    fn walk(value: &Value, member: &str, depth: usize, out: &mut Vec<Value>) {
+        if depth > MAX_REFERENCE_DEPTH {
+            return;
+        }
+        match value {
+            Value::Array(items) => items.iter().for_each(|v| walk(v, member, depth + 1, out)),
+            Value::Object(members) => {
+                for (name, held) in members {
+                    match name == member {
+                        true => out.push(held.clone()),
+                        false => walk(held, member, depth + 1, out),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for (name, value) in body.as_object().into_iter().flatten() {
+        if !skipped.contains(&name.as_str()) {
+            walk(value, member, 0, &mut out);
+        }
+    }
+    out
+}
+
+/// The most held records [`with_held_beside`] puts in one array.
+const MAX_HELD_BESIDE: usize = 100;
+
+/// `body`, a page from state of type `t` records, with each array of another type's
+/// records beside them ([`state_lists::beside`]) holding the session's records of that
+/// type instead of drawn ones: those listed under the same issued parent
+/// ([`state_lists::issued_marked`]), else those the page's records name, at most
+/// [`MAX_HELD_BESIDE`]; one no longer held is left out. Left as drawn when none is held,
+/// or the array, so filled, does not suit its schema.
+async fn with_held_beside(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: &str,
+    shape: &Shape,
+    body: &mut Value,
+) {
+    let rt = state.rt;
+    let bundle = rt.bundle();
+    for found in state_lists::beside(rt, plan.op, t, body) {
+        let mut ids = state_lists::issued_marked(state, (plan, call), &found.t).await;
+        if ids.is_empty() {
+            let items = shape.items_in(body).cloned().unwrap_or_default();
+            for item in &items {
+                if let Some(id) = item.get(&found.identity).and_then(id_string)
+                    && !ids.contains(&id)
+                {
+                    ids.push(id);
+                }
+            }
+        }
+        if ids.is_empty() {
+            continue;
+        }
+        let Some(array_schema) = property_schema(bundle, shape.schema(), &found.member) else {
+            continue;
+        };
+        let (parts, _) = schema_parts(bundle, Some(&array_schema));
+        let item_schema = parts.iter().find_map(|p| p.get("items")).cloned();
+        let mut records = Vec::with_capacity(ids.len());
+        for id in ids.iter().take(MAX_HELD_BESIDE) {
+            if let Some(held) = state.get(&plan.session, &found.t, id).await {
+                records.push(lists::projected(
+                    bundle,
+                    item_schema.as_ref(),
+                    &held.data,
+                    0,
+                ));
+            }
+        }
+        if records.is_empty() {
+            continue;
+        }
+        let filled = Value::Array(records);
+        let fits = plan
+            .engine
+            .schema_violations(bundle, &array_schema, &filled)
+            .is_some_and(|violations| violations.is_empty());
+        if fits && let Some(members) = body.as_object_mut() {
+            members.insert(found.member, filled);
+        }
+    }
+}
+
+/// The members a record of type `u` declares: by its read by path, else by the items of
+/// a list of it. Empty when neither says.
+fn record_members(rt: &MockRuntime, u: &str) -> std::collections::HashSet<String> {
+    let bundle = rt.bundle();
+    let schema = rt.index().record_schemas.get(u).cloned().or_else(|| {
+        bundle
+            .operations
+            .iter()
+            .filter(|op| item_type(rt, op) == Some(u))
+            .filter(|op| {
+                rt.described()
+                    .op(&op.id)
+                    .and_then(|d| d.kind)
+                    .or_else(|| OpKind::of(op))
+                    == Some(OpKind::List)
+            })
+            .find_map(|op| Shape::of(rt, op).map(|shape| shape.items))
+    });
+    schema
+        .and_then(|s| mb_engine::consistency::declared_members(bundle, &s))
+        .unwrap_or_default()
 }
 
 /// Nested members deeper than this in an envelope are not looked into for references.
@@ -740,6 +951,8 @@ struct Listed {
     declared: std::collections::HashSet<String>,
     /// Each listed record's id, as text and as held.
     ids: Vec<(String, Value)>,
+    /// Ids a reference may keep, which none is pointed at: records the session holds.
+    kept: Vec<String>,
 }
 
 /// `body`, a list answer of `shape` whose items are of type `t`, with each reference to
@@ -802,6 +1015,7 @@ fn with_listed_references(rt: &MockRuntime, shape: &Shape, t: &str, body: &mut V
         member: member.to_owned(),
         declared,
         ids,
+        kept: Vec::new(),
     };
     let Some(members) = body.as_object_mut() else {
         return;
@@ -815,7 +1029,8 @@ fn with_listed_references(rt: &MockRuntime, shape: &Shape, t: &str, body: &mut V
 }
 
 /// Points each reference in `value` (at nesting `depth`, see
-/// [`with_listed_references`]) holding an id no listed record has at the listed record
+/// [`with_listed_references`]) holding an id no listed record has, nor one of
+/// `listed.kept`, at the listed record
 /// at its position `at` among them all, when that record's id is held as the reference
 /// is (a string or a number).
 fn repoint(value: &mut Value, listed: &Listed, at: &mut usize, depth: usize) {
@@ -844,6 +1059,7 @@ fn repoint(value: &mut Value, listed: &Listed, at: &mut usize, depth: usize) {
                     continue;
                 };
                 if !listed.ids.iter().any(|(listed_id, _)| *listed_id == id)
+                    && !listed.kept.contains(&id)
                     && let Some((_, named)) = listed.ids.get(*at % listed.ids.len())
                     && named.is_string() == held.is_string()
                 {
