@@ -1,9 +1,10 @@
 //! A single-record read's prompt stays bounded however much the session holds: a read
 //! in another language is shown its record's text without the parts it does not ask to
-//! be embedded, a read generating parts it asks to be embedded is shown its record's own
-//! values, and a first read is shown the records that refer to it without the parts
-//! their reads embedded. The answer keeps the stored values. Driven over the TMDB
-//! example's contract with a scripted LLM.
+//! be embedded, a read generating parts it asks to be embedded is shown its record
+//! without the parts it does not ask for, nested values projected, and a first read is
+//! shown the records that refer to it without the parts their reads embedded. The
+//! answer keeps the stored values. Driven over the TMDB example's contract with a
+//! scripted LLM.
 #![cfg(feature = "http-rest")]
 
 use serde_json::{Value, json};
@@ -153,9 +154,10 @@ async fn a_variant_answered_as_shown_needs_no_repair() {
     assert_eq!(body["budget"], stored["budget"], "{body}");
 }
 
-/// A read generating the parts it asks to be embedded is shown its record's own values,
-/// long text cut, without the parts held already, under a byte bound; the answer keeps
-/// every stored value and the parts held, and takes the new parts from the model.
+/// A read generating the parts it asks to be embedded is shown its record, long text
+/// cut and nested values kept, without the parts it generates, under a byte bound; the
+/// answer keeps every stored value and the parts held, and takes the new parts from the
+/// model.
 #[tokio::test]
 async fn an_embed_read_s_prompt_stays_bounded() {
     let mut answer = movie_details(1003, "en-US");
@@ -173,7 +175,20 @@ async fn an_embed_read_s_prompt_stays_bounded() {
     assert_eq!(shown["title"], "Movie 1003 (en-US)", "{shown}");
     let overview = shown["overview"].as_str().unwrap();
     assert!(overview.ends_with('…'), "{overview}");
-    for left_out in ["credits", "videos", "images", "genres"] {
+    // Its nested values and the held parts it asks for stay, long lists cut; the parts
+    // it generates are not shown.
+    assert_eq!(
+        shown["genres"],
+        held_movie(1003, "en-US")["genres"],
+        "{shown}"
+    );
+    for held_part in ["credits", "videos", "images"] {
+        assert!(shown.get(held_part).is_some(), "{held_part}: {shown}");
+    }
+    let cast = shown["credits"]["cast"].as_array().unwrap();
+    assert!(cast.len() < 10, "{shown}");
+    assert!(cast.last().is_some_and(Value::is_string), "{shown}");
+    for left_out in ["external_ids", "release_dates"] {
         assert!(shown.get(left_out).is_none(), "{left_out}: {shown}");
     }
 
@@ -184,6 +199,64 @@ async fn an_embed_read_s_prompt_stays_bounded() {
     }
     assert_eq!(body["external_ids"]["imdb_id"], "tt7654321", "{body}");
     assert!(body.get("release_dates").is_some(), "{body}");
+}
+
+/// An embed read of a show is shown its nested values (seasons, genres, networks,
+/// creators), so the parts it generates line up with them, but not the parts embedded
+/// before that it does not ask for, under a byte bound; the answer keeps the stored
+/// seasons.
+#[tokio::test]
+async fn an_embed_read_is_shown_its_record_s_nested_values() {
+    const SHOW: u64 = 6001;
+    // The show was read with three parts; a later read asks for its credits.
+    let mut first = tv_details(SHOW, "en-US");
+    let mut answer = first.clone();
+    if let Value::Object(members) = &mut first {
+        members.remove("credits");
+        members.remove("content_ratings");
+    }
+    answer["seasons"][0]["name"] = json!("Made up");
+    answer["credits"]["cast"][0]["character"] = json!("Made up role");
+    let h = held(vec![first.clone(), answer]).await;
+    let (status, _, body) = h
+        .send(
+            "GET",
+            &format!("/3/tv/{SHOW}?language=en-US&append_to_response=videos,images,external_ids"),
+            None,
+            &[],
+        )
+        .await;
+    assert!(status.is_success(), "{body}");
+    let body = generated(
+        &h,
+        &format!("/3/tv/{SHOW}?language=en-US&append_to_response=credits"),
+    )
+    .await;
+    let prompt = last_prompt(&h.provider);
+    let bytes = last_prompt_bytes(&h.provider);
+    assert!(bytes < MAX_DETAIL_PROMPT_BYTES, "{bytes} bytes: {prompt}");
+    let shown = existing(&prompt);
+    assert_eq!(shown["id"], SHOW, "{shown}");
+    for member in ["seasons", "genres", "networks", "created_by"] {
+        assert_eq!(shown[member], first[member], "{member}: {shown}");
+    }
+    for left_out in [
+        "videos",
+        "images",
+        "external_ids",
+        "credits",
+        "content_ratings",
+    ] {
+        assert!(shown.get(left_out).is_none(), "{left_out}: {shown}");
+    }
+
+    // The stored seasons stand; the credits are the model's.
+    assert_eq!(body["seasons"], first["seasons"], "{body}");
+    assert!(body.get("images").is_none(), "{body}");
+    assert_eq!(
+        body["credits"]["cast"][0]["character"], "Made up role",
+        "{body}"
+    );
 }
 
 /// Posts by authors; a post's read can embed its comments.
