@@ -19,6 +19,7 @@ mod perf;
 mod proto;
 mod rpc_shapes;
 mod security;
+mod shared_type_names;
 mod swagger2;
 mod world_tier0;
 mod wsdl;

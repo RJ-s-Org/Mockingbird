@@ -101,6 +101,7 @@ mod runtime;
 mod seeded_mints;
 mod server_references;
 mod shared_state;
+mod shared_type_names;
 mod shopify_storefront_cart;
 mod sibling_writes;
 mod skeletal_answers;
