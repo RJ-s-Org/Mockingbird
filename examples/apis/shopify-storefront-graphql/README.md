@@ -101,14 +101,15 @@ connections hold one item:
 
 The cart is answered from state either way: `cartCreate` answers a cart with an id like
 `gid://shopify/Cart/<token>?key=<key>`, a `checkoutUrl` on the store's domain and
-`totalQuantity: 0`. Offline, a line's price is `0.0` (the faker's `Decimal` is a word),
-so totals stay `0.0` while quantities add up; with an LLM, prices are the variants'.
+`totalQuantity: 0`. Offline, a variant the session generated has price `0.0` (the
+faker's `Decimal` is a word), so totals stay `0.0` while quantities add up; with an LLM,
+or for a variant seeded into the session, prices are the variants'.
 
 ## The cart
 
 The world description makes the cart one stored object:
 
-- `cartCreate` stores a cart (with its `note` and `attributes`); `cartLinesAdd`,
+- `cartCreate` stores a cart (with its `note`, `attributes` and any `lines`); `cartLinesAdd`,
   `cartLinesUpdate` and `cartLinesRemove` change the cart their `cartId` names, and
   `cart(id:)` reads it back, all answered from state with no model call.
 - `cartLinesAdd` of a variant the cart already holds, with the same attributes, raises
@@ -125,12 +126,6 @@ The world description makes the cart one stored object:
 - A line's `merchandise.product` is the product the session holds (handle, title,
   price range, featured image, SEO, ...); its `options`, `variants` and `images` are
   empty there, so read the product itself for them.
-
-The world also describes `cartCreate` with `input.lines` (its `set` builds the lines),
-but on current Mockingbird such a create is still generated, not answered from state:
-the engine treats input lines naming variants as a member sent in another shape than
-the cart holds it, and falls back before `set` applies. Create the cart empty and add
-lines with `cartLinesAdd`, as vercel/commerce does.
 
 ## Scenarios
 
