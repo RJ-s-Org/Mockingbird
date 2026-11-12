@@ -134,7 +134,18 @@ are.
   404 or 405);
 - hosts the proxy saw that no mock claims, with the `proxy.unmapped` mode
   (`pass` or `block`) and request counts;
-- snapshot answers by result (`exact`, `operation`, `miss`, `recorded`).
+- snapshot answers by result (`exact`, `operation`, `miss`, `recorded`);
+- `next_steps`, one per host the proxy blocked since the server started
+  that no mock lists now: how many times it was blocked (over HTTPS, once
+  per `CONNECT`); for a vendor's other host, to add it to the hosts of the
+  mock serving its domain if it is the same API; the catalog examples
+  whose mocks list the host, or, when none does, to import its contract
+  into a mock; and, as a last resort, to let it through
+  (`proxy.vendor_subdomains: pass` for a vendor's other host,
+  `proxy.unmapped: pass` otherwise). Omitted when nothing is left
+  blocked. The MCP `server_status` answer carries the same `next_steps`,
+  and `verify --format text` prints them as `Next:` lines when a check
+  fails.
 
 `--format json` (default), `markdown` (for a job summary or merge request
 comment) or `junit` (one test case per operation, failing on fallbacks or
