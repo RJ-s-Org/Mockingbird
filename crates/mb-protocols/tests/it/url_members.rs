@@ -274,4 +274,89 @@ type Mutation { createTicket(input: CreateTicketInput!): CreateTicketPayload }
         let held = store.get(&key, "ticket", id).await.unwrap().unwrap();
         assert_eq!(held.data["url"], url, "{}", held.data);
     }
+
+    const URI_SDL: &str = r#"
+"""An RFC 3986, RFC 3987, and RFC 6570 (level 4) compliant URI string."""
+scalar URI
+type Project { id: ID! name: String! url: URI }
+type Ticket { id: ID! number: Int! url: URI! }
+input CreateTicketInput { projectId: ID! title: String! }
+type CreateTicketPayload { ticket: Ticket }
+type Query { node(id: ID!): Ticket }
+type Mutation { createTicket(input: CreateTicketInput!): CreateTicketPayload }
+"#;
+
+    /// A `URI` scalar member of a record the executor creates, filled locally with no
+    /// model, holds a link under the parent's, not a drawn word.
+    #[tokio::test]
+    async fn an_executor_create_s_uri_scalar_is_placed_under_its_parent_s() {
+        let doc: mb_mcm::world::World = serde_json::from_value(json!({
+            "version": 1,
+            "types": {"ticket": {"identity": {"member": "id"}}},
+            "operations": {
+                "Query.node": {"kind": "read", "type": "ticket", "target": {"member": "id"}},
+                "Mutation.createTicket": {"kind": "create", "type": "ticket", "answer": {"record": "/ticket"}}
+            }
+        }))
+        .unwrap();
+        let bundle = compile(URI_SDL.as_bytes()).unwrap();
+        let base = mb_mcm::world::tier0(&bundle);
+        let (world, refused) = mb_mcm::world::effective(&bundle, &base, &doc);
+        assert!(refused.is_empty(), "{refused:?}");
+        let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+        let key = SessionKey {
+            workspace: "default".into(),
+            mock: "tracker".into(),
+            session: "s1".into(),
+        };
+        store
+            .upsert(
+                &key,
+                StoredResource {
+                    resource_type: "project".into(),
+                    id: "P_1".into(),
+                    data: json!({"__typename": "Project", "id": "P_1", "name": "roadmap",
+                        "url": "https://tracker.test/acme/roadmap"}),
+                },
+            )
+            .await
+            .unwrap();
+        let rt = MockRuntime::new(
+            "tracker",
+            Arc::new(bundle),
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            Arc::clone(&store),
+        )
+        .with_world(&base, &world, 1);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = mb_protocols::graphql::try_router(Arc::new(rt)).unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let query = r#"mutation { createTicket(input: {projectId: "P_1", title: "Router panics"}) {
+            ticket { id number url } } }"#;
+        let body: Value = reqwest::Client::new()
+            .post(format!("http://{addr}/graphql"))
+            .header("content-type", "application/json")
+            .header("x-mockingbird-session", "s1")
+            .body(json!({ "query": query }).to_string())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(body.get("errors").is_none(), "{body}");
+        assert_eq!(
+            body["extensions"]["mockingbird"]["sources"]["createTicket"], "state",
+            "{body}"
+        );
+        let ticket = &body["data"]["createTicket"]["ticket"];
+        let number = ticket["number"].as_i64().unwrap();
+        let url = format!("https://tracker.test/acme/roadmap/tickets/{number}");
+        assert_eq!(ticket["url"], url.as_str(), "{body}");
+        let id = ticket["id"].as_str().unwrap();
+        let held = store.get(&key, "ticket", id).await.unwrap().unwrap();
+        assert_eq!(held.data["url"], url.as_str(), "{}", held.data);
+    }
 }
