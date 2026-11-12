@@ -270,6 +270,7 @@ async fn call(
         max_tokens: llm.settings.max_tokens,
         max_answer_bytes: None,
         timeout: llm.settings.timeout,
+        hedge: 0,
     };
     let bound = llm.provider.total_timeout(llm.settings.timeout);
     match tokio::time::timeout(bound, llm.provider.complete(request)).await {

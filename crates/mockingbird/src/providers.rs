@@ -562,6 +562,7 @@ pub async fn probe(profile: &FileProfile) -> anyhow::Result<ProbeReport> {
         max_tokens: 64,
         max_answer_bytes: None,
         timeout,
+        hedge: 0,
     };
     let started = Instant::now();
     let result = tokio::time::timeout(timeout, provider.complete(request)).await;

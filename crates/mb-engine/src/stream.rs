@@ -129,6 +129,7 @@ impl Engine {
             max_tokens: self.config.max_tokens,
             max_answer_bytes: None,
             timeout: self.config.timeout,
+            hedge: 0,
         }
     }
 }
