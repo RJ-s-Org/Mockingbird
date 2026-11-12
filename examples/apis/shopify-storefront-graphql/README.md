@@ -122,7 +122,8 @@ The world description makes the cart one stored object:
   A variant the session never read gets the title `Default Title` and price `0.0`.
 - Each line's `cost`, and the cart's `totalQuantity` and `cost` (`subtotalAmount`,
   `totalAmount`, `checkoutChargeAmount`), are computed from the lines on every answer,
-  in USD, in whole cents. There is no tax, shipping or discount before checkout.
+  in USD, in whole cents. There is no tax, shipping or discount before checkout, and
+  the deprecated `totalTaxAmount` is `null`.
 - A line's `merchandise.product` is the product the session holds (handle, title,
   price range, featured image, SEO, ...); its `options`, `variants` and `images` are
   empty there, so read the product itself for them.
