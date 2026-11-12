@@ -193,11 +193,16 @@ impl Harness {
         requests[n].messages.last().unwrap().content.clone()
     }
 
+    /// The write memory's documents, without the marker that the session owns a type
+    /// (`unknown_ids`).
     async fn kept(&self) -> Vec<mb_state::StoredResource> {
-        self.state
+        let mut kept = self
+            .state
             .list(&self.session, INTERNAL_TYPE, 100)
             .await
-            .unwrap()
+            .unwrap();
+        kept.retain(|doc| !doc.id.starts_with("#owns/"));
+        kept
     }
 }
 

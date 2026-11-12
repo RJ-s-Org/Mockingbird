@@ -73,6 +73,7 @@ mod state_lists;
 mod streams;
 mod tokens;
 mod transitions;
+mod unknown_ids;
 mod value_index;
 mod variants;
 mod world;
@@ -550,6 +551,10 @@ async fn prepare_state<'a>(
     let op = plan.op;
     let session = &plan.session;
     let mut state = StateAccess::new(rt);
+    // A write's records of its type are the app's own (see [`unknown_ids`]).
+    if matches!(op.kind, OperationKind::Command(_)) {
+        state.owns = op.resource_type.clone();
+    }
     state.tracks_deleted = deleted::applies(rt, plan);
     if state.tracks_deleted {
         state.call_params = Some(Box::new(OperationCall {
@@ -599,13 +604,16 @@ async fn prepare_state<'a>(
             _ => false,
         };
 
-    if rt.unknown_ids == UnknownIds::NotFound
+    if rt.unknown_ids != UnknownIds::Generate
         && matches!(op.kind, OperationKind::Query)
         && plan.forced_status.is_none()
         && targets_by_path(rt, op)
         && target.is_none()
         && state.available()
         && let (Some(t), Some(id)) = (resource_type, target_id.as_deref())
+        && unknown_ids::not_found(&mut state, session, t)
+            .instrument(state_span())
+            .await
         && !(guarded(rt, op, call).is_some()
             && any_owner_holds(
                 &mut state,
@@ -2157,24 +2165,103 @@ fn path_names_identity(identity: &mb_mcm::Identity) -> bool {
     param == mb_mcm::leaf_member(&identity.field) || identity.path_field.is_some() || id_like(param)
 }
 
-/// Whether `op`'s path parameter holds the id its record is stored by, for
-/// `unknown_ids: 404`: where the world description writes the target's path parameter,
-/// whether that is the one the operation's identity reads; otherwise (tier 0's target
-/// only restates the identity's parameter) [`path_names_identity`] judges by its name.
+/// Whether `op`'s path parameter selects the record a missing id is missing from, for
+/// `unknown_ids` (see [`unknown_ids`]): [`selects_record`], with the target path
+/// parameter the world description writes for it.
 fn targets_by_path(rt: &MockRuntime, op: &Operation) -> bool {
-    let Some(identity) = op.identity.as_ref() else {
-        return false;
-    };
     let written = rt
         .writes_path_target(&op.id)
         .then(|| rt.described().op(&op.id))
         .flatten()
         .and_then(|d| d.target.as_ref())
         .and_then(|t| t.path_param.as_deref());
-    match written {
-        Some(param) => identity.path_param.as_deref() == Some(param),
-        None => path_names_identity(identity),
+    selects_record(op, written, rt.consistency)
+}
+
+/// Whether `op`'s identity path parameter selects one record of its type, decided by
+/// what it resolves to, not by its name. Where the world description writes the target's
+/// path parameter (`written`), whether that is the one the identity reads. Otherwise
+/// whether the identity's parameter ends the route ([`trailing_path_param`]: a literal
+/// suffix of its segment aside, `{Sid}.json`), so the route ends at one record of the
+/// read's type (`/v1/customers/{customer}`, `/v1/checkout/sessions/{session}`), with
+/// `consistency` on: a value that is not the key is then also looked for under the
+/// members a name goes by (`lookup::read_context`), which `consistency: off` skips, so a
+/// miss there says nothing. A parameter further up the route, or with `consistency` off,
+/// counts when its name says it holds the id ([`path_names_identity`]).
+fn selects_record(op: &Operation, written: Option<&str>, consistency: bool) -> bool {
+    let Some(identity) = op.identity.as_ref() else {
+        return false;
+    };
+    if let Some(param) = written {
+        return identity.path_param.as_deref() == Some(param);
     }
+    let trailing = match &op.binding {
+        Binding::Http { path, .. } => trailing_path_param(path),
+        _ => None,
+    };
+    (consistency && trailing.is_some() && identity.path_param == trailing)
+        || path_names_identity(identity)
+}
+
+/// The parameter a route template ends at: [`last_path_param`] when nothing but a
+/// literal suffix of its own segment follows it (`/Messages/{Sid}.json`); none for
+/// `/a/{x}/b`.
+fn trailing_path_param(template: &str) -> Option<String> {
+    let param = last_path_param(template)?;
+    let end = template.rfind('}')?;
+    (!template[end..].contains('/')).then_some(param)
+}
+
+/// What `unknown_ids` left unset goes by, per resource type of a contract: the types a
+/// read selects one record of by a path parameter (the identity's, where it ends the
+/// route or the world description writes it), and the types an
+/// operation of kind create makes, each with the first such operation (by position).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct UnknownIdTypes {
+    /// The types read by a path parameter that selects one record.
+    pub read: std::collections::BTreeSet<String>,
+    /// The creatable types, with the id of their first create.
+    pub creatable: std::collections::BTreeMap<String, String>,
+}
+
+/// [`UnknownIdTypes`] of `bundle` (a bundle the world description was applied to, as a
+/// runtime serves it), where the description writes the target path parameter of the
+/// operations `written` names ([`mb_mcm::world::written_path_targets`]), in `world`, and
+/// the mock has `consistency`. The runtime decides each read the same way.
+#[must_use]
+pub fn unknown_id_types(
+    bundle: &mb_mcm::Bundle,
+    world: &mb_mcm::world::World,
+    written: &std::collections::BTreeSet<String>,
+    consistency: bool,
+) -> UnknownIdTypes {
+    use mb_mcm::world::OpKind;
+    let mut out = UnknownIdTypes::default();
+    for op in &bundle.operations {
+        let Some(t) = op.resource_type.as_deref() else {
+            continue;
+        };
+        match OpKind::of(op) {
+            Some(OpKind::Create) => {
+                out.creatable
+                    .entry(t.to_owned())
+                    .or_insert_with(|| op.id.clone());
+            }
+            Some(OpKind::Read) => {
+                let param = written
+                    .contains(&op.id)
+                    .then(|| world.operations.get(&op.id))
+                    .flatten()
+                    .and_then(|d| d.target.as_ref())
+                    .and_then(|t| t.path_param.as_deref());
+                if selects_record(op, param, consistency) {
+                    out.read.insert(t.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Whether a path parameter's name says it holds an id.

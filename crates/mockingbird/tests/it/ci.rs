@@ -145,13 +145,8 @@ async fn record_then_replay_answers_without_an_llm() {
     ];
     let ports = start_on_free_ports(&state, &["--record", snap_s], &env);
     let server = Server(state);
-    let created = http
-        .post(ports.data_url("/orders"))
-        .json(&json!({"customerId": "c1", "total": 10}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(created.status(), 201);
+    // `o2` is read before the session creates an order: an id of a type the session
+    // holds none of is generated (and recorded), where after a create it is a 404.
     let recorded: Value = http
         .get(ports.data_url("/orders/o2"))
         .send()
@@ -160,6 +155,15 @@ async fn record_then_replay_answers_without_an_llm() {
         .json()
         .await
         .unwrap();
+    let created = http
+        .post(ports.data_url("/orders"))
+        .json(&json!({"customerId": "c1", "total": 10}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    let created: Value = created.json().await.unwrap();
+    let created_id = created["id"].as_str().unwrap().to_owned();
     let out = mockingbird(
         &[
             "--admin-url",
@@ -189,10 +193,18 @@ async fn record_then_replay_answers_without_an_llm() {
     let state = tmp.path().join("replay");
     let ports = start_on_free_ports(&state, &["--replay", snap_s], &[]);
     let _server = Server(state);
-    let stored = http.get(ports.data_url("/orders/o1")).send().await.unwrap();
-    assert_eq!(stored.status(), 200, "the seeded session holds o1");
+    for id in ["o2", created_id.as_str()] {
+        let stored = http
+            .get(ports.data_url(&format!("/orders/{id}")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stored.status(), 200, "the seeded session holds {id}");
+    }
+    // In a session holding no order, as the recorded read's was.
     let replayed: Value = http
         .get(ports.data_url("/orders/o2"))
+        .header("x-mockingbird-session", "fresh")
         .send()
         .await
         .unwrap()

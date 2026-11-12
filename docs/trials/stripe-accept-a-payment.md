@@ -215,7 +215,22 @@ These are outside the repo, in `mockingbird-trials/accept-a-payment/mb-trial-111
 | # | Repro | Class | Status |
 | --- | --- | --- | --- |
 | 1 | With the default state store, refusals and world-described 404s answered after **75–160 s** with 0 LLM tokens, logging `pool timed out while waiting for an open connection`. With `state_url: memory`: about 1 s. The machine was heavily loaded by parallel builds. | engine (under load) | dropped: pre-production; reproduces only under heavy load. Not reproduced in isolation. Without `storage.url` the state store is `sqlite::memory:` with one pooled connection. Refusals took 0.6–9 ms in tests (up to 60 concurrent) and 0.03–2.7 s on the real server with the trial's world and model. Only 25–30 requests at once at a debug build at load average ~50 gave the same pool timeouts and 8–11 s refusals. |
-| 2 | `unknown_ids: 404`: unknown `GET /v1/checkout/sessions/cs_test_invalid` still answered 200 with an invented session. Stripe's path parameters (`{session}`, `{intent}`) aren't id-like by name. | engine | open |
+| 2 | `unknown_ids: 404`: unknown `GET /v1/checkout/sessions/cs_test_invalid` still answered 200 with an invented session. Stripe's path parameters (`{session}`, `{intent}`) aren't id-like by name. | engine | fixed: the identity parameter is found by what it looks up, and unknown ids are inferred per type (next section) |
 | 3 | stripe-ruby ignores `HTTPS_PROXY` and its CA, so specs need a preload. | proxy | reported to the proxy owner |
 | 4 | The prebuilt-checkout spec follows the 303 to `checkout.stripe.com`, which the proxy passed through to the real site. `verify --no-unmapped` flags it. | proxy | reported to the proxy owner |
 | 5 | Creates answered from state take 6–18 s because of the fill call on Stripe's large schemas. | engine (fill latency) | reported to the engine owner |
+
+## Unknown ids inferred per type (2026-11-11)
+
+The real-install-path agent's mock (no `unknown_ids`; the run above that gave 13/16), served by this PR's binary under `mockingbird run`.
+
+**Spec examples: 14/16** (was 13/16). "/session-status returns an error for an invalid session_id" now passes: Checkout Sessions can be created, the spec's server created one, so an id it never made answers Stripe's 404 `resource_missing`. The other two failures are the same as before (no `au_becs_debit` refusal, no `#fragment` in the redirect URL).
+
+**Probes after the flows** (8 PaymentIntent creates, a Checkout Session create and read):
+
+| Read | Answer | Why |
+| --- | --- | --- |
+| `/v1/prices/price_1Mockingbird000000` (the app's configured price) | 200, generated | the app never wrote a price |
+| `/v1/checkout/sessions/cs_test_neverissued000000` | 404 `resource_missing` | creatable, and the session created one |
+| `/v1/payment_intents/pi_neverissued000000` | 404 `resource_missing` | the same, through the `{intent}` parameter |
+| `/v1/customers/cus_neverissued000000` | 200, generated | the app never wrote a customer |

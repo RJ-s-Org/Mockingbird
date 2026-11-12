@@ -321,16 +321,21 @@ impl<'de> Deserialize<'de> for Consistency {
 /// How a mock answers a read of an id its session does not hold.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UnknownIds {
-    /// Generate a resource for the id.
+    /// Unset: decided per resource type. A type the contract can create, of which the
+    /// session has written a record (created, changed, deleted or seeded one), answers
+    /// the operation's 404; any other type generates.
     #[default]
+    Inferred,
+    /// Generate a resource for the id, whatever the type.
     Generate,
-    /// Answer the operation's 404.
+    /// Answer the operation's 404, whatever the type.
     NotFound,
 }
 
 impl Serialize for UnknownIds {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(match self {
+            UnknownIds::Inferred => "inferred",
             UnknownIds::Generate => "generate",
             UnknownIds::NotFound => "404",
         })
@@ -338,14 +343,15 @@ impl Serialize for UnknownIds {
 }
 
 impl<'de> Deserialize<'de> for UnknownIds {
-    /// `"generate"`, `"404"` or the number `404` (YAML `unknown_ids: 404`).
+    /// `"inferred"`, `"generate"`, `"404"` or the number `404` (YAML `unknown_ids: 404`).
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         match Value::deserialize(d)? {
+            Value::String(s) if s == "inferred" => Ok(UnknownIds::Inferred),
             Value::String(s) if s == "generate" => Ok(UnknownIds::Generate),
             Value::String(s) if s == "404" => Ok(UnknownIds::NotFound),
             Value::Number(n) if n.as_u64() == Some(404) => Ok(UnknownIds::NotFound),
             other => Err(serde::de::Error::custom(format!(
-                "unknown_ids must be \"generate\" or 404, not {other}"
+                "unknown_ids must be \"inferred\", \"generate\" or 404, not {other}"
             ))),
         }
     }

@@ -90,6 +90,16 @@ pub const INTERNAL_TYPE: &str = "__mockingbird.earlier_requests";
 /// like any other session.
 pub const UNLISTED_ID: &str = "#unlisted";
 
+/// The id of an [`INTERNAL_TYPE`] document marking that a session works with its own
+/// records of `resource_type`: a write of the type (a create, update, action or delete)
+/// stored or removed one, or the Admin API seeded one. A marker outlives the records it
+/// speaks for, so a session that deleted all of them still has it; a reset, a reseed or
+/// the session's expiry clears it, as everything of the session.
+#[must_use]
+pub fn owned_type_id(resource_type: &str) -> String {
+    format!("#owns/{resource_type}")
+}
+
 /// Identifies one session of one mock: the scope every stored resource
 /// belongs to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

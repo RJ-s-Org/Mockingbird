@@ -1070,7 +1070,8 @@ async fn a_bodyless_write_is_told_to_reads_of_its_route() {
             .list(&session(), MEMORY, 10)
             .await
             .unwrap()
-            .is_empty()
+            .iter()
+            .all(|doc| doc.id.starts_with("#owns/"))
     );
 }
 
@@ -1341,7 +1342,8 @@ async fn a_write_that_stored_its_record_tells_no_route() {
             .list(&session(), MEMORY, 10)
             .await
             .unwrap()
-            .is_empty()
+            .iter()
+            .all(|doc| doc.id.starts_with("#owns/"))
     );
 }
 
@@ -1652,7 +1654,8 @@ async fn other_routes_are_not_remembered() {
             .list(&session(), MEMORY, 10)
             .await
             .unwrap()
-            .is_empty()
+            .iter()
+            .all(|doc| doc.id.starts_with("#owns/"))
     );
 }
 
@@ -2984,7 +2987,8 @@ async fn a_minted_token_shows_the_answer_that_minted_it() {
             .list(&session(), MEMORY, 10)
             .await
             .unwrap()
-            .is_empty()
+            .iter()
+            .all(|doc| doc.id.starts_with("#owns/"))
     );
 }
 
@@ -3087,7 +3091,8 @@ async fn a_clients_own_value_is_never_kept() {
             .list(&session(), MEMORY, 10)
             .await
             .unwrap()
-            .is_empty()
+            .iter()
+            .all(|doc| doc.id.starts_with("#owns/"))
     );
     h.call("POST", "/item/get", Some(json!({"access_token": ACCESS})))
         .await;

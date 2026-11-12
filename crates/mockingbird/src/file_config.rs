@@ -1233,8 +1233,10 @@ pub struct FileMock {
     /// listed items are served by id; `off` generates every answer anew.
     #[serde(default)]
     pub consistency: Consistency,
-    /// `generate` (default) or `404`: how a read of an id the session does
-    /// not hold is answered.
+    /// How a read of an id the session does not hold is answered. Unset
+    /// (`inferred`): per resource type, the operation's 404 for a type the
+    /// contract can create once the session has written a record of it, else
+    /// generated. `generate` or `404` decides for every type of the mock.
     #[serde(default)]
     pub unknown_ids: UnknownIds,
     /// A scenario of this mock applied when a call names none.

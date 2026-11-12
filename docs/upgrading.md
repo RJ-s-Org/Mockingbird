@@ -31,6 +31,15 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### Unknown ids are decided per type unless a mock sets them
+
+No migration. `mocks.<name>.unknown_ids` gains a third value, `inferred`, which is the new default ([configuration](configuration.md)):
+
+- **An unset `unknown_ids` answers 404 for a creatable type the session writes**: a read by path of an id the session does not hold answers the read's declared 404 when an operation of kind create makes its type and the session has created, changed or deleted a record of it (or the Admin API seeded one); other types, a creatable one the session has only read or listed, and one before any write, are generated as before. The write leaves a marker in the session's state (an internal document, `#owns/<type>`, never exported or counted) that outlives its records and a restart, and clears with the session. A config-file mock without `unknown_ids` changes at once. A mock stored through the Admin API takes the new default unless its stored behaviour names `unknown_ids`: one created before this release usually has `generate` stored and keeps it (`PATCH {"unknown_ids": "inferred"}` takes the new default), while one stored with no `unknown_ids` (behaviour `{}`) reads as `inferred` and changes at once.
+- **The path parameter counts by what it selects**: the identity's parameter when it is the route's last one (a format suffix aside) counts whatever its name, under `inferred` and `404` alike, so `GET /v1/customers/{customer}`, `/v1/checkout/sessions/{session}` and `/users/{username}` can answer 404 where `unknown_ids: 404` generated before. A value a held record goes by under one of `name`, `login`, `slug` or `key` still finds it.
+- **The world view says how**: `GET .../contracts/{version}/world` (and MCP `get_world`) gains `unknown_ids: {setting, types: {<type>: {answer, why}}}`, and MCP `start_server` an `unknown_ids` summary per mock.
+- **Rust API**: `mb_protocols::UnknownIds` and `mb_store::UnknownIds` gain `Inferred`, their new default, which breaks an exhaustive `match`.
+
 ### Undeclared request members are let through
 
 No migration. A request is no longer refused only because it carries a member its schema does not declare (`additionalProperties: false`, `unevaluatedProperties: false`), for every HTTP contract; set `mocks.<name>.strict_requests: true` to keep refusing it ([configuration](configuration.md#mocks)). The Rust method `SchemaValidator::validate_lenient_located` is gone: use `validate_located_with(instance, Leniency::Inferred)`.

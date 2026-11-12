@@ -84,7 +84,7 @@ const CALLED_GAPS: usize = 40;
 /// they could not be read.
 type WorldGaps = Result<(u64, Vec<Value>), String>;
 
-pub(crate) const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock a well-known public API (Stripe, GitHub, TMDB, Twilio, ...), check `list_examples` first: `init_example` writes its contract and a ready config. To mock an API: `import_contract`, then `get_world` (pass the imported `version` unless it was activated) and fix its `gaps` with `patch_world`, then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. To run an app unchanged against mocks, start the server with `proxy: true` and export the variables from `proxy_env` in the app's shell instead of editing its base URLs; give the user `mockingbird run -c <config> -- <command>` for running it. Before handing a mock back, check it covers every operation and host the app calls (`mockingbird verify --no-unmapped --no-unmatched`) and set `unknown_ids: 404` unless the app reads ids it did not create through the mock. Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports; if the key is not in this process's environment, `open_key_setup` lets the user type it into a local page that stores it in a private file. The `mockingbird://skills/…` resources hold the full guides.";
+pub(crate) const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock a well-known public API (Stripe, GitHub, TMDB, Twilio, ...), check `list_examples` first: `init_example` writes its contract and a ready config. To mock an API: `import_contract`, then `get_world` (pass the imported `version` unless it was activated) and fix its `gaps` with `patch_world`, then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. To run an app unchanged against mocks, start the server with `proxy: true` and export the variables from `proxy_env` in the app's shell instead of editing its base URLs; give the user `mockingbird run -c <config> -- <command>` for running it. Before handing a mock back, check it covers every operation and host the app calls (`mockingbird verify --no-unmapped --no-unmatched`). Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports; if the key is not in this process's environment, `open_key_setup` lets the user type it into a local page that stores it in a private file. The `mockingbird://skills/…` resources hold the full guides.";
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Transport {
@@ -464,7 +464,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "start_server",
             title: "Start Mockingbird in the background",
-            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env (or proxy_env_error, why this project's proxy could not be handed out). With a config, also world_review: for each mock whose world description has gaps, the next_steps and world_gaps an import answers (review them as after import_contract, the mockingbird-world skill); and next_steps naming mocks that answer for one host without a common shares group (give mocks of one API the same mocks.<name>.shares).",
+            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env (or proxy_env_error, why this project's proxy could not be handed out). With a config, also world_review: for each mock whose world description has gaps, the next_steps and world_gaps an import answers (review them as after import_contract, the mockingbird-world skill); and next_steps naming mocks that answer for one host without a common shares group (give mocks of one API the same mocks.<name>.shares); and unknown_ids: per mock, how a read of an id the session does not hold is answered (its setting, or the types inferred to answer 404 once the session has written one of their records, and those that generate; get_world says why).",
             schema: obj(
                 json!({
                     "config": s("Config file (preferred)."),
@@ -579,7 +579,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "update_mock",
             title: "Update a mock",
-            description: "PATCH a mock. Fields: route_prefix, persona, llm_profile, header_overrides, unknown_ids (generate|404: how a read of an id the session does not hold is answered), data_plane_auth {mode: none|api_key|passthrough_validate, header}, chaos {error_rate, latency_jitter {min_ms, max_ms}, drop_stream_rate} (null clears), limits, faker_seed (0 to 2^64-1; null clears). Only the given fields change.",
+            description: "PATCH a mock. Fields: route_prefix, persona, llm_profile, header_overrides, unknown_ids (inferred|generate|404: how a read of an id the session does not hold is answered; inferred, the default, answers 404 for a type the contract can create once the session has created, changed or deleted one of its records, and generates the rest, get_world's unknown_ids shows each type), data_plane_auth {mode: none|api_key|passthrough_validate, header}, chaos {error_rate, latency_jitter {min_ms, max_ms}, drop_stream_rate} (null clears), limits, faker_seed (0 to 2^64-1; null clears). Only the given fields change.",
             schema: obj(
                 json!({ "name": mock(), "patch": o("Fields to change.") }),
                 &["name", "patch"],
@@ -639,7 +639,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "get_world",
             title: "Show a contract version's world description",
-            description: "The world description of a contract version: how its types and operations behave (identity, targets, lifecycle, order, not_found, ...), the author of each entry set by a revision (unlisted entries are heuristic), the revision number (0 when only the heuristics wrote it), refused entries, and gaps to fix: what the description leaves open (no_identity, no_target, no_record, skipped_route, refused) and the behaviour the contract signals that it does not state yet (undescribed_param, and the advisory no_effect, no_unique and no_soft_delete, marked advisory: describe those only when the docs state the behaviour). The format is get_world_schema. On a large contract pass `operations` and/or `types` to get only the entries the app uses: the operations named, the types named and the operations of those types, with their gaps, refused entries and authors; names the version lacks are listed in `warnings`. On a large contract whose app has run against the mock, pass `called: true` to get only what the request log (any session) names: the operations called, the types they touch, and their gaps (gaps naming neither are left out and counted in `gaps_left_out`).",
+            description: "The world description of a contract version: how its types and operations behave (identity, targets, lifecycle, order, not_found, ...), the author of each entry set by a revision (unlisted entries are heuristic), the revision number (0 when only the heuristics wrote it), refused entries, and gaps to fix: what the description leaves open (no_identity, no_target, no_record, skipped_route, refused) and the behaviour the contract signals that it does not state yet (undescribed_param, and the advisory no_effect, no_unique and no_soft_delete, marked advisory: describe those only when the docs state the behaviour). The format is get_world_schema. On a large contract pass `operations` and/or `types` to get only the entries the app uses: the operations named, the types named and the operations of those types, with their gaps, refused entries and authors; names the version lacks are listed in `warnings`. On a large contract whose app has run against the mock, pass `called: true` to get only what the request log (any session) names: the operations called, the types they touch, and their gaps (gaps naming neither are left out and counted in `gaps_left_out`). `unknown_ids` gives each type read by a path parameter its answer to an id the session does not hold (404 or generate) and why: the mock's unknown_ids setting, or, left unset, whether the type is creatable (404 once the session has created, changed or deleted one of its records).",
             schema: obj(
                 json!({
                     "mock": mock(),
@@ -2468,7 +2468,19 @@ impl McpServer {
         mock: &str,
         version: &str,
     ) -> WorldGaps {
-        let world = client::api(
+        gaps_of(&self.world_answer(admin, workspace, mock, version).await?)
+    }
+
+    /// The world view of `mock`'s contract `version` (a number or `active`) in
+    /// `workspace`, read from the Admin API at `admin`.
+    async fn world_answer(
+        &self,
+        admin: &str,
+        workspace: &str,
+        mock: &str,
+        version: &str,
+    ) -> Result<Value, String> {
+        Ok(client::api(
             admin,
             self.token.as_deref(),
             Some(workspace),
@@ -2479,24 +2491,15 @@ impl McpServer {
         )
         .await
         .map_err(|e| ToolError::from(e).0)?
-        .unwrap_or_default();
-        let gaps = world
-            .get("gaps")
-            .and_then(Value::as_array)
-            .cloned()
-            .ok_or_else(|| "the world answer has no gaps".to_owned())?;
-        let version = world
-            .get("version")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| "the world answer has no version".to_owned())?;
-        Ok((version, gaps))
+        .unwrap_or_default())
     }
 
     /// After `start_server` started the server from `config`: `world_review`
     /// lists, for each mock of the config whose active world description
     /// has gaps, what [`next_steps`] adds to an import (at most
-    /// [`START_GAPS`] gaps in all), and `next_steps` names the mocks that
-    /// answer for one host without a common `shares` group.
+    /// [`START_GAPS`] gaps in all), `unknown_ids` how each mock answers an id
+    /// the session does not hold ([`unknown_ids_summary`]), and `next_steps`
+    /// names the mocks that answer for one host without a common `shares` group.
     async fn add_start_review(&self, started: &mut Value, config: &std::path::Path) {
         let Ok(cfg) = crate::file_config::load(config) else {
             return;
@@ -2518,16 +2521,25 @@ impl McpServer {
             .unwrap_or(&self.admin_url)
             .to_owned();
         let mut read = Vec::new();
+        let mut unknown_ids = serde_json::Map::new();
         if started.get("ready").and_then(Value::as_bool) == Some(true) {
             for (name, m) in &cfg.mocks {
-                let gaps = self.world_gaps(&admin, &m.workspace, name, "active").await;
-                read.push((name.clone(), gaps));
+                let world = self
+                    .world_answer(&admin, &m.workspace, name, "active")
+                    .await;
+                if let Some(summary) = world.as_ref().ok().and_then(unknown_ids_summary) {
+                    unknown_ids.insert(name.clone(), summary);
+                }
+                read.push((name.clone(), world.and_then(|w| gaps_of(&w))));
             }
         }
         let review = world_review(read);
         let Some(obj) = started.as_object_mut() else {
             return;
         };
+        if !unknown_ids.is_empty() {
+            obj.insert("unknown_ids".into(), Value::Object(unknown_ids));
+        }
         if !steps.is_empty() {
             obj.insert("next_steps".into(), Value::Array(steps));
         }
@@ -3293,6 +3305,60 @@ fn next_steps(
 /// [`next_steps`] adds to an import of it, each capped at [`IMPORT_GAPS`]
 /// gaps and all together at [`START_GAPS`] (`world_gaps_total` still counts
 /// each mock's).
+/// The gaps of a world view (`get_world`'s answer), with the number of the version
+/// they describe.
+fn gaps_of(world: &Value) -> WorldGaps {
+    let gaps = world
+        .get("gaps")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| "the world answer has no gaps".to_owned())?;
+    let version = world
+        .get("version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "the world answer has no version".to_owned())?;
+    Ok((version, gaps))
+}
+
+/// How many type names [`unknown_ids_summary`] lists per answer.
+const START_UNKNOWN_TYPES: usize = 12;
+
+/// A mock's answer to a read of an id the session does not hold, from its world view,
+/// compactly: the setting (`"404"`, `"generate"`) when the mock sets it for every type,
+/// else (inferred per type) the types under each answer, `{"404": [...], "generate":
+/// [...]}`, each cut to [`START_UNKNOWN_TYPES`] with how many more `get_world` lists.
+/// `None` when the view says nothing of it, or no type is read by a path parameter.
+fn unknown_ids_summary(world: &Value) -> Option<Value> {
+    let view = world.get("unknown_ids")?;
+    let setting = view.get("setting")?.as_str()?;
+    if setting != "inferred" {
+        return Some(json!(setting));
+    }
+    let types = view.get("types")?.as_object()?;
+    if types.is_empty() {
+        return None;
+    }
+    let mut by_answer: std::collections::BTreeMap<&str, Vec<Value>> =
+        std::collections::BTreeMap::new();
+    for (t, entry) in types {
+        let answer = entry
+            .get("answer")
+            .and_then(Value::as_str)
+            .unwrap_or("generate");
+        by_answer.entry(answer).or_default().push(json!(t));
+    }
+    let mut out = serde_json::Map::new();
+    for (answer, mut names) in by_answer {
+        let more = names.len().saturating_sub(START_UNKNOWN_TYPES);
+        names.truncate(START_UNKNOWN_TYPES);
+        if more > 0 {
+            names.push(json!(format!("+{more} more (get_world)")));
+        }
+        out.insert(answer.to_owned(), Value::Array(names));
+    }
+    Some(Value::Object(out))
+}
+
 fn world_review(read: Vec<(String, WorldGaps)>) -> Vec<Value> {
     let mut left = START_GAPS;
     let mut review = Vec::new();
@@ -3616,6 +3682,39 @@ mod tests {
         ] {
             assert!(step.contains(part), "{part}: {step}");
         }
+    }
+
+    #[test]
+    fn unknown_ids_summary_groups_inferred_types_and_names_a_setting() {
+        let world = |setting: &str, types: Value| json!({"version": 1, "gaps": [], "unknown_ids": {"setting": setting, "types": types}});
+        let inferred = world(
+            "inferred",
+            json!({
+                "Messages": {"answer": "404", "why": "creatable"},
+                "Calls": {"answer": "404", "why": "creatable"},
+                "Accounts": {"answer": "generate", "why": "not creatable"},
+            }),
+        );
+        assert_eq!(
+            unknown_ids_summary(&inferred),
+            Some(json!({"404": ["Calls", "Messages"], "generate": ["Accounts"]}))
+        );
+        let set = world("404", json!({"Messages": {"answer": "404", "why": "set"}}));
+        assert_eq!(unknown_ids_summary(&set), Some(json!("404")));
+        assert_eq!(unknown_ids_summary(&world("inferred", json!({}))), None);
+        assert_eq!(unknown_ids_summary(&json!({"gaps": []})), None);
+        let many: serde_json::Map<String, Value> = (0..START_UNKNOWN_TYPES + 3)
+            .map(|i| {
+                (
+                    format!("t{i:02}"),
+                    json!({"answer": "404", "why": "creatable"}),
+                )
+            })
+            .collect();
+        let summary = unknown_ids_summary(&world("inferred", Value::Object(many))).unwrap();
+        let listed = summary["404"].as_array().unwrap();
+        assert_eq!(listed.len(), START_UNKNOWN_TYPES + 1, "{summary}");
+        assert_eq!(listed[START_UNKNOWN_TYPES], "+3 more (get_world)");
     }
 
     #[test]

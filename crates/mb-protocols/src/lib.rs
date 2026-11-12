@@ -81,6 +81,7 @@ pub use call::exec_pool::{
     MIN_POOL_TOKENS, POOL_SIZE, RecordPool, fill as fill_record_pool, warm_validators,
 };
 pub use call::shared::{SharedEntry, SharedTypes};
+pub use call::{UnknownIdTypes, unknown_id_types};
 pub mod chaos;
 #[cfg(any(
     feature = "http-rest",
@@ -500,10 +501,17 @@ impl std::fmt::Debug for MockRuntime {
 /// How a read of a path id the session holds no resource for is answered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum UnknownIds {
-    /// Generate a resource for the id (the default).
+    /// Per resource type (the default): the operation's `404` for a type the contract
+    /// can create (an operation of kind create answers it) once the session has written
+    /// a record of it (created, changed or deleted one, or the Admin API seeded one; a
+    /// durable marker in the store, kept after the records are gone); otherwise
+    /// generated. Reference data the app only reads or lists (a price id from its
+    /// config) keeps generating.
     #[default]
+    Inferred,
+    /// Generate a resource for the id, whatever the type.
     Generate,
-    /// Answer the operation's `404`.
+    /// Answer the operation's `404`, whatever the type.
     NotFound,
 }
 

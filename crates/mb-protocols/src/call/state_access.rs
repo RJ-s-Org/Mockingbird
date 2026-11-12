@@ -19,6 +19,12 @@ pub(crate) struct StateAccess<'a> {
     pub(super) tracks_deleted: bool,
     /// The path parameters of the call, for the parent of what it mentions.
     pub(super) call_params: Option<Box<OperationCall>>,
+    /// The type a write call (a command) acts on: storing or removing a record of it
+    /// marks that the session works with its own records of the type ([`Self::own`]).
+    /// `None` for a read, whose stored answers mark nothing.
+    pub(super) owns: Option<String>,
+    /// The types this call marked already.
+    marked: Vec<String>,
 }
 
 /// Whether this call may use the store.
@@ -40,6 +46,34 @@ impl<'a> StateAccess<'a> {
             wrote: false,
             tracks_deleted: false,
             call_params: None,
+            owns: None,
+            marked: Vec::new(),
+        }
+    }
+
+    /// Marks, durably, that the session works with its own records of type `t`
+    /// ([`mb_state::owned_type_id`]): what `unknown_ids` left unset goes by
+    /// ([`unknown_ids`]). Once per call and type.
+    pub(super) async fn own(&mut self, s: &SessionKey, t: &str) {
+        if t == mb_state::INTERNAL_TYPE || self.marked.iter().any(|m| m == t) || !self.open() {
+            return;
+        }
+        let marker = StoredResource {
+            resource_type: mb_state::INTERNAL_TYPE.to_string(),
+            id: mb_state::owned_type_id(t),
+            data: serde_json::json!({"owns": t}),
+        };
+        let r = self.rt.state.upsert(s, marker).await;
+        if self.settle(r).is_some() {
+            self.wrote = true;
+            self.marked.push(t.to_string());
+        }
+    }
+
+    /// Marks `t` owned when it is the type this write call acts on.
+    async fn own_written(&mut self, s: &SessionKey, t: &str) {
+        if self.owns.as_deref() == Some(t) {
+            self.own(s, t).await;
         }
     }
 
@@ -151,6 +185,9 @@ impl<'a> StateAccess<'a> {
         if ok && let Some((t, id)) = named {
             rt.path_aliases().remember(s, &t, &id, values);
         }
+        if ok {
+            self.own_written(s, &t).await;
+        }
         ok
     }
 
@@ -170,6 +207,7 @@ impl<'a> StateAccess<'a> {
         // A record the store held is gone: the session wrote its type.
         if held == Some(true) && t != mb_state::INTERNAL_TYPE {
             state_lists::note_deleted(self, s, t).await;
+            self.own_written(s, t).await;
         }
         ok
     }
@@ -199,6 +237,9 @@ impl<'a> StateAccess<'a> {
         }
         if stored && let Some((t, id)) = named {
             rt.path_aliases().remember(s, &t, &id, values);
+        }
+        if stored {
+            self.own_written(s, &t).await;
         }
         stored
     }

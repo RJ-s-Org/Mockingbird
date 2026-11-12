@@ -1353,6 +1353,107 @@ async fn get_world_narrows_to_the_operations_and_types_asked_for() {
     );
 }
 
+/// Customers are created and read by `{customer}`; prices only read by `{price}`.
+const SHOP_SRC: &str = r##"
+openapi: 3.0.3
+info: {title: Shop, version: "1"}
+paths:
+  /v1/customers:
+    post:
+      operationId: PostCustomers
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/customer"}}}}
+  /v1/customers/{customer}:
+    get:
+      operationId: GetCustomersCustomer
+      parameters: [{name: customer, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/customer"}}}}
+        "404": {description: missing}
+  /v1/prices/{price}:
+    get:
+      operationId: GetPricesPrice
+      parameters: [{name: price, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/price"}}}}
+        "404": {description: missing}
+components:
+  schemas:
+    customer: {type: object, required: [id], properties: {id: {type: string}, name: {type: string}}}
+    price: {type: object, required: [id], properties: {id: {type: string}, unit_amount: {type: integer}}}
+"##;
+
+/// `get_world` gives each type read by a path parameter its answer to an unknown id:
+/// inferred, a creatable type 404 and another generate, each with why; the mock's own
+/// setting decides for every type; a type filter narrows it.
+#[tokio::test]
+async fn get_world_shows_each_types_unknown_id_answer() {
+    let (_st, app) = admin().await;
+    let uploaded = send(
+        &app,
+        Method::POST,
+        &format!("{BASE}/widgets/contracts"),
+        "application/yaml",
+        SHOP_SRC.as_bytes().to_vec(),
+    )
+    .await;
+    let version = uploaded["version"].as_i64().unwrap();
+    let world = format!("{BASE}/widgets/contracts/{version}/world");
+    let view = send(&app, Method::GET, &world, "application/json", Vec::new()).await;
+    let unknown = &view["unknown_ids"];
+    assert_eq!(unknown["setting"], "inferred", "{view}");
+    let types = unknown["types"].as_object().unwrap();
+    assert_eq!(types.len(), 2, "{unknown}");
+    let customers = &types["customers"];
+    assert_eq!(customers["answer"], "404", "{unknown}");
+    let why = customers["why"].as_str().unwrap();
+    assert!(
+        why.contains("creatable (PostCustomers)") && why.contains("has written"),
+        "{why}"
+    );
+    let prices = &types["prices"];
+    assert_eq!(prices["answer"], "generate", "{unknown}");
+    assert!(
+        prices["why"].as_str().unwrap().starts_with("not creatable"),
+        "{unknown}"
+    );
+
+    let narrowed = send(
+        &app,
+        Method::GET,
+        &format!("{world}?type=prices"),
+        "application/json",
+        Vec::new(),
+    )
+    .await;
+    let kept: Vec<&String> = narrowed["unknown_ids"]["types"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect();
+    assert_eq!(kept, ["prices"], "{narrowed}");
+
+    send(
+        &app,
+        Method::PATCH,
+        &format!("{BASE}/widgets"),
+        "application/json",
+        json!({"unknown_ids": 404}).to_string().into_bytes(),
+    )
+    .await;
+    let view = send(&app, Method::GET, &world, "application/json", Vec::new()).await;
+    let unknown = &view["unknown_ids"];
+    assert_eq!(unknown["setting"], "404", "{view}");
+    for t in ["customers", "prices"] {
+        assert_eq!(unknown["types"][t]["answer"], "404", "{unknown}");
+        assert_eq!(
+            unknown["types"][t]["why"], "the mock sets unknown_ids: 404",
+            "{unknown}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn get_world_on_a_mock_without_an_active_version_is_404() {
     let (_st, app) = admin().await;

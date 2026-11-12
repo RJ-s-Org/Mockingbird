@@ -444,7 +444,9 @@ async fn a_location_header_is_the_new_records_url() {
 }
 
 /// An id header naming another kind of record (the caller's account) is not the new
-/// job's id: nothing is stored under it. One naming the created kind is.
+/// job's id: nothing is stored under it, so a read of it is a job the session does not
+/// hold, which `jobs` (created, and held) answers with its 404. One naming the created
+/// kind is.
 #[tokio::test]
 async fn an_id_header_naming_another_kind_is_not_the_records() {
     let r = router(vec![]);
@@ -452,8 +454,8 @@ async fn an_id_header_naming_another_kind_is_not_the_records() {
     assert_eq!(status, StatusCode::ACCEPTED);
     let account = header(&headers, "x-account-id");
     assert!(!account.is_empty() && !account.contains('/'), "{account:?}");
-    let (_, headers, read) = send(&r, "GET", &format!("/jobs/{account}"), None).await;
-    assert_ne!(source(&headers), "state", "{read}");
+    let (status, _, read) = send(&r, "GET", &format!("/jobs/{account}"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{read}");
 
     let (status, headers, _) = send(&r, "POST", "/exports", Some(json!({"format": "csv"}))).await;
     assert_eq!(status, StatusCode::ACCEPTED);
@@ -463,7 +465,8 @@ async fn an_id_header_naming_another_kind_is_not_the_records() {
     assert_eq!(read["format"], "csv", "{read}");
 }
 
-/// A create answering only the call's own request id stores nothing under it.
+/// A create answering only the call's own request id stores nothing under it: a read
+/// of it is a ping the session does not hold, answered with its 404.
 #[tokio::test]
 async fn a_request_id_header_stores_nothing() {
     let r = router(vec![]);
@@ -471,8 +474,8 @@ async fn a_request_id_header_stores_nothing() {
     assert_eq!(status, StatusCode::CREATED);
     let request = header(&headers, "x-request-id");
     assert!(!request.is_empty() && !request.contains('/'), "{request:?}");
-    let (_, headers, read) = send(&r, "GET", &format!("/pings/{request}"), None).await;
-    assert_ne!(source(&headers), "state", "{read}");
+    let (status, _, read) = send(&r, "GET", &format!("/pings/{request}"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{read}");
 }
 
 /// A `Location` whose record is read deeper than one segment under the create's path

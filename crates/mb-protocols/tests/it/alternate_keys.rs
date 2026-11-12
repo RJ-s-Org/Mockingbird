@@ -437,13 +437,14 @@ async fn a_described_slug_finds_the_record() {
 }
 
 /// A parameter that names an id alone does not match another member: a badge's label
-/// is no way to read it.
+/// is no way to read it, so the read misses state and, the session holding a badge it
+/// created, answers 404.
 #[tokio::test]
 async fn an_id_parameter_does_not_match_another_member() {
     let r = router(vec![json!({"id": "b_1", "label": "gold"})]);
     send(&r, "POST", "/badges", Some(json!({"label": "gold"}))).await;
-    let (_, headers, read) = send(&r, "GET", "/badges/gold", None).await;
-    assert_ne!(source(&headers), "state", "{read}");
+    let (status, _, read) = send(&r, "GET", "/badges/gold", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{read}");
 }
 
 /// An edit reached by the template's id, where its alias is its key, keeps the alias:
@@ -496,7 +497,8 @@ async fn an_edit_by_the_alternate_member_keeps_the_key() {
 
 /// A description that mentions another member without offering it as the value (a
 /// negation, a passing mention), or an id parameter whose description names a member,
-/// gives no other way to read the record: each read misses state.
+/// gives no other way to read the record: each read misses state, a 404 as the session
+/// holds a record of each type it created.
 #[tokio::test]
 async fn a_mention_or_a_negation_is_no_alternate_key() {
     let r = router(vec![
@@ -513,14 +515,14 @@ async fn a_mention_or_a_negation_is_no_alternate_key() {
         assert_eq!(source(&headers), "state", "{path}: {read}");
     }
     for path in ["/users/alice", "/orders/A-1", "/orders/5", "/widgets/gizmo"] {
-        let (_, headers, read) = send(&r, "GET", path, None).await;
-        assert_ne!(source(&headers), "state", "{path}: {read}");
+        let (status, _, read) = send(&r, "GET", path, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {read}");
     }
 }
 
 /// An either-or phrase whose two sides are members other than the identity ("the ID
 /// of the user or organization membership") offers no other way to name the record:
-/// a read by the user's value misses state.
+/// a read by the user's value misses state (a 404, the session holding a membership).
 #[tokio::test]
 async fn an_either_or_without_the_identity_is_no_alternate_key() {
     let r = router(vec![
@@ -536,8 +538,8 @@ async fn an_either_or_without_the_identity_is_no_alternate_key() {
     let (_, headers, read) = send(&r, "GET", "/memberships/m_1", None).await;
     assert_eq!(source(&headers), "state", "{read}");
     for path in ["/memberships/alice", "/memberships/acme"] {
-        let (_, headers, read) = send(&r, "GET", path, None).await;
-        assert_ne!(source(&headers), "state", "{path}: {read}");
+        let (status, _, read) = send(&r, "GET", path, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {read}");
     }
 }
 
@@ -657,7 +659,8 @@ async fn a_slug_keyed_record_reads_by_its_own_id() {
 }
 
 /// A slug-keyed record whose only `*Id` member names another kind (its owner): a bare
-/// `id` in "slug or id" is not that foreign key, so a read by the owner's id misses.
+/// `id` in "slug or id" is not that foreign key, so a read by the owner's id misses
+/// (a 404, the session holding the playlist it created).
 #[tokio::test]
 async fn a_foreign_key_is_no_other_id() {
     let r = router_for(
@@ -673,8 +676,8 @@ async fn a_foreign_key_is_no_other_id() {
     .await;
     let (_, headers, read) = send(&r, "GET", "/playlists/mix", None).await;
     assert_eq!(source(&headers), "state", "{read}");
-    let (_, headers, read) = send(&r, "GET", "/playlists/u_4", None).await;
-    assert_ne!(source(&headers), "state", "{read}");
+    let (status, _, read) = send(&r, "GET", "/playlists/u_4", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{read}");
 }
 
 /// A `{key}` its description calls the slug or id, and an `{idOrName}`: each reads the
