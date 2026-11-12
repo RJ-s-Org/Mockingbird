@@ -54,7 +54,7 @@ pub(super) async fn related(
         && target_id.is_none()
         && let Some(t) = op.resource_type.as_deref()
     {
-        let mut listed = state.list(session, t, LIST_CONTEXT_LIMIT).await;
+        let mut listed = list_context::listed(state, session, op, call, t).await;
         // Lists the answer holds that other reads stored: Plaid's
         // `/auth/get` answers the `accounts` that `/accounts/get` seeded.
         let members = rt
