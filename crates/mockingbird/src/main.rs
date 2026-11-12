@@ -351,7 +351,8 @@ async fn verify_run(
         ready: args.serve_ready.clone(),
         timeout: args
             .serve_timeout
-            .map_or(verify_run::DEFAULT_SERVE_TIMEOUT, Into::into),
+            .map_or(verify_run::DEFAULT_SERVE_TIMEOUT, Into::into)
+            .min(verify_run::MAX_SERVE_TIMEOUT),
     });
     let opts = verify_run::Options {
         command,

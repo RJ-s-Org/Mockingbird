@@ -243,7 +243,7 @@ A fresh Claude Code in a clean copy of the sample, with the plugin from the mark
 
 **`verify --run`.** `start_server` named the app's tests in its next steps: "The app's tests: `bundle exec rspec` (spec/), `cd playwright && npm test` (playwright/package.json scripts.test). Run each with verify_run …". The agent did not run them. It named why in its hand-back: the RSpec gems aren't installed (`bundle install`), and the Playwright suite runs in Docker against browser-side Stripe. That is the hand-back rule's second branch (a remaining failure named as out of scope), so it complied. It's still a gap: `bundle exec rspec` alone can't pass here anyway, because each spec needs its integration's Node server on port 4242.
 
-The trial ran it instead: `verify --run` with a script that starts custom-payment-flow's server and runs its spec. Result: exit 1, "7 requests logged while it ran; no failures point at the mock". The one spec failure (below) shows in the output tail. A relative command path resolves from the project root, not the current folder.
+The trial ran it instead: `verify --run` with a script that starts custom-payment-flow's server and runs its spec. Result: exit 1, "7 requests logged while it ran; no failures point at the mock". The one spec failure (below) shows in the output tail. A relative command path resolved from the project root, not the current folder; `verify --run` now runs from the caller's folder, and `--serve` runs an integration's server beside its spec (start_server proposes the pair).
 
 **Scorecard.**
 

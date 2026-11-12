@@ -538,15 +538,15 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "verify_run",
             title: "Run the app's tests against the mocks",
-            description: "Run the app's own command (its tests or an end-to-end suite, as start_server and server_status name them) against the mocks, as `mockingbird run` does: the proxy environment and CA preloads, this project's server (started for the run when none answers, then stopped). It runs from cwd (default: the project root). Tests that need the app's own server running (a base URL such as SERVER_URL=http://localhost:4242) take serve: that command runs first under the same environment, is waited for (serve_port accepting connections and/or a serve_ready line; with neither, the port start_server proposed for it, else 3 s still running), and is stopped after the command; when it exits or is not ready within serve_timeout_secs, the command is not run (serve_failed). Its requests count too. Only the requests made during the run count. Returns ok (exit 0 and nothing points at the mock), command {exit_code, timed_out, duration_ms, output_tail}, serve {ready_by, ready_ms, exit_code, output_tail}, window {requests}, failures, each with a next_step: unmatched_route, error_status (a 5xx, a request validation rejected, or another 4xx when the command failed: operation, status, source, problem detail), fallback (with its reason), blocked_host, unclaimed_hosts (hosts it reached that no mock lists), serve_failed; and notes (4xx answers taken as expected because the command passed, hosts passed to the real API). What the command leaves running is stopped with it. CLI `mockingbird verify --run \"<cmd>\" [--serve \"<cmd>\" --serve-port <port>]`.",
+            description: "Run the app's own command (its tests or an end-to-end suite, as start_server and server_status name them) against the mocks, as `mockingbird run` does: the proxy environment and CA preloads, this project's server (started for the run when none answers, then stopped). It runs from cwd (a folder of the project, relative to its root; default: the project root). Tests that need the app's own server running (a base URL such as SERVER_URL=http://localhost:4242) take serve: that command runs first under the same environment, is waited for (serve_port accepting connections and/or a serve_ready line; with neither, the port start_server proposed for it, else 3 s still running), and is stopped after the command; when it exits, its port is taken or it is not ready within serve_timeout_secs (counted apart from timeout_secs), the command is not run (serve_failed). Its requests count too; a process that leaves the process group (setsid, docker run -d) is not stopped. Only the requests made during the run count. Returns ok (exit 0 and nothing points at the mock), command {exit_code, timed_out, duration_ms, output_tail}, serve {ready_by, ready_ms, exit_code, output_tail}, window {requests}, failures, each with a next_step: unmatched_route, error_status (a 5xx, a request validation rejected, or another 4xx when the command failed: operation, status, source, problem detail), fallback (with its reason), blocked_host, unclaimed_hosts (hosts it reached that no mock lists), serve_failed; and notes (4xx answers taken as expected because the command passed, hosts passed to the real API). What the command leaves running is stopped with it. CLI `mockingbird verify --run \"<cmd>\" [--serve \"<cmd>\" --serve-port <port>]`.",
             schema: obj(
                 json!({
                     "command": s("The command to run with sh -c, from cwd (for example npm test)."),
-                    "cwd": s("Folder both commands run from; relative to the project root; default: the project root."),
+                    "cwd": s("Folder both commands run from, relative to the project root and inside it; default: the project root."),
                     "serve": s("The app's own server to run while the command runs, with sh -c from cwd (for example cd server && npm start)."),
                     "serve_port": n("Ready once this localhost port accepts connections."),
-                    "serve_ready": s("Ready once a line of the serve command's output matches this regular expression."),
-                    "serve_timeout_secs": n("How long serve may take to become ready; default 60, at most 600."),
+                    "serve_ready": s("Ready once a line of the serve command's output (colours stripped) matches this regular expression."),
+                    "serve_timeout_secs": n("How long serve may take to become ready, on top of timeout_secs; default 60, at most 600."),
                     "config": s("Config file; default: the one start_server used, else ./mockingbird.yaml."),
                     "timeout_secs": n("Stop the command (and what it started) after this many seconds; default 300, at most 1800."),
                     "offline": b("Faker only, for a server this run starts."),
@@ -1813,16 +1813,25 @@ impl McpServer {
                     )
                     .min(crate::verify_run::MCP_MAX_TIMEOUT);
                 let root = crate::hosts::project_root(&config);
-                let cwd = opt_str(a, "cwd").map(|c| root.join(c));
+                let cwd = match opt_str(a, "cwd") {
+                    Some(c) => Some(project_folder(&root, &c)?),
+                    None => None,
+                };
                 let serve_port = opt_port(a, "serve_port")?;
+                if serve_port == Some(0) {
+                    return Err(ToolError("serve_port must be 1-65535".into()));
+                }
                 let serve = opt_str(a, "serve").map(|command| crate::verify_run::ServeOptions {
                     command,
                     port: serve_port,
                     ready: opt_str(a, "serve_ready"),
-                    timeout: opt_u64(a, "serve_timeout_secs")
-                        .map_or(crate::verify_run::DEFAULT_SERVE_TIMEOUT, |s| {
-                            std::time::Duration::from_secs(s.min(600))
-                        }),
+                    timeout: opt_u64(a, "serve_timeout_secs").map_or(
+                        crate::verify_run::DEFAULT_SERVE_TIMEOUT,
+                        |s| {
+                            std::time::Duration::from_secs(s)
+                                .min(crate::verify_run::MAX_SERVE_TIMEOUT)
+                        },
+                    ),
                 });
                 let opts = crate::verify_run::Options {
                     command,
@@ -3542,19 +3551,88 @@ fn answer_admin(answer: &Value) -> Option<String> {
 
 /// Appends the line naming the app's test commands
 /// ([`crate::test_commands`], from the project root of `config`) to an
-/// answer's `next_steps`, and all of them (with the pairs that need the
-/// app's server) as `app_tests`, when there are any.
+/// answer's `next_steps`; when some need the app's server, also all of
+/// them and the pairs as `app_tests` (capped in size).
 async fn add_test_step(answer: &mut Value, config: &std::path::Path) {
     let root = crate::hosts::project_root(config);
-    let found = tokio::task::spawn_blocking(move || crate::test_commands::detect_all(&root))
-        .await
-        .unwrap_or_default();
+    let config = config.to_path_buf();
+    let found = tokio::task::spawn_blocking(move || {
+        let avoid: Vec<u16> = crate::test_commands::config_ports(&config)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        crate::test_commands::detect_all(&root, &avoid)
+    })
+    .await
+    .unwrap_or_default();
     if let Some(line) = crate::test_commands::step(&found) {
         append_step(answer, line);
-        if let (Some(obj), Ok(tests)) = (answer.as_object_mut(), serde_json::to_value(&found)) {
+        if !found.pairs.is_empty()
+            && let (Some(obj), Some(tests)) = (answer.as_object_mut(), app_tests(found))
+        {
             obj.insert("app_tests".into(), tests);
         }
     }
+}
+
+/// Characters of the `app_tests` field, at most.
+const APP_TESTS_CHARS: usize = 6_000;
+
+/// `found` as the `app_tests` field, its last commands, then its last
+/// pairs, left out until it fits [`APP_TESTS_CHARS`] (counted in
+/// `left_out`).
+fn app_tests(mut found: crate::test_commands::Detected) -> Option<Value> {
+    let mut left = 0usize;
+    loop {
+        let mut value = serde_json::to_value(&found).ok()?;
+        if left > 0 {
+            value["left_out"] = json!(left);
+        }
+        if value.to_string().len() <= APP_TESTS_CHARS
+            || (found.commands.is_empty() && found.pairs.len() <= 1)
+        {
+            return Some(value);
+        }
+        if found.commands.pop().is_none() {
+            found.pairs.pop();
+        }
+        left += 1;
+    }
+}
+
+/// Folder `rel` of the project at `root` (`verify_run`'s `cwd`): relative,
+/// inside the project once `.` and `..` are resolved, and present.
+fn project_folder(root: &std::path::Path, rel: &str) -> Result<PathBuf, ToolError> {
+    use std::path::Component;
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    for c in std::path::Path::new(rel).components() {
+        match c {
+            Component::Normal(p) => parts.push(p),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if parts.pop().is_none() {
+                    return Err(ToolError(format!(
+                        "cwd {rel:?} leaves the project: give a folder relative to the project root {}",
+                        root.display()
+                    )));
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(ToolError(format!(
+                    "cwd {rel:?} is absolute: give a folder relative to the project root {}",
+                    root.display()
+                )));
+            }
+        }
+    }
+    let dir = parts.iter().fold(root.to_path_buf(), |d, p| d.join(p));
+    if !dir.is_dir() {
+        return Err(ToolError(format!(
+            "cwd {rel:?} is no folder of the project root {}",
+            root.display()
+        )));
+    }
+    Ok(dir)
 }
 
 /// Appends `step` to an answer's `next_steps`, creating the list.
@@ -3591,19 +3669,39 @@ mod tests {
         let steps = answer["next_steps"].as_array().unwrap();
         assert_eq!(steps.len(), 2, "{answer}");
         let line = steps[1].as_str().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        let cd = format!("cd {}", root.display());
         assert_eq!(
             line,
-            "The app's tests: `npm test` (package.json scripts.test), `npm run test:e2e` (package.json scripts.test:e2e), `rspec` (spec/). Run each with verify_run {command} (CLI, from the project root: `mockingbird verify --run \"<cmd>\"`) before handing back."
+            "The app's tests, from the project root (verify_run's default cwd): `npm test` (package.json scripts.test), `npm run test:e2e` (package.json scripts.test:e2e), `rspec` (spec/). Run each with verify_run {command} (CLI, from the project root: `mockingbird verify --run \"<cmd>\"`) before handing back."
         );
-        assert!(line.len() <= 320, "{}", line.len());
+        assert!(line.len() <= 360, "{}", line.len());
+        // No pair: no app_tests.
+        assert!(answer.get("app_tests").is_none(), "{answer}");
+        // A pair: app_tests lists the commands (absolute) and the pair.
+        std::fs::write(
+            dir.path().join("playwright.config.ts"),
+            "export default { use: { baseURL: 'http://localhost:3000' } };\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts": {"test": "jest", "test:e2e": "playwright test", "start": "node app.js"}}"#,
+        )
+        .unwrap();
+        let mut answer = json!({});
+        add_test_step(&mut answer, &dir.path().join("mockingbird.yaml")).await;
+        let root = dir.path().canonicalize().unwrap();
+        let cd = format!("cd {}", root.display());
         assert_eq!(
             answer["app_tests"]["commands"][0]["command"],
             format!("{cd} && npm test"),
             "{answer}"
         );
-        assert_eq!(answer["app_tests"]["pairs"], json!([]));
+        assert_eq!(
+            answer["app_tests"]["pairs"][0]["serve"],
+            format!("{cd} && npm start"),
+            "{answer}"
+        );
+        assert!(answer["app_tests"].to_string().len() <= APP_TESTS_CHARS);
         let empty = tempfile::tempdir().unwrap();
         let mut answer = json!({});
         add_test_step(&mut answer, &empty.path().join("mockingbird.yaml")).await;

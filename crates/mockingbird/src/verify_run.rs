@@ -97,6 +97,10 @@ pub const SERVE_GRACE: Duration = Duration::from_secs(5);
 /// The default limit on the time a serve command takes to become ready.
 pub const DEFAULT_SERVE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// The longest readiness wait accepted (`--serve-timeout`, MCP
+/// `serve_timeout_secs`).
+pub const MAX_SERVE_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// How long a serve command with no readiness signal (no port, no line,
 /// none detected) must keep running before the command starts.
 pub const SERVE_SETTLE: Duration = Duration::from_secs(3);
@@ -281,7 +285,7 @@ struct MockRef {
 /// result, not an error.
 pub async fn run(opts: &Options, checks: Option<&report::VerifyArgs>) -> anyhow::Result<Outcome> {
     if let Some(pattern) = opts.serve.as_ref().and_then(|s| s.ready.as_deref()) {
-        line_matcher(pattern)?;
+        line_matcher(pattern, ready_arg(opts))?;
     }
     // The proxy `open` may run in this process counts into this process's
     // recorder.
@@ -338,13 +342,20 @@ async fn with_session(
             cwd: cwd.display().to_string(),
             ..ServeRun::default()
         };
+        let mut own = crate::test_commands::config_ports(&session.config);
+        own.push((session.proxy.port, "proxy port (proxy.port)"));
+        if let Ok(url) = reqwest::Url::parse(admin)
+            && let Some(port) = url.port_or_known_default()
+        {
+            own.push((port, "Admin API port (server.admin_port)"));
+        }
         let port = match (serve.port, &serve.ready) {
-            (None, None) => detected_port(&root, &serve.command)
+            (None, None) => detected_port(&root, &serve.command, &own)
                 .await
                 .map(|p| (p, true)),
             (port, _) => port.map(|p| (p, false)),
         };
-        match start_serve(opts, serve, port, &cwd, &env.vars, &mut run).await {
+        match start_serve(opts, serve, port, &own, &cwd, &env.vars, &mut run).await {
             ServeStart::Ready(s) => served = Some(s),
             ServeStart::Failed(f) => serve_failure = Some(f),
             ServeStart::Interrupted => serve_interrupted = true,
@@ -413,14 +424,18 @@ async fn with_session(
     outcome.notes.extend(expected);
     if let Some(f) = serve_failure {
         failures.insert(0, f);
-    } else if let Some(code) = serve_run
-        .as_ref()
-        .filter(|s| s.ready)
-        .and_then(|s| s.exit_code)
-    {
-        outcome.notes.push(format!(
-            "the serve command exited {code} while the command ran (serve.output_tail says why)"
-        ));
+    } else if let Some(s) = serve_run.as_ref().filter(|s| s.ready) {
+        if s.ready_by.starts_with("running for") {
+            outcome.notes.push(format!(
+                "the serve command was taken as ready because it still ran after {}s (no port or ready line was given or detected); pass --serve-port (MCP serve_port) or --serve-ready (serve_ready) to wait for it properly",
+                SERVE_SETTLE.as_secs()
+            ));
+        }
+        if let Some(code) = s.exit_code {
+            outcome.notes.push(format!(
+                "the serve command exited {code} while the command ran (serve.output_tail says why)"
+            ));
+        }
     }
     add_details(admin, token, &mut failures).await;
 
@@ -1115,6 +1130,7 @@ impl Tail {
 
     fn push(&mut self, line: &[u8]) {
         let text = String::from_utf8_lossy(line);
+        let text = strip_ansi(&text);
         let text = text.trim_end_matches(['\n', '\r']);
         if !self.matched
             && let Some(ready) = &self.ready
@@ -1143,9 +1159,50 @@ impl Tail {
 /// A matcher for the lines of `pattern` (`--serve-ready`): an ECMA 262
 /// regular expression, found anywhere in the line (a JSON Schema
 /// `pattern`).
-fn line_matcher(pattern: &str) -> anyhow::Result<jsonschema::Validator> {
+fn line_matcher(pattern: &str, arg: &str) -> anyhow::Result<jsonschema::Validator> {
     jsonschema::validator_for(&serde_json::json!({"type": "string", "pattern": pattern}))
-        .map_err(|e| anyhow!("--serve-ready {pattern:?} is not a valid regular expression: {e}"))
+        .map_err(|e| anyhow!("{arg} {pattern:?} is not a valid regular expression: {e}"))
+}
+
+/// `text` without ANSI escape sequences (colours, cursor moves), as a
+/// terminal would show it.
+fn strip_ansi(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('\u{1b}') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            // CSI: parameters, then one final byte in @..~.
+            Some('[') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC: up to BEL or ESC \.
+            Some(']') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' || (c == '\u{1b}' && chars.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// Reads `stream` into `tail` line by line (a line past [`LINE_CHARS`] is
@@ -1390,22 +1447,39 @@ impl Served {
     /// fills `run` with its exit code (when it ended on its own) and output.
     async fn stop(mut self, run: &mut ServeRun) {
         let ended = self.child.try_wait().ok().flatten();
+        let mut leader_ended = ended.is_some();
         if let Some(pid) = self.pid {
+            // Signal the group first, then reap its leader.
             stop_group(pid, false);
             let deadline = Instant::now() + SERVE_GRACE;
-            let _ = tokio::time::timeout(SERVE_GRACE, self.child.wait()).await;
+            leader_ended |= tokio::time::timeout(SERVE_GRACE, self.child.wait())
+                .await
+                .is_ok();
             // The rest of its group (`npm start` runs node below it).
             while group_alive(pid) && Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            if group_alive(pid) {
+            // Past the grace: what is left is killed. Without a group check
+            // (Windows), a leader that did not end is.
+            if group_alive(pid) || !leader_ended {
                 stop_group(pid, true);
             }
         }
-        let _ = self.child.start_kill();
-        let _ = tokio::time::timeout(Duration::from_secs(3), self.child.wait()).await;
+        if tokio::time::timeout(Duration::from_secs(3), self.child.wait())
+            .await
+            .is_err()
+        {
+            let _ = self.child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(3), self.child.wait()).await;
+        }
         self.stopped = true;
-        drain(std::mem::take(&mut self.readers)).await;
+        // A process that kept the output pipes past TERM (on Windows, one
+        // the leader started) is killed with the group.
+        if drain(std::mem::take(&mut self.readers)).await
+            && let Some(pid) = self.pid
+        {
+            stop_group(pid, true);
+        }
         run.stopped = true;
         run.exit_code = ended.map(exit_code);
         if let Ok(t) = self.tail.lock() {
@@ -1426,11 +1500,14 @@ enum ServeStart {
 
 /// Starts `serve` from `cwd` with `env` and waits until it is ready: `port`
 /// accepts connections and/or a line matches `serve.ready`; with neither,
-/// it must still run after [`SERVE_SETTLE`]. `port` is `(port, detected)`.
+/// it must still run after [`SERVE_SETTLE`]. `port` is `(port, detected)`;
+/// `own` are Mockingbird's own ports, named when the port is one of them.
+#[allow(clippy::too_many_arguments)]
 async fn start_serve(
     opts: &Options,
     serve: &ServeOptions,
     port: Option<(u16, bool)>,
+    own: &[(u16, &str)],
     cwd: &std::path::Path,
     env: &BTreeMap<String, String>,
     run: &mut ServeRun,
@@ -1454,6 +1531,16 @@ async fn start_serve(
         ServeStart::Failed(RunFailure::plain("serve_failed", 1, detail, Some(next)))
     };
     if let Some((p, _)) = port
+        && let Some((_, what)) = own.iter().find(|(o, _)| *o == p)
+    {
+        return fail(
+            format!("port {p} is Mockingbird's own {what} in this config, not the app's"),
+            format!(
+                "The app cannot listen on port {p}: Mockingbird's server uses it. Give the port the app's server listens on (--serve-port, MCP serve_port), or move Mockingbird's {what} in the config, then run verify --run again."
+            ),
+        );
+    }
+    if let Some((p, _)) = port
         && port_open(p).await
     {
         return fail(
@@ -1469,7 +1556,7 @@ async fn start_serve(
     let mut tail = Tail::new(SERVE_TAIL_LINES);
     if let Some(pattern) = &serve.ready {
         // Checked before the run started.
-        tail.ready = line_matcher(pattern).ok();
+        tail.ready = line_matcher(pattern, ready_arg(opts)).ok();
     }
     let tail = Arc::new(Mutex::new(tail));
     let mut cmd = shell(&serve.command, cwd, env);
@@ -1550,6 +1637,15 @@ async fn start_serve(
     }
 }
 
+/// The readiness line's argument as the caller gave it.
+fn ready_arg(opts: &Options) -> &'static str {
+    if opts.interactive {
+        "--serve-ready"
+    } else {
+        "serve_ready"
+    }
+}
+
 /// Whether something accepts TCP connections on `port` of localhost (IPv4
 /// or IPv6).
 async fn port_open(port: u16) -> bool {
@@ -1567,11 +1663,12 @@ async fn port_open(port: u16) -> bool {
 
 /// The port of the pair the project's test detection proposes for the
 /// serve command `serve` ([`crate::test_commands`]), if any.
-async fn detected_port(root: &std::path::Path, serve: &str) -> Option<u16> {
+async fn detected_port(root: &std::path::Path, serve: &str, own: &[(u16, &str)]) -> Option<u16> {
     let root = root.to_path_buf();
     let serve = serve.trim().to_owned();
+    let avoid: Vec<u16> = own.iter().map(|(p, _)| *p).collect();
     tokio::task::spawn_blocking(move || {
-        crate::test_commands::detect_all(&root)
+        crate::test_commands::detect_all(&root, &avoid)
             .pairs
             .into_iter()
             .find(|p| p.serves(&serve))
@@ -1644,20 +1741,23 @@ pub fn text(o: &Outcome) -> String {
         (false, false, Some(code)) => format!("exited {code} after {secs:.1}s"),
         (false, false, None) => format!("ended without an exit code after {secs:.1}s"),
     };
+    let serve_failed = o.failures.iter().any(|f| f.kind == "serve_failed");
     let mut s = format!(
-        "verify --run {}: `{}` {ended}; {} logged while it ran{}; {}\n",
+        "verify --run {}: `{}` {ended}; {} logged{}{}; {}\n",
         if o.ok { "passed" } else { "failed" },
         c.command,
         plural(
             usize::try_from(o.window.requests).unwrap_or(usize::MAX),
             "request"
         ),
+        if c.not_run { "" } else { " while it ran" },
         if o.window.truncated {
             format!(" (the newest {MAX_REQUESTS} examined)")
         } else {
             String::new()
         },
-        match o.failures.len() + o.more_failures {
+        match (o.failures.len() + o.more_failures).saturating_sub(usize::from(serve_failed)) {
+            0 if serve_failed => "the app's server failed to start".to_owned(),
             0 => "no failures point at the mock".to_owned(),
             n => format!(
                 "{} point{} at the mock",
@@ -1679,11 +1779,7 @@ pub fn text(o: &Outcome) -> String {
             s,
             "Served `{}`: {state}{}",
             serve.command,
-            if serve.stopped {
-                "; stopped after the command"
-            } else {
-                ""
-            }
+            if serve.stopped { "; stopped" } else { "" }
         );
     }
     for f in &o.failures {
@@ -1942,13 +2038,24 @@ mod tests {
 
     #[test]
     fn the_serve_ready_pattern_is_a_regex_found_anywhere_in_a_line() {
-        assert!(line_matcher("(unclosed").is_err());
+        let error = line_matcher("(unclosed", "serve_ready")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("serve_ready \"(unclosed\" is not a valid"),
+            "{error}"
+        );
         let mut t = Tail::new(SERVE_TAIL_LINES);
-        t.ready = Some(line_matcher(r"listening (on|at) .*:\d+").unwrap());
+        t.ready = Some(line_matcher(r"^Node server listening (on|at) .*:\d+$", "x").unwrap());
         t.push(b"starting\n");
         assert!(!t.matched);
-        t.push(b"Node server listening at http://localhost:4242\n");
+        // Colours are stripped first, and a trailing \r.
+        t.push(b"\x1b[32mNode server listening at\x1b[0m http://localhost:4242\r\n");
         assert!(t.matched);
+        assert_eq!(
+            t.lines.back().unwrap(),
+            "Node server listening at http://localhost:4242"
+        );
         for i in 0..40 {
             t.push(format!("{i}\n").as_bytes());
         }
@@ -1988,7 +2095,7 @@ mod tests {
             "{s}"
         );
         assert!(
-            s.contains("Served `cd server && npm start`: not ready (port 4242); stopped after the command\n"),
+            s.contains("Served `cd server && npm start`: not ready (port 4242); stopped\n"),
             "{s}"
         );
         assert!(s.contains("  serve_failed: the serve command"), "{s}");

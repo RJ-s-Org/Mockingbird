@@ -918,6 +918,13 @@ fn cached_scan(root: &Path, skip: &Skip, limits: Limits) -> RawScan {
     scan
 }
 
+/// [`fingerprint`] of the whole tree below `root` (nothing skipped but the
+/// fixed folders), for other caches of what lies in a project
+/// ([`crate::test_commands::detect_all`]).
+pub(crate) fn tree_fingerprint(root: &Path) -> Option<SystemTime> {
+    fingerprint(root, &Skip::default())
+}
+
 /// The newest modification time of the root and the entries one and two
 /// levels below it (not the skipped folders): adding or removing a file
 /// there, or installing a dependency, changes it; an edit deeper down does

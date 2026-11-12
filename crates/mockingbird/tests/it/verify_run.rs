@@ -465,6 +465,7 @@ fn verify_run_waits_for_the_serve_ready_line() {
 
 /// A serve command that exits before it is ready fails the run, and the
 /// tests are not run.
+#[cfg(unix)]
 #[test]
 fn verify_run_fails_when_the_serve_command_exits_early() {
     let dir = tempfile::tempdir().unwrap();
@@ -579,44 +580,18 @@ fn verify_run_stops_the_served_app_on_a_timeout_and_on_ctrl_c() {
     let port = free_port();
     let out = on_free_ports(|| {
         let (_, admin) = write_config(dir.path());
-        let child = std::process::Command::cargo_bin("mockingbird")
-            .unwrap()
-            .current_dir(dir.path())
-            .env("MB_CA_DIR", dir.path().join("ca"))
-            .env_remove("MB_ADMIN_URL")
-            .env_remove("MB_STATE_DIR")
-            .env_remove("HTTPS_PROXY")
-            .env_remove("HTTP_PROXY")
-            .env_remove("https_proxy")
-            .env_remove("http_proxy")
-            .args(["verify", "--offline", "--format", "json", "--state-dir"])
-            .arg(dir.path().join("state"))
-            .args([
+        interrupted_when(
+            dir.path(),
+            &[
                 "--serve",
                 &app(dir.path(), port),
                 "--serve-port",
                 &port.to_string(),
-            ])
-            .args(["--run", &format!("touch {}; sleep 60", started.display())])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-        while !started.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        // Ctrl-C, sent to this test's own child.
-        let _ = std::process::Command::new("kill")
-            .args(["-INT", &child.id().to_string()])
-            .status();
-        let out = child.wait_with_output().unwrap();
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if port_was_busy(&stderr) {
-            return Err(stderr.into_owned());
-        }
-        logged_admin(&dir.path().join("state/server.log"), admin)?;
-        Ok(out)
+            ],
+            &format!("touch {}; sleep 60", started.display()),
+            &started,
+            admin,
+        )
     });
     let json: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
         panic!("{e}: {}", String::from_utf8_lossy(&out.stderr));
@@ -627,8 +602,290 @@ fn verify_run_stops_the_served_app_on_a_timeout_and_on_ctrl_c() {
     assert!(gone(&pid), "the app outlived Ctrl-C");
 }
 
+/// `verify --run <command>` (plus `extra`) in `dir`, sent Ctrl-C (SIGINT,
+/// to this test's own child) once `marker` exists; its output.
+#[cfg(unix)]
+fn interrupted_when(
+    dir: &Path,
+    extra: &[&str],
+    command: &str,
+    marker: &Path,
+    admin: u16,
+) -> Result<std::process::Output, String> {
+    let child = std::process::Command::cargo_bin("mockingbird")
+        .unwrap()
+        .current_dir(dir)
+        .env("MB_CA_DIR", dir.join("ca"))
+        .env_remove("MB_ADMIN_URL")
+        .env_remove("MB_STATE_DIR")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("HTTP_PROXY")
+        .env_remove("https_proxy")
+        .env_remove("http_proxy")
+        .args(["verify", "--offline", "--format", "json", "--state-dir"])
+        .arg(dir.join("state"))
+        .args(extra)
+        .args(["--run", command])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    while !marker.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = std::process::Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if port_was_busy(&stderr) {
+        return Err(stderr.into_owned());
+    }
+    logged_admin(&dir.join("state/server.log"), admin)?;
+    Ok(out)
+}
+
+/// A serve command whose group ignores TERM is killed after the grace.
+#[cfg(unix)]
+#[test]
+fn verify_run_kills_a_serve_group_that_ignores_term_after_the_grace() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid = dir.path().join("stubborn.pid");
+    let (code, json) = fresh(
+        dir.path(),
+        "true",
+        &[
+            "--serve",
+            &format!(
+                "sh -c 'trap \"\" TERM; echo $$ > {}; echo ready; while :; do sleep 0.2; done' & wait",
+                pid.display()
+            ),
+            "--serve-ready",
+            "^ready$",
+        ],
+    );
+    assert_eq!(code, Some(0), "{json:#}");
+    assert_eq!(json["serve"]["stopped"], true, "{json:#}");
+    // It ignores TERM: only the KILL after the grace ends it.
+    assert!(
+        gone(&pid),
+        "the grandchild that ignores TERM outlived the run"
+    );
+}
+
+/// A port something already listens on, or one of Mockingbird's own, fails
+/// before the serve command starts.
+#[cfg(unix)]
+#[test]
+fn verify_run_refuses_a_serve_port_already_taken() {
+    let dir = tempfile::tempdir().unwrap();
+    let ran = dir.path().join("ran");
+    let taken = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = taken.local_addr().unwrap().port();
+    let (code, json) = fresh(
+        dir.path(),
+        "true",
+        &[
+            "--serve",
+            &format!("touch {}; sleep 30", ran.display()),
+            "--serve-port",
+            &port.to_string(),
+        ],
+    );
+    drop(taken);
+    assert_eq!(code, Some(1), "{json:#}");
+    assert_eq!(kinds(&json), ["serve_failed"], "{json:#}");
+    assert!(
+        json["failures"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("port {port} already accepted connections")),
+        "{json:#}"
+    );
+    assert!(!ran.exists(), "the serve command started");
+    // Mockingbird's own data-plane port.
+    let out = on_free_ports(|| {
+        let (data, admin) = write_config(dir.path());
+        let out = verify_run(
+            dir.path(),
+            "true",
+            &["--serve", "sleep 30", "--serve-port", &data.to_string()],
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if port_was_busy(&stderr) {
+            return Err(stderr.into_owned());
+        }
+        logged_admin(&dir.path().join("state/server.log"), admin)?;
+        Ok(out)
+    });
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let failure = &json["failures"][0];
+    assert_eq!(failure["kind"], "serve_failed", "{json:#}");
+    assert!(
+        failure["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Mockingbird's own data-plane port")
+            && failure["next_step"]
+                .as_str()
+                .unwrap()
+                .contains("Mockingbird's server uses it"),
+        "{failure}"
+    );
+}
+
+/// With no port and no ready line, the port the detection proposes for
+/// that serve command is waited for.
+#[cfg(unix)]
+#[test]
+fn verify_run_waits_for_the_detected_port() {
+    let dir = tempfile::tempdir().unwrap();
+    write_app(dir.path());
+    let port = free_port();
+    std::fs::write(dir.path().join(".rspec"), "").unwrap();
+    std::fs::create_dir_all(dir.path().join("spec")).unwrap();
+    std::fs::write(
+        dir.path().join("spec/spec_helper.rb"),
+        format!("SERVER_URL = ENV.fetch('SERVER_URL', 'http://localhost:{port}')\n"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("server")).unwrap();
+    std::fs::write(
+        dir.path().join("server/app.py"),
+        format!(
+            "import sys\nsys.argv = ['app', '{port}', {:?}]\nexec(open({:?}).read())\n",
+            dir.path().join("app.pid").display().to_string(),
+            dir.path().join("app.py").display().to_string()
+        ),
+    )
+    .unwrap();
+    let (code, json) = fresh(
+        dir.path(),
+        &ask_app(port),
+        &["--serve", "cd server && python3 app.py"],
+    );
+    assert_eq!(code, Some(0), "{json:#}");
+    assert_eq!(
+        json["serve"]["ready_by"],
+        format!("port {port} (detected)"),
+        "{json:#}"
+    );
+    assert_eq!(json["window"]["requests"], 1, "{json:#}");
+    assert!(gone(&dir.path().join("app.pid")));
+}
+
+/// With no readiness signal at all, the serve command must still run after
+/// 3 s, and a note says readiness was assumed.
+#[cfg(unix)]
+#[test]
+fn verify_run_assumes_a_serve_command_ready_after_the_settle_time() {
+    let dir = tempfile::tempdir().unwrap();
+    write_app(dir.path());
+    let port = free_port();
+    let (code, json) = fresh(
+        dir.path(),
+        &ask_app(port),
+        &["--serve", &app(dir.path(), port)],
+    );
+    assert_eq!(code, Some(0), "{json:#}");
+    let serve = &json["serve"];
+    assert_eq!(serve["ready_by"], "running for 3s", "{json:#}");
+    assert!(serve["ready_ms"].as_u64().unwrap() >= 3000, "{json:#}");
+    assert!(
+        json["notes"]
+            .to_string()
+            .contains("taken as ready because it still ran after 3s"),
+        "{json:#}"
+    );
+    assert!(gone(&dir.path().join("app.pid")));
+}
+
+/// An invalid ready pattern is refused before anything starts.
+#[test]
+fn verify_run_refuses_an_invalid_serve_ready_pattern() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config(dir.path());
+    let out = verify_run(
+        dir.path(),
+        "true",
+        &["--serve", "true", "--serve-ready", "(unclosed"],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--serve-ready \"(unclosed\" is not a valid regular expression"),
+        "{stderr}"
+    );
+    assert!(
+        !dir.path().join("state/server.log").exists(),
+        "a server was started"
+    );
+}
+
+/// Ctrl-C while the serve command is not ready yet stops it, and the tests
+/// are not run.
+#[cfg(unix)]
+#[test]
+fn verify_run_stops_the_serve_command_on_ctrl_c_while_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid = dir.path().join("waiting.pid");
+    let ran = dir.path().join("ran");
+    let port = free_port();
+    let out = on_free_ports(|| {
+        let (_, admin) = write_config(dir.path());
+        interrupted_when(
+            dir.path(),
+            &[
+                "--serve",
+                &format!("echo $$ > {}; exec sleep 60", pid.display()),
+                "--serve-port",
+                &port.to_string(),
+            ],
+            &format!("touch {}", ran.display()),
+            &pid,
+            admin,
+        )
+    });
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!("{e}: {}", String::from_utf8_lossy(&out.stderr));
+    });
+    assert_eq!(out.status.code(), Some(1), "{json:#}");
+    assert_eq!(json["command"]["interrupted"], true, "{json:#}");
+    assert_eq!(json["command"]["not_run"], true, "{json:#}");
+    assert_eq!(json["serve"]["stopped"], true, "{json:#}");
+    assert!(!ran.exists(), "the tests ran");
+    assert!(gone(&pid), "the serve command outlived Ctrl-C");
+}
+
+/// A serve command that exits while the tests run is a note.
+#[cfg(unix)]
+#[test]
+fn verify_run_notes_a_serve_command_that_exits_during_the_tests() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, json) = fresh(
+        dir.path(),
+        "sleep 3",
+        &[
+            "--serve",
+            "echo ready; sleep 1; exit 4",
+            "--serve-ready",
+            "^ready$",
+        ],
+    );
+    assert_eq!(code, Some(0), "{json:#}");
+    assert_eq!(json["serve"]["exit_code"], 4, "{json:#}");
+    assert!(
+        json["notes"]
+            .to_string()
+            .contains("the serve command exited 4 while the command ran"),
+        "{json:#}"
+    );
+}
+
 /// The command runs from the caller's folder, so a relative path works
 /// from a subfolder.
+#[cfg(unix)]
 #[test]
 fn verify_run_runs_from_the_callers_folder() {
     let dir = tempfile::tempdir().unwrap();
@@ -857,6 +1114,34 @@ fn mcp_verify_run_serves_the_app_and_stops_it() {
     assert_eq!(outcome["window"]["requests"], 1, "{outcome:#}");
     assert_eq!(outcome["serve"]["stopped"], true, "{outcome:#}");
     assert!(gone(&pid), "the app outlived the run");
+
+    // A cwd outside the project, or none, and bad serve arguments are
+    // refused.
+    for (args, want) in [
+        (
+            serde_json::json!({"cwd": dir.path().join("app")}),
+            "is absolute",
+        ),
+        (
+            serde_json::json!({"cwd": "app/../.."}),
+            "leaves the project",
+        ),
+        (serde_json::json!({"cwd": "missing"}), "is no folder"),
+        (
+            serde_json::json!({"serve": "true", "serve_ready": "(unclosed"}),
+            "serve_ready \"(unclosed\" is not a valid",
+        ),
+        (
+            serde_json::json!({"serve": "true", "serve_port": 0}),
+            "serve_port must be",
+        ),
+    ] {
+        let mut args = args;
+        args["command"] = "true".into();
+        args["config"] = "mockingbird.yaml".into();
+        let (failed, text) = mcp.tool("verify_run", args.clone());
+        assert!(failed && text.contains(want), "{args}: {text}");
+    }
 
     // The client goes away while the tests run.
     std::fs::remove_file(&pid).unwrap();

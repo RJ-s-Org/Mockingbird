@@ -118,14 +118,15 @@ pub struct VerifyArgs {
     #[arg(long, value_name = "COMMAND", requires = "run")]
     pub serve: Option<String>,
     /// Ready once something accepts connections on this localhost port.
-    #[arg(long, value_name = "PORT", requires = "serve")]
+    #[arg(long, value_name = "PORT", requires = "serve", value_parser = clap::value_parser!(u16).range(1..))]
     pub serve_port: Option<u16>,
-    /// Ready once a line of its output matches this regular expression.
-    /// With neither this nor `--serve-port`, the port the test detection
+    /// Ready once a line of its output (colours stripped) matches this
+    /// regular expression. With neither this nor `--serve-port`, the port the test detection
     /// proposes for this serve command, else it must still run after 3s.
     #[arg(long, value_name = "REGEX", requires = "serve")]
     pub serve_ready: Option<String>,
-    /// How long the serve command may take to become ready [default: 60s].
+    /// How long the serve command may take to become ready, at most 10m
+    /// [default: 60s]. It counts apart from `--timeout`.
     #[arg(long, requires = "serve")]
     pub serve_timeout: Option<humantime::Duration>,
 }

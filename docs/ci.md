@@ -198,11 +198,15 @@ mockingbird verify -c mockingbird.yaml --run "bundle exec rspec spec/checkout_sp
   `--state-dir`, default `$MB_STATE_DIR` else `.mockingbird`) and stopped
   after it; the command gets the proxy environment and the CA preloads for
   every runtime. It runs with `sh -c` (`cmd /C`, the line passed as
-  written, on Windows) from the folder `verify` was started in (the MCP
-  tool: its `cwd`, relative to the project root, else the project root
-  as [below](#hosts-the-project-can-call)), so `--run ./x.sh` works from
-  a subfolder, with no stdin, in a process group of its own. When it ends, whatever it left running in that group (a
-  server it started in the background) is stopped too. The CLI echoes its
+  written, on Windows) from the folder `verify` was started in, so `--run
+  ./x.sh` works from a subfolder (the MCP tool: its `cwd`, a folder of the
+  project given relative to the project root, which must exist and may not
+  lead out of it; else the project root as
+  [below](#hosts-the-project-can-call)), with no stdin, in a process group
+  of its own. When it ends, whatever it left running in that group (a
+  server it started in the background) is stopped too. A process that
+  leaves the group (`setsid`, a daemon that detaches, a container started
+  with `docker run -d` or `docker compose up -d`) is not: stop it yourself. The CLI echoes its
   output on stderr as it comes. Ctrl-C or SIGTERM to the CLI stops the
   command's process group and still prints the report, with the command
   marked `interrupted`. Only the command the user or agent passed is run.
@@ -214,13 +218,20 @@ mockingbird verify -c mockingbird.yaml --run "bundle exec rspec spec/checkout_sp
   once it is ready: `--serve-port <port>` (a TCP connect to localhost
   succeeds) and/or `--serve-ready "<regex>"` (a line of its stdout or
   stderr matches; an ECMA 262 regular expression, as a JSON Schema
-  `pattern`, found anywhere in the line). With neither, the port the
+  `pattern`, found anywhere in the line; colours and other ANSI escapes
+  are stripped first, lines end at `\n` and a trailing `\r` is dropped, so
+  output a progress bar redraws with bare `\r` reaches the pattern as one
+  line). An invalid pattern is refused before anything starts. With neither, the port the
   [test detection](#test-commands-and-the-apps-server) proposes for that
   exact serve command is waited for, else it must still be running after
-  3 s. A port that already accepts connections before it starts, a serve
-  command that exits first, or one not ready within `--serve-timeout`
-  (default `60s`; MCP `serve_timeout_secs`, at most 600) is a
-  `serve_failed` failure: the tests are not run (`command.not_run`).
+  3 s (and a note says readiness was only assumed). A port that already
+  accepts connections before it starts (or one of Mockingbird's own ports
+  in the config, which the next step names), a serve command that exits
+  first, or one not ready within `--serve-timeout` (default `60s`, at most
+  `10m`; MCP `serve_timeout_secs`, at most 600) is a `serve_failed`
+  failure: the tests are not run (`command.not_run`). The readiness wait
+  counts apart from `--timeout` (MCP `timeout_secs`): a run takes at most
+  their sum, plus the server start and a few seconds to stop and settle.
   After the tests end, however they end (an exit, the timeout, Ctrl-C,
   an error, the MCP client going away), its process group is stopped:
   TERM, then KILL after 5 s. The answer's `serve` has the command, what
@@ -298,12 +309,11 @@ failed; `--format json` prints:
 ### Test commands and the app's server
 
 The MCP `start_server` and `server_status` answers name the app's test
-commands in one `next_steps` line, and list them all under `app_tests`
-(`commands`, and `pairs` of a test command with the app server it
-needs), found from the project root and its
+commands in one `next_steps` line, found from the project root and its
 folders up to two levels down (dependencies, build outputs and hidden
-folders skipped; at most 4,000 directory entries looked at and 8
-commands listed): `package.json` `scripts.test` (`npm test`, or `pnpm` /
+folders skipped; at most 4,000 directory entries and files looked at in
+all, pairs included, and 8 commands listed; the result is reused while
+the project's files look unchanged, for up to 30 s): `package.json` `scripts.test` (`npm test`, or `pnpm` /
 `yarn` beside their lock file; npm's placeholder script is left out) and
 other test scripts (`test:e2e`, `test-integration`, `e2e`, ...: `npm run
 <name>`; not watch, lint, type check or format scripts); a Makefile `test`
@@ -320,29 +330,49 @@ test` or pytest is left out below a folder that has one (a Cargo
 workspace, a pytest rootdir).
 
 Tests that need the app's own server get a pair (at most 8), and the
-`next_steps` line then leads with one, ready to run: `verify_run
-{command: "bundle exec rspec spec/checkout_server_spec.rb", serve: "cd
-checkout/server/node && npm start", serve_port: 4242}`. A pair comes
-from Playwright's `webServer` (`command`, `port` or `url`, `cwd`), else
-from a local base URL with a port (a `SERVER_URL`, `BASE_URL`,
-`baseURL`, `APP_URL`, ... line naming `http://localhost:<port>`, or
-127.0.0.1, 0.0.0.0, [::1]) in the test config or helpers
-(`spec/spec_helper.rb`, `spec/rails_helper.rb`, `conftest.py`,
-`playwright.config.*`, `cypress.config.*`, `jest.setup.*`,
-`setupTests.*`, `.env.test`) together with the server to start:
+`next_steps` line then leads with one, ready to run from the project root
+(the MCP tool's default `cwd`): `verify_run {command: "bundle exec rspec
+spec/checkout_server_spec.rb", serve: "cd checkout/server/node && npm
+start", serve_port: 4242}`. The answer then also lists every command and
+pair under `app_tests` (`commands`, `pairs`; at most 6,000 characters,
+`left_out` counting what did not fit), each command as `cd <absolute
+folder> && …` so it runs from any folder. A pair comes from:
+
+- Playwright's `webServer` (`command`, `port` or `url`, `cwd`) only when
+  it sets `reuseExistingServer: true`: otherwise Playwright starts the
+  server itself;
+- a local base URL with a port in a test helper: a whole identifier such
+  as `SERVER_URL`, `BASE_URL`, `baseURL` or `APP_URL` (not
+  `DATABASE_URL` or `OPENAI_BASE_URL`) on a line that is not a comment,
+  set to `http://localhost:<port>` (or 127.0.0.1, 0.0.0.0, [::1]), on a
+  port that is not one of the config's own (server, admin, gRPC, proxy).
+  The helper decides the test command: `spec/spec_helper.rb` and
+  `spec/rails_helper.rb` the RSpec one, `conftest.py` pytest,
+  `playwright.config.*` the script that runs Playwright (else `npx
+  playwright test`), `cypress.config.*` Cypress (else `npx cypress run`),
+  `jest.setup.*` and `setupTests.*` Jest or Vitest (else `npx jest`), and
+  `.env.test` the folder's first command.
+
+The server it pairs with:
 
 - in a project of several samples, each with an `<x>/server` folder, one
-  pair per sample whose name the test files carry
-  (`spec/checkout_server_spec.rb` with `checkout/server`), with those
-  files on the test command (RSpec, pytest, and `npm test -- <files>`);
-  when some of them also name the server (`_server_`), only those;
-- else the one `<x>/server` or `server/` folder, else a `start`, `dev` or
-  `serve` script in `package.json` next to the tests (or at the root).
+  pair per sample that the runner's test files name: each file belongs to
+  the sample with the longest name it starts with
+  (`spec/checkout_flow_server_spec.rb` to `checkout-flow`, not
+  `checkout`), and goes on the test command (RSpec, pytest, and `npm test
+  -- <files>`); when some of a sample's files also name the server
+  (`_server_`), only those run and the others are listed in the pair's
+  `other_tests`;
+- else (or when no file names a sample) the one `<x>/server` or `server/`
+  folder, else a `start`, `dev` or `serve` script in `package.json` next
+  to the tests (or at the root).
 
-A server folder that holds a folder per language is started from the one
-with a start command (a `package.json` `start`, `dev` or `serve` script;
-`app.py`, `server.py` or `main.py`; `server.rb` or `app.rb`; a Go
-`main`), Node first, then Python, Ruby and Go, the shortest name first.
+A server folder that holds a folder per language is started from one with
+a start command (a `package.json` `start`, `dev` or `serve` script;
+`app.py`, `server.py` or `main.py`; `server.rb` or `app.rb`; a Go `main`):
+first one whose dependencies are installed (`node_modules`, a `.venv` or
+`venv`, `vendor/bundle`), then one in the test runner's language, then
+Node, Python, Ruby and Go, then the shortest name.
 
 ## Hosts the project can call
 
