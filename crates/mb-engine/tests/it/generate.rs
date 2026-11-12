@@ -57,6 +57,7 @@ fn ctx() -> GenerationContext<'static> {
         update_guard: None,
         answer_records: None,
         restates: None,
+        shown_target: None,
     }
 }
 
@@ -318,6 +319,7 @@ async fn prompt_contains_request_and_state_as_data() {
                     update_guard: None,
                     answer_records: None,
                     restates: None,
+                    shown_target: None,
                 },
             )
             .await

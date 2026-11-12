@@ -46,6 +46,7 @@ mod described_lifecycle;
 mod described_lists;
 mod described_runtime;
 mod described_state_lists;
+mod detail_prompt_size;
 mod effect_members;
 mod engine_error_bodies;
 mod envelope_parents;

@@ -308,6 +308,12 @@ pub struct GenerationContext<'a> {
     /// not the one the target was stored in: the answer is the target itself, with its
     /// text in that representation (see `restate`).
     pub restates: Option<&'a str>,
+    /// The target as the prompt shows it, trimmed to what the answer needs (its parts a
+    /// query embedded that this read does not ask for left out, say): `None` shows
+    /// [`Self::target`] whole. For the prompt only: the answer is still reflected over the
+    /// whole target, and a read that [`Self::restates`] it takes text only where this
+    /// holds some (see `restate`), so what this leaves out is answered as stored.
+    pub shown_target: Option<&'a Value>,
 }
 
 /// What only the runtime knows of an update's stored target, for the answer to settle
@@ -3717,7 +3723,12 @@ fn reflect(
                 body,
                 op.protocol == mb_mcm::Protocol::Graphql,
             ),
-            Some(target) if ctx.restates.is_some() => restate(validator, target, body),
+            Some(target) if ctx.restates.is_some() => restate(
+                validator,
+                target,
+                ctx.shown_target.unwrap_or(&target.data),
+                body,
+            ),
             Some(target) if ahead => caught_up(validator, body, target, ctx.earlier_own_body),
             Some(target) => overlay_target(
                 validator,
@@ -5327,10 +5338,19 @@ fn reflect_record(
 /// declares that the stored resource lacks (a part the read asked to be embedded) is
 /// `generated`'s, and is left out again when the schema refuses it. A result that still
 /// does not validate is the stored resource when that does, else `generated`, as
-/// [`overlay_target`] decides.
-fn restate(validator: &SchemaValidator, target: &StoredResource, generated: Value) -> Value {
+/// [`overlay_target`] decides. Text is taken only where `shown`, the target as the prompt
+/// showed it ([`GenerationContext::shown_target`]), holds it: what the prompt left out
+/// stays as stored.
+fn restate(
+    validator: &SchemaValidator,
+    target: &StoredResource,
+    shown: &Value,
+    generated: Value,
+) -> Value {
     let mut texts = Vec::new();
-    text_pointers(&target.data, &generated, None, String::new(), &mut texts);
+    // Where the prompt showed text, by construction (see [`restated_view`]).
+    let shown = restated_view(shown);
+    text_pointers(&shown, &generated, None, String::new(), &mut texts);
     let mut merged = target.data.clone();
     for (pointer, text) in texts.into_iter().take(MAX_RESTATED_TEXTS) {
         if validator.fixes_string(&pointer) {
@@ -5419,6 +5439,76 @@ fn text_pointers(
             out.push((at, answered.clone()));
         }
         _ => {}
+    }
+}
+
+/// `value`, a target a read restates in another representation, as its prompt shows it:
+/// its members that hold text ([`is_text`]), which is what [`restate`] takes from the
+/// answer, each at its place, and its own values besides, which say what it is. A
+/// nested object that holds text keeps its values too, and a list that holds text all
+/// its items (in their places); one that holds none is left out.
+pub(crate) fn restated_view(value: &Value) -> Value {
+    match value {
+        Value::Object(members) => Value::Object(object_view(members, 0).0),
+        other => other.clone(),
+    }
+}
+
+/// Bounds [`text_view`] (recursive data).
+const MAX_VIEW_DEPTH: usize = 16;
+
+/// `members` as [`restated_view`] shows them, and whether they hold text.
+fn object_view(members: &Map<String, Value>, depth: usize) -> (Map<String, Value>, bool) {
+    let mut shown = Map::new();
+    let mut text = false;
+    for (name, value) in members {
+        match value {
+            Value::Object(_) | Value::Array(_) => {
+                if let Some(kept) = text_view(value, Some(name), depth + 1) {
+                    text = true;
+                    shown.insert(name.clone(), kept);
+                }
+            }
+            Value::String(s) => {
+                text |= is_text(Some(name), s);
+                shown.insert(name.clone(), value.clone());
+            }
+            scalar => {
+                shown.insert(name.clone(), scalar.clone());
+            }
+        }
+    }
+    (shown, text)
+}
+
+/// `value`, the value of member `member`, as [`restated_view`] shows it: `None` when it
+/// holds no text.
+fn text_view(value: &Value, member: Option<&str>, depth: usize) -> Option<Value> {
+    if depth > MAX_VIEW_DEPTH {
+        return None;
+    }
+    match value {
+        Value::String(text) => is_text(member, text).then(|| value.clone()),
+        Value::Object(members) => {
+            let (shown, text) = object_view(members, depth);
+            text.then_some(Value::Object(shown))
+        }
+        Value::Array(items) => {
+            let shown: Vec<Option<Value>> = items
+                .iter()
+                .map(|item| text_view(item, member, depth + 1))
+                .collect();
+            shown.iter().any(Option::is_some).then(|| {
+                Value::Array(
+                    shown
+                        .into_iter()
+                        .zip(items)
+                        .map(|(kept, item)| kept.unwrap_or_else(|| item.clone()))
+                        .collect(),
+                )
+            })
+        }
+        _ => None,
     }
 }
 
@@ -6787,7 +6877,7 @@ mod answer_cap_tests {
 mod restate_tests {
     use serde_json::json;
 
-    use super::{StoredResource, is_text, name_parts, restate};
+    use super::{StoredResource, is_text, name_parts, restate, restated_view};
     use crate::validate::SchemaValidator;
 
     fn held(data: serde_json::Value) -> StoredResource {
@@ -6876,7 +6966,7 @@ mod restate_tests {
             "summary": {"text": "an object, not a string"},
             "added": "a member the schema does not declare"
         });
-        let merged = restate(&validator, &stored, answer);
+        let merged = restate(&validator, &stored, &stored.data, answer);
         assert_eq!(
             merged,
             json!({
@@ -6891,6 +6981,52 @@ mod restate_tests {
                 // Not a string in the answer.
                 "summary": "A western town."
             })
+        );
+    }
+
+    #[test]
+    fn a_restated_target_is_shown_by_its_text() {
+        let stored = json!({
+            "id": 1,
+            "name": "Deadwood",
+            "poster_path": "/a.jpg",
+            "genre_ids": [37, 18],
+            "network": {"id": 6, "name": "Home Box Office", "logo_path": "/b.png"},
+            "genres": [{"id": 37}, {"id": 18, "name": "Drama"}],
+            "images": {"posters": [{"file_path": "/c.jpg", "width": 500}]}
+        });
+        assert_eq!(
+            restated_view(&stored),
+            json!({
+                "id": 1,
+                "name": "Deadwood",
+                "poster_path": "/a.jpg",
+                "network": {"id": 6, "name": "Home Box Office", "logo_path": "/b.png"},
+                // Each item keeps its place.
+                "genres": [{"id": 37}, {"id": 18, "name": "Drama"}]
+            })
+        );
+    }
+
+    #[test]
+    fn a_restatement_takes_text_only_where_it_was_shown() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "integer"},
+                "name": {"type": "string"},
+                "credits": {"type": "object", "properties": {
+                    "cast": {"type": "array", "items": {"type": "string"}}}}
+            }
+        });
+        let validator = SchemaValidator::new(&schema).unwrap();
+        let stored =
+            held(json!({"id": 1, "name": "Deadwood", "credits": {"cast": ["Al Swearengen"]}}));
+        let shown = json!({"id": 1, "name": "Deadwood"});
+        let answer = json!({"id": 1, "name": "Deadwood (VF)", "credits": {"cast": ["Made Up"]}});
+        assert_eq!(
+            restate(&validator, &stored, &shown, answer),
+            json!({"id": 1, "name": "Deadwood (VF)", "credits": {"cast": ["Al Swearengen"]}})
         );
     }
 
@@ -6918,7 +7054,7 @@ mod restate_tests {
             "undeclared": true
         });
         assert_eq!(
-            restate(&validator, &stored, answer),
+            restate(&validator, &stored, &stored.data, answer),
             json!({"id": 1, "name": "Deadwood (VF)", "credits": {"cast": ["Timothy Olyphant"]}})
         );
     }

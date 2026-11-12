@@ -39,6 +39,7 @@ mod creates;
 mod cursors;
 mod deleted;
 mod described;
+mod detail_context;
 mod effects;
 mod entities;
 mod envelopes;
@@ -378,6 +379,15 @@ pub(crate) async fn generate_pending(
         (&pending.related, &pending.created_since)
     };
     let session_answers = |values| if restated.is_some() { &[][..] } else { values };
+    // A single-record read is shown its held records trimmed to what its answer needs
+    // ([`detail_context`]); not one catching up with writes, which needs its target whole.
+    let shown_target = target
+        .filter(|_| !repeat && response_schema.is_none() && pending.earlier.told.is_empty())
+        .and_then(|held| {
+            detail_context::shown_target(rt, plan.op, call, held, representation.is_some())
+        });
+    let shown_related = detail_context::shown_related(rt, plan.op, related);
+    let related = shown_related.as_deref().unwrap_or(related);
     let ctx = GenerationContext {
         related,
         target,
@@ -404,6 +414,7 @@ pub(crate) async fn generate_pending(
             .and_then(|d| d.answer.as_ref())
             .and_then(|a| a.records.as_ref()),
         restates: representation.as_deref(),
+        shown_target: shown_target.as_ref(),
     };
     let mut generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
     // The request log counts the executor's fill as well as the generation.
@@ -1789,6 +1800,11 @@ pub(crate) async fn complete(
         {
             if single_record {
                 query_roles::onto_kept(rt, session, (op, call), held, record);
+            }
+            // What the read did not ask to be embedded is the record's, not the variant's: a
+            // later read in this language asking for it takes the record's.
+            if single_record {
+                query_roles::embeds(rt, op, call).leave_out_unasked(Some(record));
             }
             rt.variants().keep(session, (op, call), held, record);
             if single_record {
