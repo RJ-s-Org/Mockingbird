@@ -1510,11 +1510,29 @@ fn only_a_parameter_ending_the_route_trails_it() {
 }
 
 /// Two reads by path of `repos`: a team's view of a repository, listed first, and the
-/// repository's own route.
+/// repository's own route. The lists and the create tie them into one object, as
+/// GitHub's do: the team's repositories and the organization's both list
+/// `minimal-repository`, and the organization's create answers `full-repository`.
 const REPO_READS: &str = r##"
 openapi: 3.0.0
 info: {title: T, version: "1"}
 paths:
+  /orgs/{org}/teams/{team_slug}/repos:
+    get:
+      operationId: teamRepos
+      parameters:
+        - {name: org, in: path, required: true, schema: {type: string}}
+        - {name: team_slug, in: path, required: true, schema: {type: string}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/minimal-repository"}}}}}}
+  /orgs/{org}/repos:
+    get:
+      operationId: orgRepos
+      parameters: [{name: org, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/minimal-repository"}}}}}}
+    post:
+      operationId: createOrgRepo
+      parameters: [{name: org, in: path, required: true, schema: {type: string}}]
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/full-repository"}}}}}
   /orgs/{org}/teams/{team_slug}/repos/{owner}/{repo}:
     get:
       operationId: teamRepo
@@ -1535,6 +1553,7 @@ components:
   schemas:
     full-repository: {type: object, properties: {id: {type: integer}, name: {type: string}, full_name: {type: string}}}
     team-repository: {type: object, properties: {id: {type: integer}, name: {type: string}, role_name: {type: string}}}
+    minimal-repository: {type: object, properties: {id: {type: integer}, name: {type: string}}}
 "##;
 
 fn read_of(bundle: &Bundle, index: &BundleIndex, t: &str) -> Option<String> {

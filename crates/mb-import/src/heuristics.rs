@@ -11,6 +11,8 @@ use mb_mcm::{
 };
 use serde_json::{Map, Value};
 
+mod shared_names;
+
 /// The segments of `path` as the heuristics read them: each `/`-separated
 /// segment, except that a segment with a resource's key inside it
 /// ([`key_segment`]) reads as the segments a whole-segment parameter would make
@@ -2516,13 +2518,15 @@ fn identity_is_declared(
 
 /// Applies [`infer_route`] to every compiled operation, and over it the
 /// operation's [`ResourceHint`] (`hints` runs parallel to `operations`). Reads
-/// go first: the routes are judged by them, with their hints.
+/// go first: the routes are judged by them, with their hints. A type that names
+/// several objects is split first ([`shared_names::split_shared_type_names`]).
 pub(crate) fn apply_action_routes(
     operations: &mut [Operation],
     hints: &[ResourceHint],
     defs: &Map<String, Value>,
     ctx: &mut Ctx,
 ) {
+    let split = shared_names::split_shared_type_names(operations, hints, defs);
     apply_post_updates(operations, defs);
     let creates = type_parameter_paths(operations, hints, defs);
     let keys = record_keys(operations, defs);
@@ -2580,7 +2584,16 @@ pub(crate) fn apply_action_routes(
             );
         }
         match route {
-            Route::Action(target) => {
+            Route::Action(mut target) => {
+                // A parent split off its collection's name acts under its own type:
+                // voiding a treasury transaction is not voiding an issuing one.
+                if let Some(t) = http_path(&operations[index])
+                    .and_then(|(_, path)| parent_read(operations, path, target.tail))
+                    .and_then(|read| read.resource_type.clone())
+                    .filter(|t| split.contains(t))
+                {
+                    target.resource_type = t;
+                }
                 let parent_keys = keys.of(Some(&target.resource_type)).clone();
                 act_on_parent(index, target, operations, defs, &parent_keys);
             }
