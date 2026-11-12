@@ -259,6 +259,7 @@ mockingbird verify -c mockingbird.yaml --run "bundle exec rspec spec/checkout_sp
   | `unclaimed_hosts` | the command reached a host that a bundled description or catalog example serves and no mock lists ([below](#hosts-the-project-can-call)) |
   | `check` | an assertion given beside `--run` (`--called`, `--no-unmapped`, `--no-client-errors`, `--exact-replay`) fails on the window |
   | `serve_failed` | the `--serve` command exited, was not ready in time or found its port taken; the tests were not run |
+  | `missing_dependencies` | the command exited non-zero, or the `--serve` command failed to start (or exited non-zero while the failing command ran), and its output shows a dependency that is not installed; like `serve_failed`, it does not point at the mock ([below](#missing-dependencies)) |
 
   When the command exits 0, a 4xx that matched an operation and passed
   validation is taken as a status the test expected (a lookup of a
@@ -266,6 +267,35 @@ mockingbird verify -c mockingbird.yaml --run "bundle exec rspec spec/checkout_sp
   failed on. Also under `notes`: hosts the proxy passed to the real API
   (`proxy.unmapped: pass`), and the project's unclaimed hosts when the
   command called none of them.
+- <a id="missing-dependencies"></a>**Missing dependencies.** When the
+  command exits non-zero, or the serve command fails before it is ready
+  (or exits non-zero while a command that fails runs), the last lines of
+  its output are read for a runtime's own error: Ruby `Could not find gem`, `Bundler::GemNotFound`, `cannot
+  load such file -- X` (`LoadError`); Node `Cannot find module 'X'`,
+  `Cannot find package 'X'` (`ERR_MODULE_NOT_FOUND`); Python `No module
+  named X` (`ModuleNotFoundError`); Go `cannot find package`, `no required
+  module provides package`, `missing go.sum entry`; Java
+  `ClassNotFoundException`, `NoClassDefFoundError`; or, failing those, the
+  shell's `command not found` (a test runner such as `rspec`, `pytest` or
+  `jest`, or a toolchain such as `mvn`). A path of the project's own
+  (`./routes`, `/app/x.js`) is not a dependency. The next step names the
+  project's install command, from the files of the folder the failing
+  command runs in (after its leading `cd <dir> &&`), else of the nearest
+  folder above it up to the project root: `Gemfile` → `bundle install`;
+  `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, `yarn.lock` → `yarn
+  install --frozen-lockfile`, `package-lock.json` → `npm ci`, a
+  `package.json` alone → `npm install`; `requirements*.txt` → `pip install
+  -r <file>`, else `pyproject.toml` → `uv sync` or `poetry install` when
+  their lock is there, else `pip install -e .`; `go.mod` → `go mod
+  download`; `pom.xml` → `mvn -q -DskipTests package` (`./mvnw` when the
+  project has it); `build.gradle` → `./gradlew build -x test` (`gradle`
+  without the wrapper). For example: "The tests could not start: missing
+  module `requests` (ModuleNotFoundError). Install the project's
+  dependencies (`cd /app/api && pip install -r requirements.txt`), then run
+  verify --run again." Under `proxy.unmapped: block` the step adds to run
+  the install outside the proxy, which would otherwise block the package
+  registry; under the default `pass` the registries are reachable either
+  way. A failure with none of these errors gets no such step.
 - **Exit code** 1 when the command exits non-zero, is stopped at the
   timeout or interrupted, or any failure is found; 0 otherwise.
 - **Caps.** `--timeout` (default `10m`; the MCP tool's `timeout_secs`

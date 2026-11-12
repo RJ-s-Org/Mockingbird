@@ -51,6 +51,7 @@ pub mod import_llm;
 pub mod keys;
 pub mod maintenance;
 pub mod mcp;
+pub mod missing_deps;
 pub mod onboard;
 pub mod ops;
 pub mod providers;
