@@ -900,6 +900,46 @@ async fn each_owner_reads_its_own_record_of_a_shared_number() {
     }
 }
 
+/// A fork's pull request belongs to its base repository: `b/r#5` opened from the
+/// fork `a/r` is read under `b/r` (its owner's login in another case), not under
+/// `a/r`, though its head names `a`.
+#[tokio::test]
+async fn a_fork_s_pull_request_is_read_under_its_base_only() {
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let types = SharedTypes::default();
+    let sdl = PULLS_SDL.replace(
+        "type PullRequest { id: ID! number: Int!",
+        "type User { id: ID! login: String! }\ntype Repository { id: ID! name: String! owner: User }\ntype PullRequest { id: ID! baseRepository: Repository headRepository: Repository number: Int!",
+    );
+    let repo = |owner: &str| {
+        json!({"__typename": "Repository", "id": format!("R_{owner}"), "name": "r",
+               "owner": {"__typename": "User", "id": format!("U_{owner}"), "login": owner}})
+    };
+    let fork = json!({"__typename": "PullRequest", "id": "PR_fork", "number": 5,
+        "title": "From the fork", "state": "OPEN",
+        "baseRepository": repo("B"), "headRepository": repo("a")});
+    let gh = joined(("github-graphql", &sdl), vec![fork], &state, &types, None);
+    let gql_router = graphql::try_router(gh).unwrap();
+    let rest_rt = joined(
+        ("github-rest", PULLS),
+        vec![json!({"id": 1, "node_id": "PR_1", "number": 5, "title": "Made up", "state": "open"})],
+        &state,
+        &types,
+        None,
+    );
+    let rest_router = http_rest::router(rest_rt);
+    gql(
+        &gql_router,
+        r#"mutation { createPullRequest(title: "From the fork") { id number } }"#,
+        true,
+    )
+    .await;
+    let read = rest(&rest_router, "GET", "/repos/a/r/pulls/5", None).await;
+    assert_ne!(read["title"], "From the fork", "{read}");
+    let read = rest(&rest_router, "GET", "/repos/b/r/pulls/5", None).await;
+    assert_eq!(read["title"], "From the fork", "{read}");
+}
+
 /// `same_as` on one side only: the GraphQL world names REST's type, the REST mock
 /// has no world, and its read still finds the GraphQL record (inferred there).
 #[tokio::test]

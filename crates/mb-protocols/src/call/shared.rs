@@ -140,65 +140,80 @@ fn chain_of(owner: &Owner) -> Vec<String> {
         .collect()
 }
 
-/// Bounds the walk of a record for the owners it shows.
-const CHAIN_DEPTH: usize = 4;
+/// The members of a record naming the repository it belongs to: GraphQL's and REST's
+/// spellings. A pull request's `head` (a fork's branch) is not among them.
+const REPOSITORY_MEMBERS: &[&str] = &["repository", "baseRepository", "base_repository"];
 
-/// Whether `data` (a record another mock stored) is under the owner `chain` names,
-/// as far as it shows: when it names the repository (`chain`'s last value) under an
-/// owner, in a path (`a/r`, `https://github.com/a/r/pull/5`) or an object holding
-/// it as its `name` beside an `owner` (`{name: r, owner: {login: a}}`), one of those
-/// owners must be the chain's. A record that names none fits.
+/// The members of a record (and of its repository) holding a link or path to it.
+const LINK_MEMBERS: &[&str] = &[
+    "url",
+    "html_url",
+    "htmlUrl",
+    "repository_url",
+    "repositoryUrl",
+    "full_name",
+    "nameWithOwner",
+];
+
+/// Whether `data` (a record another mock stored) belongs under the owner `chain`
+/// names, as far as it shows: only the repository it belongs to counts, as its own
+/// links (`url`, `html_url`, `repository_url`: `https://github.com/a/r/pull/5`)
+/// show it, or its repository (`repository`, `baseRepository`, `base.repo`) does by
+/// a link, a `full_name` (`a/r`) or its `name` beside an `owner`. Other nested
+/// objects, a pull request's `head` (a fork) above all, say nothing. Names compare
+/// without case, as GitHub's do. A record that shows no owner fits every one.
 fn chain_fits(chain: &[String], data: &Value) -> bool {
     let [.., parent, name] = chain else {
         return true;
     };
     let mut shown: Vec<String> = Vec::new();
-    owners_shown(data, name, 0, &mut shown);
-    shown.is_empty() || shown.iter().any(|o| o == parent)
+    owners_shown(data, name, &mut shown);
+    let repositories = REPOSITORY_MEMBERS
+        .iter()
+        .filter_map(|m| data.get(*m))
+        .chain(data.get("base").and_then(|b| b.get("repo")));
+    for repository in repositories {
+        owners_shown(repository, name, &mut shown);
+        if repository
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            && let Some(owner) = repository.get("owner")
+        {
+            let login = match owner {
+                Value::String(login) => Some(login.as_str()),
+                owner => ["login", "name", "slug"]
+                    .iter()
+                    .find_map(|k| owner.get(*k).and_then(Value::as_str)),
+            };
+            shown.extend(login.map(str::to_string));
+        }
+    }
+    shown.is_empty() || shown.iter().any(|o| o.eq_ignore_ascii_case(parent))
 }
 
-/// The owners `value` shows repository `name` under (see [`chain_fits`]).
-fn owners_shown(value: &Value, name: &str, depth: usize, out: &mut Vec<String>) {
-    if depth > CHAIN_DEPTH {
-        return;
-    }
-    match value {
-        Value::String(text) if !text.contains(char::is_whitespace) => {
-            let path = text.split_once("://").map_or(text.as_str(), |(_, rest)| {
-                rest.split_once('/').map_or("", |(_, p)| p)
-            });
-            let segments: Vec<&str> = path
-                .split(['/', '?', '#'])
-                .filter(|s| !s.is_empty())
-                .collect();
-            for pair in segments.windows(2) {
-                if pair[1] == name {
-                    out.push(pair[0].to_string());
-                }
+/// The owners the link members of `object` show repository `name` under: the
+/// segment before `name` in each path.
+fn owners_shown(object: &Value, name: &str, out: &mut Vec<String>) {
+    for member in LINK_MEMBERS {
+        let Some(text) = object.get(*member).and_then(Value::as_str) else {
+            continue;
+        };
+        if text.contains(char::is_whitespace) {
+            continue;
+        }
+        let path = text.split_once("://").map_or(text, |(_, rest)| {
+            rest.split_once('/').map_or("", |(_, p)| p)
+        });
+        let segments: Vec<&str> = path
+            .split(['/', '?', '#'])
+            .filter(|s| !s.is_empty())
+            .collect();
+        for pair in segments.windows(2) {
+            if pair[1].eq_ignore_ascii_case(name) {
+                out.push(pair[0].to_string());
             }
         }
-        Value::Object(members) => {
-            if members.get("name").and_then(Value::as_str) == Some(name)
-                && let Some(owner) = members.get("owner")
-            {
-                let login = match owner {
-                    Value::String(login) => Some(login.as_str()),
-                    owner => ["login", "name", "slug"]
-                        .iter()
-                        .find_map(|k| owner.get(*k).and_then(Value::as_str)),
-                };
-                out.extend(login.map(str::to_string));
-            }
-            for v in members.values() {
-                owners_shown(v, name, depth + 1, out);
-            }
-        }
-        Value::Array(items) => {
-            for v in items {
-                owners_shown(v, name, depth + 1, out);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -824,17 +839,35 @@ mod tests {
         assert!(fits(json!({"number": 5})));
         assert!(fits(json!({"url": "https://github.com/a/r/pull/5"})));
         assert!(!fits(json!({"url": "https://github.com/b/r/pull/5"})));
-        assert!(fits(json!({"full_name": "a/r"})));
+        assert!(fits(json!({"repository": {"full_name": "a/r"}})));
         assert!(!fits(
             json!({"repository": {"name": "r", "owner": {"login": "b"}}})
         ));
         assert!(fits(
             json!({"repository": {"name": "r", "owner": {"login": "a"}}})
         ));
-        // Prose with a slash is no path.
-        assert!(fits(json!({"title": "fix b/r and more"})));
+        assert!(!fits(json!({"baseRepository": {"nameWithOwner": "b/r"}})));
+        // Prose with a slash is no path, and a member that is no link says nothing.
+        assert!(fits(json!({"title": "fix b/r and more", "body": "b/r"})));
+        // A fork's pull request belongs to its base: its head names another owner.
+        let fork = json!({"base": {"repo": {"full_name": "b/r"}},
+                          "head": {"repo": {"full_name": "a/r"}}});
+        assert!(!fits(fork.clone()));
+        assert!(chain_fits(&["b".to_string(), "r".to_string()], &fork));
+        let fork = json!({"baseRepository": {"name": "r", "owner": {"login": "b"}},
+                          "headRepository": {"name": "r", "owner": {"login": "a"}},
+                          "headRepositoryOwner": {"login": "a"}});
+        assert!(!fits(fork));
+        // Logins and names compare without case.
+        assert!(fits(json!({"url": "https://github.com/A/R/pull/5"})));
+        assert!(fits(
+            json!({"repository": {"name": "R", "owner": {"login": "A"}}})
+        ));
         // A one-parameter chain says nothing beyond the nearest parameter.
-        assert!(chain_fits(&chain[1..], &json!({"full_name": "b/r"})));
+        assert!(chain_fits(
+            &chain[1..],
+            &json!({"repository": {"full_name": "b/r"}})
+        ));
     }
 
     #[test]

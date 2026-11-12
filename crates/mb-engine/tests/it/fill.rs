@@ -107,6 +107,7 @@ async fn a_nullable_reference_or_optional_object_nothing_set_is_null_and_not_ask
                 op,
                 call: &call,
                 sent: None,
+                caller: &[],
             },
         )
         .await;
@@ -159,6 +160,7 @@ async fn only_nullable_references_and_optional_objects_ask_no_model() {
                 op,
                 call: &call,
                 sent: None,
+                caller: &[],
             },
         )
         .await;
@@ -199,6 +201,7 @@ async fn an_optional_object_that_may_not_be_null_is_left_out() {
                 op,
                 call: &call,
                 sent: None,
+                caller: &[],
             },
         )
         .await;
@@ -254,6 +257,7 @@ async fn an_optional_object_the_request_sent_is_asked() {
                 op,
                 call: &call,
                 sent: None,
+                caller: &[],
             },
         )
         .await;
@@ -299,6 +303,7 @@ async fn a_failed_call_leaves_a_sent_optional_object_absent() {
                 op,
                 call: &call,
                 sent: None,
+                caller: &[],
             },
         )
         .await;
@@ -341,6 +346,7 @@ async fn a_failed_call_leaves_a_nullable_object_null() {
                 op,
                 call: &call,
                 sent: None,
+                caller: &[],
             },
         )
         .await;
@@ -454,6 +460,7 @@ async fn structured_members_are_filled_with_no_model_call() {
                 op,
                 call: &call,
                 sent: None,
+                caller: &[],
             },
         )
         .await;
@@ -519,6 +526,7 @@ async fn only_free_text_is_asked_of_the_model() {
                 op,
                 call: &call,
                 sent: None,
+                caller: &[],
             },
         )
         .await;
@@ -530,9 +538,9 @@ async fn only_free_text_is_asked_of_the_model() {
     };
     let mut asked: Vec<&String> = schema["properties"].as_object().unwrap().keys().collect();
     asked.sort();
-    // An enum rides along on a call made anyway.
-    assert_eq!(asked, vec!["body", "meta", "status"]);
-    assert_eq!(filled.members["status"], "sent");
+    // An enum the persona says nothing of is no reason to ask: its first value.
+    assert_eq!(asked, vec!["body", "meta"]);
+    assert_eq!(filled.members["status"], "queued");
     let meta: Vec<&String> = schema["properties"]["meta"]["properties"]
         .as_object()
         .unwrap()
@@ -626,6 +634,7 @@ async fn an_object_is_asked_for_its_free_text_and_keeps_nothing_unasked() {
                 op,
                 call: &call,
                 sent: None,
+                caller: &[],
             },
         )
         .await;
@@ -674,9 +683,160 @@ async fn a_list_sent_inside_a_wrapper_is_asked() {
                 op,
                 call: &call,
                 sent: record.as_object(),
+                caller: &[],
             },
         )
         .await;
     assert_eq!(filled.members["lines"], lines);
     assert_eq!(provider.requests().len(), 1);
+}
+
+const TICKETS: &str = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /repos/{owner}/{repo}/tickets:
+    post:
+      operationId: createTicket
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+      responses:
+        "201":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Ticket"}
+components:
+  schemas:
+    Ticket:
+      type: object
+      required: [author, repository, direction, kind, tier]
+      properties:
+        author:
+          type: object
+          required: [login, id]
+          properties: {login: {type: string}, id: {type: integer}}
+        repository:
+          type: object
+          required: [owner, name, id]
+          properties: {owner: {type: string}, name: {type: string, pattern: "^[a-z]{12}$"}, id: {type: integer}}
+        direction: {type: string, enum: [inbound, outbound-api, outbound-call]}
+        kind: {type: string, enum: [bug, task], default: task}
+        tier: {type: string, enum: [gold, silver]}
+"##;
+
+fn ticket_engine(
+    persona: Option<&str>,
+    script: Vec<Result<String, LlmError>>,
+) -> (std::sync::Arc<mb_llm::ScriptedProvider>, mb_engine::Engine) {
+    let provider = std::sync::Arc::new(mb_llm::ScriptedProvider::new(script));
+    let dyn_provider: std::sync::Arc<dyn mb_llm::Provider> = provider.clone();
+    let config = mb_engine::EngineConfig {
+        persona: persona.map(str::to_string),
+        ..mb_engine::EngineConfig::default()
+    };
+    (provider, mb_engine::Engine::new(Some(dyn_provider), config))
+}
+
+fn ticket_call(op: &mb_mcm::Operation) -> OperationCall {
+    let mut path_params = Map::new();
+    path_params.insert("owner".into(), json!("acme"));
+    path_params.insert("repo".into(), json!("backups"));
+    OperationCall {
+        credentials: Default::default(),
+        operation_id: op.id.clone(),
+        path_params,
+        query: Map::new(),
+        headers: Map::new(),
+        body: Some(json!({"title": "down"})),
+    }
+}
+
+/// A nested member the call's context gives is that value, with no model call: a
+/// path parameter by its name (`repository.owner`), a member of who the caller is by
+/// its name (`author.login`), though both are plain strings. An enum the persona says
+/// nothing of is its `default`, else its first value.
+#[tokio::test]
+async fn nested_members_come_from_the_path_and_the_caller() {
+    let bundle = compile(TICKETS.as_bytes()).unwrap();
+    let op = bundle.operation("createTicket").unwrap();
+    let schema = op.success_output().unwrap().schema.clone().unwrap();
+    let (provider, engine) = ticket_engine(None, vec![]);
+    let call = ticket_call(op);
+    let author = mb_engine::consistency::property_schema(&bundle, &schema, "author").unwrap();
+    let members = json!({"login": "octocat", "name": "theoctocatxy", "id": 7});
+    let caller = [mb_engine::CallerAnswer {
+        schema: author,
+        members: members.as_object().unwrap().clone(),
+    }];
+    let missing: Vec<String> = ["author", "repository", "direction", "kind", "tier"]
+        .map(String::from)
+        .to_vec();
+    let filled = engine
+        .fill(
+            &bundle,
+            &schema,
+            &Map::new(),
+            &missing,
+            FillContext {
+                op,
+                call: &call,
+                sent: None,
+                caller: &caller,
+            },
+        )
+        .await;
+    assert!(provider.requests().is_empty(), "{:?}", provider.requests());
+    let m = &filled.members;
+    assert_eq!(m["author"], json!({"login": "octocat", "id": 7}), "{m:?}");
+    assert_eq!(m["repository"]["owner"], "acme", "{m:?}");
+    // Only an object of the caller's schema takes the caller's members.
+    assert_ne!(m["repository"]["name"], "theoctocatxy", "{m:?}");
+    assert_ne!(m["repository"]["id"], 7, "{m:?}");
+    assert_eq!(m["kind"], "task", "the default: {m:?}");
+    assert_eq!(m["direction"], "inbound", "the first value: {m:?}");
+    assert_eq!(m["tier"], "gold", "the first value: {m:?}");
+}
+
+/// An enum the persona names one value of is that value; one whose member the persona
+/// names, but no one value of, is the model's.
+#[tokio::test]
+async fn an_enum_the_persona_speaks_of_is_resolved_or_asked() {
+    let bundle = compile(TICKETS.as_bytes()).unwrap();
+    let op = bundle.operation("createTicket").unwrap();
+    let schema = op.success_output().unwrap().schema.clone().unwrap();
+    let persona =
+        "Ticket API. New tickets are \"outbound-api\" and get a tier the support plan decides.";
+    let (provider, engine) = ticket_engine(
+        Some(persona),
+        vec![Ok(json!({"tier": "silver"}).to_string())],
+    );
+    let call = ticket_call(op);
+    let missing: Vec<String> = ["direction", "kind", "tier"].map(String::from).to_vec();
+    let filled = engine
+        .fill(
+            &bundle,
+            &schema,
+            &Map::new(),
+            &missing,
+            FillContext {
+                op,
+                call: &call,
+                sent: None,
+                caller: &[],
+            },
+        )
+        .await;
+    let m = &filled.members;
+    assert_eq!(m["direction"], "outbound-api", "{m:?}");
+    assert_eq!(m["kind"], "task", "{m:?}");
+    assert_eq!(m["tier"], "silver", "{m:?}");
+    let sent = provider.requests();
+    assert_eq!(sent.len(), 1);
+    let ResponseFormat::JsonSchema { schema, .. } = &sent[0].response_format else {
+        panic!("no schema sent");
+    };
+    let asked: Vec<&String> = schema["properties"].as_object().unwrap().keys().collect();
+    assert_eq!(asked, vec!["tier"]);
 }

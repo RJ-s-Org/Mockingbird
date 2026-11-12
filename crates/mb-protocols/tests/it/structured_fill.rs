@@ -151,7 +151,7 @@ async fn a_create_missing_only_structured_members_makes_no_model_call() {
 /// for it alone: the structured members beside it are the faker's.
 #[tokio::test]
 async fn a_create_missing_free_text_asks_the_model_for_it_alone() {
-    let fill = json!({"routing": {"note": "Page the on-call engineer."}, "priority": "P2"});
+    let fill = json!({"routing": {"note": "Page the on-call engineer."}});
     let h = support::described(CONTRACT, world(), vec![fill]);
     let (status, _, body) = h
         .send(
@@ -162,12 +162,9 @@ async fn a_create_missing_free_text_asks_the_model_for_it_alone() {
         )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    // `routing` is asked for its free text alone, and the enum rides along.
-    assert_eq!(
-        asked(&h),
-        vec![vec!["priority".to_string(), "routing".to_string()]]
-    );
-    assert_eq!(body["priority"], "P2", "{body}");
+    // `routing` is asked for its free text alone; the enum, unnamed by any persona, is not.
+    assert_eq!(asked(&h), vec![vec!["routing".to_string()]]);
+    assert_eq!(body["priority"], "P1", "the first value: {body}");
     assert!(body["routing"]["team_id"].is_string(), "{body}");
     assert_eq!(
         body["routing"]["note"], "Page the on-call engineer.",
@@ -181,4 +178,102 @@ async fn a_create_missing_free_text_asks_the_model_for_it_alone() {
     let id = body["id"].as_str().unwrap_or_default().to_owned();
     let stored = h.stored("alert", &id).await.unwrap_or_default();
     assert_eq!(stored["routing"]["note"], "Page the on-call engineer.");
+}
+
+const TICKETS: &str = r##"
+openapi: 3.1.0
+info: {title: Tickets, version: "1"}
+paths:
+  /user:
+    get:
+      operationId: getMe
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/User"}
+  /repos/{owner}/{repo}/tickets:
+    post:
+      operationId: createTicket
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties: {title: {type: string}}
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Ticket"}
+  /tickets/{id}:
+    get:
+      operationId: getTicket
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Ticket"}
+components:
+  schemas:
+    User:
+      type: object
+      required: [login, id]
+      properties: {login: {type: string}, id: {type: integer}}
+    Ticket:
+      type: object
+      required: [id, title, author, repository]
+      properties:
+        id: {type: string, format: uuid}
+        title: {type: string}
+        author: {$ref: "#/components/schemas/User"}
+        repository:
+          type: object
+          required: [owner]
+          properties: {owner: {type: string}}
+"##;
+
+/// A create's nested members come from the call's context with no model call: who
+/// the caller is (what the session's `/user` answered) into the ticket's `author`, a
+/// path parameter into `repository.owner`.
+#[tokio::test]
+async fn a_create_takes_the_caller_and_the_path_into_nested_members() {
+    let world = json!({
+        "types": {"ticket": {"identity": {"member": "id"}}},
+        "operations": {
+            "createTicket": {"kind": "create", "type": "ticket"},
+            "getTicket": {"kind": "read", "type": "ticket", "target": {"path_param": "id"}}
+        }
+    });
+    let me = json!({"login": "octocat", "id": 7});
+    let h = support::described(TICKETS, world, vec![me.clone()]);
+    let (status, _, body) = h.send("GET", "/user", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, me);
+    let calls = h.provider.requests().len();
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/repos/acme/backups/tickets",
+            Some(json!({"title": "Backup is down"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(h.provider.requests().len(), calls, "no model call: {body}");
+    assert_eq!(body["author"], me, "{body}");
+    assert_eq!(body["repository"]["owner"], "acme", "{body}");
+    let id = body["id"].as_str().unwrap_or_default().to_owned();
+    let (_, _, read) = h.send("GET", &format!("/tickets/{id}"), None, &[]).await;
+    assert_eq!(read, body);
 }
