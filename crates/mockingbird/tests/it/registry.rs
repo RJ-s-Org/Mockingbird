@@ -1860,3 +1860,250 @@ async fn mocks_rebuilt_in_one_batch_end_in_their_group() {
     let title = note_across(&registry.router(), host, host).await;
     assert_eq!(title, "Over REST");
 }
+
+/// A tracker's GraphQL schema: tickets and merge requests created under a project,
+/// read by no query of their own (so each type's first operation answers a payload).
+const TRACKER_SDL: &str = r#"
+"""An RFC 3986, RFC 3987, and RFC 6570 (level 4) compliant URI string."""
+scalar URI
+type Owner { login: String! }
+type Project { id: ID! name: String! owner: Owner! url: URI }
+type Ticket { id: ID! number: Int! title: String! url: URI! project: Project! }
+type MergeRequest { id: ID! number: Int! title: String! url: URI! project: Project! }
+input CreateTicketInput { projectId: ID! title: String! }
+type CreateTicketPayload { ticket: Ticket }
+input CreateMergeRequestInput { projectId: ID! title: String! }
+type CreateMergeRequestPayload { mergeRequest: MergeRequest }
+type Query { project(owner: String!, name: String!): Project }
+type Mutation {
+  createTicket(input: CreateTicketInput!): CreateTicketPayload
+  createMergeRequest(input: CreateMergeRequestInput!): CreateMergeRequestPayload
+}
+"#;
+
+/// What the GraphQL tracker's world says: both creates.
+fn tracker_world() -> Value {
+    json!({
+        "version": 1,
+        "types": {
+            "ticket": {"identity": {"member": "id"}},
+            "mergerequest": {"identity": {"member": "id"}}
+        },
+        "operations": {
+            "Mutation.createTicket": {"kind": "create", "type": "ticket",
+                "answer": {"record": "/ticket"}},
+            "Mutation.createMergeRequest": {"kind": "create", "type": "mergerequest",
+                "answer": {"record": "/mergeRequest"}}
+        }
+    })
+}
+
+/// The tracker's REST API: tickets (the GraphQL type's name) and merges (answering
+/// `MergeRequest`s, inferred the same type) read by number under their project. A
+/// ticket's `url` example reaches it by another route (the project's id), and only a
+/// merge's page link has an example; both name their project by id.
+const TRACKER_REST: &str = r##"
+openapi: 3.1.0
+info: {title: Tracker, version: "1"}
+servers: [{url: "https://api.tracker.test"}]
+paths:
+  /projects/{owner}/{project}/tickets/{ticket_number}:
+    get:
+      operationId: getTicket
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: project, in: path, required: true, schema: {type: string}}
+        - {name: ticket_number, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}
+        "404": {description: missing}
+  /projects/{owner}/{project}/merges/{merge_number}:
+    get:
+      operationId: getMerge
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: project, in: path, required: true, schema: {type: string}}
+        - {name: merge_number, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {$ref: "#/components/schemas/MergeRequest"}}}
+        "404": {description: missing}
+components:
+  schemas:
+    ProjectRef:
+      type: object
+      properties:
+        id: {type: integer}
+        node_id: {type: string}
+        name: {type: string}
+    Ticket:
+      type: object
+      required: [id, number, title]
+      properties:
+        id: {type: integer}
+        node_id: {type: string}
+        number: {type: integer}
+        title: {type: string}
+        url: {type: string, format: uri, example: "https://api.tracker.test/projectsbyid/42/tickets/1"}
+        html_url: {type: string, format: uri}
+        project: {$ref: "#/components/schemas/ProjectRef"}
+    MergeRequest:
+      type: object
+      required: [id, number, title]
+      properties:
+        id: {type: integer}
+        node_id: {type: string}
+        number: {type: integer}
+        title: {type: string}
+        url: {type: string, format: uri}
+        html_url: {type: string, format: uri, example: "https://tracker.test/acme/roadmap/merge/12"}
+        project: {$ref: "#/components/schemas/ProjectRef"}
+"##;
+
+/// A REST and a GraphQL tracker mock on one host, `shares` set as given on both,
+/// mounted with two projects of `acme` held in the session they keep under `holder`:
+/// `P_1` (`roadmap`) holding no link, `P_2` (`atlas`) its page link.
+async fn trackers(shares: Option<&str>, holder: &str) -> axum::Router {
+    let store = store().await;
+    let host = "api.tracker.test";
+    create_sharing(&store, "rest", "/", &[host], shares, TRACKER_REST).await;
+    let gql = create_sharing(&store, "gql", "/graphql", &[host], shares, TRACKER_SDL).await;
+    // The first contract version, the active one.
+    store
+        .add_world_revision(
+            gql.id,
+            1,
+            mb_store::NewWorldRevision {
+                author: mb_mcm::world::Author::Agent,
+                document: tracker_world(),
+                created_by: None,
+                expect: None,
+            },
+        )
+        .await
+        .unwrap();
+    let deps = deps(store.clone());
+    let key = mb_state::SessionKey {
+        workspace: DEFAULT_WORKSPACE.into(),
+        mock: holder.into(),
+        session: "default".into(),
+    };
+    let owner = json!({"__typename": "Owner", "login": "acme"});
+    for data in [
+        json!({"__typename": "Project", "id": "P_1", "name": "roadmap", "owner": owner}),
+        json!({"__typename": "Project", "id": "P_2", "name": "atlas", "owner": owner,
+            "url": "https://tracker.test/acme/atlas"}),
+    ] {
+        let id = data["id"].as_str().unwrap().to_owned();
+        deps.state
+            .upsert(
+                &key,
+                mb_state::StoredResource {
+                    resource_type: "project".into(),
+                    id,
+                    data,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    registry.router()
+}
+
+/// Creates a `kind` (`Ticket`, `MergeRequest`) under `project` over GraphQL: its number
+/// and `url`.
+async fn create_tracked(router: &axum::Router, kind: &str, project: &str) -> (u64, String) {
+    let field = format!("{}{}", kind[..1].to_ascii_lowercase(), &kind[1..]);
+    let query = format!(
+        r#"mutation {{ create{kind}(input: {{projectId: "{project}", title: "Router panics"}}) {{
+            {field} {{ id number url }} }} }}"#
+    );
+    let (status, body) = call(
+        router,
+        "POST",
+        "api.tracker.test",
+        "/graphql",
+        Some(json!({ "query": query })),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let made = &body["data"][format!("create{kind}")][&field];
+    let number = made["number"].as_u64().unwrap_or_else(|| panic!("{body}"));
+    let url = made["url"].as_str().unwrap_or_else(|| panic!("{body}"));
+    (number, url.to_owned())
+}
+
+/// A GraphQL create's link follows its REST twin's layout, whether the twin is the type
+/// of the same name (`tickets`) or one inferred the same (`merges` answering
+/// `MergeRequest`s, where GraphQL reads the type only through a mutation's payload):
+/// the twin's API link under a project holding no link (not the `url` example reaching
+/// a ticket by another route), its page link under one on the page host. A REST read by
+/// number under the project returns the record, though it names its project by the
+/// GraphQL mock's id alone (the project that id names, held in the session, says
+/// whose it is), and a read under another project does not. In a default group (no
+/// `shares`) as in a named one.
+#[tokio::test]
+async fn a_graphql_create_follows_its_rest_twin_in_a_default_or_named_group() {
+    for (shares, holder) in [(None, "tracker.test"), (Some("tracker"), "tracker")] {
+        let router = trackers(shares, holder).await;
+        for (kind, rest, project, url) in [
+            (
+                "Ticket",
+                "tickets",
+                "P_1",
+                "https://api.tracker.test/projects/acme/roadmap/tickets/",
+            ),
+            (
+                "MergeRequest",
+                "merges",
+                "P_1",
+                "https://api.tracker.test/projects/acme/roadmap/merges/",
+            ),
+            (
+                "MergeRequest",
+                "merges",
+                "P_2",
+                "https://tracker.test/acme/atlas/merge/",
+            ),
+        ] {
+            let (number, made) = create_tracked(&router, kind, project).await;
+            assert_eq!(
+                made,
+                format!("{url}{number}"),
+                "{shares:?} {kind} {project}"
+            );
+            let name = if project == "P_1" { "roadmap" } else { "atlas" };
+            let (status, read) = call(
+                &router,
+                "GET",
+                "api.tracker.test",
+                &format!("/projects/acme/{name}/{rest}/{number}"),
+                None,
+            )
+            .await;
+            let case = format!("{shares:?} {kind} {project}: {read}");
+            assert_eq!(status, 200, "{case}");
+            assert_eq!(read["number"], number, "{case}");
+            assert_eq!(read["title"], "Router panics", "{case}");
+            if project == "P_1" {
+                let (_, other) = call(
+                    &router,
+                    "GET",
+                    "api.tracker.test",
+                    &format!("/projects/acme/atlas/{rest}/{number}"),
+                    None,
+                )
+                .await;
+                assert_ne!(
+                    other["title"], "Router panics",
+                    "{shares:?} {kind}: {other}"
+                );
+            }
+        }
+    }
+}

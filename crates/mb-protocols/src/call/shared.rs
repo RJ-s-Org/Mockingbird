@@ -114,9 +114,18 @@ pub(super) async fn by_shared(
             };
             // The nearest parameter names the repository alone (`r`): the whole chain
             // (`a/r`) tells two owners' repositories of one name apart.
-            if owner.is_none_or(|o| {
-                key_fits(rt, session, &own, o) && chain_fits(&chain_of(o), &record.data)
-            }) {
+            let fits = match owner {
+                None => true,
+                Some(o) => {
+                    let judged = StoredResource {
+                        data: resolved(state, session, o, &own.data, &record.data).await,
+                        ..own.clone()
+                    };
+                    let stored = resolved(state, session, o, &record.data, &record.data).await;
+                    key_fits(rt, session, &judged, o) && chain_fits(&chain_of(o), &stored)
+                }
+            };
+            if fits {
                 return Some(StoredResource {
                     resource_type: t.to_string(),
                     id: id.to_string(),
@@ -126,6 +135,63 @@ pub(super) async fn by_shared(
         }
     }
     None
+}
+
+/// `data`, a record another mock stored (`stored` as it stored it) drawn into the
+/// reading mock's shape, as its owner is judged: each reference naming another record
+/// by an id alone (GraphQL's `repository: {id: "R_1"}`, which REST's shape holds as
+/// `{node_id}`) is replaced by the record it names, when the session holds it under
+/// its type (`__typename`) or the member's name, so its name and owner say whose it is.
+/// One the session does not hold is left out when `owner` names its record by name
+/// (`trellis` of `/repos/{owner}/{repo}/…`): its id is the other mock's, and says
+/// nothing of that name. Under an owner named by id (`{project_id}`) it stays.
+async fn resolved(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    owner: &Owner,
+    data: &Value,
+    stored: &Value,
+) -> Value {
+    let mut data = data.clone();
+    let Value::Object(members) = &mut data else {
+        return data;
+    };
+    let references: Vec<(String, String)> = members
+        .iter()
+        .filter_map(|(name, value)| {
+            let inner = value.as_object()?;
+            let ids_only = inner.keys().any(|k| k != "__typename")
+                && inner
+                    .keys()
+                    .all(|k| k == "__typename" || k == "node_id" || mb_mcm::is_generic_id(k));
+            let id = ids_only
+                .then(|| inner.values().find_map(id_string))
+                .flatten()?;
+            Some((name.clone(), id))
+        })
+        .collect();
+    for (name, id) in references {
+        let typename = [name.as_str(), camel(&name).as_str()]
+            .iter()
+            .find_map(|n| stored.get(*n)?.get("__typename")?.as_str().map(normal));
+        let mut found = None;
+        for t in typename.into_iter().chain([normal(&name)]) {
+            found = state.get(session, &t, &id).await;
+            if found.is_some() {
+                break;
+            }
+        }
+        match found {
+            Some(record) => {
+                members.insert(name, record.data);
+            }
+            None if !id_like(&owner.param) => {
+                members.remove(&name);
+            }
+            None => {}
+        }
+    }
+    data
 }
 
 /// The values of the path parameters `owner`'s collection is under, outermost first:
@@ -633,7 +699,8 @@ impl Registry {
 
 /// The types `bundle` stores records under: each operation's resource type, with the
 /// schema its success answer holds a record of, and for a GraphQL contract each object
-/// type with an `id` (stored under its name in lower case).
+/// type with an `id` (stored under its name in lower case), whose definition adds its
+/// name and identity to the operations' type of that name.
 fn record_types(bundle: &mb_mcm::Bundle) -> Vec<RecordType> {
     let mut out: Vec<RecordType> = Vec::new();
     let mut graphql = false;
@@ -677,16 +744,32 @@ fn record_types(bundle: &mb_mcm::Bundle) -> Vec<RecordType> {
                 continue;
             };
             let key = name.to_lowercase();
-            if !props.contains_key("id") || out.iter().any(|r| r.key.to_lowercase() == key) {
+            if !props.contains_key("id") {
                 continue;
             }
-            out.push(RecordType {
-                key,
-                names: vec![words(name)],
-                number: props.contains_key("number"),
-                id: true,
-                node_id: props.contains_key("node_id"),
-            });
+            let number = props.contains_key("number");
+            let node_id = props.contains_key("node_id");
+            // A type a mutation creates is stored under its name too, but its success
+            // answer is the mutation's payload (`CreatePullRequestPayload`), which
+            // declares none of the type's identity: the type's own definition does.
+            match out.iter_mut().find(|r| r.key.to_lowercase() == key) {
+                Some(entry) => {
+                    let own = words(name);
+                    if !entry.names.contains(&own) {
+                        entry.names.push(own);
+                    }
+                    entry.number |= number;
+                    entry.id = true;
+                    entry.node_id |= node_id;
+                }
+                None => out.push(RecordType {
+                    key,
+                    names: vec![words(name)],
+                    number,
+                    id: true,
+                    node_id,
+                }),
+            }
         }
     }
     out
@@ -852,6 +935,26 @@ fn camel(name: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A GraphQL type a mutation creates, read through no query of its own, has the
+    /// identity its definition declares, not its payload's.
+    #[test]
+    fn a_type_created_through_a_payload_has_its_definition_s_identity() {
+        let bundle = mb_import::compile(
+            br#"
+type PullRequest { id: ID! number: Int! title: String! }
+input CreatePullRequestInput { title: String! }
+type CreatePullRequestPayload { pullRequest: PullRequest }
+type Query { viewer: String }
+type Mutation { createPullRequest(input: CreatePullRequestInput!): CreatePullRequestPayload }
+"#,
+        )
+        .unwrap();
+        let types = record_types(&bundle);
+        let own = types.iter().find(|r| r.key == "pullrequest").unwrap();
+        assert!(own.number && own.id, "{own:?}");
+        assert!(own.names.contains(&words("PullRequest")), "{own:?}");
+    }
 
     fn record_type(names: &[&str], identity: &[&str]) -> RecordType {
         RecordType {
