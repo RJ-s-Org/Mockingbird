@@ -69,6 +69,7 @@ mod graphql_creates;
 mod graphql_def_effects;
 mod graphql_links;
 mod graphql_nested;
+mod graphql_offline_lookups;
 mod graphql_references;
 mod graphql_relay_edges;
 mod graphql_relay_inputs;
