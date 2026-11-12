@@ -86,6 +86,7 @@ fn message_bundle() -> Bundle {
         webhooks: Vec::new(),
         api_key_names: None,
         inferred: false,
+        example_links: Vec::new(),
     }
 }
 

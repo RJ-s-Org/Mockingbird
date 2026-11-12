@@ -1160,6 +1160,7 @@ fn compile_text(sdl: &str, bytes: &[u8], title: Option<String>) -> Result<Bundle
         webhooks: Vec::new(),
         api_key_names: None,
         inferred: false,
+        example_links: Vec::new(),
     })
 }
 

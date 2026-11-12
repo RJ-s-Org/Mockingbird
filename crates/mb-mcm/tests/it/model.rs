@@ -91,6 +91,7 @@ fn bundle_round_trips_through_json() {
         webhooks: Vec::new(),
         api_key_names: None,
         inferred: false,
+        example_links: Vec::new(),
     };
     let value = serde_json::to_value(&bundle).unwrap();
     // A bundle compiled before the field existed has none, and says so.
@@ -110,6 +111,7 @@ fn bundle_round_trips_through_json() {
         let newer = Bundle {
             api_key_names: Some(names),
             inferred: false,
+            example_links: Vec::new(),
             ..bundle.clone()
         };
         let value = serde_json::to_value(&newer).unwrap();
@@ -204,6 +206,7 @@ fn with_defs_attaches_definitions() {
         webhooks: Vec::new(),
         api_key_names: None,
         inferred: false,
+        example_links: Vec::new(),
     };
     let v = bundle.with_defs(&json!({"$ref":"#/$defs/Order"}));
     assert_eq!(v["$defs"]["Order"], order);
@@ -240,6 +243,7 @@ fn with_reachable_defs_attaches_only_the_ref_closure() {
         webhooks: Vec::new(),
         api_key_names: None,
         inferred: false,
+        example_links: Vec::new(),
     };
 
     let v = bundle.with_reachable_defs(&json!({"$ref": "#/$defs/Order"}));
@@ -739,6 +743,7 @@ fn grpc_services_lists_full_service_names() {
         webhooks: Vec::new(),
         api_key_names: None,
         inferred: false,
+        example_links: Vec::new(),
     };
     let services: Vec<String> = bundle.grpc_services().into_iter().collect();
     assert_eq!(services, ["Bare", "routeguide.RouteGuide"]);

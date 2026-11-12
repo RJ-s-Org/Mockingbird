@@ -448,3 +448,47 @@ fn action_routes_read_the_contract_as_openapi_does() {
     assert_eq!(bad.kind, OperationKind::Command(Effect::Other));
     assert_eq!(bad.resource_type.as_deref(), Some("jobs"));
 }
+
+/// A Swagger 2 response's `examples` entry for a JSON media type keeps its links
+/// beside the bundle.
+#[test]
+fn response_example_links_are_kept() {
+    let contract = r##"
+swagger: "2.0"
+info: {title: Tracker, version: "1"}
+produces: [application/json]
+paths:
+  /merges/{number}:
+    get:
+      operationId: getMerge
+      parameters:
+        - {name: number, in: path, required: true, type: integer}
+      responses:
+        "200":
+          description: ok
+          schema: {$ref: "#/definitions/MergeRequest"}
+          examples:
+            application/json:
+              number: 12
+              title: Fix
+              html_url: "https://tracker.test/acme/roadmap/merge/12"
+definitions:
+  MergeRequest:
+    type: object
+    properties:
+      number: {type: integer}
+      title: {type: string}
+      html_url: {type: string}
+"##;
+    let bundle = mb_import::compile(contract.as_bytes()).unwrap();
+    let [links] = bundle.example_links.as_slice() else {
+        panic!("{:?}", bundle.example_links);
+    };
+    assert_eq!(links.operation, "getMerge");
+    assert_eq!(links.record.as_deref(), Some("MergeRequest"));
+    assert_eq!(
+        links.members.get("html_url").map(String::as_str),
+        Some("https://tracker.test/acme/roadmap/merge/12")
+    );
+    assert_eq!(links.members.len(), 1);
+}

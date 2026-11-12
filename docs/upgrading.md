@@ -31,6 +31,14 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### GraphQL links follow the REST twin's page link
+
+No migration or configuration.
+
+- **Response examples lay out links**: the OpenAPI 3 and Swagger 2.0 importers keep the link members of a success response's example (OpenAPI 3 `example` and `examples` of the media type, `components/examples` refs followed; Swagger 2 `examples`) as `Bundle::example_links`, beside the schemas and never served. A URL member whose schema gives no example of its own is laid out by them (see [URL members](world.md)). Stored bundles get them after a recompile; until then links follow member examples only, as before.
+- **A GraphQL `url` is the page link**: for a GraphQL type whose REST twin has both an API `url` and an `html_url`, a created record's `url` follows the twin's `html_url` (`https://<page host>/<owner>/<repo>/pull/<n>`) whatever host the parent's link is on, unless the type declares a page link of its own; the same when the `url`'s description says it holds the HTML page's URL. It used to follow the twin's API link unless the parent's link was on the page host.
+- **Rust API**: `mb_mcm::Bundle` gains `example_links` (and `mb_mcm::ExampleLinks` is new), which breaks code constructing it in full (`Vec::new()` keeps the old behaviour).
+
 ### Mocks of one domain share their sessions by default
 
 No migration. A mock that sets no `mocks.<name>.shares` now joins the default group of the other mocks of its workspace whose `hosts` share a registrable domain with its own, named after the domain (`github.com`), so a REST and a GraphQL mock of one vendor read each other's records without a setting ([configuration](configuration.md#mocks)):

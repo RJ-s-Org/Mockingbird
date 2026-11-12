@@ -1869,7 +1869,7 @@ scalar URI
 type Owner { login: String! }
 type Project { id: ID! name: String! owner: Owner! url: URI }
 type Ticket { id: ID! number: Int! title: String! url: URI! project: Project! }
-type MergeRequest { id: ID! number: Int! title: String! url: URI! project: Project! }
+type MergeRequest { id: ID! number: Int! title: String! bodyHTML: String url: URI! project: Project! }
 input CreateTicketInput { projectId: ID! title: String! }
 type CreateTicketPayload { ticket: Ticket }
 input CreateMergeRequestInput { projectId: ID! title: String! }
@@ -1967,9 +1967,14 @@ components:
 /// mounted with two projects of `acme` held in the session they keep under `holder`:
 /// `P_1` (`roadmap`) holding no link, `P_2` (`atlas`) its page link.
 async fn trackers(shares: Option<&str>, holder: &str) -> axum::Router {
+    trackers_with(TRACKER_REST, shares, holder).await
+}
+
+/// [`trackers`], the REST mock's contract `rest`.
+async fn trackers_with(rest: &str, shares: Option<&str>, holder: &str) -> axum::Router {
     let store = store().await;
     let host = "api.tracker.test";
-    create_sharing(&store, "rest", "/", &[host], shares, TRACKER_REST).await;
+    create_sharing(&store, "rest", "/", &[host], shares, rest).await;
     let gql = create_sharing(&store, "gql", "/graphql", &[host], shares, TRACKER_SDL).await;
     // The first contract version, the active one.
     store
@@ -2041,8 +2046,10 @@ async fn create_tracked(router: &axum::Router, kind: &str, project: &str) -> (u6
 /// A GraphQL create's link follows its REST twin's layout, whether the twin is the type
 /// of the same name (`tickets`) or one inferred the same (`merges` answering
 /// `MergeRequest`s, where GraphQL reads the type only through a mutation's payload):
-/// the twin's API link under a project holding no link (not the `url` example reaching
-/// a ticket by another route), its page link under one on the page host. A REST read by
+/// a ticket's twin's API link under a project holding no link (not the `url` example
+/// reaching a ticket by another route), and a merge request's twin's page link, as
+/// GraphQL's `url` of a type declaring no page link of its own is, wherever its
+/// project's link is. A REST read by
 /// number under the project returns the record, though it names its project by the
 /// GraphQL mock's id alone (the project that id names, held in the session, says
 /// whose it is), and a read under another project does not. In a default group (no
@@ -2062,7 +2069,7 @@ async fn a_graphql_create_follows_its_rest_twin_in_a_default_or_named_group() {
                 "MergeRequest",
                 "merges",
                 "P_1",
-                "https://api.tracker.test/projects/acme/roadmap/merges/",
+                "https://tracker.test/acme/roadmap/merge/",
             ),
             (
                 "MergeRequest",
@@ -2106,4 +2113,40 @@ async fn a_graphql_create_follows_its_rest_twin_in_a_default_or_named_group() {
             }
         }
     }
+}
+
+/// A GraphQL create's `url` follows its REST twin's page link when only a response
+/// example shows that link (the member's schema giving none): the example is kept
+/// beside the REST bundle and lays the link out, under a project holding no link.
+#[tokio::test]
+async fn a_graphql_create_follows_a_page_link_only_a_response_example_shows() {
+    let member = r#"html_url: {type: string, format: uri, example: "https://tracker.test/acme/roadmap/merge/12"}"#;
+    let content =
+        r##"content: {application/json: {schema: {$ref: "#/components/schemas/MergeRequest"}}}"##;
+    assert!(TRACKER_REST.contains(member) && TRACKER_REST.contains(content));
+    let rest = format!(
+        "{}{}",
+        TRACKER_REST
+            .replace(member, "html_url: {type: string, format: uri}")
+            .replace(
+                content,
+                r##"content: {application/json: {schema: {$ref: "#/components/schemas/MergeRequest"},
+            examples: {default: {$ref: "#/components/examples/merge"}}}}"##,
+            ),
+        r#"  examples:
+    merge:
+      value:
+        id: 1
+        number: 12
+        title: Fix the router
+        url: "https://api.tracker.test/projects/acme/roadmap/merges/12"
+        html_url: "https://tracker.test/acme/roadmap/merge/12"
+"#
+    );
+    let router = trackers_with(&rest, Some("tracker"), "tracker").await;
+    let (number, made) = create_tracked(&router, "MergeRequest", "P_1").await;
+    assert_eq!(
+        made,
+        format!("https://tracker.test/acme/roadmap/merge/{number}")
+    );
 }

@@ -7,12 +7,12 @@ use crate::schema::{collect_refs, defs_name, normalize_schema};
 use crate::security::compile_security;
 use crate::{Ctx, ImportError};
 use mb_mcm::{
-    Binding, BodyVariant, Bundle, HttpMethod, InputSchemas, Operation, OperationKind,
+    Binding, BodyVariant, Bundle, ExampleLinks, HttpMethod, InputSchemas, Operation, OperationKind,
     OutputVariant, Protocol, StatusSelector, WebhookDef,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 const REF_PREFIX: &str = "#/components/schemas/";
 
@@ -229,6 +229,193 @@ fn media_example(media: &Value) -> Option<Value> {
         })
         .or_else(|| media.get("schema").and_then(|s| s.get("example")))
         .cloned()
+}
+
+/// The links of operation `op`'s success response example, for
+/// [`Bundle::example_links`]: of its first 2xx response (by status) with a JSON media
+/// type, the media's `example`, else its `examples` entries' values (in name order,
+/// `$ref`s to `#/components/examples` followed), the first that shows links. A
+/// schema's own `example` is not looked at: it stays in the schema.
+fn response_example_links(doc: &Value, op: &Value, op_id: &str) -> Option<ExampleLinks> {
+    success_responses(op).find_map(|(status, resp)| {
+        let at = format!("/responses/{status}");
+        let resp = deref(doc, resp, &at).ok()?;
+        let (_, media) = json_media(resp.get("content")?.as_object()?)?;
+        let named = media
+            .get("examples")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|e| e.values())
+            .filter_map(|entry| {
+                Some(example_value(
+                    doc,
+                    deref(doc, entry, &at).ok()?.get("value")?,
+                ))
+            });
+        media
+            .get("example")
+            .into_iter()
+            .chain(named)
+            .find_map(|example| {
+                example_links(doc, (op_id, media.get("schema"), REF_PREFIX), example)
+            })
+    })
+}
+
+/// An operation's 2xx responses (`200`, `201`, `2XX`), in status order.
+pub(crate) fn success_responses(op: &Value) -> impl Iterator<Item = (&String, &Value)> {
+    let mut success: Vec<(&String, &Value)> = op
+        .get("responses")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(status, _)| status.starts_with('2'))
+        .collect();
+    success.sort_by_key(|(status, _)| status.as_str());
+    success.into_iter()
+}
+
+/// An Example Object's `value`, followed when it is itself a `$ref` to an Example
+/// Object, its keys only those of one and extensions (`value: {$ref:
+/// "#/components/examples/issue"}`, as GitHub writes it).
+fn example_value<'a>(doc: &'a Value, value: &'a Value) -> &'a Value {
+    if value.get("$ref").is_none() {
+        return value;
+    }
+    let Ok(target) = deref(doc, value, "") else {
+        return value;
+    };
+    match target.as_object() {
+        Some(object)
+            if object.contains_key("value")
+                && object.keys().all(|k| {
+                    k.starts_with("x-")
+                        || matches!(
+                            k.as_str(),
+                            "summary" | "description" | "value" | "externalValue"
+                        )
+                }) =>
+        {
+            object.get("value").unwrap_or(target)
+        }
+        _ => target,
+    }
+}
+
+/// The links a response `example` of `operation` shows, for
+/// [`Bundle::example_links`]: its record's (a list's first) string members holding an
+/// absolute URL or a path, and those of its object members one level down
+/// (`user.html_url`), but those whose schema (the response's `schema`, its `$ref`s
+/// in `doc` followed) gives an example of its own, which the mock reads there. The
+/// record is the definition `schema` (or, for a list, its `items`) names under
+/// `prefix`. `None` when it shows none.
+pub(crate) fn example_links(
+    doc: &Value,
+    (operation, schema, prefix): (&str, Option<&Value>, &str),
+    example: &Value,
+) -> Option<ExampleLinks> {
+    let (example, schema) = match example {
+        Value::Array(items) => (
+            items.first()?,
+            schema.and_then(|s| deref(doc, s, "").ok()?.get("items")),
+        ),
+        example => (example, schema),
+    };
+    let record = schema
+        .and_then(|s| s.get("$ref")?.as_str()?.strip_prefix(prefix))
+        .map(str::to_owned);
+    let mut members = BTreeMap::new();
+    let mut keep = |path: &[&str], text: &str| {
+        if is_link(text) && !has_own_example(doc, schema, path) {
+            members.insert(path.join("."), text.to_owned());
+        }
+    };
+    for (name, value) in example.as_object()? {
+        match value {
+            Value::String(text) => keep(&[name], text),
+            Value::Object(inner) => {
+                for (inner_name, value) in inner {
+                    if let Some(text) = value.as_str() {
+                        keep(&[name, inner_name], text);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (!members.is_empty()).then(|| ExampleLinks {
+        operation: operation.to_owned(),
+        record,
+        members,
+    })
+}
+
+/// Whether the member at `path` of `schema` (its `properties`, `$ref`s in `doc`
+/// followed, through `allOf`, `anyOf` and `oneOf`) gives an example of its own
+/// (`example`, or an `examples` list).
+fn has_own_example(doc: &Value, schema: Option<&Value>, path: &[&str]) -> bool {
+    let mut at = schema;
+    for name in path {
+        at = at.and_then(|s| property(doc, s, name, 0));
+    }
+    at.is_some_and(|s| has_example(doc, s, 0))
+}
+
+/// The branches a schema composes: its `allOf`, `anyOf` and `oneOf` members.
+fn branches(schema: &Value) -> impl Iterator<Item = &Value> {
+    ["allOf", "anyOf", "oneOf"]
+        .into_iter()
+        .filter_map(|k| schema.get(k)?.as_array())
+        .flatten()
+}
+
+/// Member `name` of `schema`, `$ref`s in `doc` followed, through its branches.
+fn property<'a>(doc: &'a Value, schema: &'a Value, name: &str, depth: usize) -> Option<&'a Value> {
+    let schema = deref(doc, schema, "").ok()?;
+    if let Some(member) = schema.get("properties").and_then(|p| p.get(name)) {
+        return Some(member);
+    }
+    if depth > 2 {
+        return None;
+    }
+    branches(schema).find_map(|b| property(doc, b, name, depth + 1))
+}
+
+/// Whether `schema` (or a branch of it) gives an example.
+fn has_example(doc: &Value, schema: &Value, depth: usize) -> bool {
+    let Ok(schema) = deref(doc, schema, "") else {
+        return false;
+    };
+    schema.get("example").is_some()
+        || schema.get("examples").is_some_and(Value::is_array)
+        || (depth <= 2 && branches(schema).any(|b| has_example(doc, b, depth + 1)))
+}
+
+/// Adds `links` to `kept`, unless an earlier operation's example of the same record
+/// showed the same links.
+pub(crate) fn keep_example_links(kept: &mut Vec<ExampleLinks>, links: Option<ExampleLinks>) {
+    if let Some(links) = links
+        && !kept.iter().any(|k| {
+            links.record.is_some() && k.record == links.record && k.members == links.members
+        })
+    {
+        kept.push(links);
+    }
+}
+
+/// Whether `text` is an absolute URL (`scheme://host…`) or a path (`/acme/roadmap`).
+fn is_link(text: &str) -> bool {
+    if text.starts_with('/') {
+        return !text.starts_with("//");
+    }
+    text.split_once("://").is_some_and(|(scheme, rest)| {
+        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+            && !rest.is_empty()
+            && !rest.starts_with('/')
+    })
 }
 
 /// The form media types, whose body schemas are tagged with
@@ -860,6 +1047,7 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
     let mut operations = Vec::new();
     let mut hints = Vec::new();
     let mut callbacks = Vec::new();
+    let mut example_links = Vec::new();
     let empty = Map::new();
     let paths = doc
         .get("paths")
@@ -923,6 +1111,10 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
                 callbacks.push((op_out.id.clone(), cbs, format!("{at}/callbacks")));
             }
             hints.push(resource_hint(op, &op_out.id, ctx));
+            keep_example_links(
+                &mut example_links,
+                response_example_links(doc, op, &op_out.id),
+            );
             operations.push(op_out);
         }
     }
@@ -949,6 +1141,7 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
             "/components/securitySchemes",
         )),
         inferred: inferred(doc),
+        example_links,
     })
 }
 
