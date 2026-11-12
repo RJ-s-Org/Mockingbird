@@ -109,6 +109,7 @@ async fn run(invocation: Invocation) -> ExitCode {
             verify(&admin_url, cli.token.as_deref(), &cli.workspace, args).await
         }
         Command::Examples(cmd) => print_json(mockingbird::examples::run(cmd).await),
+        Command::Hosts(args) => print_json(mockingbird::hosts::run(&args).await),
         Command::Client(cmd) => client(&admin_url, cli.token.as_deref(), &cli.workspace, cmd).await,
     };
     exit_code(result)
@@ -306,7 +307,11 @@ async fn verify(
     args: mockingbird::report::VerifyArgs,
 ) -> Result<(), Failure> {
     use mockingbird::report;
-    let collected = report::collect(admin_url, token, workspace).await?;
+    let config = report::unclaimed_hosts_config(&args).map_err(Failure::Usage)?;
+    let mut collected = report::collect(admin_url, token, workspace).await?;
+    if let Some(config) = config {
+        report::add_unclaimed_hosts(&mut collected, &config, admin_url, token).await?;
+    }
     let failures =
         report::check(&collected, &args).map_err(|e| Failure::Usage(format!("{e:#}")))?;
     let text = report::render(&collected, Some(&failures), args.format)?;

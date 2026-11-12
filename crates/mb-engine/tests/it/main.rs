@@ -20,6 +20,7 @@ mod guards;
 mod message;
 mod perf;
 mod pii;
+mod prompt_size;
 mod repetition;
 mod salvage;
 mod scenario;

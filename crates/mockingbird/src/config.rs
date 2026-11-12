@@ -71,12 +71,13 @@ impl Cli {
     /// The Admin API URL the command talks to (see
     /// [`crate::client::resolve_admin_url`]): `--admin-url` or
     /// `MB_ADMIN_URL`, else the admin listener of the command's
-    /// `-c/--config` (`doctor`, `proxy`), else of `./mockingbird.yaml`,
+    /// `-c/--config` (`doctor`, `proxy`, `verify`), else of `./mockingbird.yaml`,
     /// else [`crate::client::DEFAULT_ADMIN_URL`].
     #[must_use]
     pub fn resolved_admin_url(&self) -> String {
         let config = match &self.cmd {
             Command::Doctor(args) => args.config.as_deref(),
+            Command::Verify(args) => args.config.as_deref(),
             Command::Proxy(args) if args.cmd.is_none() => args.run.config.as_deref(),
             _ => None,
         };
@@ -263,6 +264,10 @@ pub enum Command {
     /// list them, show one, or write one into a directory.
     #[command(subcommand)]
     Examples(crate::examples::ExamplesCommand),
+    /// The vendor hosts the project can call that no mock lists, found in
+    /// its files (bundled API descriptions, URL literals), with what to
+    /// import for each, as JSON.
+    Hosts(crate::hosts::HostsArgs),
     #[command(flatten)]
     Client(ClientCommand),
 }

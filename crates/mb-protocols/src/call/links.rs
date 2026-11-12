@@ -27,18 +27,23 @@
 //!   repository): its collection segment and own identity follow the parent's path
 //!   (`…/owner/repo` + `issues/7`), and a value pointing at the parent's own place
 //!   (`…/issues/42#issuecomment-1` for a comment) is the parent's URL, its fragment kept.
-//!   The record's own link (`url`, `href`, `html_url`, `htmlUrl`) holding a drawn word,
-//!   or a link showing no identity that is relative or on a placeholder host, is built
-//!   there: the
-//!   parent's URL, the type's name in the plural and the record's numeric identity
-//!   (`…/owner/repo/issues/7`), else its first. When the type has a twin, the same type
-//!   in another mock of its `shares` group read by path ([`Twin`]), its own link (a
-//!   drawn word, or a value on a placeholder or known host not pointing at the
-//!   parent's place) follows the twin's link on the host the parent's URL is on (a
-//!   GraphQL `url` under a parent on the page host is the twin's `html_url`), the one of
-//!   the same name first, else with no parent URL the twin's link of the same name:
-//!   laid out as its example shows the record's place, the parameters before the
-//!   collection from the parent's URL or members, the record's number last.
+//!   The record's own link (`url`, `href`, `resourcePath`, `html_url`, `htmlUrl`)
+//!   holding a drawn word, or a link showing no identity that is relative or on a
+//!   placeholder host, is built there: the parent's URL, the type's name in the plural
+//!   and the record's numeric identity (`…/owner/repo/issues/7`), else its first. When
+//!   the type has a twin, the same type in another mock of its `shares` group read by
+//!   path ([`Twin`]), its own link (a drawn word, or a value on a placeholder or known
+//!   host not pointing at the parent's place) follows the twin's link on the host the
+//!   parent's URL is on (a GraphQL `url` under a parent on the page host is the twin's
+//!   `html_url`), the one of the same name first, else with no parent URL the twin's
+//!   link of the same name: laid out as its example shows the record's place, the
+//!   parameters before the collection from the parent's URL or members, the record's
+//!   number last. A parent holding no link has its own built first
+//!   ([`parent_place`]): its twin's or read path's layout, else the mock's host and its
+//!   values of the arguments its type is looked up by (`project(owner:, name:)` →
+//!   `https://tracker.test/acme/roadmap`). With no parent link at all, the record's own
+//!   link is the mock's host, the plural type name and its identity
+//!   (`https://tracker.test/tickets/82`).
 //! - **The host**: a value rebuilt along the read path takes the contract's example host
 //!   for its member, when it has one. Otherwise a placeholder (`example.com`,
 //!   `example.org`, `example.net`, `.invalid`, `.example`) is replaced by the example
@@ -54,12 +59,15 @@
 //!
 //! What a type's links are built from is worked out once per type ([`TypeLinks`]); a call
 //! only matches its values against it. Only the record's top-level members are looked
-//! at; a relative value (`resourcePath`) stays relative.
+//! at. For a type with no read by path, the record's own link placed from a relative
+//! value is made absolute, but a path-like member (`resourcePath`, or one whose example
+//! is a path) stays a path.
 
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError};
 
 use mb_engine::consistency::{property_schema, required_members};
+use mb_mcm::{Bundle, GraphqlOperationType};
 
 use super::bundle_index::schema_parts;
 use super::entities::type_check;
@@ -84,6 +92,10 @@ pub(crate) struct TypeLinks {
     examples: HashMap<String, Example>,
     /// The hosts of the contract's URL examples, placeholders aside.
     hosts: Vec<String>,
+    /// The required arguments of the query that looks one record of the type up by
+    /// what names it (`project(owner:, name:)` → `[owner, name]`), in order; empty when
+    /// it has none, or only one by id.
+    lookup: Vec<String>,
 }
 
 /// What a contract's example of a URL member shows.
@@ -103,6 +115,8 @@ struct Example {
     whole: bool,
     /// Whether its last segment is a number.
     numeric: bool,
+    /// Whether it is a path with no scheme and host (`/acme/roadmap`).
+    relative: bool,
 }
 
 impl TypeLinks {
@@ -176,6 +190,7 @@ impl TypeLinks {
                 }
             }
         }
+        links.lookup = lookup_arguments(bundle, t);
         links
     }
 
@@ -191,6 +206,7 @@ impl TypeLinks {
         }
         let mut example = Example {
             origin: origin.map(str::to_owned),
+            relative: url.origin.is_none(),
             ..Example::default()
         };
         if let Some((i, j, k)) = align(&url.segments, &self.read)
@@ -216,6 +232,39 @@ impl TypeLinks {
     fn is_url_member(&self, name: &str) -> bool {
         url_named(name) || self.members.iter().any(|m| m == name)
     }
+}
+
+/// The required arguments of the GraphQL query that reads one record of type `t` by what
+/// names it, not by id (`project(owner: String!, name: String!)`), in the order declared;
+/// empty when there is none.
+fn lookup_arguments(bundle: &Bundle, t: &str) -> Vec<String> {
+    bundle
+        .operations
+        .iter()
+        .filter(|op| {
+            matches!(
+                op.binding,
+                Binding::Graphql {
+                    operation_type: GraphqlOperationType::Query,
+                    ..
+                }
+            ) && op.identity.is_some()
+                && op
+                    .resource_type
+                    .as_deref()
+                    .is_some_and(|r| r.eq_ignore_ascii_case(t))
+        })
+        .filter_map(|op| op.input.body.as_ref())
+        .map(|body| required_members(bundle, body))
+        .find(|args| !args.is_empty() && !args.iter().any(|a| names_an_id(a)))
+        .unwrap_or_default()
+}
+
+/// Whether argument `arg` names a record by its id: `id`, `<x>Id`, `<x>ID`, `<x>_id`.
+fn names_an_id(arg: &str) -> bool {
+    arg.eq_ignore_ascii_case("id")
+        || (arg.len() > 2 && (arg.ends_with("Id") || arg.ends_with("ID")))
+        || (arg.len() > 3 && arg.ends_with("_id"))
 }
 
 /// The links of type `t`, worked out on first use and kept with the bundle's index.
@@ -554,7 +603,20 @@ struct Known<'a> {
     /// The record's identity values the twin's own parameter may take: its value of
     /// the twin's own member first.
     twin_owns: Vec<String>,
+    /// When no parent holds a link, the first parent's link built as its own would be
+    /// ([`parent_place`]).
+    built_parent: Option<Built>,
 }
+
+/// A link built afresh: its origin (none for a path alone) and path segments.
+#[derive(Debug, Clone)]
+struct Built {
+    origin: Option<String>,
+    segments: Vec<String>,
+}
+
+/// The members a record's own link goes by when no contract example says otherwise.
+const OWN_LINKS: [&str; 5] = ["url", "href", "resourcePath", "html_url", "htmlUrl"];
 
 impl Known<'_> {
     /// `text`, member `name`'s value, with its place and host as the call says; `None`
@@ -611,40 +673,62 @@ impl Known<'_> {
                 && url.origin.is_none_or(|o| placeholder(&host_of(o)))
                 && let Some(built) = self.own_under_parent(name)
             {
-                return Some(built);
+                return (built != text).then_some(built);
             }
             placed
         } else {
             self.along_read(&url.segments, example, own_link)
                 .or_else(|| own_link.then(|| self.build(example)).flatten())
         };
-        let origin = url.origin.map(|origin| {
-            let host = host_of(origin);
-            let example_origin = example.and_then(|e| e.origin.as_deref());
-            let parent_origin = parent
-                .as_ref()
-                .and_then(|p| p.origin)
-                .filter(|o| !placeholder(&host_of(o)));
-            if rebuilt.is_some()
-                && !self.links.read.is_empty()
-                && let Some(example) = example_origin
-            {
-                return example.to_owned();
-            }
-            // A link to anything but the record (an avatar) may live on any host.
-            let off = placeholder(&host)
-                || (rebuilt.is_some()
-                    && (own_link || self.links.read.is_empty())
-                    && !self.accepted.contains(&host));
-            if !off {
-                return origin.to_owned();
-            }
-            let scheme = origin.split_once("://").map_or("https", |(s, _)| s);
-            example_origin
-                .map(str::to_owned)
-                .or_else(|| parent_origin.map(str::to_owned))
-                .or_else(|| self.host.map(|h| format!("{scheme}://{h}")))
-                .unwrap_or_else(|| origin.to_owned())
+        // With no read by path, the record's own link placed from a path alone is
+        // absolute, unless the member holds paths.
+        let absolute = url.origin.is_none()
+            && self.links.read.is_empty()
+            && rebuilt.is_some()
+            && OWN_LINKS.contains(&name)
+            && !self.path_like(name);
+        let origin = match url.origin {
+            None if absolute => example
+                .and_then(|e| e.origin.clone())
+                .or_else(|| {
+                    parent
+                        .as_ref()
+                        .and_then(|p| p.origin)
+                        .filter(|o| !placeholder(&host_of(o)))
+                        .map(str::to_owned)
+                })
+                .or_else(|| self.host.map(|h| format!("https://{h}"))),
+            _ => None,
+        };
+        let origin = origin.or_else(|| {
+            url.origin.map(|origin| {
+                let host = host_of(origin);
+                let example_origin = example.and_then(|e| e.origin.as_deref());
+                let parent_origin = parent
+                    .as_ref()
+                    .and_then(|p| p.origin)
+                    .filter(|o| !placeholder(&host_of(o)));
+                if rebuilt.is_some()
+                    && !self.links.read.is_empty()
+                    && let Some(example) = example_origin
+                {
+                    return example.to_owned();
+                }
+                // A link to anything but the record (an avatar) may live on any host.
+                let off = placeholder(&host)
+                    || (rebuilt.is_some()
+                        && (own_link || self.links.read.is_empty())
+                        && !self.accepted.contains(&host));
+                if !off {
+                    return origin.to_owned();
+                }
+                let scheme = origin.split_once("://").map_or("https", |(s, _)| s);
+                example_origin
+                    .map(str::to_owned)
+                    .or_else(|| parent_origin.map(str::to_owned))
+                    .or_else(|| self.host.map(|h| format!("{scheme}://{h}")))
+                    .unwrap_or_else(|| origin.to_owned())
+            })
         });
         let segments: Vec<String> =
             rebuilt.unwrap_or_else(|| url.segments.iter().map(|s| (*s).to_owned()).collect());
@@ -665,10 +749,7 @@ impl Known<'_> {
         !self.links.read.is_empty()
             && match example {
                 Some(e) => e.start.is_some(),
-                None => matches!(
-                    name,
-                    "url" | "href" | "resourcePath" | "html_url" | "htmlUrl"
-                ),
+                None => OWN_LINKS.contains(&name),
             }
     }
 
@@ -879,33 +960,60 @@ impl Known<'_> {
         Some((origin, path))
     }
 
-    /// For a type with no read by path, the record's own link (member `name` being
-    /// `url`, `href`, `html_url` or `htmlUrl`) built under the URL its first parent holds
-    /// in the same member: the parent's URL (on the mock's host when the parent's is a
-    /// placeholder), the type's collection and the record's numeric identity
-    /// (`…/acme/roadmap/tickets/82`), else its first; `None` for any other member, or
-    /// when no parent holds a URL there.
+    /// For a type with no read by path, the record's own link (member `name` being one
+    /// of [`OWN_LINKS`]) built under its parent's link ([`Self::parent_link`]): the
+    /// parent's (on the mock's host when the parent's is a placeholder or has none),
+    /// the type's collection and the record's numeric identity
+    /// (`…/acme/roadmap/tickets/82`), else its first; with no parent link, the mock's
+    /// host, the collection and the identity (`https://tracker.test/tickets/82`). A
+    /// path-like member ([`Self::path_like`]) takes the same path with no scheme and
+    /// host. `None` for any other member, with no identity, or with neither a parent
+    /// link nor a host.
     fn own_under_parent(&self, name: &str) -> Option<String> {
-        if !matches!(name, "url" | "href" | "html_url" | "htmlUrl") {
+        if !OWN_LINKS.contains(&name) {
             return None;
         }
-        let parent = self.parent_url(name)?;
         let own = self
             .owns
             .iter()
             .find(|o| !o.is_empty() && o.bytes().all(|b| b.is_ascii_digit()))
             .or_else(|| self.owns.iter().find(|o| !o.is_empty()))?;
-        let origin = match parent.origin {
-            Some(o) if placeholder(&host_of(o)) => self
-                .host
-                .map(|h| format!("https://{h}"))
-                .or_else(|| Some(o.to_owned())),
-            o => o.map(str::to_owned),
+        let parent = self.parent_link(name);
+        let host = self.host.map(|h| format!("https://{h}"));
+        let origin = match parent.as_ref().map(|p| p.origin.as_deref()) {
+            _ if self.path_like(name) => None,
+            Some(Some(o)) if !placeholder(&host_of(o)) => Some(o.to_owned()),
+            Some(o) => host.or_else(|| o.map(str::to_owned)),
+            None => Some(host?),
         };
-        let mut segments: Vec<String> = parent.segments.iter().map(|s| (*s).to_owned()).collect();
+        let mut segments = parent.map(|p| p.segments).unwrap_or_default();
         segments.push(self.collection.clone());
         segments.push(own.clone());
         Some(BLANK.render(origin.as_deref(), &segments, false))
+    }
+
+    /// The link of the record's first parent that member `name` goes under: the URL a
+    /// parent holds in `name` (or, for a path-like member, in `url`), else the parent's
+    /// link built afresh when no parent holds one.
+    fn parent_link(&self, name: &str) -> Option<Built> {
+        let held = self.parent_url(name).or_else(|| {
+            self.path_like(name)
+                .then(|| self.parent_url("url"))
+                .flatten()
+        });
+        match held {
+            Some(url) => Some(Built {
+                origin: url.origin.map(str::to_owned),
+                segments: url.segments.iter().map(|s| (*s).to_owned()).collect(),
+            }),
+            None => self.built_parent.clone(),
+        }
+    }
+
+    /// Whether member `name` holds a path with no scheme and host: `resourcePath`, or a
+    /// member whose contract example is such a path.
+    fn path_like(&self, name: &str) -> bool {
+        name == "resourcePath" || self.links.examples.get(name).is_some_and(|e| e.relative)
     }
 
     /// The URL the first parent holds in member `name`.
@@ -949,6 +1057,136 @@ fn param_of(param: &str, parent: &StoredResource) -> Option<String> {
     names_type
         .then(|| data.get("name").and_then(id_string))
         .flatten()
+}
+
+/// The link of `parent`, a held record holding none, built as its own link would be:
+/// its twin's link (the one named `url` first), else its type's read by path, each
+/// filled from its members ([`param_of`]), its own identity for a last parameter none
+/// names; else the mock's host and the values its members give the arguments its type
+/// is looked up by (`project(owner:, name:)` →
+/// `https://tracker.test/<owner login>/<name>`).
+/// `None` when a value is missing, or no host is known for a read path or a lookup.
+fn parent_place(rt: &MockRuntime, parent: &StoredResource, host: Option<&str>) -> Option<Built> {
+    let t = parent.resource_type.as_str();
+    let identity = rt.index().identity_fields(t);
+    let https = host.map(|h| format!("https://{h}"));
+    let by_twin = rt
+        .shared_types
+        .twin(rt, t)
+        .and_then(|twin| place_by_twin(&twin, parent, identity, https.as_deref()));
+    if by_twin.is_some() {
+        return by_twin;
+    }
+    let links = type_links(rt, t);
+    let base = rt
+        .base_paths
+        .first()
+        .map(String::as_str)
+        .unwrap_or_default();
+    place_by_read(&links, base, parent, identity, https.as_deref())
+        .or_else(|| place_by_lookup(&links, parent, https.as_deref()))
+}
+
+/// `parent`'s own identity: its member `member`, else its `identity` members, its
+/// `number`, its `id`; a number only when `numeric`.
+fn identity_of(
+    parent: &StoredResource,
+    member: Option<&str>,
+    identity: &[String],
+    numeric: bool,
+) -> Option<String> {
+    member
+        .into_iter()
+        .chain(identity.iter().map(String::as_str))
+        .chain(["number", "id"])
+        .filter_map(|m| mb_mcm::member_at(&parent.data, m).and_then(id_string))
+        .find(|v| !v.is_empty() && (!numeric || v.bytes().all(|b| b.is_ascii_digit())))
+}
+
+/// `parent`'s value of path parameter `param` ([`param_of`]), when it can stand in a
+/// path segment.
+fn segment_of(param: &str, parent: &StoredResource) -> Option<String> {
+    param_of(param, parent).filter(|v| !v.is_empty() && !v.contains(char::is_whitespace))
+}
+
+/// `parent`'s link as its `twin` lays its links out: the one named `url` first.
+fn place_by_twin(
+    twin: &Twin,
+    parent: &StoredResource,
+    identity: &[String],
+    https: Option<&str>,
+) -> Option<Built> {
+    let layout = twin
+        .layouts
+        .iter()
+        .find(|l| squash(&l.member) == "url")
+        .or_else(|| twin.layouts.first())?;
+    let last = layout.slots.len().saturating_sub(1);
+    let segments = layout
+        .slots
+        .iter()
+        .enumerate()
+        .map(|(x, slot)| match slot {
+            Slot::Literal(l) => Some(l.clone()),
+            Slot::Param(param) if x == last => segment_of(param, parent)
+                .or_else(|| identity_of(parent, twin.own.as_deref(), identity, layout.numeric)),
+            Slot::Param(param) => segment_of(param, parent),
+        })
+        .collect::<Option<Vec<String>>>()?;
+    Some(Built {
+        origin: layout.origin.clone().or_else(|| https.map(str::to_owned)),
+        segments,
+    })
+}
+
+/// `parent`'s link along its type's read by path (`links`) under base path `base`, on
+/// the mock's host.
+fn place_by_read(
+    links: &TypeLinks,
+    base: &str,
+    parent: &StoredResource,
+    identity: &[String],
+    https: Option<&str>,
+) -> Option<Built> {
+    let last = links.read.len().checked_sub(1)?;
+    let origin = https?.to_owned();
+    let segments = base
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| Some(s.to_owned()))
+        .chain(links.read.iter().enumerate().map(|(x, segment)| {
+            match segment_param(segment) {
+                None => Some(segment.clone()),
+                Some(param) if x == last => segment_of(param, parent)
+                    .or_else(|| identity_of(parent, links.own.as_deref(), identity, false)),
+                Some(param) => segment_of(param, parent),
+            }
+        }))
+        .collect::<Option<Vec<String>>>()?;
+    Some(Built {
+        origin: Some(origin),
+        segments,
+    })
+}
+
+/// `parent`'s link on the mock's host: its values of its type's lookup arguments.
+fn place_by_lookup(
+    links: &TypeLinks,
+    parent: &StoredResource,
+    https: Option<&str>,
+) -> Option<Built> {
+    if links.lookup.is_empty() {
+        return None;
+    }
+    let segments = links
+        .lookup
+        .iter()
+        .map(|arg| segment_of(arg, parent))
+        .collect::<Option<Vec<String>>>()?;
+    Some(Built {
+        origin: Some(https?.to_owned()),
+        segments,
+    })
 }
 
 /// The records `call`'s required id arguments name (`input.repositoryId`), as the
@@ -1098,6 +1336,26 @@ pub(super) async fn settle(
             accepted.push(host);
         }
     }
+    // A parent holding no link at all has its own built first, for the record's own
+    // link to go under.
+    let host = rt
+        .hosts
+        .iter()
+        .map(String::as_str)
+        .find(|h| !placeholder(h));
+    let holds_link = |p: &StoredResource| {
+        OWN_LINKS.iter().any(|m| {
+            p.data
+                .get(*m)
+                .and_then(Value::as_str)
+                .and_then(Url::parse)
+                .is_some_and(|u| !u.segments.is_empty())
+        })
+    };
+    let built_parent = match held.iter().any(holds_link) {
+        true => None,
+        false => held.iter().find_map(|p| parent_place(rt, p, host)),
+    };
     let known = Known {
         links: &links,
         params: read_params(&links.read, op, call),
@@ -1113,16 +1371,13 @@ pub(super) async fn settle(
                     .collect()
             })
             .unwrap_or_default(),
-        host: rt
-            .hosts
-            .iter()
-            .map(String::as_str)
-            .find(|h| !placeholder(h)),
+        host,
         accepted,
         parents: &held,
         collection: plural(t),
         twin: twin.as_deref(),
         twin_owns,
+        built_parent,
     };
     let Value::Object(members) = record else {
         return;
@@ -1242,6 +1497,7 @@ mod tests {
             collection: "pulls".to_owned(),
             twin: None,
             twin_owns: Vec::new(),
+            built_parent: None,
         }
     }
 
@@ -1390,12 +1646,50 @@ mod tests {
         // A real host's link is left as it is, as is a word in a link to anything else.
         assert_eq!(known.settle("url", "https://elsewhere.test/harbor"), None);
         assert_eq!(known.settle("comments_url", "sable"), None);
-        // With no parent holding a URL, a drawn word stays.
+        // A path-like member takes the same path, with no scheme and host.
+        assert_eq!(
+            known.settle("resourcePath", "/sable/sable").as_deref(),
+            Some("/acme/roadmap/issues/7/comments/42")
+        );
+        // A relative own link placed under the parent is made absolute.
+        assert_eq!(known.settle("url", "/x/comments/42").as_deref(), Some(own));
+        // With no parent link, the mock's host, the collection and the identity.
         let orphan = Known {
             parents: &[],
             ..known_of(&links)
         };
-        assert_eq!(orphan.settle("url", "sable"), None);
+        assert_eq!(
+            orphan.settle("url", "sable").as_deref(),
+            Some("https://api.tracker.test/pulls/7")
+        );
+        assert_eq!(
+            orphan.settle("url", "/harbor/nectar").as_deref(),
+            Some("https://api.tracker.test/pulls/7")
+        );
+        assert_eq!(
+            orphan.settle("resourcePath", "/sable/sable").as_deref(),
+            Some("/pulls/7")
+        );
+        // A parent whose link was built (it held none) is what the link goes under.
+        let built = Known {
+            parents: &[],
+            built_parent: Some(Built {
+                origin: Some("https://tracker.test".to_owned()),
+                segments: vec!["acme".to_owned(), "roadmap".to_owned()],
+            }),
+            ..known_of(&links)
+        };
+        assert_eq!(
+            built.settle("url", "/harbor/nectar").as_deref(),
+            Some("https://tracker.test/acme/roadmap/pulls/7")
+        );
+        assert_eq!(built.settle("resourcePath", "/acme/roadmap/pulls/7"), None);
+        // With no host known and no parent link, a drawn word stays.
+        let unknown = Known {
+            host: None,
+            ..orphan
+        };
+        assert_eq!(unknown.settle("url", "sable"), None);
         // A parent on a placeholder host gives the mock's host.
         let drawn = [StoredResource {
             resource_type: "issue".into(),
@@ -1516,6 +1810,78 @@ mod tests {
             param_of("owner", &bare[0]).as_deref(),
             Some("fernwood-labs")
         );
+    }
+
+    /// A parent holding no link has it built as its own would be: by its twin, its
+    /// read path or its lookup, from its members, a last parameter it names before its
+    /// identity.
+    #[test]
+    fn a_parent_s_link_is_built_from_its_members() {
+        let parent = StoredResource {
+            resource_type: "project".into(),
+            id: "P_1".into(),
+            data: serde_json::json!({"id": "P_1", "number": 5, "name": "roadmap",
+                "owner": {"login": "acme"}}),
+        };
+        let built =
+            |b: Option<Built>| b.map(|b| BLANK.render(b.origin.as_deref(), &b.segments, false));
+        let host = Some("https://tracker.test");
+        // A twin: its `url` (the read path on the API host) before its page link.
+        let mut links = TypeLinks {
+            read: template("/projects/{owner}/{project}"),
+            leading: 1,
+            own: Some("id".to_owned()),
+            members: vec!["url".to_owned()],
+            ..TypeLinks::default()
+        };
+        let example = links.example("https://pages.test/octo/demo").unwrap();
+        links.examples.insert("html_url".to_owned(), example);
+        let twin = Twin::of(&links, Some("api.pages.test"), Vec::new()).unwrap();
+        assert_eq!(
+            built(place_by_twin(&twin, &parent, &[], None)).as_deref(),
+            Some("https://api.pages.test/projects/acme/roadmap")
+        );
+        // Its read path, under the base path, on the mock's host; a last parameter
+        // naming its identity takes it.
+        assert_eq!(
+            built(place_by_read(&links, "/v1", &parent, &[], host)).as_deref(),
+            Some("https://tracker.test/v1/projects/acme/roadmap")
+        );
+        let numbered = TypeLinks {
+            read: template("/projects/{number}"),
+            own: Some("number".to_owned()),
+            ..TypeLinks::default()
+        };
+        assert_eq!(
+            built(place_by_read(&numbered, "", &parent, &[], host)).as_deref(),
+            Some("https://tracker.test/projects/5")
+        );
+        assert_eq!(
+            built(place_by_read(&numbered, "", &parent, &[], None)),
+            None
+        );
+        // Its lookup's arguments on the mock's host.
+        let looked_up = TypeLinks {
+            lookup: vec!["owner".to_owned(), "name".to_owned()],
+            ..TypeLinks::default()
+        };
+        assert_eq!(
+            built(place_by_lookup(&looked_up, &parent, host)).as_deref(),
+            Some("https://tracker.test/acme/roadmap")
+        );
+        assert_eq!(built(place_by_lookup(&looked_up, &parent, None)), None);
+        let unnamed = TypeLinks {
+            lookup: vec!["owner".to_owned(), "slug".to_owned()],
+            ..TypeLinks::default()
+        };
+        assert_eq!(built(place_by_lookup(&unnamed, &parent, host)), None);
+        // A lookup by id is none.
+        for arg in ["id", "ID", "projectId", "projectID", "project_id"] {
+            assert!(names_an_id(arg), "{arg}");
+        }
+        for arg in ["owner", "name", "paid", "_id"] {
+            assert!(!names_an_id(arg), "{arg}");
+        }
     }
 
     #[test]

@@ -174,6 +174,25 @@ The agent never ran a Verify command while it built, so the step had nothing to 
 **Still open.**
 - **Verify isn't mocked.** The agent chooses which of the CLI's products to mock, and it never calls a host it left out, so nothing flags the gap while it builds. The bundled `twilio_verify_v2.json` is right there. A general fix would have the agent run one command per product the app ships before handing back, or have it mock every bundled contract whose host the app calls.
 
+## Fifth rerun: the project host scan (2026-11-12)
+
+A fresh Claude Code got the same one-line prompt in a clean copy of the app. The plugin came from the marketplace; its skills don't yet have this PR's skill line. The binary was main plus this PR's first round.
+
+**Build.** 395 s, 58 turns, $2.69 of Claude Code usage. `start_server` answered with the scan's next step at once, before any app traffic. It read: "47 hosts of twilio.com that the project can call have no mock (mocked: api.twilio.com, lookups.twilio.com). Bundled API descriptions in node_modules/@twilio/cli-core/src/services/twilio-api/: …". The agent then:
+- mocked `verify.twilio.com`, `messaging.twilio.com` and `monitor.twilio.com` from the CLI's bundled descriptions (`twilio_verify_v2.json` and the others);
+- wrote world rules for their creates;
+- passed `verify --no-unmapped --no-unmatched`;
+- in its hand-back, listed what it left out: "the other ~40 Twilio hosts the CLI can reach (conversations, studio, taskrouter, serverless and so on), plus SendGrid".
+
+**Flows: 20 of 21** (was 12).
+- Messages: 9 of 9.
+- Phone numbers: 3 of 3.
+- Verify: 8 of 9.
+
+The one failure is `verification-check:create`. It is served from state, with a fill, but its `to`, `service_sid` and `status` come back as generated words (`"to": "alpha"`, `"status": "juniper"`) instead of the request's `To`, the path's `ServiceSid` and `approved`. `CreateVerification` on the same service carries the request's values. That engine bug has its own PR.
+
+The first-round step was 5 KB. This PR's review cut it to one line of about 220 characters in `start_server`/`server_status`, and one entry of about 500 characters per domain in `project_hosts`.
+
 ## Files
 
 These are outside the repo, in `mockingbird-trials/twilio/`:
