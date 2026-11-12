@@ -250,7 +250,8 @@ pub async fn collect(
     }
     let metrics = fetch_metrics(admin_url, token).await?;
     report.unmapped_hosts = unmapped_hosts(&metrics);
-    report.next_steps = blocked_host_steps(&report.unmapped_hosts);
+    let claimed = claimed_hosts(admin_url, token, workspace).await;
+    report.next_steps = blocked_host_steps(&report.unmapped_hosts, &claimed);
     for (labels, value) in samples(&metrics, crate::snapshot::ANSWERS_METRIC) {
         let result = labels.get("result").cloned().unwrap_or_default();
         *report.snapshot.entry(result).or_default() += value;
@@ -263,40 +264,57 @@ pub async fn collect(
 ///
 /// [`UNMAPPED_METRIC`]: crate::proxy::UNMAPPED_METRIC
 fn unmapped_hosts(metrics: &str) -> Vec<HostReport> {
-    let mut hosts: Vec<HostReport> = samples(metrics, crate::proxy::UNMAPPED_METRIC)
-        .into_iter()
-        .map(|(labels, value)| HostReport {
-            host: labels.get("host").cloned().unwrap_or_default(),
-            mode: labels.get("mode").cloned().unwrap_or_default(),
-            requests: value,
-            sibling_of: labels
-                .get("sibling_of")
-                .map(|hosts| {
-                    hosts
-                        .split(',')
-                        .filter(|h| !h.is_empty())
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default(),
-        })
-        .collect();
-    hosts.sort_by(|a, b| (&a.host, &a.mode).cmp(&(&b.host, &b.mode)));
+    // One entry per host and mode: a host's `sibling_of` label changes
+    // when the mocked hosts of its domain do, which starts a new sample.
+    let mut merged: BTreeMap<(String, String), HostReport> = BTreeMap::new();
+    for (labels, value) in samples(metrics, crate::proxy::UNMAPPED_METRIC) {
+        let host = labels.get("host").cloned().unwrap_or_default();
+        let mode = labels.get("mode").cloned().unwrap_or_default();
+        let entry = merged
+            .entry((host.clone(), mode.clone()))
+            .or_insert_with(|| HostReport {
+                host,
+                mode,
+                requests: 0,
+                sibling_of: Vec::new(),
+            });
+        entry.requests += value;
+        for sibling in labels
+            .get("sibling_of")
+            .into_iter()
+            .flat_map(|hosts| hosts.split(','))
+            .filter(|h| !h.is_empty())
+        {
+            if !entry.sibling_of.iter().any(|s| s == sibling) {
+                entry.sibling_of.push(sibling.to_owned());
+            }
+        }
+    }
+    let mut hosts: Vec<HostReport> = merged.into_values().collect();
+    for h in &mut hosts {
+        h.sibling_of.sort();
+    }
     hosts
 }
 
-/// The `next_steps` for the hosts the proxy blocked: per blocked host
-/// (not the [`OTHER_HOSTS_LABEL`] overflow), how many calls were blocked
-/// and the catalog example that serves the host
-/// ([`serving`](crate::examples::serving)), or, without one, how to mock
-/// it or let it through.
+/// The `next_steps` for the hosts the proxy blocked and no mock claims
+/// now (`claimed`, normalized; the counts run from server start, so a
+/// host mocked since is left out): per host (not the
+/// [`OTHER_HOSTS_LABEL`] overflow), how many calls were blocked, adding
+/// it to the mock of its domain when it is a vendor's other host, the
+/// catalog examples that list it ([`serving`](crate::examples::serving)),
+/// and, last, how to let it through.
 ///
 /// [`OTHER_HOSTS_LABEL`]: crate::proxy::OTHER_HOSTS_LABEL
-pub fn blocked_host_steps(hosts: &[HostReport]) -> Vec<String> {
+pub fn blocked_host_steps(
+    hosts: &[HostReport],
+    claimed: &std::collections::HashSet<String>,
+) -> Vec<String> {
     hosts
         .iter()
         .filter(|h| h.mode == "block" && h.requests > 0)
         .filter(|h| h.host != crate::proxy::OTHER_HOSTS_LABEL && !h.host.is_empty())
+        .filter(|h| !claimed.contains(&h.host))
         .map(blocked_host_step)
         .collect()
 }
@@ -307,11 +325,50 @@ fn blocked_host_step(h: &HostReport) -> String {
         1 => "once".to_string(),
         n => format!("{n} times"),
     };
-    let called = format!("{host} was called {times} and blocked: no mock serves it.");
-    if let Some(s) = crate::examples::serving(host) {
-        return format!(
-            "{called} The catalog example `{}` serves it (mock `{}`, contract `{}`): write it with init_example (name `{}`, a new dir; CLI `mockingbird examples init {} --dir <dir>`), add that mock and contract to your config, and rerun the app's flows before handing back.",
-            s.example, s.mock, s.contract, s.example, s.example
+    let mut step =
+        format!("{host} was blocked {times} since the server started: no mock serves it.");
+    if !h.sibling_of.is_empty() {
+        let _ = write!(
+            step,
+            " If it is the same API as the mock serving {}, add {host} to that mock's hosts.",
+            h.sibling_of.join(", ")
+        );
+    }
+    let otherwise = if h.sibling_of.is_empty() {
+        ""
+    } else {
+        "Otherwise "
+    };
+    let examples = crate::examples::serving(host);
+    if examples.is_empty() {
+        let lead = if otherwise.is_empty() {
+            "import"
+        } else {
+            "otherwise import"
+        };
+        let _ = write!(
+            step,
+            " No catalog example lists this host: {lead} its API's contract into a mock that lists {host} in hosts (import_contract)."
+        );
+    } else {
+        let listed: Vec<String> = examples
+            .iter()
+            .map(|s| {
+                format!(
+                    "example `{}` (mock `{}`, contract `{}`)",
+                    s.example, s.mock, s.contract
+                )
+            })
+            .collect();
+        let lead = if otherwise.is_empty() {
+            "The"
+        } else {
+            "Otherwise the"
+        };
+        let _ = write!(
+            step,
+            " {lead} catalog lists it: {}. Write one with init_example (its name, a new dir; CLI `mockingbird examples init <name> --dir <dir>`) and add that mock and contract to your config.",
+            listed.join("; ")
         );
     }
     let pass = if h.sibling_of.is_empty() {
@@ -319,20 +376,87 @@ fn blocked_host_step(h: &HostReport) -> String {
     } else {
         "proxy.vendor_subdomains: pass"
     };
-    format!(
-        "{called} The catalog has no contract for it: import its API's contract into a mock that lists {host} in hosts (import_contract), or set {pass} to send it to the real host, and rerun the app's flows before handing back."
+    let _ = write!(
+        step,
+        " Only as a last resort, set {pass} to send it to the real host. Rerun the app's flows before handing back."
+    );
+    step
+}
+
+/// The hosts the mocks of the server at `admin_url` list (normalized), in
+/// every workspace the caller sees, or in `workspace` alone when the
+/// workspaces cannot be listed. A workspace whose mocks cannot be read
+/// adds none.
+pub async fn claimed_hosts(
+    admin_url: &str,
+    token: Option<&str>,
+    workspace: &str,
+) -> std::collections::HashSet<String> {
+    let listed = client::api(
+        admin_url,
+        token,
+        None,
+        Method::GET,
+        &["workspaces"],
+        &[],
+        None,
     )
+    .await
+    .ok()
+    .flatten();
+    let mut workspaces: Vec<String> = listed
+        .as_ref()
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|w| w["name"].as_str().map(str::to_owned))
+        .collect();
+    if workspaces.is_empty() {
+        workspaces.push(workspace.to_owned());
+    }
+    let mut hosts = std::collections::HashSet::new();
+    for ws in &workspaces {
+        let Ok(Some(mocks)) = client::api(
+            admin_url,
+            token,
+            Some(ws),
+            Method::GET,
+            &["mocks"],
+            &[],
+            None,
+        )
+        .await
+        else {
+            continue;
+        };
+        hosts.extend(
+            mocks
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|m| m["hosts"].as_array().into_iter().flatten())
+                .filter_map(Value::as_str)
+                .filter_map(crate::registry::normalize_host),
+        );
+    }
+    hosts
 }
 
 /// The `next_steps` for the hosts the proxy of the server at `admin_url`
-/// blocked so far ([`blocked_host_steps`]).
+/// blocked since it started and no mock claims now
+/// ([`blocked_host_steps`], [`claimed_hosts`]).
 ///
 /// # Errors
 ///
 /// Fails when `/metrics` cannot be read.
-pub async fn blocked_steps(admin_url: &str, token: Option<&str>) -> anyhow::Result<Vec<String>> {
+pub async fn blocked_steps(
+    admin_url: &str,
+    token: Option<&str>,
+    workspace: &str,
+) -> anyhow::Result<Vec<String>> {
     let metrics = fetch_metrics(admin_url, token).await?;
-    Ok(blocked_host_steps(&unmapped_hosts(&metrics)))
+    let claimed = claimed_hosts(admin_url, token, workspace).await;
+    Ok(blocked_host_steps(&unmapped_hosts(&metrics), &claimed))
 }
 
 fn add_entry(m: &mut MockReport, e: &Value) {
@@ -365,7 +489,7 @@ fn add_entry(m: &mut MockReport, e: &Value) {
 
 async fn fetch_metrics(admin_url: &str, token: Option<&str>) -> anyhow::Result<String> {
     let url = format!("{}/metrics", admin_url.trim_end_matches('/'));
-    let mut req = reqwest::Client::new().get(&url);
+    let mut req = crate::daemon::http().get(&url);
     if let Some(token) = token.filter(|t| !t.is_empty()) {
         req = req.bearer_auth(token);
     }
@@ -896,65 +1020,120 @@ mod tests {
         }
     }
 
+    fn none() -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+
     #[test]
     fn a_blocked_host_the_catalog_serves_names_its_example_and_contract() {
-        let steps = blocked_host_steps(&[blocked("lookups.twilio.com", 3, &["api.twilio.com"])]);
+        let steps = blocked_host_steps(
+            &[blocked("lookups.twilio.com", 3, &["api.twilio.com"])],
+            &none(),
+        );
         assert_eq!(steps.len(), 1, "{steps:?}");
         let step = &steps[0];
         assert!(
             step.starts_with(
-                "lookups.twilio.com was called 3 times and blocked: no mock serves it."
+                "lookups.twilio.com was blocked 3 times since the server started: no mock serves it. If it is the same API as the mock serving api.twilio.com, add lookups.twilio.com to that mock's hosts. Otherwise the catalog lists it: example `twilio` (mock `twilio-lookups`, contract `twilio-lookups.openapi.yaml`)."
             ),
             "{step}"
         );
-        assert!(step.contains("catalog example `twilio`"), "{step}");
-        assert!(step.contains("mock `twilio-lookups`"), "{step}");
+        assert!(step.contains("init_example"), "{step}");
         assert!(
-            step.contains("contract `twilio-lookups.openapi.yaml`"),
+            step.contains("Only as a last resort, set proxy.vendor_subdomains: pass"),
             "{step}"
         );
-        assert!(step.contains("init_example"), "{step}");
+    }
+
+    #[test]
+    fn a_blocked_host_every_catalog_example_lists_names_them_all() {
+        let steps = blocked_host_steps(&[blocked("api.github.com", 2, &[])], &none());
+        assert!(steps[0].contains("example `github-rest`"), "{}", steps[0]);
+        assert!(
+            steps[0].contains("example `github-graphql`"),
+            "{}",
+            steps[0]
+        );
+        assert!(steps[0].contains(" The catalog lists it: "), "{}", steps[0]);
     }
 
     #[test]
     fn a_blocked_host_without_a_catalog_entry_says_how_to_mock_or_pass_it() {
-        let steps = blocked_host_steps(&[
-            blocked("verify.twilio.com", 9, &["api.twilio.com"]),
-            blocked("api.example.com", 1, &[]),
-            blocked(crate::proxy::OTHER_HOSTS_LABEL, 4, &[]),
-            HostReport {
-                host: "passed.example.org".into(),
-                mode: "pass".into(),
-                requests: 2,
-                sibling_of: Vec::new(),
-            },
-        ]);
+        let steps = blocked_host_steps(
+            &[
+                blocked("verify.twilio.com", 9, &["api.twilio.com"]),
+                blocked("api.example.com", 1, &[]),
+                blocked(crate::proxy::OTHER_HOSTS_LABEL, 4, &[]),
+                HostReport {
+                    host: "passed.example.org".into(),
+                    mode: "pass".into(),
+                    requests: 2,
+                    sibling_of: Vec::new(),
+                },
+            ],
+            &none(),
+        );
         assert_eq!(steps.len(), 2, "{steps:?}");
         assert_eq!(
             steps[0],
-            "verify.twilio.com was called 9 times and blocked: no mock serves it. The catalog has no contract for it: import its API's contract into a mock that lists verify.twilio.com in hosts (import_contract), or set proxy.vendor_subdomains: pass to send it to the real host, and rerun the app's flows before handing back."
+            "verify.twilio.com was blocked 9 times since the server started: no mock serves it. If it is the same API as the mock serving api.twilio.com, add verify.twilio.com to that mock's hosts. No catalog example lists this host: otherwise import its API's contract into a mock that lists verify.twilio.com in hosts (import_contract). Only as a last resort, set proxy.vendor_subdomains: pass to send it to the real host. Rerun the app's flows before handing back."
         );
-        assert!(
-            steps[1].starts_with("api.example.com was called once and blocked"),
-            "{}",
-            steps[1]
+        assert_eq!(
+            steps[1],
+            "api.example.com was blocked once since the server started: no mock serves it. No catalog example lists this host: import its API's contract into a mock that lists api.example.com in hosts (import_contract). Only as a last resort, set proxy.unmapped: pass to send it to the real host. Rerun the app's flows before handing back."
         );
-        assert!(steps[1].contains("proxy.unmapped: pass"), "{}", steps[1]);
     }
 
     #[test]
-    fn unmapped_hosts_and_their_steps_come_from_the_metric() {
+    fn a_blocked_host_a_mock_now_lists_gets_no_step() {
+        let claimed: std::collections::HashSet<String> =
+            ["verify.twilio.com".to_owned()].into_iter().collect();
+        let steps = blocked_host_steps(
+            &[blocked("verify.twilio.com", 9, &["api.twilio.com"])],
+            &claimed,
+        );
+        assert!(steps.is_empty(), "{steps:?}");
+    }
+
+    #[test]
+    fn unmapped_hosts_merge_samples_and_their_steps_come_from_the_metric() {
         let metrics = format!(
-            "{m}{{host=\"verify.twilio.com\",mode=\"block\",sibling_of=\"api.twilio.com\"}} 9\n{m}{{host=\"example.org\",mode=\"pass\"}} 2\n",
+            "{m}{{host=\"verify.twilio.com\",mode=\"block\",sibling_of=\"api.twilio.com\"}} 9\n\
+             {m}{{host=\"verify.twilio.com\",mode=\"block\",sibling_of=\"api.twilio.com,lookups.twilio.com\"}} 2\n\
+             {m}{{host=\"example.org\",mode=\"pass\"}} 2\n",
             m = crate::proxy::UNMAPPED_METRIC
         );
         let hosts = unmapped_hosts(&metrics);
         assert_eq!(hosts.len(), 2);
         assert_eq!(hosts[0].host, "example.org");
-        assert_eq!(hosts[1].sibling_of, ["api.twilio.com"]);
-        let steps = blocked_host_steps(&hosts);
+        assert_eq!(hosts[1].requests, 11);
+        assert_eq!(
+            hosts[1].sibling_of,
+            ["api.twilio.com", "lookups.twilio.com"]
+        );
+        let steps = blocked_host_steps(&hosts, &none());
         assert_eq!(steps.len(), 1);
-        assert!(steps[0].starts_with("verify.twilio.com was called 9 times"));
+        assert!(
+            steps[0].starts_with("verify.twilio.com was blocked 11 times since the server started")
+        );
+    }
+
+    #[test]
+    fn next_steps_render_in_json_markdown_and_text() {
+        let mut r = report();
+        r.next_steps = vec!["mock verify.example.com".into()];
+        let json: Value = serde_json::from_str(&render(&r, None, Format::Json).unwrap()).unwrap();
+        assert_eq!(json["next_steps"][0], "mock verify.example.com");
+        let md = render(&r, None, Format::Markdown).unwrap();
+        assert!(
+            md.contains("**Next steps**\n\n- mock verify.example.com\n"),
+            "{md}"
+        );
+        let failures = check(&r, &verify(&["--no-blocked"])).unwrap();
+        let text = render(&r, Some(&failures), Format::Text).unwrap();
+        assert!(text.contains("\nNext: mock verify.example.com\n"), "{text}");
+        let quiet = render(&report(), None, Format::Json).unwrap();
+        assert!(!quiet.contains("next_steps"), "{quiet}");
     }
 
     #[test]

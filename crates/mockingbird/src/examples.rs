@@ -205,7 +205,7 @@ pub fn find(name: &str) -> anyhow::Result<&'static Example> {
     })
 }
 
-/// A catalog example that serves a host: the example, the mock of its
+/// A catalog mock that serves a host: the example, the mock of its
 /// `mockingbird.yaml` that lists the host, and that mock's contract file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Serving {
@@ -214,39 +214,48 @@ pub struct Serving {
     pub contract: String,
 }
 
-/// The `mocks` of an example's `mockingbird.yaml`, as much as
-/// [`serving`] reads.
-#[derive(Deserialize)]
-struct CatalogConfig {
-    #[serde(default)]
-    mocks: std::collections::BTreeMap<String, CatalogMock>,
+/// Each example's `mockingbird.yaml`, parsed once; an example whose config
+/// does not parse is left out (`every_example_config_parses` keeps that
+/// from happening).
+fn catalog_configs() -> &'static [(&'static str, crate::file_config::FileConfig)] {
+    static CONFIGS: std::sync::OnceLock<Vec<(&'static str, crate::file_config::FileConfig)>> =
+        std::sync::OnceLock::new();
+    CONFIGS.get_or_init(|| {
+        EXAMPLES
+            .iter()
+            .filter_map(|example| {
+                let text = example.file("mockingbird.yaml")?;
+                serde_saphyr::from_str(text)
+                    .ok()
+                    .map(|config| (example.name, config))
+            })
+            .collect()
+    })
 }
 
-#[derive(Deserialize)]
-struct CatalogMock {
-    contract: String,
-    #[serde(default)]
-    hosts: Vec<String>,
-}
-
-/// The first catalog example (in [`EXAMPLES`] order) with a mock that lists
-/// `host` (normalized, see [`normalize_host`](crate::registry::normalize_host))
-/// in its `hosts`; `None` when no example serves it.
-pub fn serving(host: &str) -> Option<Serving> {
-    EXAMPLES.iter().find_map(|example| {
-        let config: CatalogConfig =
-            serde_saphyr::from_str(example.file("mockingbird.yaml")?).ok()?;
-        config.mocks.into_iter().find_map(|(mock, m)| {
-            m.hosts
+/// Every mock of the catalog (in [`EXAMPLES`] order) that lists `host`
+/// (normalized, see [`normalize_host`](crate::registry::normalize_host))
+/// in its `hosts`; empty when no example serves it.
+pub fn serving(host: &str) -> Vec<Serving> {
+    catalog_configs()
+        .iter()
+        .flat_map(|(example, config)| {
+            let example: &'static str = example;
+            config
+                .mocks
                 .iter()
-                .any(|h| crate::registry::normalize_host(h).as_deref() == Some(host))
-                .then_some(Serving {
-                    example: example.name,
-                    mock,
-                    contract: m.contract,
+                .filter(|(_, m)| {
+                    m.hosts
+                        .iter()
+                        .any(|h| crate::registry::normalize_host(h).as_deref() == Some(host))
+                })
+                .map(move |(mock, m)| Serving {
+                    example,
+                    mock: mock.clone(),
+                    contract: m.contract.display().to_string(),
                 })
         })
-    })
+        .collect()
 }
 
 /// Runs an `examples` subcommand and returns its JSON output.
@@ -631,18 +640,28 @@ mod tests {
     }
 
     #[test]
-    fn serving_finds_the_mock_and_contract_listing_a_host() {
+    fn every_example_config_parses() {
+        assert_eq!(catalog_configs().len(), EXAMPLES.len());
+    }
+
+    #[test]
+    fn serving_finds_every_mock_and_contract_listing_a_host() {
         assert_eq!(
             serving("lookups.twilio.com"),
-            Some(Serving {
+            [Serving {
                 example: "twilio",
                 mock: "twilio-lookups".into(),
                 contract: "twilio-lookups.openapi.yaml".into(),
-            })
+            }]
         );
-        assert_eq!(serving("api.stripe.com").map(|s| s.example), Some("stripe"));
-        assert_eq!(serving("verify.twilio.com"), None);
-        assert_eq!(serving("twilio.com"), None);
+        let github: Vec<&str> = serving("api.github.com")
+            .iter()
+            .map(|s| s.example)
+            .collect();
+        assert_eq!(github, ["github-rest", "github-graphql"]);
+        assert!(serving("api-m.paypal.com").len() > 1);
+        assert!(serving("verify.twilio.com").is_empty());
+        assert!(serving("twilio.com").is_empty());
     }
 
     /// Any examples can be combined in one config: no two mocks of the

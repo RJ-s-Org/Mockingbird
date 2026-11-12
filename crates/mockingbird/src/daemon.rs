@@ -472,7 +472,8 @@ pub(crate) fn url(host: IpAddr, port: u16) -> String {
     }
 }
 
-fn http() -> reqwest::Client {
+/// A client for the local Admin API: a 3 s timeout, no proxy.
+pub(crate) fn http() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .no_proxy()

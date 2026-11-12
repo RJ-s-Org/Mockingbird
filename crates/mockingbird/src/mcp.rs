@@ -513,7 +513,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "server_status",
             title: "Background server status",
-            description: "Whether the background server runs, and its /readyz (ready, degraded reasons). After the app ran: next_steps, one per host the proxy blocked (called, but no mock serves it), naming the catalog example and contract that serves the host, if any. Mock those hosts before handing back.",
+            description: "Whether the background server runs, and its /readyz (ready, degraded reasons). After the app ran: next_steps, one per host the proxy blocked since the server started that no mock lists now, naming the mock of its domain to add it to and the catalog examples that list it, if any. Mock those hosts before handing back.",
             schema: obj(
                 json!({ "config": s("Config file the server was started with; default: the one start_server used.") }),
                 &[],
@@ -2563,7 +2563,9 @@ impl McpServer {
         let Some(admin) = status["server"]["admin"].as_str().map(str::to_owned) else {
             return;
         };
-        let Ok(steps) = crate::report::blocked_steps(&admin, self.token.as_deref()).await else {
+        let Ok(steps) =
+            crate::report::blocked_steps(&admin, self.token.as_deref(), &self.workspace).await
+        else {
             return;
         };
         if !steps.is_empty() {
