@@ -336,10 +336,355 @@ fn verify_run_text_names_each_failure_with_its_next_step() {
     );
 }
 
+/// A small app server for `--serve`: it writes its pid to `pid`, prints
+/// `listening on <port>` and answers each GET with the status of its own
+/// call to the mock (`GET https://api.orders.test/orders`, through the
+/// proxy its environment names).
+fn write_app(dir: &Path) {
+    std::fs::write(
+        dir.join("app.py"),
+        r#"import http.server, os, subprocess, sys
+port, pid = int(sys.argv[1]), sys.argv[2]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        out = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "https://api.orders.test/orders"], capture_output=True, text=True).stdout.encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+    def log_message(self, *a):
+        pass
+server = http.server.HTTPServer(("127.0.0.1", port), H)
+with open(pid, "w") as f:
+    f.write(str(os.getpid()))
+print("listening on", port, flush=True)
+server.serve_forever()
+"#,
+    )
+    .unwrap();
+}
+
+/// `python3 -u app.py <port> <pid file>`.
+fn app(dir: &Path, port: u16) -> String {
+    format!(
+        "python3 -u {} {port} {}",
+        dir.join("app.py").display(),
+        dir.join("app.pid").display()
+    )
+}
+
+/// A test command that asks the served app on `port` (not through the
+/// proxy) and passes when its call to the mock answered 200.
+fn ask_app(port: u16) -> String {
+    format!("test \"$(curl -sS --noproxy '*' http://127.0.0.1:{port}/)\" = 200")
+}
+
+/// Whether the process whose pid `file` holds is gone (it may take a
+/// moment to be reaped).
+#[cfg(unix)]
+fn gone(file: &Path) -> bool {
+    let pid = std::fs::read_to_string(file).unwrap();
+    for _ in 0..50 {
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        if !alive {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
+}
+
+/// The served app's call to the mock counts in the window; the app is
+/// stopped after the tests.
+#[cfg(unix)]
+#[test]
+fn verify_run_serves_the_app_until_the_tests_end_and_counts_its_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    write_app(dir.path());
+    let port = free_port();
+    let (code, json) = fresh(
+        dir.path(),
+        &ask_app(port),
+        &[
+            "--serve",
+            &app(dir.path(), port),
+            "--serve-port",
+            &port.to_string(),
+        ],
+    );
+    assert_eq!(code, Some(0), "{json:#}");
+    assert_eq!(json["ok"], true, "{json:#}");
+    assert_eq!(json["window"]["requests"], 1, "the app's call: {json:#}");
+    let serve = &json["serve"];
+    assert_eq!(serve["ready"], true, "{json:#}");
+    assert_eq!(serve["ready_by"], format!("port {port}"));
+    assert!(serve["ready_ms"].as_u64().is_some(), "{json:#}");
+    assert_eq!(serve["stopped"], true);
+    assert!(
+        serve["output_tail"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("listening on {port}")),
+        "{json:#}"
+    );
+    assert!(
+        gone(&dir.path().join("app.pid")),
+        "the app outlived the run"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn verify_run_waits_for_the_serve_ready_line() {
+    let dir = tempfile::tempdir().unwrap();
+    write_app(dir.path());
+    let port = free_port();
+    let (code, json) = fresh(
+        dir.path(),
+        &ask_app(port),
+        &[
+            "--serve",
+            &app(dir.path(), port),
+            "--serve-ready",
+            "^listening on \\d+$",
+        ],
+    );
+    assert_eq!(code, Some(0), "{json:#}");
+    assert_eq!(
+        json["serve"]["ready_by"],
+        "a line matching \"^listening on \\\\d+$\""
+    );
+    assert_eq!(json["window"]["requests"], 1, "{json:#}");
+    assert!(gone(&dir.path().join("app.pid")));
+}
+
+/// A serve command that exits before it is ready fails the run, and the
+/// tests are not run.
+#[test]
+fn verify_run_fails_when_the_serve_command_exits_early() {
+    let dir = tempfile::tempdir().unwrap();
+    let ran = dir.path().join("ran");
+    let port = free_port();
+    let (code, json) = fresh(
+        dir.path(),
+        &format!("touch {}", ran.display()),
+        &[
+            "--serve",
+            "echo cannot find module express >&2; exit 3",
+            "--serve-port",
+            &port.to_string(),
+        ],
+    );
+    assert_eq!(code, Some(1), "{json:#}");
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["command"]["not_run"], true, "{json:#}");
+    assert!(!ran.exists(), "the tests ran");
+    assert_eq!(kinds(&json), ["serve_failed"], "{json:#}");
+    let failure = &json["failures"][0];
+    assert!(
+        failure["detail"]
+            .as_str()
+            .unwrap()
+            .contains("exited 3 before it was ready"),
+        "{failure}"
+    );
+    assert!(
+        failure["next_step"]
+            .as_str()
+            .unwrap()
+            .contains("serve.output_tail")
+    );
+    assert_eq!(json["serve"]["exit_code"], 3, "{json:#}");
+    assert!(
+        json["serve"]["output_tail"]
+            .as_str()
+            .unwrap()
+            .contains("cannot find module express"),
+        "{json:#}"
+    );
+}
+
+/// A serve command that never becomes ready is stopped at
+/// `--serve-timeout`, and the tests are not run.
+#[cfg(unix)]
+#[test]
+fn verify_run_stops_a_serve_command_that_never_becomes_ready() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid = dir.path().join("app.pid");
+    let port = free_port();
+    let started = std::time::Instant::now();
+    let (code, json) = fresh(
+        dir.path(),
+        "true",
+        &[
+            "--serve",
+            &format!("echo $$ > {}; exec sleep 60", pid.display()),
+            "--serve-port",
+            &port.to_string(),
+            "--serve-timeout",
+            "2s",
+        ],
+    );
+    assert_eq!(code, Some(1), "{json:#}");
+    assert_eq!(kinds(&json), ["serve_failed"], "{json:#}");
+    assert!(
+        json["failures"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("was not ready within 2s"),
+        "{json:#}"
+    );
+    assert_eq!(json["command"]["not_run"], true);
+    assert_eq!(json["serve"]["stopped"], true);
+    assert!(gone(&pid), "the serve command outlived its timeout");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(45),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// The tests' timeout and Ctrl-C both stop the served app too.
+#[cfg(unix)]
+#[test]
+fn verify_run_stops_the_served_app_on_a_timeout_and_on_ctrl_c() {
+    let dir = tempfile::tempdir().unwrap();
+    write_app(dir.path());
+    let port = free_port();
+    let pid = dir.path().join("app.pid");
+    let (code, json) = fresh(
+        dir.path(),
+        "sleep 60",
+        &[
+            "--timeout",
+            "2s",
+            "--serve",
+            &app(dir.path(), port),
+            "--serve-port",
+            &port.to_string(),
+        ],
+    );
+    assert_eq!(code, Some(1), "{json:#}");
+    assert_eq!(json["command"]["timed_out"], true, "{json:#}");
+    assert_eq!(json["serve"]["stopped"], true);
+    assert!(gone(&pid), "the app outlived the timeout");
+
+    std::fs::remove_file(&pid).unwrap();
+    let started = dir.path().join("tests-started");
+    let port = free_port();
+    let out = on_free_ports(|| {
+        let (_, admin) = write_config(dir.path());
+        let child = std::process::Command::cargo_bin("mockingbird")
+            .unwrap()
+            .current_dir(dir.path())
+            .env("MB_CA_DIR", dir.path().join("ca"))
+            .env_remove("MB_ADMIN_URL")
+            .env_remove("MB_STATE_DIR")
+            .env_remove("HTTPS_PROXY")
+            .env_remove("HTTP_PROXY")
+            .env_remove("https_proxy")
+            .env_remove("http_proxy")
+            .args(["verify", "--offline", "--format", "json", "--state-dir"])
+            .arg(dir.path().join("state"))
+            .args([
+                "--serve",
+                &app(dir.path(), port),
+                "--serve-port",
+                &port.to_string(),
+            ])
+            .args(["--run", &format!("touch {}; sleep 60", started.display())])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        while !started.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // Ctrl-C, sent to this test's own child.
+        let _ = std::process::Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status();
+        let out = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if port_was_busy(&stderr) {
+            return Err(stderr.into_owned());
+        }
+        logged_admin(&dir.path().join("state/server.log"), admin)?;
+        Ok(out)
+    });
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!("{e}: {}", String::from_utf8_lossy(&out.stderr));
+    });
+    assert_eq!(out.status.code(), Some(1), "{json:#}");
+    assert_eq!(json["command"]["interrupted"], true, "{json:#}");
+    assert_eq!(json["serve"]["stopped"], true, "{json:#}");
+    assert!(gone(&pid), "the app outlived Ctrl-C");
+}
+
+/// The command runs from the caller's folder, so a relative path works
+/// from a subfolder.
+#[test]
+fn verify_run_runs_from_the_callers_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("tests");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(
+        sub.join("check.sh"),
+        "#!/bin/sh\ncurl -sSf -o /dev/null https://api.orders.test/orders\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(sub.join("check.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+    let out = on_free_ports(|| {
+        let (_, admin) = write_config(dir.path());
+        let out = mockingbird(&sub)
+            .args([
+                "verify",
+                "-c",
+                "../mockingbird.yaml",
+                "--offline",
+                "--format",
+                "json",
+                "--state-dir",
+            ])
+            .arg(dir.path().join("state"))
+            .args(["--run", "./check.sh"])
+            .timeout(std::time::Duration::from_secs(120))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if port_was_busy(&stderr) {
+            return Err(stderr.into_owned());
+        }
+        logged_admin(&dir.path().join("state/server.log"), admin)?;
+        Ok(out)
+    });
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!("{e}: {}", String::from_utf8_lossy(&out.stderr));
+    });
+    assert_eq!(out.status.code(), Some(0), "{json:#}");
+    assert!(
+        json["command"]["cwd"].as_str().unwrap().ends_with("tests"),
+        "{json:#}"
+    );
+    assert_eq!(json["window"]["requests"], 1, "{json:#}");
+}
+
 /// A line-delimited JSON-RPC client of `mockingbird mcp` over stdio.
 struct Mcp {
     child: std::process::Child,
-    stdin: std::process::ChildStdin,
+    /// `None` once closed.
+    stdin: Option<std::process::ChildStdin>,
     stdout: std::io::BufReader<std::process::ChildStdout>,
     next: u64,
 }
@@ -367,7 +712,7 @@ impl Mcp {
         let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
         Self {
             child,
-            stdin,
+            stdin: Some(stdin),
             stdout,
             next: 0,
         }
@@ -381,8 +726,9 @@ impl Mcp {
         let id = self.next;
         let msg =
             serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        writeln!(self.stdin, "{msg}").unwrap();
-        self.stdin.flush().unwrap();
+        let stdin = self.stdin.as_mut().unwrap();
+        writeln!(stdin, "{msg}").unwrap();
+        stdin.flush().unwrap();
         let mut line = String::new();
         self.stdout.read_line(&mut line).unwrap();
         let resp: Value = serde_json::from_str(&line)
@@ -468,4 +814,78 @@ fn mcp_verify_run_runs_a_command_and_keeps_stdio_clean() {
             .as_array()
             .is_some_and(|t| !t.is_empty())
     );
+}
+
+/// The MCP tool's `serve` (with `serve_port` and `cwd`) runs the app
+/// beside the command and stops it; closing stdin while a run waits stops
+/// the command and the app.
+#[cfg(unix)]
+#[test]
+fn mcp_verify_run_serves_the_app_and_stops_it() {
+    let dir = tempfile::tempdir().unwrap();
+    write_app(dir.path());
+    std::fs::create_dir(dir.path().join("app")).unwrap();
+    let mut mcp = Mcp::start(dir.path());
+    mcp.rpc(
+        "initialize",
+        serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}),
+    );
+    let pid = dir.path().join("app.pid");
+    let port = free_port();
+    let outcome = on_free_ports(|| {
+        let (_, admin) = write_config(dir.path());
+        let (failed, text) = mcp.tool(
+            "verify_run",
+            serde_json::json!({
+                "command": format!("test \"$(basename \"$PWD\")\" = app && {}", ask_app(port)),
+                "serve": app(dir.path(), port),
+                "serve_port": port,
+                "cwd": "app",
+                "offline": true,
+            }),
+        );
+        if failed {
+            return Err(text);
+        }
+        let log = dir.path().join(".mockingbird/server.log");
+        if log.exists() {
+            logged_admin(&log, admin)?;
+        }
+        Ok(serde_json::from_str::<Value>(&text).unwrap())
+    });
+    assert_eq!(outcome["ok"], true, "{outcome:#}");
+    assert_eq!(outcome["window"]["requests"], 1, "{outcome:#}");
+    assert_eq!(outcome["serve"]["stopped"], true, "{outcome:#}");
+    assert!(gone(&pid), "the app outlived the run");
+
+    // The client goes away while the tests run.
+    std::fs::remove_file(&pid).unwrap();
+    let port = free_port();
+    let started = dir.path().join("tests-started");
+    {
+        use std::io::Write as _;
+        let msg = serde_json::json!({"jsonrpc": "2.0", "id": 99, "method": "tools/call", "params": {"name": "verify_run", "arguments": {
+            "command": format!("touch {}; sleep 60", started.display()),
+            "serve": app(dir.path(), port),
+            "serve_port": port,
+            "config": "mockingbird.yaml",
+            "offline": true,
+        }}});
+        let stdin = mcp.stdin.as_mut().unwrap();
+        writeln!(stdin, "{msg}").unwrap();
+        stdin.flush().unwrap();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    while !started.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(started.exists(), "the tests did not start");
+    drop(mcp.stdin.take());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while mcp.child.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let exited = mcp.child.try_wait().unwrap().is_some();
+    assert!(exited, "the MCP server did not exit after stdin closed");
+    assert!(gone(&pid), "the app outlived the MCP client");
 }

@@ -85,7 +85,7 @@ const CALLED_GAPS: usize = 40;
 /// they could not be read.
 type WorldGaps = Result<(u64, Vec<Value>), String>;
 
-pub(crate) const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock a well-known public API (Stripe, GitHub, TMDB, Twilio, ...), check `list_examples` first: `init_example` writes its contract and a ready config. To mock an API: `import_contract`, then `get_world` (pass the imported `version` unless it was activated) and fix its `gaps` with `patch_world`, then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. To run an app unchanged against mocks, start the server with `proxy: true` and export the variables from `proxy_env` in the app's shell instead of editing its base URLs; give the user `mockingbird run -c <config> -- <command>` for running it. Before handing a mock back, check it covers every operation and host the app calls (`mockingbird verify --no-unmapped --no-unmatched`) and that the app's tests pass against it (`verify_run` with the test command start_server names). Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports; if the key is not in this process's environment, `open_key_setup` lets the user type it into a local page that stores it in a private file. The `mockingbird://skills/…` resources hold the full guides.";
+pub(crate) const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock a well-known public API (Stripe, GitHub, TMDB, Twilio, ...), check `list_examples` first: `init_example` writes its contract and a ready config. To mock an API: `import_contract`, then `get_world` (pass the imported `version` unless it was activated) and fix its `gaps` with `patch_world`, then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. To run an app unchanged against mocks, start the server with `proxy: true` and export the variables from `proxy_env` in the app's shell instead of editing its base URLs; give the user `mockingbird run -c <config> -- <command>` for running it. Before handing a mock back, check it covers every operation and host the app calls (`mockingbird verify --no-unmapped --no-unmatched`) and that the app's tests pass against it (`verify_run` with the test command, and serve command, start_server names). Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports; if the key is not in this process's environment, `open_key_setup` lets the user type it into a local page that stores it in a private file. The `mockingbird://skills/…` resources hold the full guides.";
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Transport {
@@ -467,7 +467,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "start_server",
             title: "Start Mockingbird in the background",
-            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env (or proxy_env_error, why this project's proxy could not be handed out). With a config, also world_review: for each mock whose world description has gaps, the next_steps and world_gaps an import answers (review them as after import_contract, the mockingbird-world skill); shares: the shares group each mock of the config keeps its sessions in (as the config's mocks group them), {group, default} (default: true when it set no shares and joined the group of the mocks whose hosts share its registrable domain, named after the domain; null when in none); and next_steps naming mocks that answer for one host in no common shares group (one sets shares: none, they name different groups, or the host has no registrable domain), one line summing up the hosts the project can call that no mock lists (project_hosts lists each with what to import), and one naming the app's test commands found in the project (package.json scripts, Makefile, pytest, rspec, go test, cargo test) to run with verify_run; and unknown_ids: per mock, how a read of an id the session does not hold is answered (its setting, or the types inferred to answer 404 once the session has written one of their records, and those that generate; get_world says why).",
+            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env (or proxy_env_error, why this project's proxy could not be handed out). With a config, also world_review: for each mock whose world description has gaps, the next_steps and world_gaps an import answers (review them as after import_contract, the mockingbird-world skill); shares: the shares group each mock of the config keeps its sessions in (as the config's mocks group them), {group, default} (default: true when it set no shares and joined the group of the mocks whose hosts share its registrable domain, named after the domain; null when in none); and next_steps naming mocks that answer for one host in no common shares group (one sets shares: none, they name different groups, or the host has no registrable domain), one line summing up the hosts the project can call that no mock lists (project_hosts lists each with what to import), and one naming the app's test commands found in the project (package.json scripts, Makefile, pytest, rspec, go test, cargo test) to run with verify_run, led by a ready-to-run {command, serve, serve_port} when tests need the app's own server (app_tests lists every command and pair); and unknown_ids: per mock, how a read of an id the session does not hold is answered (its setting, or the types inferred to answer 404 once the session has written one of their records, and those that generate; get_world says why).",
             schema: obj(
                 json!({
                     "config": s("Config file (preferred)."),
@@ -516,7 +516,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "server_status",
             title: "Background server status",
-            description: "Whether the background server runs, and its /readyz (ready, degraded reasons). next_steps: one per host the proxy blocked since the server started that no mock lists now, naming the mock of its domain to add it to and the catalog examples that list it, if any; then one line summing up the hosts the project can call that no mock lists (project_hosts lists each with what to import), and one naming the app's test commands to run with verify_run. Mock those hosts before handing back.",
+            description: "Whether the background server runs, and its /readyz (ready, degraded reasons). next_steps: one per host the proxy blocked since the server started that no mock lists now, naming the mock of its domain to add it to and the catalog examples that list it, if any; then one line summing up the hosts the project can call that no mock lists (project_hosts lists each with what to import), and one naming the app's test commands to run with verify_run (with serve when they need the app's server; app_tests lists them all). Mock those hosts before handing back.",
             schema: obj(
                 json!({ "config": s("Config file the server was started with; default: the one start_server used.") }),
                 &[],
@@ -538,10 +538,15 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "verify_run",
             title: "Run the app's tests against the mocks",
-            description: "Run the app's own command (its tests or an end-to-end suite, as start_server and server_status name them) from the project root against the mocks, as `mockingbird run` does: the proxy environment and CA preloads, this project's server (started for the run when none answers, then stopped). Only the requests the command made count. Returns ok (exit 0 and nothing points at the mock), command {exit_code, timed_out, duration_ms, output_tail}, window {requests}, failures, each with a next_step: unmatched_route, error_status (a 5xx, a request validation rejected, or another 4xx when the command failed: operation, status, source, problem detail), fallback (with its reason), blocked_host, unclaimed_hosts (hosts it reached that no mock lists); and notes (4xx answers taken as expected because the command passed, hosts passed to the real API). What the command leaves running is stopped with it. CLI `mockingbird verify --run \"<cmd>\"`.",
+            description: "Run the app's own command (its tests or an end-to-end suite, as start_server and server_status name them) against the mocks, as `mockingbird run` does: the proxy environment and CA preloads, this project's server (started for the run when none answers, then stopped). It runs from cwd (default: the project root). Tests that need the app's own server running (a base URL such as SERVER_URL=http://localhost:4242) take serve: that command runs first under the same environment, is waited for (serve_port accepting connections and/or a serve_ready line; with neither, the port start_server proposed for it, else 3 s still running), and is stopped after the command; when it exits or is not ready within serve_timeout_secs, the command is not run (serve_failed). Its requests count too. Only the requests made during the run count. Returns ok (exit 0 and nothing points at the mock), command {exit_code, timed_out, duration_ms, output_tail}, serve {ready_by, ready_ms, exit_code, output_tail}, window {requests}, failures, each with a next_step: unmatched_route, error_status (a 5xx, a request validation rejected, or another 4xx when the command failed: operation, status, source, problem detail), fallback (with its reason), blocked_host, unclaimed_hosts (hosts it reached that no mock lists), serve_failed; and notes (4xx answers taken as expected because the command passed, hosts passed to the real API). What the command leaves running is stopped with it. CLI `mockingbird verify --run \"<cmd>\" [--serve \"<cmd>\" --serve-port <port>]`.",
             schema: obj(
                 json!({
-                    "command": s("The command to run with sh -c, from the project root (for example npm test)."),
+                    "command": s("The command to run with sh -c, from cwd (for example npm test)."),
+                    "cwd": s("Folder both commands run from; relative to the project root; default: the project root."),
+                    "serve": s("The app's own server to run while the command runs, with sh -c from cwd (for example cd server && npm start)."),
+                    "serve_port": n("Ready once this localhost port accepts connections."),
+                    "serve_ready": s("Ready once a line of the serve command's output matches this regular expression."),
+                    "serve_timeout_secs": n("How long serve may take to become ready; default 60, at most 600."),
                     "config": s("Config file; default: the one start_server used, else ./mockingbird.yaml."),
                     "timeout_secs": n("Stop the command (and what it started) after this many seconds; default 300, at most 1800."),
                     "offline": b("Faker only, for a server this run starts."),
@@ -1807,8 +1812,22 @@ impl McpServer {
                         std::time::Duration::from_secs,
                     )
                     .min(crate::verify_run::MCP_MAX_TIMEOUT);
+                let root = crate::hosts::project_root(&config);
+                let cwd = opt_str(a, "cwd").map(|c| root.join(c));
+                let serve_port = opt_port(a, "serve_port")?;
+                let serve = opt_str(a, "serve").map(|command| crate::verify_run::ServeOptions {
+                    command,
+                    port: serve_port,
+                    ready: opt_str(a, "serve_ready"),
+                    timeout: opt_u64(a, "serve_timeout_secs")
+                        .map_or(crate::verify_run::DEFAULT_SERVE_TIMEOUT, |s| {
+                            std::time::Duration::from_secs(s.min(600))
+                        }),
+                });
                 let opts = crate::verify_run::Options {
                     command,
+                    cwd,
+                    serve,
                     state_dir: self.state_for(Some(&config)).state_dir,
                     config: Some(config),
                     offline: opt_bool(a, "offline"),
@@ -3523,14 +3542,18 @@ fn answer_admin(answer: &Value) -> Option<String> {
 
 /// Appends the line naming the app's test commands
 /// ([`crate::test_commands`], from the project root of `config`) to an
-/// answer's `next_steps`, when there are any.
+/// answer's `next_steps`, and all of them (with the pairs that need the
+/// app's server) as `app_tests`, when there are any.
 async fn add_test_step(answer: &mut Value, config: &std::path::Path) {
     let root = crate::hosts::project_root(config);
-    let found = tokio::task::spawn_blocking(move || crate::test_commands::detect(&root))
+    let found = tokio::task::spawn_blocking(move || crate::test_commands::detect_all(&root))
         .await
         .unwrap_or_default();
     if let Some(line) = crate::test_commands::step(&found) {
         append_step(answer, line);
+        if let (Some(obj), Ok(tests)) = (answer.as_object_mut(), serde_json::to_value(&found)) {
+            obj.insert("app_tests".into(), tests);
+        }
     }
 }
 
@@ -3568,11 +3591,19 @@ mod tests {
         let steps = answer["next_steps"].as_array().unwrap();
         assert_eq!(steps.len(), 2, "{answer}");
         let line = steps[1].as_str().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let cd = format!("cd {}", root.display());
         assert_eq!(
             line,
-            "The app's tests: `npm test` (package.json scripts.test), `npm run test:e2e` (package.json scripts.test:e2e), `rspec` (spec/). Run each with verify_run {command} (CLI `mockingbird verify --run \"<cmd>\"`) before handing back."
+            "The app's tests: `npm test` (package.json scripts.test), `npm run test:e2e` (package.json scripts.test:e2e), `rspec` (spec/). Run each with verify_run {command} (CLI, from the project root: `mockingbird verify --run \"<cmd>\"`) before handing back."
         );
         assert!(line.len() <= 320, "{}", line.len());
+        assert_eq!(
+            answer["app_tests"]["commands"][0]["command"],
+            format!("{cd} && npm test"),
+            "{answer}"
+        );
+        assert_eq!(answer["app_tests"]["pairs"], json!([]));
         let empty = tempfile::tempdir().unwrap();
         let mut answer = json!({});
         add_test_step(&mut answer, &empty.path().join("mockingbird.yaml")).await;
