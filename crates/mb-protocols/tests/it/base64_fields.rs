@@ -104,6 +104,14 @@ fn router(script: Vec<Value>) -> axum::Router {
 }
 
 fn router_with(script: Vec<Result<String, LlmError>>) -> axum::Router {
+    router_on(
+        script,
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))) as Arc<dyn StateStore>,
+    )
+}
+
+/// [`router_with`] over `store`, which a test may write to directly.
+fn router_on(script: Vec<Result<String, LlmError>>, store: Arc<dyn StateStore>) -> axum::Router {
     let provider = Arc::new(ScriptedProvider::new(script));
     let rt = MockRuntime::new(
         "contents",
@@ -113,7 +121,7 @@ fn router_with(script: Vec<Result<String, LlmError>>) -> axum::Router {
             EngineConfig::default(),
         )),
         CachingStateStore::wrap(
-            Arc::new(MemoryStore::new(Duration::from_secs(3600))) as Arc<dyn StateStore>,
+            store,
             Duration::from_secs(3600),
             mb_state::DEFAULT_CACHE_ENTRIES,
         ),
@@ -237,22 +245,30 @@ async fn a_client_s_binary_file_round_trips_through_state() {
 }
 
 /// A read that cannot catch up with a later write is answered from state (the
-/// catch-up fallback): what it holds is served as it was, a valid base64 value
-/// kept and still valid.
+/// catch-up fallback). State holds the file as text (a record written as the client
+/// sent it, `encoding: "utf-8"`); that answer is encoded on its way out like any
+/// other.
 #[tokio::test]
 async fn a_catch_up_fallback_serves_valid_base64() {
     let down = || Err(LlmError::Transport("down".into()));
-    let text = base64::engine::general_purpose::STANDARD.encode("# Notes");
-    let router = router_with(vec![
-        Ok(
-            json!({"id": "f1", "status": "open", "content": text, "encoding": "base64"})
-                .to_string(),
-        ),
-        down(),
-        down(),
-    ]);
-    let first = send(&router, "GET", "/files/f1", None).await;
-    assert_eq!(first["content"], text, "{first}");
+    let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let key = mb_state::SessionKey {
+        workspace: "default".into(),
+        mock: "contents".into(),
+        session: "s1".into(),
+    };
+    store
+        .upsert(
+            &key,
+            mb_state::StoredResource {
+                resource_type: "files".into(),
+                id: "f1".into(),
+                data: json!({"id": "f1", "status": "open", "content": "# Notes", "encoding": "utf-8"}),
+            },
+        )
+        .await
+        .unwrap();
+    let router = router_on(vec![down(), down()], Arc::clone(&store));
     let req = Request::builder()
         .method("POST")
         .uri("/files/f1/close")
@@ -270,6 +286,13 @@ async fn a_catch_up_fallback_serves_valid_base64() {
     );
     let (source, read) = send_with_source(&router, "GET", "/files/f1", None).await;
     assert_eq!(source, "state", "{read}");
-    assert_eq!(read["content"], text, "{read}");
     assert_eq!(read["encoding"], "base64", "{read}");
+    assert_eq!(
+        decoded(read["content"].as_str().unwrap()),
+        "# Notes",
+        "{read}"
+    );
+    // What state holds is left as it was.
+    let held = store.get(&key, "files", "f1").await.unwrap().unwrap();
+    assert_eq!(held.data["content"], "# Notes");
 }
