@@ -85,7 +85,7 @@ const CALLED_GAPS: usize = 40;
 /// they could not be read.
 type WorldGaps = Result<(u64, Vec<Value>), String>;
 
-pub(crate) const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock a well-known public API (Stripe, GitHub, TMDB, Twilio, ...), check `list_examples` first: `init_example` writes its contract and a ready config. To mock an API: `import_contract`, then `get_world` (pass the imported `version` unless it was activated) and fix its `gaps` with `patch_world`, then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. To run an app unchanged against mocks, start the server with `proxy: true` and export the variables from `proxy_env` in the app's shell instead of editing its base URLs; give the user `mockingbird run -c <config> -- <command>` for running it. Before handing a mock back, check it covers every operation and host the app calls (`mockingbird verify --no-unmapped --no-unmatched`) and that the app's tests pass against it (`verify_run` with the test command, and serve command, start_server names). Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports; if the key is not in this process's environment, `open_key_setup` lets the user type it into a local page that stores it in a private file. The `mockingbird://skills/…` resources hold the full guides.";
+pub(crate) const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock a well-known public API (Stripe, GitHub, TMDB, Twilio, ...), check `list_examples` first: `init_example` writes its contract and a ready config. To mock an API: `import_contract`, then `get_world` (pass the imported `version` unless it was activated) and fix its `gaps` with `patch_world` (above 40 gaps, run the app's flows first and fix those `get_world {called: true}` lists), then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. To run an app unchanged against mocks, start the server with `proxy: true` and export the variables from `proxy_env` in the app's shell instead of editing its base URLs; give the user `mockingbird run -c <config> -- <command>` for running it. Before handing a mock back, check it covers every operation and host the app calls (`mockingbird verify --no-unmapped --no-unmatched`) and that the app's tests pass against it (`verify_run` with the test command, and serve command, start_server names). Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports; if the key is not in this process's environment, `open_key_setup` lets the user type it into a local page that stores it in a private file. The `mockingbird://skills/…` resources hold the full guides.";
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Transport {
@@ -3404,8 +3404,9 @@ fn imported_version(answer: &Value) -> Option<u64> {
 
 /// Adds to import `answer` of `mock`'s `version` the steps to take next and the
 /// version's world gaps: `world_gaps_total`, and `world_gaps` with at most
-/// `cap` of them, the ones to fix before the advisory ones. When the
-/// gaps could not be read, `world_gaps_error` says why instead.
+/// `cap` of them, the ones to fix before the advisory ones; none above
+/// [`CALLED_GAPS`], where the first step says to review the called ones. When
+/// the gaps could not be read, `world_gaps_error` says why instead.
 fn next_steps(
     answer: &mut Value,
     mock: &str,
@@ -3419,7 +3420,7 @@ fn next_steps(
     let total = gaps.as_ref().map_or(0, Vec::len);
     let review = if total > CALLED_GAPS {
         format!(
-            "Version {version} has {total} world gaps, too many to review one by one. Run the app's flows against the mock first, then call get_world {{mock: {mock:?}, version: {version}, called: true}}: it lists only the gaps of the operations the app called and the types they touch. Work through those as the mockingbird-world skill says (read that skill), and repeat after each new flow. Gaps marked advisory are checks: act on them only where the docs state the behaviour."
+            "Version {version} has {total} world gaps, most of them in operations the app never calls: they are no to-do list, and none is listed here. The mock is not ready until the gaps of what the app calls are reviewed: run the app's flows (or its main commands: a create, then reads and lists of what it created, then a change and a read) against the mock, then call get_world {{mock: {mock:?}, version: {version}, called: true}}: it lists only the gaps of the operations the app called and the types they touch. Work through those as the mockingbird-world skill says (read that skill), and repeat after each new flow. Gaps marked advisory are checks: act on them only where the docs state the behaviour."
         )
     } else {
         format!(
@@ -3438,6 +3439,11 @@ fn next_steps(
     match gaps {
         Ok(mut gaps) => {
             obj.insert("world_gaps_total".into(), json!(gaps.len()));
+            // Too many to review: a sample of the whole contract's gaps reads as the
+            // to-do list it is not; the called ones are (see the first step).
+            if total > CALLED_GAPS {
+                gaps.clear();
+            }
             gaps.sort_by_key(|g| g.get("advisory").and_then(Value::as_bool).unwrap_or(false));
             gaps.truncate(cap);
             obj.insert("world_gaps".into(), Value::Array(gaps));
@@ -3456,8 +3462,8 @@ fn next_steps(
 /// One `world_review` entry per mock whose world gaps were read and are not
 /// empty, or could not be read: the mock, the version, and what
 /// [`next_steps`] adds to an import of it, each capped at [`IMPORT_GAPS`]
-/// gaps and all together at [`START_GAPS`] (`world_gaps_total` still counts
-/// each mock's).
+/// gaps (none above [`CALLED_GAPS`]) and all together at [`START_GAPS`]
+/// (`world_gaps_total` still counts each mock's).
 /// The gaps of a world view (`get_world`'s answer), with the number of the version
 /// they describe.
 fn gaps_of(world: &Value) -> WorldGaps {
@@ -3808,15 +3814,15 @@ mod tests {
 
     #[test]
     fn next_steps_cap_the_gaps_with_the_real_total_and_fixes_first() {
-        let mut gaps: Vec<Value> = (0..50)
+        let mut gaps: Vec<Value> = (0..30)
             .map(|i| json!({"code": "no_effect", "message": i, "advisory": true}))
             .collect();
         gaps.push(json!({"code": "no_target", "message": "fix"}));
         let mut answer = json!({"version": 2});
-        next_steps(&mut answer, "shop", 2, Ok(gaps), IMPORT_GAPS);
-        assert_eq!(answer["world_gaps_total"], 51);
+        next_steps(&mut answer, "shop", 2, Ok(gaps), 10);
+        assert_eq!(answer["world_gaps_total"], 31);
         let listed = answer["world_gaps"].as_array().cloned().unwrap_or_default();
-        assert_eq!(listed.len(), IMPORT_GAPS);
+        assert_eq!(listed.len(), 10);
         assert_eq!(listed[0]["code"], "no_target", "{listed:?}");
         assert!(
             answer["next_steps"][0]
@@ -3838,12 +3844,15 @@ mod tests {
             IMPORT_GAPS,
         );
         let first = answer["next_steps"][0].as_str().unwrap_or_default();
-        assert!(first.contains("Run the app's flows"), "{first}");
+        assert!(first.contains("run the app's flows"), "{first}");
         assert!(
             first.contains(r#"get_world {mock: "gh", version: 3, called: true}"#),
             "{first}"
         );
         assert_eq!(answer["world_gaps_total"], CALLED_GAPS + 1);
+        // No sample of the whole contract's gaps: the called ones are the list.
+        assert_eq!(answer["world_gaps"], json!([]), "{answer}");
+        assert!(first.contains("no to-do list"), "{first}");
 
         let mut answer = json!({"version": 3});
         next_steps(
@@ -3914,19 +3923,23 @@ mod tests {
         };
         let review = world_review(vec![
             ("clean".into(), Ok((1, Vec::new()))),
-            ("a".into(), Ok((3, gaps(50)))),
+            ("a".into(), Ok((3, gaps(40)))),
             ("b".into(), Ok((1, gaps(30)))),
             ("c".into(), Ok((2, gaps(20)))),
             ("d".into(), Err("timed out".into())),
+            // Too many to review: none listed, none of the cap taken.
+            ("e".into(), Ok((1, gaps(CALLED_GAPS + 1)))),
         ]);
         let mocks: Vec<&str> = review.iter().filter_map(|e| e["mock"].as_str()).collect();
-        assert_eq!(mocks, ["a", "b", "c", "d"]);
+        assert_eq!(mocks, ["a", "b", "c", "d", "e"]);
         let listed = |i: usize| review[i]["world_gaps"].as_array().map_or(0, Vec::len);
-        assert_eq!(listed(0), IMPORT_GAPS);
-        assert_eq!(review[0]["world_gaps_total"], 50);
+        assert_eq!(listed(0), 40);
+        assert_eq!(review[0]["world_gaps_total"], 40);
+        assert_eq!(listed(4), 0);
+        assert_eq!(review[4]["world_gaps_total"], CALLED_GAPS + 1);
         assert_eq!(review[0]["version"], 3);
         assert_eq!(listed(1), 30);
-        assert_eq!(listed(2), START_GAPS - IMPORT_GAPS - 30);
+        assert_eq!(listed(2), START_GAPS - 40 - 30);
         assert_eq!(review[2]["world_gaps_total"], 20);
         assert!(
             review[0]["next_steps"][0]
