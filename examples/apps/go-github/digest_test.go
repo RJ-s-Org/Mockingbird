@@ -117,12 +117,29 @@ func TestDigest(t *testing.T) {
 			return base.RoundTrip(r)
 		})
 		_, err := Run(context.Background(), &limited, "ghp_test123", "fernwood-labs", "trellis")
+		// GitHub answers an exhausted limit with 403 and X-RateLimit-Remaining: 0,
+		// which go-github reports as a RateLimitError; without those headers it is
+		// a plain ErrorResponse.
+		var status int
+		var message string
+		var rateErr *github.RateLimitError
 		var ghErr *github.ErrorResponse
-		if !errors.As(err, &ghErr) || ghErr.Response.StatusCode != http.StatusForbidden {
-			t.Fatalf("want a 403 ErrorResponse, got %v", err)
+		switch {
+		case errors.As(err, &rateErr):
+			status, message = rateErr.Response.StatusCode, rateErr.Message
+			if rateErr.Rate.Remaining != 0 {
+				t.Errorf("remaining: %d", rateErr.Rate.Remaining)
+			}
+		case errors.As(err, &ghErr):
+			status, message = ghErr.Response.StatusCode, ghErr.Message
+		default:
+			t.Fatalf("want a 403 rate-limit error, got %v", err)
 		}
-		if !strings.Contains(ghErr.Message, "rate limit") {
-			t.Errorf("message: %q", ghErr.Message)
+		if status != http.StatusForbidden {
+			t.Fatalf("want 403, got %d: %v", status, err)
+		}
+		if !strings.Contains(message, "rate limit") {
+			t.Errorf("message: %q", message)
 		}
 	})
 }
