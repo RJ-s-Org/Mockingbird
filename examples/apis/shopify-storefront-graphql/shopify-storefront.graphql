@@ -1,0 +1,535 @@
+# A hand-written subset of the Shopify Storefront GraphQL API, version 2026-10
+# (shop, products and variants, collections, menus, pages, product
+# recommendations, node, and the cart: cart, cartCreate, cartLinesAdd,
+# cartLinesUpdate and cartLinesRemove with userErrors), written for
+# Mockingbird's examples and covered by its license. Type, field and argument
+# names follow Shopify's public reference, https://shopify.dev/docs/api/storefront/2026-10;
+# Shopify publishes no schema file under an open licence, so nothing of it is
+# vendored or pinned. Left out: what a storefront rarely reads (metafields,
+# selling plans, buyer identity, delivery groups, discounts, localization
+# queries), the cart payloads' `warnings`, `Image.url`'s `transform` argument
+# and `Collection.products`' `filters` argument. `@inContext` is declared, with
+# a few country and language codes, so Hydrogen-style queries validate; it
+# changes nothing in the answers. One departure: ProductVariant.product is
+# nullable here (Shopify: Product!), so a cart line can hold a variant without
+# its whole product.
+
+"""An ISO-8601 encoded UTC date time string, e.g. "2026-10-01T12:30:00Z"."""
+scalar DateTime
+
+"""A signed decimal number serialized as a string, e.g. "34.0"."""
+scalar Decimal
+
+"""An RFC 3986 and RFC 3987 compliant URI string."""
+scalar URL
+
+"""A string containing HTML code."""
+scalar HTML
+
+"""An object with an ID field (a global id, e.g. gid://shopify/Product/8493028147510)."""
+interface Node {
+  id: ID!
+}
+
+"""A country code (ISO 3166-1 alpha-2); a few of Shopify's values."""
+enum CountryCode {
+  US
+  CA
+  GB
+  AU
+  DE
+  FR
+  JP
+}
+
+"""A language code (ISO 639-1); a few of Shopify's values."""
+enum LanguageCode {
+  EN
+  FR
+  DE
+  ES
+  JA
+}
+
+"""The input fields for a buyer's identity in a B2B or customer context."""
+input BuyerInput {
+  customerAccessToken: String!
+  companyLocationId: ID
+}
+
+"""Contextualizes data (prices, availability, language) to a country, language or buyer."""
+directive @inContext(country: CountryCode, language: LanguageCode, buyer: BuyerInput) on QUERY | MUTATION
+
+"""Returns information about pagination in a connection, in accordance with the Relay specification."""
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}
+
+"""The three-letter currency codes that represent the world currencies used in stores."""
+enum CurrencyCode {
+  USD
+  CAD
+  EUR
+  GBP
+}
+
+"""A monetary value with currency."""
+type MoneyV2 {
+  amount: Decimal!
+  currencyCode: CurrencyCode!
+}
+
+"""Represents an image resource."""
+type Image {
+  id: ID
+  url: URL!
+  altText: String
+  width: Int
+  height: Int
+}
+
+type ImageEdge {
+  cursor: String!
+  node: Image!
+}
+
+type ImageConnection {
+  edges: [ImageEdge!]!
+  nodes: [Image!]!
+  pageInfo: PageInfo!
+}
+
+"""SEO information."""
+type SEO {
+  title: String
+  description: String
+}
+
+"""A domain of the shop."""
+type Domain {
+  host: String!
+  sslEnabled: Boolean!
+  url: URL!
+}
+
+"""Shop represents a collection of the general settings and information about the shop."""
+type Shop implements Node {
+  id: ID!
+  name: String!
+  description: String
+  moneyFormat: String!
+  primaryDomain: Domain!
+}
+
+"""Properties used by customers to select a product variant."""
+type SelectedOption {
+  name: String!
+  value: String!
+}
+
+"""The value of a product option."""
+type ProductOptionValue implements Node {
+  id: ID!
+  name: String!
+}
+
+"""Product property names like "Size", "Color", and "Material"."""
+type ProductOption implements Node {
+  id: ID!
+  name: String!
+  optionValues: [ProductOptionValue!]!
+  """The corresponding value to the product option name."""
+  values: [String!]! @deprecated(reason: "Use `optionValues` instead.")
+}
+
+"""The price range of the product."""
+type ProductPriceRange {
+  maxVariantPrice: MoneyV2!
+  minVariantPrice: MoneyV2!
+}
+
+"""A product variant represents a different version of a product, such as differing sizes or differing colors."""
+type ProductVariant implements Node {
+  id: ID!
+  title: String!
+  sku: String
+  availableForSale: Boolean!
+  currentlyNotInStock: Boolean!
+  quantityAvailable: Int
+  requiresShipping: Boolean!
+  selectedOptions: [SelectedOption!]!
+  price: MoneyV2!
+  compareAtPrice: MoneyV2
+  image: Image
+  """The product object that the product variant belongs to. Shopify declares it
+  non-null; it is nullable here so a cart line can hold a variant the session
+  read without its whole product (the product is answered from what the
+  session holds)."""
+  product: Product
+}
+
+type ProductVariantEdge {
+  cursor: String!
+  node: ProductVariant!
+}
+
+type ProductVariantConnection {
+  edges: [ProductVariantEdge!]!
+  nodes: [ProductVariant!]!
+  pageInfo: PageInfo!
+}
+
+"""A product represents an individual item for sale in a Shopify store."""
+type Product implements Node {
+  id: ID!
+  handle: String!
+  title: String!
+  description(truncateAt: Int): String!
+  descriptionHtml: HTML!
+  vendor: String!
+  productType: String!
+  tags: [String!]!
+  availableForSale: Boolean!
+  totalInventory: Int
+  options(first: Int): [ProductOption!]!
+  priceRange: ProductPriceRange!
+  compareAtPriceRange: ProductPriceRange!
+  variants(first: Int, after: String, last: Int, before: String, reverse: Boolean = false): ProductVariantConnection!
+  featuredImage: Image
+  images(first: Int, after: String, last: Int, before: String, reverse: Boolean = false): ImageConnection!
+  seo: SEO!
+  onlineStoreUrl: URL
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  publishedAt: DateTime!
+}
+
+type ProductEdge {
+  cursor: String!
+  node: Product!
+}
+
+type ProductConnection {
+  edges: [ProductEdge!]!
+  nodes: [Product!]!
+  pageInfo: PageInfo!
+}
+
+"""The set of valid sort keys for the products query."""
+enum ProductSortKeys {
+  TITLE
+  PRODUCT_TYPE
+  VENDOR
+  UPDATED_AT
+  CREATED_AT
+  BEST_SELLING
+  PRICE
+  ID
+  RELEVANCE
+}
+
+"""The set of valid sort keys for the ProductCollection query."""
+enum ProductCollectionSortKeys {
+  TITLE
+  PRICE
+  BEST_SELLING
+  CREATED
+  ID
+  MANUAL
+  COLLECTION_DEFAULT
+  RELEVANCE
+}
+
+"""The recommendation intent that is used to generate product recommendations."""
+enum ProductRecommendationIntent {
+  RELATED
+  COMPLEMENTARY
+}
+
+"""A collection represents a grouping of products that a shop owner can create to organize them or make their shops easier to browse."""
+type Collection implements Node {
+  id: ID!
+  handle: String!
+  title: String!
+  description(truncateAt: Int): String!
+  descriptionHtml: HTML!
+  image: Image
+  seo: SEO!
+  onlineStoreUrl: URL
+  updatedAt: DateTime!
+  products(first: Int, after: String, last: Int, before: String, reverse: Boolean = false, sortKey: ProductCollectionSortKeys = COLLECTION_DEFAULT): ProductConnection!
+}
+
+type CollectionEdge {
+  cursor: String!
+  node: Collection!
+}
+
+type CollectionConnection {
+  edges: [CollectionEdge!]!
+  nodes: [Collection!]!
+  pageInfo: PageInfo!
+}
+
+"""The set of valid sort keys for the Collection query."""
+enum CollectionSortKeys {
+  TITLE
+  UPDATED_AT
+  ID
+  RELEVANCE
+}
+
+"""A menu item type."""
+enum MenuItemType {
+  FRONTPAGE
+  COLLECTION
+  COLLECTIONS
+  PRODUCT
+  CATALOG
+  PAGE
+  BLOG
+  ARTICLE
+  SEARCH
+  SHOP_POLICY
+  HTTP
+}
+
+"""A menu item within a parent menu."""
+type MenuItem implements Node {
+  id: ID!
+  title: String!
+  type: MenuItemType!
+  url: URL
+  resourceId: ID
+  tags: [String!]!
+  items: [MenuItem!]!
+}
+
+"""A menu used for navigation within a storefront."""
+type Menu implements Node {
+  id: ID!
+  handle: String!
+  title: String!
+  itemsCount: Int!
+  items: [MenuItem!]!
+}
+
+"""Shopify merchants can create pages to hold static HTML content."""
+type Page implements Node {
+  id: ID!
+  handle: String!
+  title: String!
+  body: HTML!
+  bodySummary: String!
+  seo: SEO
+  onlineStoreUrl: URL
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type PageEdge {
+  cursor: String!
+  node: Page!
+}
+
+type PageConnection {
+  edges: [PageEdge!]!
+  nodes: [Page!]!
+  pageInfo: PageInfo!
+}
+
+"""The set of valid sort keys for the Page query."""
+enum PageSortKeys {
+  TITLE
+  UPDATED_AT
+  ID
+  RELEVANCE
+}
+
+"""Represents a generic custom attribute, such as whether an order is a customer's first."""
+type Attribute {
+  key: String!
+  value: String
+}
+
+"""The input fields for an attribute."""
+input AttributeInput {
+  key: String!
+  value: String!
+}
+
+"""The merchandise to be purchased at checkout."""
+union Merchandise = ProductVariant
+
+"""The cost of the merchandise line that the buyer will pay at checkout."""
+type CartLineCost {
+  amountPerQuantity: MoneyV2!
+  compareAtAmountPerQuantity: MoneyV2
+  subtotalAmount: MoneyV2!
+  totalAmount: MoneyV2!
+}
+
+"""Represents a cart line item."""
+interface BaseCartLine {
+  id: ID!
+  quantity: Int!
+  merchandise: Merchandise!
+  cost: CartLineCost!
+  attributes: [Attribute!]!
+}
+
+"""Represents information about the merchandise in the cart."""
+type CartLine implements BaseCartLine & Node {
+  id: ID!
+  quantity: Int!
+  merchandise: Merchandise!
+  cost: CartLineCost!
+  attributes: [Attribute!]!
+}
+
+type BaseCartLineEdge {
+  cursor: String!
+  node: BaseCartLine!
+}
+
+type BaseCartLineConnection {
+  edges: [BaseCartLineEdge!]!
+  nodes: [BaseCartLine!]!
+  pageInfo: PageInfo!
+}
+
+"""The costs that the buyer will pay at checkout."""
+type CartCost {
+  subtotalAmount: MoneyV2!
+  totalAmount: MoneyV2!
+  """The tax amount for the customer to pay at checkout."""
+  totalTaxAmount: MoneyV2 @deprecated(reason: "Tax and duty amounts are no longer available and will be removed in a future version.")
+  checkoutChargeAmount: MoneyV2!
+}
+
+"""A cart represents the merchandise that a buyer intends to purchase, and the estimated cost associated with the cart."""
+type Cart implements Node {
+  id: ID!
+  checkoutUrl: URL!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  note: String
+  attributes: [Attribute!]!
+  totalQuantity: Int!
+  cost: CartCost!
+  lines(first: Int, after: String, last: Int, before: String, reverse: Boolean = false): BaseCartLineConnection!
+}
+
+"""The input fields to create a merchandise line on a cart."""
+input CartLineInput {
+  merchandiseId: ID!
+  quantity: Int = 1
+  attributes: [AttributeInput!]
+}
+
+"""The input fields to update a line item on a cart."""
+input CartLineUpdateInput {
+  id: ID!
+  merchandiseId: ID
+  quantity: Int
+  attributes: [AttributeInput!]
+}
+
+"""The input fields to create a cart."""
+input CartInput {
+  lines: [CartLineInput!]
+  note: String
+  attributes: [AttributeInput!]
+}
+
+"""Possible error codes that can be returned by CartUserError."""
+enum CartErrorCode {
+  INVALID
+  LESS_THAN
+  INVALID_MERCHANDISE_LINE
+  MISSING_DISCOUNT_CODE
+  MISSING_NOTE
+  MERCHANDISE_NOT_ENOUGH_STOCK
+  MERCHANDISE_OUT_OF_STOCK
+  MAXIMUM_EXCEEDED
+  INVALID_INCREMENT
+}
+
+"""Represents an error that happens during execution of a cart mutation."""
+type CartUserError {
+  code: CartErrorCode
+  field: [String!]
+  message: String!
+}
+
+"""Return type for cartCreate mutation."""
+type CartCreatePayload {
+  cart: Cart
+  userErrors: [CartUserError!]!
+}
+
+"""Return type for cartLinesAdd mutation."""
+type CartLinesAddPayload {
+  cart: Cart
+  userErrors: [CartUserError!]!
+}
+
+"""Return type for cartLinesUpdate mutation."""
+type CartLinesUpdatePayload {
+  cart: Cart
+  userErrors: [CartUserError!]!
+}
+
+"""Return type for cartLinesRemove mutation."""
+type CartLinesRemovePayload {
+  cart: Cart
+  userErrors: [CartUserError!]!
+}
+
+"""The schema's entry-point for queries."""
+type QueryRoot {
+  """The shop associated with the storefront access token."""
+  shop: Shop!
+  """Fetch a specific Product by one of its unique attributes."""
+  product(id: ID, handle: String): Product
+  """Returns a list of the shop's products."""
+  products(first: Int, after: String, last: Int, before: String, reverse: Boolean = false, sortKey: ProductSortKeys = ID, query: String): ProductConnection!
+  """Find recommended products related to a given product."""
+  productRecommendations(productId: ID, productHandle: String, intent: ProductRecommendationIntent = RELATED): [Product!]
+  """Fetch a specific Collection by one of its unique attributes."""
+  collection(id: ID, handle: String): Collection
+  """List of the shop's collections."""
+  collections(first: Int, after: String, last: Int, before: String, reverse: Boolean = false, sortKey: CollectionSortKeys = ID, query: String): CollectionConnection!
+  """Retrieve a navigation menu by its handle."""
+  menu(handle: String!): Menu
+  """Fetch a specific Page by one of its unique attributes."""
+  page(id: ID, handle: String): Page
+  """Find a page by its handle."""
+  pageByHandle(handle: String!): Page @deprecated(reason: "Use `page` instead.")
+  """List of the shop's pages."""
+  pages(first: Int, after: String, last: Int, before: String, reverse: Boolean = false, sortKey: PageSortKeys = ID, query: String): PageConnection!
+  """Returns a specific node (any object that implements the Node interface) by ID."""
+  node(id: ID!): Node
+  """Retrieve a cart by its ID."""
+  cart(id: ID!): Cart
+}
+
+"""The schema's entry-point for mutations."""
+type Mutation {
+  """Creates a new cart."""
+  cartCreate(input: CartInput): CartCreatePayload
+  """Adds a merchandise line to the cart."""
+  cartLinesAdd(cartId: ID!, lines: [CartLineInput!]!): CartLinesAddPayload
+  """Updates one or more merchandise lines on a cart."""
+  cartLinesUpdate(cartId: ID!, lines: [CartLineUpdateInput!]!): CartLinesUpdatePayload
+  """Removes one or more merchandise lines from the cart."""
+  cartLinesRemove(cartId: ID!, lineIds: [ID!]!): CartLinesRemovePayload
+}
+
+schema {
+  query: QueryRoot
+  mutation: Mutation
+}

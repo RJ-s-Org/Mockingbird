@@ -1,6 +1,6 @@
 # API examples
 
-Ready-made mocks of 21 APIs developers integrate most, and sample apps that test against
+Ready-made mocks of 22 APIs developers integrate most, and sample apps that test against
 them. Each example is a directory under [`examples/apis/`](../examples/apis) and is also
 built into the binary, so you can start one anywhere:
 
@@ -37,6 +37,7 @@ Every example has:
 | [GitHub REST](../examples/apis/github-rest) | OpenAPI | `api.github.com` | `rate-limited`, `not-found`, `outage` | hmac-sha256 | [MIT](https://github.com/github/rest-api-description), `--full` | `PyGithub` (python) |
 | [GitHub GraphQL](../examples/apis/github-graphql) | GraphQL | `api.github.com` | `rate-limited`, `slow`, `outage` | – | [CC-BY-4.0](https://github.com/github/docs/blob/main/src/graphql/data/fpt/schema.docs.graphql), `--full` | `@octokit/graphql` (node) |
 | [Shopify Admin GraphQL](../examples/apis/shopify-admin-graphql) | GraphQL | `juniper-plants.myshopify.com` | `invalid-product`, `slow`, `outage` | hmac-sha256 | proprietary, not vendored | `@shopify/admin-api-client` (node) |
+| [Shopify Storefront GraphQL](../examples/apis/shopify-storefront-graphql) | GraphQL | `juniper-plants.myshopify.com` | `invalid-merchandise`, `invalid-merchandise-on-create`, `slow`, `outage` | – | proprietary, not vendored | `@shopify/storefront-api-client` (node), not run |
 | [Twilio](../examples/apis/twilio) | OpenAPI | `api.twilio.com`, `lookups.twilio.com` | `invalid-to-number`, `rate-limited`, `outage` | hmac-sha256 | [MIT](https://github.com/twilio/twilio-oai), `--full` | `twilio` (python) |
 | [Slack Web API](../examples/apis/slack) | OpenAPI | `slack.com` | `channel-not-found`, `ratelimited`, `outage` | – | [MIT](https://github.com/slackapi/slack-api-specs), `--full` | `slack_sdk` (python) |
 | [Twilio SendGrid](../examples/apis/sendgrid) | OpenAPI | `api.sendgrid.com` | `invalid-recipient`, `rate-limited`, `outage` | hmac-sha256 | [MIT](https://github.com/twilio/sendgrid-oai), not fetched | `sendgrid` (python) |
@@ -69,12 +70,15 @@ Ed25519 and ECDSA signatures, ...), so those examples use `hmac-sha256`
 (`X-Mockingbird-Signature: sha256=<hex>`) and each README says what the real header
 looks like. See [improvements](improvements.md#from-the-examples-catalog-2026-10-28).
 
-*World*: the Plaid example also ships a [world description](world.md),
-`plaid.world.yaml`, wired as `world:` in its config: after a token exchange, its account
-lists answer from state. The other examples ship none.
+*World*: two examples also ship a [world description](world.md), wired as `world:` in
+their config. Plaid's `plaid.world.yaml`: after a token exchange, its account lists
+answer from state. Shopify Storefront's `shopify-storefront.world.yaml`: the cart is one
+stored object whose line mutations merge a variant's lines, remove a line at quantity 0
+and compute its totals from the lines. The other examples ship none.
 
 *SDK*: every snippet except the Kafka consumer was run against its example through the
-proxy. Some SDKs bypass the proxy variables or ship their own CA bundle (stripe-python,
+proxy (Shopify Storefront's README runs plain `fetch`; its official client snippet was not
+run). Some SDKs bypass the proxy variables or ship their own CA bundle (stripe-python,
 plaid-python, hubspot-api-client); their snippets pass the CA or proxy explicitly.
 
 ## Using an example

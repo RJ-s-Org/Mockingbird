@@ -293,40 +293,46 @@ async fn offline_streams_repeat_item_for_item() {
     );
 }
 
-/// The Shopify example contract, compiled.
-fn shopify() -> Bundle {
+/// A Shopify example contract (`<example>/<file>` under `examples/apis`), compiled.
+fn shopify(contract: &str) -> Bundle {
     let path = format!(
-        "{}/../../examples/apis/shopify-admin-graphql/shopify-admin.graphql",
+        "{}/../../examples/apis/{contract}",
         env!("CARGO_MANIFEST_DIR")
     );
     compile(&std::fs::read(path).unwrap()).unwrap()
 }
 
-/// Every seeded offline answer of every Shopify operation validates, so
-/// none is flagged with `FAKER_INVALID_REASON`. `InventoryItem.variant` and
-/// `ProductVariant.inventoryItem` require each other (no finite instance):
-/// the faker leaves lists of variants empty instead of recursing to its
-/// hard depth limit (`Query.products` used to fail on every seed).
+/// Every seeded offline answer of every operation of both Shopify contracts
+/// validates, so none is flagged with `FAKER_INVALID_REASON`.
+/// `InventoryItem.variant` and `ProductVariant.inventoryItem` (Admin) require
+/// each other (no finite instance): the faker leaves lists of variants empty
+/// instead of recursing to its hard depth limit (`Query.products` used to
+/// fail on every seed).
 #[tokio::test]
 async fn seeded_shopify_answers_validate_offline() {
-    let bundle = shopify();
     let engine = offline();
     let mut invalid = Vec::new();
-    for op in &bundle.operations {
-        for seed in 0..10u64 {
-            let mut call = OperationCall {
-                operation_id: op.id.clone(),
-                ..OperationCall::default()
-            };
-            call.headers
-                .insert(SEED_HEADER.into(), json!(seed.to_string()));
-            let response = engine
-                .generate(&bundle, op, &call, GenerationContext::default())
-                .await
-                .unwrap();
-            let reason = response.fallback_reason.unwrap_or_default();
-            if reason.contains(mb_engine::FAKER_INVALID_REASON) {
-                invalid.push(format!("{} (seed {seed})", op.id));
+    for contract in [
+        "shopify-admin-graphql/shopify-admin.graphql",
+        "shopify-storefront-graphql/shopify-storefront.graphql",
+    ] {
+        let bundle = shopify(contract);
+        for op in &bundle.operations {
+            for seed in 0..10u64 {
+                let mut call = OperationCall {
+                    operation_id: op.id.clone(),
+                    ..OperationCall::default()
+                };
+                call.headers
+                    .insert(SEED_HEADER.into(), json!(seed.to_string()));
+                let response = engine
+                    .generate(&bundle, op, &call, GenerationContext::default())
+                    .await
+                    .unwrap();
+                let reason = response.fallback_reason.unwrap_or_default();
+                if reason.contains(mb_engine::FAKER_INVALID_REASON) {
+                    invalid.push(format!("{contract} {} (seed {seed})", op.id));
+                }
             }
         }
     }

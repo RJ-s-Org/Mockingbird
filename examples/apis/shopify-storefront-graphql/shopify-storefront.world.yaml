@@ -1,0 +1,169 @@
+# World description for shopify-storefront.graphql (see docs/world.md): how the
+# cart holds together. It holds no records and no values from traffic.
+#
+# - cartCreate stores a cart; cartLinesAdd, cartLinesUpdate and cartLinesRemove
+#   change the cart their `cartId` names, and cart(id:) reads it back.
+# - cartCreate's `set` builds lines from `input.lines` too, but on current main
+#   a create sending `input.lines` is still generated (the engine takes the
+#   input lines for a member sent in another shape and falls back before `set`
+#   applies): create the cart empty and add lines with cartLinesAdd.
+# - A line added with the variant and attributes of a line the cart holds
+#   raises that line's quantity, as Shopify merges them.
+# - A line keeps a copy of its variant (merchandise) as the session holds it:
+#   the variant a product, collection or recommendation read showed. Its price
+#   is that variant's `price.amount`, or 0.0 for a variant the session never
+#   read (and offline, where the faker's Decimal values are words).
+# - The cart's `totalQuantity` and `cost`, and each line's `cost`, are computed
+#   from the lines whenever the cart is answered, in cents so sums never drift.
+#   A line's `merchandise.product` is computed too, from the product the session
+#   holds (what the reads that showed it selected), with every member Shopify
+#   requires: its `options`, `variants` and `images` are left empty (an
+#   expression has at most 512 nodes); read the product for them.
+#
+# CEL has no `let`: `[x].map(v, ...)[0]` names a value once and reads it as `v`.
+version: 1
+types:
+  # Storefronts read products, collections and pages by handle as often as by id.
+  product:
+    identity: { member: id, alternates: [handle] }
+  collection:
+    identity: { member: id, alternates: [handle] }
+  page:
+    identity: { member: id, alternates: [handle] }
+  productvariant:
+    identity: { member: id }
+  cart:
+    identity: { member: id }
+    computed:
+      totalQuantity: >-
+        record.lines.edges == null ? 0 : sum(record.lines.edges, it.node.quantity)
+      # subtotal = total = checkout charge: no taxes, shipping or discounts before checkout.
+      cost: >-
+        [record.lines.edges == null ? 0 : sum(record.lines.edges,
+            (matches(string(it.node.merchandise.price.amount), '^[0-9]+([.][0-9]+)?$')
+              ? int(double(it.node.merchandise.price.amount) * 100.0 + 0.5) : 0) * it.node.quantity)]
+        .map(c, {'currencyCode': 'USD', 'amount': c % 100 == 0 ? string(c / 100) + '.0' : string(c / 100)})
+        .map(m, {'subtotalAmount': m, 'totalAmount': m, 'checkoutChargeAmount': m})[0]
+      lines: >-
+        [(record.lines.edges == null ? [] : record.lines.edges).map(e,
+          [e.node.merchandise].map(m,
+          [matches(string(m.price.amount), '^[0-9]+([.][0-9]+)?$') ? int(double(m.price.amount) * 100.0 + 0.5) : 0].map(unit,
+          [held('productvariant', m.id)].map(v,
+          [held('product', v.product.id)].map(p,
+            {'__typename': 'CartLine', 'id': e.node.id, 'quantity': e.node.quantity, 'attributes': e.node.attributes,
+             'cost': [[unit, unit * e.node.quantity].map(c, {'currencyCode': 'USD', 'amount': c % 100 == 0 ? string(c / 100) + '.0' : string(c / 100)})]
+               .map(ms, {'amountPerQuantity': ms[0], 'subtotalAmount': ms[1], 'totalAmount': ms[1]})[0],
+             'merchandise': {'__typename': 'ProductVariant', 'id': m.id, 'title': m.title, 'sku': m.sku,
+               'availableForSale': m.availableForSale, 'currentlyNotInStock': m.currentlyNotInStock,
+               'requiresShipping': m.requiresShipping, 'selectedOptions': m.selectedOptions, 'price': m.price,
+               'product': v.product.id == null ? null : {
+                 'id': v.product.id,
+                 'handle': p.handle != null ? p.handle : (v.product.handle != null ? v.product.handle : ''),
+                 'title': p.title != null ? p.title : (v.product.title != null ? v.product.title : m.title),
+                 'description': p.description != null ? p.description : '',
+                 'descriptionHtml': p.descriptionHtml != null ? p.descriptionHtml : '',
+                 'vendor': p.vendor != null ? p.vendor : '',
+                 'productType': p.productType != null ? p.productType : '',
+                 'tags': p.tags != null ? p.tags : [],
+                 'availableForSale': p.availableForSale != null ? p.availableForSale : m.availableForSale,
+                 'totalInventory': p.totalInventory,
+                 'options': [],
+                 'priceRange': {
+                   'minVariantPrice': {'currencyCode': 'USD', 'amount': p.priceRange.minVariantPrice.amount != null ? p.priceRange.minVariantPrice.amount : m.price.amount},
+                   'maxVariantPrice': {'currencyCode': 'USD', 'amount': p.priceRange.maxVariantPrice.amount != null ? p.priceRange.maxVariantPrice.amount : m.price.amount}},
+                 'compareAtPriceRange': {
+                   'minVariantPrice': {'currencyCode': 'USD', 'amount': p.compareAtPriceRange.minVariantPrice.amount != null ? p.compareAtPriceRange.minVariantPrice.amount : '0.0'},
+                   'maxVariantPrice': {'currencyCode': 'USD', 'amount': p.compareAtPriceRange.maxVariantPrice.amount != null ? p.compareAtPriceRange.maxVariantPrice.amount : '0.0'}},
+                 'variants': {'edges': [], 'nodes': [], 'pageInfo': {'hasNextPage': false, 'hasPreviousPage': false}},
+                 'featuredImage': p.featuredImage.url == null ? null : {'id': p.featuredImage.id, 'url': p.featuredImage.url, 'altText': p.featuredImage.altText, 'width': p.featuredImage.width, 'height': p.featuredImage.height},
+                 'images': {'edges': [], 'nodes': [], 'pageInfo': {'hasNextPage': false, 'hasPreviousPage': false}},
+                 'seo': {'title': p.seo.title, 'description': p.seo.description},
+                 'onlineStoreUrl': p.onlineStoreUrl,
+                 'createdAt': p.createdAt != null ? p.createdAt : record.createdAt,
+                 'updatedAt': p.updatedAt != null ? p.updatedAt : record.createdAt,
+                 'publishedAt': p.publishedAt != null ? p.publishedAt : record.createdAt}}}
+          )[0])[0])[0])[0])]
+        .map(ns, {'edges': ns.map(n, {'cursor': n.id, 'node': n}), 'nodes': ns,
+                  'pageInfo': {'hasNextPage': false, 'hasPreviousPage': false}})[0]
+operations:
+  Query.product:
+    target: { member: handle }
+  Query.collection:
+    target: { member: handle }
+  Query.page:
+    target: { member: handle }
+  # A storefront looks a variant up by its gid through `node(id:)`; describing it
+  # as the variant read makes `productvariant` a type held() can read.
+  Query.node:
+    kind: read
+    type: productvariant
+    target: { member: id }
+  Mutation.cartCreate:
+    set:
+      # gid://shopify/Cart/<token>?key=<key>, and the checkout URL on the store's domain.
+      id: "'gid://shopify/Cart/' + mint('[A-Za-z0-9]{26}') + '?key=' + mint('[0-9a-f]{32}')"
+      checkoutUrl: "'https://juniper-plants.myshopify.com/cart/c/' + substring(record.id, 19)"
+      createdAt: now
+      updatedAt: now
+      note: request.body.input.note
+      attributes: >-
+        request.body.input.attributes == null ? [] : request.body.input.attributes.map(a, {'key': a.key, 'value': a.value})
+      lines: >-
+        {'pageInfo': {'hasNextPage': false, 'hasPreviousPage': false}, 'nodes': [],
+         'edges': (request.body.input.lines == null ? [] : request.body.input.lines).map(l,
+           [held('productvariant', l.merchandiseId)].map(v, {'cursor': l.merchandiseId,
+             'node': {'__typename': 'CartLine', 'id': 'gid://shopify/CartLine/' + mint('[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'),
+               'quantity': l.quantity == null ? 1 : l.quantity,
+               'attributes': l.attributes == null ? [] : l.attributes.map(a, {'key': a.key, 'value': a.value}),
+               'cost': {'amountPerQuantity': {'amount': '0.0', 'currencyCode': 'USD'}, 'subtotalAmount': {'amount': '0.0', 'currencyCode': 'USD'}, 'totalAmount': {'amount': '0.0', 'currencyCode': 'USD'}},
+               'merchandise': {'__typename': 'ProductVariant', 'id': l.merchandiseId, 'sku': v.sku,
+                 'title': v.title != null ? v.title : 'Default Title',
+                 'availableForSale': v.availableForSale != null ? v.availableForSale : true,
+                 'currentlyNotInStock': v.currentlyNotInStock != null ? v.currentlyNotInStock : false,
+                 'requiresShipping': v.requiresShipping != null ? v.requiresShipping : true,
+                 'selectedOptions': v.selectedOptions != null ? v.selectedOptions : [],
+                 'price': {'currencyCode': 'USD', 'amount': v.price.amount != null && matches(string(v.price.amount), '^[0-9]+([.][0-9]+)?$') ? string(v.price.amount) : '0.0'}}}})[0])}
+  # Adding a variant the cart already holds, with the same attributes, raises
+  # that line's quantity; anything else becomes a new line (quantity defaults to 1).
+  Mutation.cartLinesAdd:
+    set:
+      updatedAt: now
+      lines: >-
+        {'pageInfo': {'hasNextPage': false, 'hasPreviousPage': false}, 'nodes': [],
+         'edges': (record.lines.edges == null ? [] : record.lines.edges).map(e, {'cursor': e.cursor,
+             'node': {'__typename': 'CartLine', 'id': e.node.id, 'attributes': e.node.attributes, 'cost': e.node.cost, 'merchandise': e.node.merchandise,
+               'quantity': e.node.quantity + sum(request.body.lines.filter(l, l.merchandiseId == e.node.merchandise.id
+                 && (l.attributes == null ? [] : l.attributes.map(a, a.key + '=' + a.value)) == e.node.attributes.map(a, a.key + '=' + a.value)), it.quantity == null ? 1 : it.quantity)}})
+           + request.body.lines.filter(l, !(record.lines.edges == null ? [] : record.lines.edges).exists(e, e.node.merchandise.id == l.merchandiseId
+                 && (l.attributes == null ? [] : l.attributes.map(a, a.key + '=' + a.value)) == e.node.attributes.map(a, a.key + '=' + a.value))).map(l,
+           [held('productvariant', l.merchandiseId)].map(v, {'cursor': l.merchandiseId,
+             'node': {'__typename': 'CartLine', 'id': 'gid://shopify/CartLine/' + mint('[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'),
+               'quantity': l.quantity == null ? 1 : l.quantity,
+               'attributes': l.attributes == null ? [] : l.attributes.map(a, {'key': a.key, 'value': a.value}),
+               'cost': {'amountPerQuantity': {'amount': '0.0', 'currencyCode': 'USD'}, 'subtotalAmount': {'amount': '0.0', 'currencyCode': 'USD'}, 'totalAmount': {'amount': '0.0', 'currencyCode': 'USD'}},
+               'merchandise': {'__typename': 'ProductVariant', 'id': l.merchandiseId, 'sku': v.sku,
+                 'title': v.title != null ? v.title : 'Default Title',
+                 'availableForSale': v.availableForSale != null ? v.availableForSale : true,
+                 'currentlyNotInStock': v.currentlyNotInStock != null ? v.currentlyNotInStock : false,
+                 'requiresShipping': v.requiresShipping != null ? v.requiresShipping : true,
+                 'selectedOptions': v.selectedOptions != null ? v.selectedOptions : [],
+                 'price': {'currencyCode': 'USD', 'amount': v.price.amount != null && matches(string(v.price.amount), '^[0-9]+([.][0-9]+)?$') ? string(v.price.amount) : '0.0'}}}})[0])}
+  # Each line named by `id` takes the quantity (and attributes) sent; quantity 0
+  # removes it. Lines not named stay as they are.
+  Mutation.cartLinesUpdate:
+    set:
+      updatedAt: now
+      lines: >-
+        {'pageInfo': {'hasNextPage': false, 'hasPreviousPage': false}, 'nodes': [],
+         'edges': (record.lines.edges == null ? [] : record.lines.edges)
+           .filter(e, !request.body.lines.exists(u, u.id == e.node.id && u.quantity == 0))
+           .map(e, [request.body.lines.filter(u, u.id == e.node.id)].map(us, {'cursor': e.cursor,
+             'node': {'__typename': 'CartLine', 'id': e.node.id, 'cost': e.node.cost, 'merchandise': e.node.merchandise,
+               'quantity': us.exists(u, u.quantity != null) ? us.filter(u, u.quantity != null)[0].quantity : e.node.quantity,
+               'attributes': us.exists(u, u.attributes != null) ? us.filter(u, u.attributes != null)[0].attributes.map(a, {'key': a.key, 'value': a.value}) : e.node.attributes}})[0])}
+  Mutation.cartLinesRemove:
+    set:
+      updatedAt: now
+      lines: >-
+        {'pageInfo': {'hasNextPage': false, 'hasPreviousPage': false}, 'nodes': [],
+         'edges': (record.lines.edges == null ? [] : record.lines.edges).filter(e, !(e.node.id in request.body.lineIds))}
