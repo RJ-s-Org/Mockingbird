@@ -17,6 +17,7 @@ mockingbird seed-fixtures --mock orders --session ci tests/fixtures/orders.json
 ```
 
   (MCP: `export_session`, `seed_session`.) Fixtures are `[{resource_type, id, data}]`.
+  A fresh server has no records, so seed in the same command that runs the tests (`verify --run "mockingbird seed-fixtures ... && npm test"`), not only by hand or in an earlier admin call.
 - **Edge cases on demand**: `X-Mockingbird-Status: 503`, `X-Mockingbird-Latency: 2s`, or a named scenario (`X-Mockingbird-Scenario: out-of-stock`) declared in `mockingbird.yaml` so it is versioned with the tests.
 - **Resilience tests**: per-mock `chaos` (`error_rate`, `latency_jitter`, `drop_stream_rate`); set `MB_CHAOS_SEED` for a reproducible sequence; `X-Mockingbird-Chaos: off` exempts a request.
 
