@@ -901,6 +901,56 @@ fn echoed_values_fill_same_named_root_fields() {
 }
 
 #[test]
+fn a_value_echoed_into_an_object_field_names_the_object() {
+    let mut echoes = serde_json::Map::new();
+    echoes.insert("owner".into(), json!("fernwood"));
+    echoes.insert("team".into(), json!("core"));
+    let faker = Faker::default().with_hints(mb_engine::FakerHints { echoes });
+    let schema = json!({"type": "object", "required": ["owner", "team"], "properties": {
+        "owner": {"type": "object", "required": ["login", "name"], "properties": {
+            "login": {"type": "string"}, "name": {"type": "string"}}},
+        "team": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}}});
+    let v = faker.fake(&schema, &mut StdRng::seed_from_u64(7));
+    // A handle before a display name.
+    assert_eq!(v["owner"]["login"], "fernwood", "{v}");
+    assert_ne!(v["owner"]["name"], "fernwood", "{v}");
+    assert_eq!(v["team"]["name"], "core", "{v}");
+}
+
+#[test]
+fn an_echoed_object_name_keeps_to_its_member_s_schema() {
+    let mut echoes = serde_json::Map::new();
+    echoes.insert("project".into(), json!("10000"));
+    echoes.insert("size".into(), json!("huge"));
+    echoes.insert("deep".into(), json!("x"));
+    echoes.insert("count".into(), json!(3));
+    let faker = Faker::default().with_hints(mb_engine::FakerHints { echoes });
+    let schema = json!({"type": "object", "required": ["project", "size", "deep", "count"], "properties": {
+        // The key's pattern refuses the value; the name takes it.
+        "project": {"type": "object", "required": ["key", "name"], "properties": {
+            "key": {"type": "string", "pattern": "^[A-Z]{2,5}$"}, "name": {"type": "string"}}},
+        // An enum member is never overwritten.
+        "size": {"type": "object", "required": ["key"], "properties": {
+            "key": {"type": "string", "enum": ["s", "m"]}}},
+        "deep": {"type": "object", "required": ["inner"], "properties": {
+            "inner": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}}},
+        // Only a string value names an object.
+        "count": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}}});
+    let v = faker.fake(&schema, &mut StdRng::seed_from_u64(7));
+    assert_ne!(v["project"]["key"], "10000", "{v}");
+    assert_eq!(v["project"]["name"], "10000", "{v}");
+    assert!(
+        ["s", "m"].contains(&v["size"]["key"].as_str().unwrap()),
+        "{v}"
+    );
+    assert_ne!(
+        v["deep"]["inner"]["name"], "x",
+        "only root fields are named: {v}"
+    );
+    assert_ne!(v["count"]["name"], "3", "{v}");
+}
+
+#[test]
 fn integer_ids_are_positive_and_spread_out() {
     let schema = json!({"type": "object", "required": ["id", "owner_id", "userId"], "properties": {
         "id": {"type": "integer"}, "owner_id": {"type": "integer"}, "userId": {"type": "integer", "minimum": -2147483648i64, "maximum": 2147483647}}});

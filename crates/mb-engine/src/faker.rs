@@ -71,7 +71,8 @@ impl std::fmt::Debug for Faker {
 }
 
 /// Request values the faker copies into same-named fields of the root
-/// object (`login`, `id`, `page`...).
+/// object (`login`, `id`, `page`...); an object field takes the value in
+/// its handle member (`owner` → `owner.login`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FakerHints {
     /// Field name to the value echoed into it.
@@ -351,7 +352,15 @@ impl Faker {
             "array" if hard_limit => Value::Array(Vec::new()),
             "object" if hard_limit => Value::Object(Map::new()),
             "array" => self.fake_array(ctx, s, depth, at_limit, rng),
-            "object" => self.fake_object(ctx, s, depth, at_limit, rng),
+            "object" => {
+                let mut object = self.fake_object(ctx, s, depth, at_limit, rng);
+                if depth == 1
+                    && let Some(Value::String(name)) = field.and_then(|f| self.hints.echoes.get(f))
+                {
+                    name_object(&mut object, name, s, ctx.root);
+                }
+                object
+            }
             _ => Value::String(word(rng)),
         }
     }
@@ -632,6 +641,47 @@ fn extra_key<R: Rng>(rng: &mut R, n: usize) -> String {
         w
     } else {
         format!("{w}_{n}")
+    }
+}
+
+/// Members that name an object, a handle before a display name: a request
+/// value echoed into an object field (`repository(owner: "octo")`, `owner:
+/// {login, name}`) is its handle.
+const NAME_MEMBERS: [&str; 4] = ["login", "slug", "key", "name"];
+
+/// `object`, generated from `s` for a field a request value names, named by
+/// it: the first string member of [`NAME_MEMBERS`] whose schema the value
+/// fits (no `enum` or `const`, and its `format`, length and `pattern` allow
+/// it; see [`echo_as`]) takes the value, so that the record read is the one
+/// the request named. Otherwise `object` stays as drawn.
+fn name_object(object: &mut Value, name: &str, s: &Map<String, Value>, root: &Value) {
+    let Value::Object(members) = object else {
+        return;
+    };
+    let props = s.get("properties").and_then(Value::as_object);
+    let value = Value::String(name.to_string());
+    for key in NAME_MEMBERS {
+        if !members.get(key).is_some_and(Value::is_string) {
+            continue;
+        }
+        let mut member = props.and_then(|p| p.get(key));
+        // A member declared by reference: what it names (a few hops at most).
+        for _ in 0..4 {
+            match member.and_then(|m| m.get("$ref")).and_then(Value::as_str) {
+                Some(reference) => member = resolve_ref(root, reference),
+                None => break,
+            }
+        }
+        let Some(member) = member.and_then(Value::as_object) else {
+            continue;
+        };
+        if member.contains_key("enum") || member.contains_key("const") {
+            continue;
+        }
+        if let Some(fits) = echo_as(&value, "string", member) {
+            members.insert(key.to_string(), fits);
+            return;
+        }
     }
 }
 
