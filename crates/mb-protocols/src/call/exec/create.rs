@@ -2101,7 +2101,7 @@ fn enveloped(
 
 /// `schema` without the `null` it admits: the one other branch of an `anyOf` or `oneOf`
 /// whose others are `null` (a GraphQL nullable object), else `schema` itself.
-fn non_null(bundle: &mb_mcm::Bundle, schema: &Value) -> Value {
+pub(super) fn non_null(bundle: &mb_mcm::Bundle, schema: &Value) -> Value {
     let derefed = crate::call::bundle_index::def_name(schema)
         .and_then(|def| bundle.defs.get(def))
         .unwrap_or(schema);

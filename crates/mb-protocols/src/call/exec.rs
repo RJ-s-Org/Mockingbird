@@ -630,6 +630,21 @@ async fn held_read(
         .as_ref()
         .and_then(|kept| held(Some(kept)))
         .or(bare)
+        .map(|mut served| {
+            // A nullable member the selection asks for that the record lacks is `null`.
+            // With a model, only in what the description computes: the model writes the rest.
+            if op.protocol == mb_mcm::Protocol::Graphql
+                && !plan.renames
+                && let (Some(schema), Some(body)) = (response_schema, served.body.as_mut())
+            {
+                let within = plan
+                    .engine
+                    .has_provider()
+                    .then(|| held_gaps::derived_members(rt, &stored.resource_type));
+                held_gaps::null_selected(rt, schema, body, within.as_deref());
+            }
+            served
+        })
         .filter(|served| selected_held(rt, op, response_schema, served));
     match served {
         Some(mut served) => {
@@ -654,8 +669,11 @@ async fn held_read(
 /// that selection asks for (`response_schema`, narrowed to it), at every depth. The
 /// narrowed schema leaves a nullable member optional, so a record stored by a smaller
 /// selection (a user's repositories without their `languages`) would otherwise answer
-/// it `null`; such a read generates instead, over the record. Other protocols' schemas
-/// are not narrowed to what the client reads, so they are not checked.
+/// it `null`; such a read generates instead, over the record. What the read's own record
+/// and the objects it holds lack was set to `null` before this
+/// ([`held_gaps::null_selected`], offline): only another record it embeds can still lack one.
+/// Other protocols' schemas are not narrowed to what the client reads, so they are not
+/// checked.
 fn selected_held(
     rt: &crate::MockRuntime,
     op: &mb_mcm::Operation,

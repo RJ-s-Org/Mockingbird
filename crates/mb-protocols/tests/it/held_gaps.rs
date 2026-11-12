@@ -710,3 +710,180 @@ async fn a_record_the_list_drops_is_not_completed() {
         Some(json!({"id": "i8", "title": "Seeded eight"}))
     );
 }
+
+/// A held object under a nullable member (`anyOf` its type or `null`) lacking what its
+/// type requires is completed in place too, its stored members kept.
+#[tokio::test]
+async fn a_nullable_object_lacking_required_members_is_completed_in_place() {
+    let contract = r##"
+openapi: 3.1.0
+info: {title: issues, version: "1"}
+paths:
+  /issues/{number}:
+    get:
+      operationId: getIssue
+      parameters: [{name: number, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200":
+          description: the issue
+          content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}
+        "404": {description: missing}
+components:
+  schemas:
+    Milestone:
+      type: object
+      required: [title, due]
+      properties:
+        title: {type: string}
+        due: {type: integer}
+    Issue:
+      type: object
+      required: [number, title, milestone]
+      properties:
+        number: {type: integer}
+        title: {type: string}
+        milestone:
+          anyOf:
+            - {$ref: "#/components/schemas/Milestone"}
+            - {type: "null"}
+"##;
+    let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store
+        .upsert(
+            &session("issues"),
+            StoredResource {
+                resource_type: "issues".into(),
+                id: "7".into(),
+                data: json!({"number": 7, "title": "Stored title", "milestone": {"title": "v1"}}),
+            },
+        )
+        .await
+        .unwrap();
+    let router = http_rest::router(runtime(
+        "issues",
+        contract,
+        vec![],
+        Arc::clone(&store),
+        false,
+    ));
+
+    let (source, read) = get(&router, "/issues/7").await;
+    assert_eq!(source, "state", "{read}");
+    assert_eq!(read["milestone"]["title"], "v1", "{read}");
+    assert!(read["milestone"]["due"].is_i64(), "{read}");
+    let held = store.get(&session("issues"), "issues", "7").await.unwrap();
+    let held = held.unwrap().data;
+    assert_eq!(held["milestone"]["title"], "v1", "{held}");
+    assert_eq!(held["milestone"]["due"], read["milestone"]["due"], "{held}");
+}
+
+#[cfg(feature = "graphql")]
+const PULLS_GQL_COUNTS: &str = r#"
+type PullRequest { id: ID number: Int! title: String! additions: Int! deletions: Int! changedFiles: Int! }
+type Query { pullRequest(number: Int!): PullRequest }
+"#;
+
+/// The answer to a GraphQL `query` sent to `router`, and its root field's source.
+#[cfg(feature = "graphql")]
+async fn gql_read(router: &axum::Router, query: &str) -> (String, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/graphql")
+        .header("content-type", "application/json")
+        .header("x-mockingbird-session", "s1")
+        .body(Body::from(json!({ "query": query }).to_string()))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(body.get("errors").is_none(), "{body}");
+    let source = body["extensions"]["mockingbird"]["sources"]
+        .as_object()
+        .and_then(|s| s.values().next())
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    (source, body["data"].clone())
+}
+
+/// Another mock's record (a pull request a REST read stored) read over GraphQL by two
+/// selections, offline: each is completed from state, the second filling what the
+/// first's completion lacks of it, and both answer alike when repeated. No copy of the
+/// record is stored, and the record stays as its writer stored it.
+#[cfg(feature = "graphql")]
+#[tokio::test]
+async fn another_mock_s_record_completes_for_each_graphql_selection() {
+    use mb_protocols::graphql;
+
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let offline = |name: &str, contract: &str| {
+        let mut rt = MockRuntime::new(
+            name,
+            Arc::new(compile(contract.as_bytes()).unwrap()),
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            Arc::clone(&state),
+        );
+        rt.shares = Some("gh".into());
+        rt
+    };
+    let rest_router = http_rest::router(Arc::new(offline("github-rest", PULLS)));
+    let world = serde_json::from_value::<mb_mcm::world::World>(json!({"version": 1,
+        "types": {"pullrequest": {"identity": {"member": "number"}, "same_as": ["pulls"]}}}))
+    .unwrap();
+    let gql_router = graphql::try_router(Arc::new(
+        offline("github-graphql", PULLS_GQL_COUNTS).with_world(&world, &world, 1),
+    ))
+    .unwrap();
+
+    // The REST mock's pull request, held under its type.
+    state
+        .upsert(
+            &session("gh"),
+            StoredResource {
+                resource_type: "pulls".into(),
+                id: "7".into(),
+                data: json!({"number": 7, "title": "Fix panic", "additions": 12,
+                    "head": {"ref": "fix", "sha": "a".repeat(40)},
+                    "base": {"ref": "main", "sha": "b".repeat(40)}, "assignee": null}),
+            },
+        )
+        .await
+        .unwrap();
+    let (source, rest) = get(&rest_router, "/repos/fernwood/trellis/pulls/7").await;
+    assert_eq!(source, "state", "{rest}");
+    let before = state.list(&session("gh"), "pulls", 10).await.unwrap();
+    assert_eq!(before.len(), 1, "{before:?}");
+
+    let first_query = "{ pullRequest(number: 7) { number title additions deletions } }";
+    let (source, first) = gql_read(&gql_router, first_query).await;
+    assert_eq!(source, "state", "{first}");
+    let pull = &first["pullRequest"];
+    assert_eq!(pull["title"], rest["title"], "{first}");
+    assert_eq!(pull["additions"], rest["additions"], "{first}");
+    assert!(pull["deletions"].is_i64(), "{first}");
+
+    let second_query = "{ pullRequest(number: 7) { number deletions changedFiles } }";
+    let (source, second) = gql_read(&gql_router, second_query).await;
+    assert_eq!(source, "state", "{second}");
+    assert_eq!(
+        second["pullRequest"]["deletions"], pull["deletions"],
+        "{second}"
+    );
+    assert!(second["pullRequest"]["changedFiles"].is_i64(), "{second}");
+
+    let (source, again) = gql_read(&gql_router, first_query).await;
+    assert_eq!(source, "state", "{again}");
+    assert_eq!(again, first);
+    let (source, again) = gql_read(&gql_router, second_query).await;
+    assert_eq!(source, "state", "{again}");
+    assert_eq!(again, second);
+
+    assert_eq!(
+        state.list(&session("gh"), "pulls", 10).await.unwrap(),
+        before
+    );
+    let copies = state.list(&session("gh"), "pullrequest", 10).await.unwrap();
+    assert!(copies.is_empty(), "{copies:?}");
+}
