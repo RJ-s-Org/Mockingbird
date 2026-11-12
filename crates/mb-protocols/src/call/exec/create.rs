@@ -89,6 +89,36 @@ use crate::call::{
 /// Whether the executor takes these calls.
 pub(super) const EXECUTES: bool = true;
 
+/// What says who the caller is, for fill ([`mb_engine::FillContext::caller`]): what the
+/// session's routes with no parameters answered (a `/user`, a `/users/@me`, see
+/// [`crate::call::world::recall_answers`]), the newest first, each with its read's
+/// answer schema and its scalar members. Fill takes one only into an object of the
+/// record of that very schema (an issue's `user`), never by a name alone.
+async fn caller(state: &mut StateAccess<'_>, plan: &CallPlan<'_>) -> Vec<mb_engine::CallerAnswer> {
+    let rt = state.rt;
+    let (answers, _) = crate::call::world::recall_answers(state, plan).await;
+    answers
+        .iter()
+        .rev()
+        .filter_map(|entry| {
+            let path = entry.get("path")?.as_str()?;
+            let read = rt
+                .bundle()
+                .operations
+                .get(*rt.index().single_reads.get(path)?)?;
+            let schema = read.success_output()?.schema.clone()?;
+            let members: Map<String, Value> = entry
+                .get("answer")?
+                .as_object()?
+                .iter()
+                .filter(|(_, v)| matches!(v, Value::String(_) | Value::Number(_) | Value::Bool(_)))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            (!members.is_empty()).then_some(mb_engine::CallerAnswer { schema, members })
+        })
+        .collect()
+}
+
 /// Executes the call.
 pub(super) async fn run(
     state: &mut StateAccess<'_>,
@@ -399,6 +429,7 @@ pub(super) async fn run(
                 .filter(|(name, _)| names.contains(name))
                 .cloned()
                 .collect();
+            let caller = caller(state, plan).instrument(state_span()).await;
             let filled = plan
                 .engine
                 .fill(
@@ -410,6 +441,7 @@ pub(super) async fn run(
                         op,
                         call,
                         sent: sent.as_object(),
+                        caller: &caller,
                     },
                 )
                 .await;

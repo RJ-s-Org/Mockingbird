@@ -37,7 +37,10 @@ fn contracts() -> Vec<PathBuf> {
             } else if !matches!(
                 name.as_str(),
                 "mockingbird.yaml" | "README.md" | "example.json"
-            ) {
+            ) && !name.contains(".world.")
+            {
+                // A world description beside its contract (`plaid.world.yaml`) is no
+                // contract.
                 out.push(path);
             }
         }
