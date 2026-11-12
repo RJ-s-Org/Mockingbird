@@ -87,6 +87,7 @@ mod list;
 mod patches;
 pub(crate) mod pool;
 mod queue;
+mod redraw;
 mod writes;
 
 pub(super) use create::{initial_token, unreadable};
@@ -656,8 +657,25 @@ fn unrendered(
     }
 }
 
-/// Logs that the executor answered the call.
+/// Counts the repair the call's answer took, when it took one
+/// ([`redraw::ANSWER_REPAIRS_METRIC`]): once per call, when the executor answers it or
+/// leaves it to generation.
+fn count_repair(rt: &crate::MockRuntime, plan: &CallPlan<'_>) {
+    if let Some(outcome) = plan.exprs.repair_to_count() {
+        metrics::counter!(
+            redraw::ANSWER_REPAIRS_METRIC,
+            "mock" => rt.name.clone(),
+            "operation" => plan.op.id.clone(),
+            "outcome" => outcome
+        )
+        .increment(1);
+    }
+}
+
+/// Logs that the executor answered the call, and counts the repair its answer took
+/// ([`count_repair`]).
 fn answered(rt: &crate::MockRuntime, plan: &CallPlan<'_>, kind: OpKind) {
+    count_repair(rt, plan);
     tracing::info!(
         mock = %rt.name,
         operation = %plan.op.id,
@@ -683,6 +701,7 @@ fn fell_back_unrendered(
     why: &str,
 ) {
     plan.exprs.unrendered(reason.as_str(), why);
+    count_repair(rt, plan);
     tracing::info!(
         mock = %rt.name,
         operation = %plan.op.id,
@@ -719,6 +738,7 @@ impl<'r> Stop<'r> {
 /// [`fell_back`] for `stop`, naming what caused it (`exec_fallback_on`) when it says.
 fn fell_back_on(rt: &crate::MockRuntime, plan: &CallPlan<'_>, kind: OpKind, stop: &Stop<'_>) {
     plan.exprs.fell_back(stop.reason, stop.on.as_deref());
+    count_repair(rt, plan);
     match &stop.on {
         Some(on) => tracing::info!(
             mock = %rt.name,
@@ -1100,12 +1120,43 @@ pub(super) fn bodiless(op: &mb_mcm::Operation) -> Option<GeneratedResponse> {
 /// the record's id there. Failing validation, it tries the faker's answer with the
 /// identity alone (at its top, or in that envelope member), then as drawn. `None` only
 /// when none of these validates. Tagged `state`.
+///
+/// An acknowledgement holding the record's members that fails validation is first
+/// repaired ([`redraw`]): only the members that break the schema are re-drawn, the
+/// identity and every other stored value kept. It falls back to the answers above only
+/// when the identity itself breaks the schema or no repair validates. Whatever happened
+/// is noted on the call ([`super::CallExprs::set_repair`]: the request record's
+/// `answer_repair`), and counted when the executor answers ([`answered`]).
 pub(super) fn render(
+    rt: &crate::MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    at: (&str, &Value),
+    response_schema: Option<&Value>,
+) -> Option<GeneratedResponse> {
+    let mut repair = None;
+    let answer = render_noting(rt, plan, call, at, response_schema, &mut repair);
+    // Noted whether or not anything rendered: a call that goes on to generation for it
+    // still counts its record as unrepairable.
+    if answer.is_none()
+        && let Some((outcome, members)) = repair.as_mut()
+    {
+        *outcome = redraw::UNREPAIRABLE;
+        members.clear();
+    }
+    plan.exprs.set_repair(repair);
+    answer
+}
+
+/// [`render`], setting `repair` to what became of an acknowledgement that failed
+/// validation: its outcome and the members re-drawn.
+fn render_noting(
     rt: &crate::MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,
     (id, record): (&str, &Value),
     response_schema: Option<&Value>,
+    repair: &mut Option<(&'static str, Vec<String>)>,
 ) -> Option<GeneratedResponse> {
     let op = plan.op;
     if let Some(none) = bodiless(op) {
@@ -1260,7 +1311,72 @@ pub(super) fn render(
     {
         inner.insert(identity.to_owned(), own_id);
     }
-    [&held, &identified, &drawn].into_iter().find_map(serve)
+    if let Some(answer) = serve(&held) {
+        return Some(answer);
+    }
+    // What names the record, where the answer holds the record's members: at its top,
+    // or in the envelope holding it.
+    let t = op.resource_type.as_deref().unwrap_or_default();
+    let envelope_at = id_envelope
+        .as_ref()
+        .map(|(name, _)| format!("/{}", name.replace('~', "~0").replace('/', "~1")));
+    let record_at = match &envelope_at {
+        Some(at) if !at_top => at.as_str(),
+        _ => "",
+    };
+    let places: Vec<&str> = std::iter::once("").chain(envelope_at.as_deref()).collect();
+    let answer = Value::Object(held.clone());
+    let identities = redraw::pointers_of(&redraw::naming_members(rt, op, t), &places, &answer);
+    let seed = mb_engine::seed::request_seed(call)
+        .or(rt.engine.faker_seed())
+        .unwrap_or(mb_engine::DEFAULT_FAKER_SEED);
+    let schemas = redraw::Schemas {
+        schema,
+        response: response_schema,
+    };
+    let record_place = redraw::RecordAt {
+        resource_type: t,
+        id,
+        at: record_at,
+    };
+    let outcome = redraw::repaired(rt, op, (&schemas, &record_place), (held, &identities), seed);
+    let (served, noted) = match outcome {
+        redraw::Repair::Redrawn(answer, members) => match serve(&answer) {
+            Some(served) => (Some(served), (redraw::MEMBERS_REDRAWN, members)),
+            None => (None, (redraw::UNREPAIRABLE, Vec::new())),
+        },
+        other => (None, (other.outcome(), Vec::new())),
+    };
+    let fell_back = served.is_none();
+    tracing::info!(
+        mock = %rt.name,
+        operation = %op.id,
+        outcome = noted.0,
+        members = ?noted.1,
+        "the stored record broke the answer's schema"
+    );
+    *repair = Some(noted);
+    if !fell_back {
+        return served;
+    }
+    // Failing the repair: the faker's answer with the identity alone (none when the
+    // identity is what breaks it), then as drawn, each saying so.
+    let broken = match repair
+        .as_ref()
+        .is_some_and(|(o, _)| *o == redraw::IDENTITY_INVALID)
+    {
+        true => "the stored identity breaks the answer's schema",
+        false => "the stored record breaks the answer's schema",
+    };
+    if let Some(mut served) = serve(&identified) {
+        served.fallback_reason = Some(format!(
+            "{broken}: the faker's answer with the record's identity"
+        ));
+        return Some(served);
+    }
+    let mut served = serve(&drawn)?;
+    served.fallback_reason = Some(format!("{broken}: the faker's answer"));
+    Some(served)
 }
 
 /// Sets the boolean members of `answer`, and of its object members down to `depth`

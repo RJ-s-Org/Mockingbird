@@ -88,6 +88,14 @@ With a Postgres lock, leadership can overlap: when the holder's session ends on 
 
 **Action:** none is needed for a few. When they dominate for one mock, read the log lines: a schema the model keeps breaking usually needs a clearer `description` or persona. A burst alongside `mb_state_errors_total{mock}` is the store, not the model.
 
+## Answers repaired from state
+
+**Signal:** `mb_answer_repairs_total{mock,operation,outcome}` increasing.
+
+**Meaning:** the executor built a write's acknowledgement (a create, update, replace, delete or action) from a stored record that breaks the operation's response schema. `outcome="members_redrawn"`: only the failing members were re-drawn (or, undeclared, removed) and the identity and other values kept, so the answer agrees with later reads except for those members. `outcome="unrepairable"`: no repair validated; the answer is the faker's with the record's identity, so the id still reads back, but its other values may not match the record (or, when even that does not validate, the faker's own). `outcome="identity_invalid"`: a member that names the record (its id, a key a read takes, an alternate key, its parent's member) breaks the schema; the answer is the faker's with the record's identity where that validates, else the faker's own, whose id names no record the session holds. The fallbacks carry a fallback reason. The request record's `request.answer_repair` names the outcome and the members re-drawn, which may be members the faker drew rather than the record's.
+
+**Action:** read `answer_repair` on the calls of that operation. A member re-drawn on every call means the record is stored with a value the answer's schema refuses: fix where it comes from (the world's `set`, a create's fill, an earlier answer) or the contract's schema. Any `identity_invalid` is a bug in how the record's id or keys were minted or stored.
+
 ## Request log dropped
 
 **Signal:** `mb_request_log_dropped_total{mock}` (and `mb_request_log_errors_total`) increasing.

@@ -16,6 +16,7 @@
 mod support;
 
 mod alternate_keys;
+mod answer_repairs;
 mod api;
 mod backends;
 mod base64_fields;

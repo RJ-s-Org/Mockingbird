@@ -80,6 +80,21 @@ struct Notes {
     failed: Vec<Value>,
     /// How many records the call took from the mock's record pool.
     pooled: usize,
+    /// What became of the executor's answer when the stored record did not render
+    /// into it as held (`answer_repair`): the outcome, and the members re-drawn.
+    repair: Option<(&'static str, Vec<String>)>,
+    /// Whether the repair is counted already.
+    repair_counted: bool,
+}
+
+impl Notes {
+    /// Forgets the answer's repair unless the call went on to generation because its
+    /// answer did not render (`render_failed`), which the repair is then about.
+    fn keep_repair_for(&mut self, reason: &str) {
+        if reason != "render_failed" {
+            self.repair = None;
+        }
+    }
 }
 
 /// How many failed expressions a request record lists at most.
@@ -99,6 +114,7 @@ impl CallExprs {
         self.with_notes(|n| {
             n.fallback = Some((reason.to_string(), on.map(str::to_string)));
             n.render_error = None;
+            n.keep_repair_for(reason);
         });
     }
 
@@ -108,7 +124,29 @@ impl CallExprs {
         self.with_notes(|n| {
             n.fallback = Some((reason.to_string(), None));
             n.render_error = Some(why.to_string());
+            n.keep_repair_for(reason);
         });
+    }
+
+    /// Notes how the executor's latest rendering of the call's answer from its record
+    /// went (see [`super::exec`]'s `render`): `None` when the record rendered as held,
+    /// else the outcome and the members re-drawn. A later rendering replaces it, as its
+    /// answer does.
+    pub(super) fn set_repair(&self, repair: Option<(&'static str, Vec<String>)>) {
+        self.with_notes(|n| n.repair = repair);
+    }
+
+    /// The outcome [`Self::set_repair`] noted last, the first time it is asked for
+    /// (a call's repair is counted once), else `None`.
+    pub(super) fn repair_to_count(&self) -> Option<&'static str> {
+        let mut outcome = None;
+        self.with_notes(|n| {
+            if !n.repair_counted {
+                outcome = n.repair.as_ref().map(|(o, _)| *o);
+                n.repair_counted = outcome.is_some();
+            }
+        });
+        outcome
     }
 
     /// Notes that the call took `count` records from the mock's record pool.
@@ -133,8 +171,8 @@ impl CallExprs {
     }
 
     /// The notes, as a request record's `request` keeps them: `exec_fallback`,
-    /// `exec_fallback_on`, `render_error` and `expr_failed`, each only when there is
-    /// one.
+    /// `exec_fallback_on`, `render_error`, `expr_failed`, `pool` and `answer_repair`
+    /// (`{outcome, members}`), each only when there is one.
     pub(crate) fn notes(&self) -> Map<String, Value> {
         let notes = self
             .notes
@@ -158,6 +196,12 @@ impl CallExprs {
         }
         if notes.pooled > 0 {
             out.insert("pool".into(), Value::from(notes.pooled));
+        }
+        if let Some((outcome, members)) = &notes.repair {
+            out.insert(
+                "answer_repair".into(),
+                json!({"outcome": outcome, "members": members}),
+            );
         }
         out
     }

@@ -1772,6 +1772,80 @@ impl Engine {
         drawn
     }
 
+    /// The branch of union `schema` that `value` is of: the one its discriminator names
+    /// (see [`consistency::tagged_branch`]), else the one contradicting fewest of its
+    /// pinned members ([`consistency::pinned_mismatches`]), then with the fewest
+    /// violations, the first of equals. `None` when `schema` is no union.
+    #[must_use]
+    pub fn union_branch(&self, bundle: &Bundle, schema: &Value, value: &Value) -> Option<Value> {
+        let (branches, tag) = consistency::union_branches(bundle, schema)?;
+        if let Some(tag) = tag
+            && let Some(found) = consistency::tagged_branch(bundle, schema, branches, tag, value)
+        {
+            return Some(found.clone());
+        }
+        branches
+            .iter()
+            .enumerate()
+            .min_by_key(|(i, branch)| {
+                let violations = self
+                    .schema_violations(bundle, branch, value)
+                    .map_or(usize::MAX, |v| v.len());
+                (
+                    consistency::pinned_mismatches(bundle, branch, value),
+                    violations,
+                    *i,
+                )
+            })
+            .map(|(_, branch)| branch.clone())
+    }
+
+    /// The schema of the value at JSON `pointer` of `instance`, an instance of
+    /// `schema` ([`consistency::schema_at`]), stepping into each union on the way
+    /// through the branch the value it is the schema of is of ([`Engine::union_branch`]).
+    #[must_use]
+    pub fn schema_at(
+        &self,
+        bundle: &Bundle,
+        schema: &Value,
+        pointer: &str,
+        instance: &Value,
+    ) -> Option<Value> {
+        consistency::schema_at_with(bundle, schema, pointer, &|union, at| {
+            self.union_branch(bundle, union, instance.pointer(at)?)
+        })
+    }
+
+    /// A faker value for the member at JSON `pointer` of `instance`, an instance of
+    /// `schema` ([`Engine::schema_at`]), valid against that member's schema: what
+    /// replaces one member of an answer built from a stored record that breaks the
+    /// answer's schema, the rest kept. Drawn from `seed` mixed with the contract and
+    /// `labels` (what names the member: its record and its place in it), so every
+    /// answer holding that member of that record draws it alike. `None` when the
+    /// pointer names nothing the schema declares, or no draw validates.
+    #[must_use]
+    pub fn draw_at(
+        &self,
+        bundle: &Bundle,
+        (schema, instance): (&Value, &Value),
+        pointer: &str,
+        (seed, labels): (u64, &[&str]),
+    ) -> Option<Value> {
+        let member_schema = self.schema_at(bundle, schema, pointer, instance)?;
+        let validator = self.schema_validator(bundle, &member_schema).ok()?;
+        let mut mixed: Vec<&str> = vec![&bundle.source_digest, "redraw"];
+        mixed.extend_from_slice(labels);
+        let mut draws = seed::Draws::seeded(seed, &mixed, &[]);
+        let (value, valid) = self.fake_checked(
+            bundle,
+            &member_schema,
+            Some(validator.as_ref()),
+            &FakerHints::default(),
+            &mut draws,
+        );
+        valid.then_some(value)
+    }
+
     /// A `404` for a resource the session does not hold: the operation's
     /// declared `404` response (or its `default`); else the status
     /// it declares for that (a `410`, or its one declared
@@ -5661,6 +5735,90 @@ mod tests {
             Some(&json!({"type": ["object", "string"]}))
         ));
         assert!(!takes_scalar(&root, None));
+    }
+
+    /// An empty contract with `defs` as its definitions.
+    fn with_defs(defs: Value) -> Bundle {
+        let mut bundle =
+            mb_import::compile(b"openapi: 3.0.3\ninfo: {title: t, version: \"1\"}\npaths: {}\n")
+                .unwrap();
+        bundle.defs = defs.as_object().cloned().unwrap_or_default();
+        bundle
+    }
+
+    /// A member's schema is found through escaped steps, `$ref`s, array items, a
+    /// nullable union and a map's values; an undeclared member has none.
+    #[test]
+    fn a_schema_is_found_at_a_pointer() {
+        let item = json!({"type": "object", "properties": {"label": {"type": "string", "pattern": "^[a-z]+$"}}});
+        let bundle = with_defs(json!({"Item": item}));
+        let schema = json!({"type": "object", "properties": {
+            "a/b": {"type": "integer"},
+            "tags": {"type": "array", "items": {"$ref": "#/$defs/Item"}},
+            "maybe": {"anyOf": [{"type": "null"}, {"type": "object", "properties": {"n": {"type": "integer"}}}]},
+            "labels": {"type": "object", "additionalProperties": {"type": "string"}}
+        }});
+        let at = |p: &str| consistency::schema_at(&bundle, &schema, p);
+        assert_eq!(at("/a~1b"), Some(json!({"type": "integer"})));
+        assert_eq!(
+            at("/tags/3/label"),
+            Some(json!({"type": "string", "pattern": "^[a-z]+$"}))
+        );
+        assert_eq!(at("/maybe/n"), Some(json!({"type": "integer"})));
+        assert_eq!(at("/labels/any key"), Some(json!({"type": "string"})));
+        assert_eq!(at(""), Some(schema.clone()));
+        assert_eq!(at("/nope"), None);
+        assert_eq!(at("/a~1b/deeper"), None);
+    }
+
+    /// Through a union, the branch the instance is of is stepped into: the one its
+    /// discriminator names, else the one its pinned members agree with.
+    #[test]
+    fn a_union_is_stepped_into_through_the_instances_branch() {
+        let bundle = with_defs(json!({
+            "Done": {"type": "object", "properties": {"status": {"enum": ["done"]}, "code": {"type": "string", "pattern": "^D"}}},
+            "Pending": {"type": "object", "properties": {"status": {"enum": ["pending"]}, "code": {"type": "integer"}}}
+        }));
+        let engine = Engine::new(None, EngineConfig::default());
+        let branches = json!([{"$ref": "#/$defs/Pending"}, {"$ref": "#/$defs/Done"}]);
+        let tagged = json!({"oneOf": branches, "discriminator": {"propertyName": "status"}});
+        let untagged = json!({"anyOf": branches});
+        let done = json!({"status": "done", "code": "x"});
+        for union in [&tagged, &untagged] {
+            assert_eq!(
+                engine.schema_at(&bundle, union, "/code", &done),
+                Some(json!({"type": "string", "pattern": "^D"})),
+                "{union}"
+            );
+        }
+        let pending = json!({"status": "pending", "code": "x"});
+        assert_eq!(
+            engine.schema_at(&bundle, &tagged, "/code", &pending),
+            Some(json!({"type": "integer"}))
+        );
+    }
+
+    /// A drawn member is valid, the same for the same labels, and apart for others.
+    #[test]
+    fn a_member_is_drawn_valid_and_alike_for_its_labels() {
+        let bundle = with_defs(json!({}));
+        let engine = Engine::new(None, EngineConfig::default());
+        let schema = json!({"type": "object", "properties": {"code": {"type": "string", "pattern": "^[A-Z]{8}$"}}});
+        let instance = json!({"code": "bad"});
+        let draw =
+            |labels: &[&str]| engine.draw_at(&bundle, (&schema, &instance), "/code", (7, labels));
+        let one = draw(&["widgets", "w1", "/code"]).unwrap();
+        let code = one.as_str().unwrap();
+        assert!(
+            code.len() == 8 && code.chars().all(|c| c.is_ascii_uppercase()),
+            "{one}"
+        );
+        assert_eq!(draw(&["widgets", "w1", "/code"]), Some(one.clone()));
+        assert_ne!(draw(&["widgets", "w2", "/code"]), Some(one));
+        assert_eq!(
+            engine.draw_at(&bundle, (&schema, &instance), "/nope", (7, &[])),
+            None
+        );
     }
 
     fn orders() -> Bundle {
