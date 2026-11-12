@@ -360,8 +360,8 @@ async fn answer(
     // says of another type's record names one it lists beside, or the session listed.
     if let Some(body) = served.body.as_mut() {
         with_listed_references(rt, &shape, t, body);
-        with_held_beside(state, (plan, call), t, &shape, body).await;
-        with_beside_references(state, (plan, call), t, body, false).await;
+        let drawn = with_held_beside(state, (plan, call), (t, &shape), body, false).await;
+        with_beside_references(state, (plan, call), (t, &drawn), body, false).await;
     }
     // A list the query leaves nothing of answers the bodiless status declared for that.
     if none_kept {
@@ -703,9 +703,12 @@ async fn held_parent(
 
 /// A generated answer `body` to list `call`, before it is served and recorded, made to
 /// agree with the session as a page from state does: its parent-shaped envelope member
-/// is the held parent ([`with_held_parent`]) and what its envelope says of a listed
-/// record names one it lists ([`with_listed_references`]). Only for a list whose items
-/// have a described identity ([`identified`]). Whether it changed `body`.
+/// is the held parent ([`with_held_parent`]), what its envelope says of a listed
+/// record names one it lists ([`with_listed_references`]), its arrays of another type's
+/// records hold those the session listed under the same parent ([`with_held_beside`]),
+/// and its references to that type name one of them ([`with_beside_references`]). Only
+/// for a list whose items have a described identity ([`identified`]). Whether it
+/// changed `body`.
 pub(in crate::call) async fn agree_generated(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
@@ -728,15 +731,19 @@ pub(in crate::call) async fn agree_generated(
     let answer = std::mem::take(body);
     *body = with_held_parent(state, (plan, call), t, &shape, answer).await;
     with_listed_references(rt, &shape, t, body);
-    with_beside_references(state, (plan, call), t, body, true).await;
+    let drawn = with_held_beside(state, (plan, call), (t, &shape), body, true).await;
+    with_beside_references(state, (plan, call), (t, &drawn), body, true).await;
     *body != before
 }
 
 /// `body`, a list answer to `call` whose items are of type `t`, with each reference to a
-/// record of another described type naming one of that type that the answer lists
-/// beside its items ([`state_lists::beside`]: a sync's `accounts`), else one the session
-/// listed under the same issued parent ([`state_lists::issued_marked`]: the Item's
-/// accounts `/accounts/get` listed). A sync's transactions then name its accounts.
+/// record of another described type naming one of that type that the session listed
+/// under the same issued parent and still holds ([`state_lists::issued_marked`]: the
+/// Item's accounts `/accounts/get` listed; at most [`MAX_HELD_BESIDE`]), else, with
+/// none listed there or when the answer keeps records of the type it drew beside its
+/// items (`drawn`, as [`with_held_beside`] left them), one the answer lists beside its
+/// items ([`state_lists::beside`]: a sync's `accounts`) or one the session holds. A
+/// sync's transactions then name the Item's accounts, not ones the answer drew.
 ///
 /// For each described type `u` other than `t` whose identity member refers to it
 /// (`account_id` to `account`, as [`with_listed_references`] reads it), that member is a
@@ -748,7 +755,7 @@ pub(in crate::call) async fn agree_generated(
 async fn with_beside_references(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
-    t: &str,
+    (t, drawn): (&str, &[String]),
     body: &mut Value,
     items: bool,
 ) {
@@ -778,39 +785,58 @@ async fn with_beside_references(
             .filter(|b| b.t == *u)
             .map(|b| b.member.as_str())
             .collect();
-        let mut ids: Vec<(String, Value)> = arrays
-            .iter()
-            .filter_map(|name| body.get(*name)?.as_array())
-            .flatten()
-            .filter_map(|record| {
-                let id = record.get(member)?;
-                Some((id_string(id)?, id.clone()))
-            })
-            .collect();
-        for id in state_lists::issued_marked(state, (plan, call), u).await {
-            if !ids.iter().any(|(held, _)| *held == id) {
-                ids.push((id.clone(), Value::String(id)));
+        // The parent's records of `u` the session listed and still holds are all it
+        // has: a reference names one of them, as held (text or a number), unless the
+        // answer keeps records of `u` it drew beside its items, which it then names.
+        let mut targets: Vec<(String, Value)> = Vec::new();
+        if !drawn.contains(u) {
+            let marked = state_lists::issued_marked(state, (plan, call), u).await;
+            for id in marked.into_iter().take(MAX_HELD_BESIDE) {
+                if let Some(held) = state.get(&plan.session, u, &id).await {
+                    let value = held
+                        .data
+                        .get(member)
+                        .filter(|v| id_string(v).as_deref() == Some(id.as_str()))
+                        .cloned()
+                        .unwrap_or_else(|| Value::String(id.clone()));
+                    targets.push((id, value));
+                }
             }
         }
+        let (ids, kept) = match targets.is_empty() {
+            false => (targets, Vec::new()),
+            true => {
+                let ids: Vec<(String, Value)> = arrays
+                    .iter()
+                    .filter_map(|name| body.get(*name)?.as_array())
+                    .flatten()
+                    .filter_map(|record| {
+                        let id = record.get(member)?;
+                        Some((id_string(id)?, id.clone()))
+                    })
+                    .collect();
+                // A reference naming a record the session holds names one already.
+                let mut kept: Vec<String> = Vec::new();
+                for value in references(body, member, &arrays) {
+                    if let Some(id) = id_string(&value)
+                        && !ids.iter().any(|(listed, _)| *listed == id)
+                        && !kept.contains(&id)
+                        && state.get(&plan.session, u, &id).await.is_some()
+                    {
+                        kept.push(id);
+                    }
+                }
+                (ids, kept)
+            }
+        };
         if ids.is_empty() {
             continue;
-        }
-        // A reference naming a record the session holds names one already.
-        let mut held = Vec::new();
-        for value in references(body, member, &arrays) {
-            if let Some(id) = id_string(&value)
-                && !ids.iter().any(|(listed, _)| *listed == id)
-                && !held.iter().any(|(kept, _)| *kept == id)
-                && state.get(&plan.session, u, &id).await.is_some()
-            {
-                held.push((id, value));
-            }
         }
         let listed = Listed {
             member: member.to_owned(),
             declared: record_members(rt, u),
             ids,
-            kept: held.into_iter().map(|(id, _)| id).collect(),
+            kept,
         };
         let Some(members) = body.as_object_mut() else {
             return;
@@ -856,24 +882,31 @@ fn references(body: &Value, member: &str, skipped: &[&str]) -> Vec<Value> {
 /// The most held records [`with_held_beside`] puts in one array.
 const MAX_HELD_BESIDE: usize = 100;
 
-/// `body`, a page from state of type `t` records, with each array of another type's
-/// records beside them ([`state_lists::beside`]) holding the session's records of that
-/// type instead of drawn ones: those listed under the same issued parent
-/// ([`state_lists::issued_marked`]), else those the page's records name, at most
-/// [`MAX_HELD_BESIDE`]; one no longer held is left out. Left as drawn when none is held,
-/// or the array, so filled, does not suit its schema.
+/// `body`, a list answer of type `t` records, with each array of another type's records
+/// beside them ([`state_lists::beside`]) holding the session's records of that type
+/// instead of drawn ones: those listed under the same issued parent
+/// ([`state_lists::issued_marked`]), else, for a page from state (not `generated`),
+/// those the page's records name, at most [`MAX_HELD_BESIDE`]; one no longer held is
+/// left out. Left as drawn when none is held, or the array, so filled, does not suit
+/// its schema. A generated answer's drawn records beside its items are then neither
+/// served nor stored where the session listed the parent's. The types of the arrays
+/// left as drawn are answered, for [`with_beside_references`] to name what they hold.
 async fn with_held_beside(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
-    t: &str,
-    shape: &Shape,
+    (t, shape): (&str, &Shape),
     body: &mut Value,
-) {
+    generated: bool,
+) -> Vec<String> {
     let rt = state.rt;
     let bundle = rt.bundle();
+    let mut drawn = Vec::new();
     for found in state_lists::beside(rt, plan.op, t, body) {
+        if !drawn.contains(&found.t) {
+            drawn.push(found.t.clone());
+        }
         let mut ids = state_lists::issued_marked(state, (plan, call), &found.t).await;
-        if ids.is_empty() {
+        if ids.is_empty() && !generated {
             let items = shape.items_in(body).cloned().unwrap_or_default();
             for item in &items {
                 if let Some(id) = item.get(&found.identity).and_then(id_string)
@@ -912,8 +945,10 @@ async fn with_held_beside(
             .is_some_and(|violations| violations.is_empty());
         if fits && let Some(members) = body.as_object_mut() {
             members.insert(found.member, filled);
+            drawn.retain(|u| *u != found.t);
         }
     }
+    drawn
 }
 
 /// The members a record of type `u` declares: by its read by path, else by the items of
