@@ -108,6 +108,17 @@ fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
 
+/// The least string above every string starting with `prefix`: `prefix` with its last
+/// character one past (`a\u{1f}` -> `a `); `None` for an empty prefix, or one whose last
+/// character has no next.
+fn next_prefix(prefix: &str) -> Option<String> {
+    let mut chars: Vec<char> = prefix.chars().collect();
+    let last = chars.pop()?;
+    let next = char::from_u32(u32::from(last) + 1)?;
+    chars.push(next);
+    Some(chars.into_iter().collect())
+}
+
 fn to_i64(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
@@ -385,6 +396,56 @@ impl StateStore for SqlStateStore {
                 .bind(&s.mock)
                 .bind(&s.session)
                 .bind(resource_type)
+                .bind(to_i64(limit))
+                .bind(cutoff)
+                .fetch_all(p)
+                .await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in &rows {
+                out.push(resource_from_row!(row));
+            }
+            out
+        }))
+    }
+
+    /// The ids under `prefix` are a range of the primary key's: `[prefix, next)`, where
+    /// `next` is `prefix` with its last character one past, compared byte by byte
+    /// (SQLite's `BINARY`, Postgres's `"C"` collation).
+    async fn list_prefix(
+        &self,
+        s: &SessionKey,
+        resource_type: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredResource>, StateError> {
+        let Some(next) = next_prefix(prefix) else {
+            // No string bounds the prefix's ids from above: keep the matches.
+            let all = self.list(s, resource_type, usize::MAX).await?;
+            return Ok(all
+                .into_iter()
+                .filter(|r| r.id.starts_with(prefix))
+                .take(limit)
+                .collect());
+        };
+        let range = match &self.inner.pool {
+            Pool::Sqlite(_) => "id >= $5 AND id < $6",
+            Pool::Pg(_) => "id COLLATE \"C\" >= $5 AND id COLLATE \"C\" < $6",
+        };
+        let sql = format!(
+            "SELECT resource_type, id, data FROM state_resources \
+             WHERE {KEY_WHERE} AND resource_type = $4 AND {range} AND {} \
+             ORDER BY seq DESC LIMIT $7",
+            live_session(8)
+        );
+        let cutoff = self.inner.cutoff(now_ms());
+        Ok(on_pool!(&self.inner.pool, |p| {
+            let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+                .bind(&s.workspace)
+                .bind(&s.mock)
+                .bind(&s.session)
+                .bind(resource_type)
+                .bind(prefix)
+                .bind(&next)
                 .bind(to_i64(limit))
                 .bind(cutoff)
                 .fetch_all(p)

@@ -785,6 +785,8 @@ pub struct SharedEntry {
     by_form: Arc<HashMap<String, Vec<usize>>>,
     /// What each of its types read by path shows of where its records live, by type.
     twins: Arc<HashMap<String, Arc<Twin>>>,
+    /// Its parent-scoped types ([`scopes`]), by type.
+    scopes: Arc<HashMap<String, scopes::ParentScope>>,
 }
 
 impl SharedEntry {
@@ -797,7 +799,16 @@ impl SharedEntry {
             .iter()
             .filter_map(|r| Some((r.key.to_lowercase(), Arc::new(twin_of(rt, &r.key)?))))
             .collect();
-        Some(Self::with(group, types, twins))
+        let scopes = types
+            .iter()
+            .filter_map(|r| {
+                let scope = rt.index().parent_scopes().get(&r.key)?;
+                Some((r.key.to_lowercase(), scope.clone()))
+            })
+            .collect();
+        let mut entry = Self::with(group, types, twins);
+        entry.scopes = Arc::new(scopes);
+        Some(entry)
     }
 
     fn with(group: String, types: Vec<RecordType>, twins: HashMap<String, Arc<Twin>>) -> Self {
@@ -812,6 +823,7 @@ impl SharedEntry {
             types: Arc::new(types),
             by_form: Arc::new(by_form),
             twins: Arc::new(twins),
+            scopes: Arc::default(),
         }
     }
 
@@ -971,6 +983,30 @@ impl SharedTypes {
 }
 
 impl SharedTypes {
+    /// How another mock of `rt`'s group keeps its type `t` under a parent, when it does
+    /// ([`scopes`]): what a delete of such a record through `rt` marks it by.
+    pub(crate) fn parent_scope(&self, rt: &MockRuntime, t: &str) -> Option<scopes::ParentScope> {
+        rt.shares.as_ref()?;
+        let registry = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        let group = &registry
+            .mocks
+            .get(&(rt.workspace.clone(), rt.name.clone()))?
+            .group;
+        let mut peers: Vec<(&String, &SharedEntry)> = registry
+            .mocks
+            .iter()
+            .filter(|((workspace, mock), entry)| {
+                *workspace == rt.workspace && *mock != rt.name && entry.group == *group
+            })
+            .map(|((_, mock), entry)| (mock, entry))
+            .collect();
+        peers.sort_by(|a, b| a.0.cmp(b.0));
+        let t = t.to_lowercase();
+        peers
+            .iter()
+            .find_map(|(_, entry)| entry.scopes.get(&t).cloned())
+    }
+
     /// The type of another mock of `rt`'s group that is `t` (see [`equivalents`]) and
     /// shows where its records live ([`Twin`]): what a type with no read by path builds
     /// its own links from. Remembered per type until the mocks change.

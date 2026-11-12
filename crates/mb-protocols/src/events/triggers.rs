@@ -293,7 +293,7 @@ async fn run_state_changes(
             },
             ChangeKind::Deleted => Vec::new(),
         };
-        let origin = json!({
+        let mut origin = json!({
             "kind": "on_state_change",
             "resource_type": change.resource_type,
             "id": crate::call::scopes::plain_id(&change.id),
@@ -303,6 +303,13 @@ async fn run_state_changes(
             },
             "session": change.session.session,
         });
+        // A parent-scoped record's id is its parent's own (issue 5 of each repository):
+        // the parent's values say which one changed.
+        if let Some((parent, _)) = crate::call::scopes::split_id(&change.id)
+            && let Some(o) = origin.as_object_mut()
+        {
+            o.insert("parent".into(), json!(parent));
+        }
         for channel in matching {
             fire(
                 &inner,
@@ -319,8 +326,9 @@ async fn run_state_changes(
     }
 }
 
-/// The upserted resource, then up to five more of its type; `None` when
-/// it is gone or cannot be read.
+/// The upserted resource, then up to five more of its type (of a
+/// parent-scoped record, under its parent); `None` when it is gone or
+/// cannot be read.
 async fn related(inner: &ChannelInner, change: &StateChanged) -> Option<Vec<StoredResource>> {
     let state = &inner.rt.state;
     let resource = match state
@@ -334,10 +342,25 @@ async fn related(inner: &ChannelInner, change: &StateChanged) -> Option<Vec<Stor
             return None;
         }
     };
-    let others = state
-        .list(&change.session, &change.resource_type, MAX_RELATED + 1)
-        .await
-        .unwrap_or_default();
+    let others = match change.id.rsplit_once(crate::call::scopes::SEP) {
+        Some((parent, _)) => {
+            let prefix = format!("{parent}{}", crate::call::scopes::SEP);
+            state
+                .list_prefix(
+                    &change.session,
+                    &change.resource_type,
+                    &prefix,
+                    MAX_RELATED + 1,
+                )
+                .await
+        }
+        None => {
+            state
+                .list(&change.session, &change.resource_type, MAX_RELATED + 1)
+                .await
+        }
+    }
+    .unwrap_or_default();
     let mut out = vec![resource];
     out.extend(
         others

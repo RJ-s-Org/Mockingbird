@@ -196,6 +196,30 @@ pub trait StateStore: Send + Sync {
         resource_type: &str,
         limit: usize,
     ) -> Result<Vec<StoredResource>, StateError>;
+    /// [`StateStore::list`] of the resources of `resource_type` whose id starts with
+    /// `prefix`, most recent first, at most `limit`: the records a caller keys under one
+    /// prefix (a parent's, `a\u{1f}x\u{1f}`). Only those records are returned; how
+    /// many a backend reads to find them is its own: the memory store and SQLite read
+    /// the ordered range of ids under the prefix alone, so the cost follows the
+    /// prefix's records; Postgres compares the range byte by byte (`"C"`), past its
+    /// key's collation, among the type's rows; Redis matches the prefix on the server
+    /// as it walks the session's order. This default, for test doubles and wrappers
+    /// that do not say, lists the whole type and keeps the matches.
+    async fn list_prefix(
+        &self,
+        s: &SessionKey,
+        resource_type: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredResource>, StateError> {
+        Ok(self
+            .list(s, resource_type, usize::MAX)
+            .await?
+            .into_iter()
+            .filter(|r| r.id.starts_with(prefix))
+            .take(limit)
+            .collect())
+    }
     /// Stores `r`, replacing a resource with its type and id, and creates or
     /// refreshes the session.
     async fn upsert(&self, s: &SessionKey, r: StoredResource) -> Result<(), StateError>;

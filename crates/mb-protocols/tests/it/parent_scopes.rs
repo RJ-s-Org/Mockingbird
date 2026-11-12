@@ -361,3 +361,190 @@ async fn a_prefixed_id_stays_global() {
     assert_eq!(source(&headers), "state", "{read}");
     assert_eq!(read["kind"], "card", "{read}");
 }
+
+/// A state store counting the `issues` records under `b/x` its listings return.
+struct ListSpy {
+    inner: std::sync::Arc<dyn mb_state::StateStore>,
+    issues: std::sync::atomic::AtomicUsize,
+}
+
+impl ListSpy {
+    fn count(&self, t: &str, listed: &[mb_state::StoredResource]) {
+        if t == "issues" {
+            let under_b = listed
+                .iter()
+                .filter(|r| r.id.starts_with("b\u{1f}"))
+                .count();
+            self.issues
+                .fetch_add(under_b, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn read(&self) -> usize {
+        self.issues.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl mb_state::StateStore for ListSpy {
+    async fn get(
+        &self,
+        s: &mb_state::SessionKey,
+        t: &str,
+        id: &str,
+    ) -> Result<Option<mb_state::StoredResource>, mb_state::StateError> {
+        self.inner.get(s, t, id).await
+    }
+    async fn list(
+        &self,
+        s: &mb_state::SessionKey,
+        t: &str,
+        limit: usize,
+    ) -> Result<Vec<mb_state::StoredResource>, mb_state::StateError> {
+        let listed = self.inner.list(s, t, limit).await?;
+        self.count(t, &listed);
+        Ok(listed)
+    }
+    async fn list_prefix(
+        &self,
+        s: &mb_state::SessionKey,
+        t: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<mb_state::StoredResource>, mb_state::StateError> {
+        let listed = self.inner.list_prefix(s, t, prefix, limit).await?;
+        self.count(t, &listed);
+        Ok(listed)
+    }
+    async fn upsert(
+        &self,
+        s: &mb_state::SessionKey,
+        r: mb_state::StoredResource,
+    ) -> Result<(), mb_state::StateError> {
+        self.inner.upsert(s, r).await
+    }
+    async fn insert_seeded(
+        &self,
+        s: &mb_state::SessionKey,
+        r: mb_state::StoredResource,
+    ) -> Result<bool, mb_state::StateError> {
+        self.inner.insert_seeded(s, r).await
+    }
+    async fn insert_seeded_all(
+        &self,
+        s: &mb_state::SessionKey,
+        r: Vec<mb_state::StoredResource>,
+    ) -> Result<Vec<bool>, mb_state::StateError> {
+        self.inner.insert_seeded_all(s, r).await
+    }
+    async fn delete(
+        &self,
+        s: &mb_state::SessionKey,
+        t: &str,
+        id: &str,
+    ) -> Result<bool, mb_state::StateError> {
+        self.inner.delete(s, t, id).await
+    }
+    async fn reset(&self, s: &mb_state::SessionKey) -> Result<(), mb_state::StateError> {
+        self.inner.reset(s).await
+    }
+    async fn reset_mock(&self, workspace: &str, mock: &str) -> Result<(), mb_state::StateError> {
+        self.inner.reset_mock(workspace, mock).await
+    }
+    async fn touch(&self, s: &mb_state::SessionKey) -> Result<(), mb_state::StateError> {
+        self.inner.touch(s).await
+    }
+    async fn touch_live(&self, s: &mb_state::SessionKey) -> Result<bool, mb_state::StateError> {
+        self.inner.touch_live(s).await
+    }
+    async fn sessions(
+        &self,
+        workspace: &str,
+        mock: &str,
+    ) -> Result<Vec<mb_state::SessionInfo>, mb_state::StateError> {
+        self.inner.sessions(workspace, mock).await
+    }
+    async fn export(
+        &self,
+        s: &mb_state::SessionKey,
+    ) -> Result<Vec<mb_state::StoredResource>, mb_state::StateError> {
+        self.inner.export(s).await
+    }
+    async fn seed(
+        &self,
+        s: &mb_state::SessionKey,
+        resources: Vec<mb_state::StoredResource>,
+    ) -> Result<(), mb_state::StateError> {
+        self.inner.seed(s, resources).await
+    }
+    async fn ping(&self) -> Result<(), mb_state::StateError> {
+        self.inner.ping().await
+    }
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<mb_state::StateChanged> {
+        self.inner.subscribe()
+    }
+    fn response_cache(&self) -> Option<&mb_state::ResponseCache> {
+        self.inner.response_cache()
+    }
+}
+
+/// A list under one repository reads that repository's issues, not every one the
+/// session holds: with 200 held in `b/x` and two in `a/x`, listing `a/x` returns its
+/// two and reads none of `b/x`'s (after the first list of the type in the session,
+/// which reads the type once to learn none is held under no parent).
+#[tokio::test]
+async fn a_list_under_one_repository_reads_that_repository_s_issues() {
+    let spy = std::sync::Arc::new(ListSpy {
+        inner: std::sync::Arc::new(mb_state::MemoryStore::new(std::time::Duration::from_secs(
+            3600,
+        ))),
+        issues: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let store = std::sync::Arc::clone(&spy);
+    let world = json!({"types": {
+        "issues": {"identity": {"member": "id"}},
+        "pulls": {"identity": {"member": "id"}},
+    }});
+    let h = support::harness(
+        CONTRACT,
+        Vec::new(),
+        &HarnessOptions::default(),
+        |mut rt| {
+            rt.state = store as std::sync::Arc<dyn mb_state::StateStore>;
+            support::with_effective(rt, world, false)
+        },
+    );
+    create(&h, "/repos/a/x/issues", "A one").await;
+    create(&h, "/repos/a/x/issues", "A two").await;
+    let session = mb_state::SessionKey {
+        workspace: h.rt.workspace.clone(),
+        mock: h.rt.name.clone(),
+        session: "default".into(),
+    };
+    for n in 1..=200 {
+        let resource = mb_state::StoredResource {
+            resource_type: "issues".into(),
+            id: format!("b\u{1f}x\u{1f}{}", 1000 + n),
+            data: json!({"id": 1000 + n, "number": n, "title": format!("B {n}")}),
+        };
+        h.rt.state.upsert(&session, resource).await.unwrap();
+    }
+    for round in 0..2 {
+        let before = spy.read();
+        let (status, headers, list) = h.send("GET", "/repos/a/x/issues", None, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        assert_eq!(source(&headers), "state", "{list}");
+        let mut titles: Vec<&str> = list
+            .as_array()
+            .unwrap_or_else(|| panic!("{list}"))
+            .iter()
+            .filter_map(|i| i["title"].as_str())
+            .collect();
+        titles.sort_unstable();
+        assert_eq!(titles, ["A one", "A two"], "{list}");
+        let read = spy.read() - before;
+        if round == 1 {
+            assert_eq!(read, 0, "read {read} of b/x's issues to list a/x's");
+        }
+    }
+}

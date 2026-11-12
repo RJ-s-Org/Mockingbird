@@ -31,6 +31,9 @@ pub(crate) struct StateAccess<'a> {
     /// Parent-scoped records this call found under the parent it names, by its key
     /// there: (type, id) ([`Self::found_placed`]).
     placed: HashSet<(String, String)>,
+    /// The parent-scoped types this call marked as held under no parent
+    /// ([`unplaced_marker`]).
+    marked_unplaced: Vec<String>,
     /// The call's type and path parameters, for the parent of a parent-scoped record
     /// ([`scopes`]); `None` outside a call's path (a GraphQL helper), where a record's
     /// links alone name its parent.
@@ -60,6 +63,17 @@ enum Placement {
 
 /// Records of a parent-scoped type read to find one under a parent, at most.
 const MAX_SCOPED_SCAN: usize = 10_000;
+
+/// The id of the [`mb_state::INTERNAL_TYPE`] document saying whether a session holds
+/// records of parent-scoped type `t` stored under no parent (seeded, written where
+/// nothing named a parent, or before the type was scoped): `{"unplaced": bool}`. With
+/// none held, a list under a parent reads that parent's records alone
+/// ([`mb_state::StateStore::list_prefix`]); otherwise, or with no marker yet (the
+/// first list of the type in the session, or after a reseed, which replaces the
+/// session's documents), it reads the type and writes the marker.
+fn unplaced_marker(t: &str) -> String {
+    format!("#unplaced/{t}")
+}
 
 /// Whether a record of type `t` under `id` is none the call layer may name: its ids
 /// never hold the separator a parent-scoped key is joined by ([`scopes::SEP`]), so one
@@ -101,6 +115,7 @@ impl<'a> StateAccess<'a> {
             marked: Vec::new(),
             unplaced: Vec::new(),
             placed: HashSet::new(),
+            marked_unplaced: Vec::new(),
             scope_call: None,
         }
     }
@@ -389,13 +404,34 @@ impl<'a> StateAccess<'a> {
         scope: &[String],
         limit: usize,
     ) -> Vec<StoredResource> {
-        let all = self.raw_list(s, t, MAX_SCOPED_SCAN).await;
         let prefix = scopes::scoped_id(scope, "");
         let under = |id: &str| {
             id.strip_prefix(prefix.as_str())
                 .filter(|rest| !rest.contains(scopes::SEP))
                 .map(str::to_string)
         };
+        // The parent's own records only, unless the session may hold the type's records
+        // under no parent ([`unplaced_marker`]): those are found by reading the
+        // type, so the two are listed in one order.
+        let marked = self.unplaced_marked(s, t).await;
+        if marked == Some(false) {
+            let held = self.raw_list_prefix(s, t, &prefix, limit).await;
+            let mut out = Vec::with_capacity(held.len());
+            for r in held {
+                if let Some(id) = under(&r.id) {
+                    self.placed.insert((t.to_string(), id));
+                    out.push(unscoped(r));
+                }
+            }
+            return out;
+        }
+        let all = self.raw_list(s, t, MAX_SCOPED_SCAN).await;
+        // Whether the session holds any is known now, for the next list: where it holds
+        // some of the type (so the marker creates no session), all of them read.
+        if marked.is_none() && !all.is_empty() && all.len() < MAX_SCOPED_SCAN {
+            let unplaced = all.iter().any(|r| !r.id.contains(scopes::SEP));
+            self.note_unplaced_held(s, t, unplaced, false).await;
+        }
         let placed: HashSet<String> = all.iter().filter_map(|r| under(&r.id)).collect();
         let mut out = Vec::new();
         for r in all {
@@ -414,6 +450,74 @@ impl<'a> StateAccess<'a> {
             }
         }
         out
+    }
+
+    async fn raw_list_prefix(
+        &mut self,
+        s: &SessionKey,
+        t: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Vec<StoredResource> {
+        if !self.open() {
+            return Vec::new();
+        }
+        let r = self.rt.state.list_prefix(s, t, prefix, limit).await;
+        let found = self.settle(r);
+        self.read |= found.is_some();
+        found.unwrap_or_default()
+    }
+
+    /// What the session's marker says of records of parent-scoped type `t` stored under
+    /// no parent ([`unplaced_marker`]): `Some(false)` that it holds none, `Some(true)`
+    /// that it may, `None` with no marker. A session another mock shares may hold
+    /// records that mock stores under no parent without marking them (its contract may
+    /// not scope the type), so its marker is never trusted: `Some(true)`.
+    async fn unplaced_marked(&mut self, s: &SessionKey, t: &str) -> Option<bool> {
+        if self.rt.shares.is_some() {
+            return Some(true);
+        }
+        let doc = self
+            .raw_get(s, mb_state::INTERNAL_TYPE, &unplaced_marker(t))
+            .await?;
+        Some(doc.data.get("unplaced").and_then(Value::as_bool) != Some(false))
+    }
+
+    /// Records whether the session holds records of parent-scoped type `t` under no
+    /// parent ([`unplaced_marker`]); whether the marker was written. That it may hold
+    /// one (`stored`: a write this call is about to make) overwrites the marker, before
+    /// the record is stored, so no list misses it; that it holds none (`unplaced`
+    /// false, read by a list) is written only where no marker is yet, so it never hides
+    /// a record a concurrent call stored. Once per call and type for a write.
+    async fn note_unplaced_held(
+        &mut self,
+        s: &SessionKey,
+        t: &str,
+        unplaced: bool,
+        stored: bool,
+    ) -> bool {
+        if stored && self.marked_unplaced.iter().any(|m| m == t) {
+            return true;
+        }
+        if !self.open() {
+            return false;
+        }
+        let doc = StoredResource {
+            resource_type: mb_state::INTERNAL_TYPE.to_string(),
+            id: unplaced_marker(t),
+            data: serde_json::json!({"unplaced": unplaced}),
+        };
+        if stored {
+            let r = self.rt.state.upsert(s, doc).await;
+            let ok = self.settle(r).is_some();
+            if ok {
+                self.marked_unplaced.push(t.to_string());
+            }
+            ok
+        } else {
+            let r = self.rt.state.insert_seeded(s, doc).await;
+            self.settle(r).is_some()
+        }
     }
 
     /// Records of type `t` as the store holds them, most recent first, at most `limit`,
@@ -452,6 +556,11 @@ impl<'a> StateAccess<'a> {
         let indexed = value_index::Indexed::of(rt, &r);
         let r = self.placed(r);
         let moved = r.id != plain;
+        let unplaced = !moved && rt.index().parent_scopes().get(&t).is_some();
+        // Marked before it is stored: a list between the two reads the type.
+        if unplaced && !self.note_unplaced_held(s, &t, true, true).await {
+            return false;
+        }
         let r = rt.state.upsert(s, r).await;
         let ok = self.settle(r).is_some();
         self.wrote |= ok;
@@ -545,6 +654,34 @@ impl<'a> StateAccess<'a> {
                 held = Some(held.unwrap_or(false) || gone);
             }
         }
+        self.deleted(s, t, id, held).await
+    }
+
+    /// Whether the store took the delete of the record of parent-scoped type `t` under
+    /// `id` stored under `parent`, wherever this call places `t`.
+    #[cfg(feature = "graphql")]
+    pub(super) async fn delete_under(
+        &mut self,
+        s: &SessionKey,
+        t: &str,
+        parent: &[String],
+        id: &str,
+    ) -> bool {
+        if refused(t, id) || !self.open() {
+            return false;
+        }
+        let r = self
+            .rt
+            .state
+            .delete(s, t, &scopes::scoped_id(parent, id))
+            .await;
+        let held = self.settle(r);
+        self.deleted(s, t, id, held).await
+    }
+
+    /// After a delete of the record of type `t` under `id` the store answered `held`
+    /// (`Some(true)`: it held one), whether it took it.
+    async fn deleted(&mut self, s: &SessionKey, t: &str, id: &str, held: Option<bool>) -> bool {
         let ok = held.is_some();
         self.wrote |= ok;
         if ok {
@@ -585,7 +722,12 @@ impl<'a> StateAccess<'a> {
         let t = r.resource_type.clone();
         let indexed = value_index::Indexed::of(rt, &r);
         let r = self.placed(r);
+        let unplaced = !r.id.contains(scopes::SEP) && rt.index().parent_scopes().get(&t).is_some();
         if !self.open() {
+            return false;
+        }
+        // Marked before it is stored, as [`Self::upsert`] marks.
+        if unplaced && !self.note_unplaced_held(s, &t, true, true).await {
             return false;
         }
         let r = rt.state.insert_seeded(s, r).await;
@@ -698,6 +840,118 @@ pub(crate) async fn stored_with_parents(
     async { state.list_with_parents(session, t, limit).await }
         .instrument(state_span())
         .await
+}
+
+/// Removes from the session the record of a type the mock this one shares stores
+/// equivalent to `t` ([`shared::equivalents`]) that is `t`'s record `id`, as a read
+/// of `t` finds it ([`stored_with_parents`]): one stored under a parent by the id its
+/// shape as `t` gives it (REST's `node_id` as `id`), else by its own; one stored under
+/// none by its own. Two parents' records answering `id` leave both. `true` when one
+/// went.
+#[cfg(feature = "graphql")]
+pub(crate) async fn delete_shared(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    (t, id): (&str, &str),
+) -> bool {
+    let session = &plan.session;
+    let Some(props) = rt
+        .bundle
+        .defs
+        .iter()
+        .find(|(name, _)| name.to_lowercase() == t)
+        .and_then(|(_, def)| def.get("properties")?.as_object())
+    else {
+        return false;
+    };
+    let mut state = StateAccess::new(rt);
+    async {
+        for other in shared::equivalents(rt, t) {
+            let held = state
+                .list_with_parents(session, &other, MAX_SCOPED_SCAN)
+                .await;
+            let mut found = held.into_iter().filter(|(parent, record)| {
+                let shaped = parent.as_ref().and_then(|_| {
+                    shared::reshape(props, &rt.bundle.defs, &record.data)
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+                shaped.as_deref().unwrap_or(&record.id) == id
+            });
+            let (Some((parent, record)), None) = (found.next(), found.next()) else {
+                continue;
+            };
+            // A type with a described soft delete keeps the record, moved to its
+            // deleted state, as [`delete_resource`] keeps it.
+            let mut kept = record.data.clone();
+            if lifecycle::soft_delete(rt, &other, &mut kept) {
+                if kept != record.data {
+                    let stored = match &parent {
+                        Some(parent) => scopes::scoped_id(parent, &record.id),
+                        None => record.id.clone(),
+                    };
+                    let r = rt
+                        .state
+                        .upsert(
+                            session,
+                            StoredResource {
+                                data: kept,
+                                id: stored,
+                                ..record
+                            },
+                        )
+                        .await;
+                    state.settle(r);
+                }
+                state.touch(session).await;
+                return true;
+            }
+            let gone = match &parent {
+                Some(parent) => {
+                    state
+                        .delete_under(session, &other, parent, &record.id)
+                        .await
+                }
+                None => state.delete(session, &other, &record.id).await,
+            };
+            if gone {
+                rt.collections().forget(session, &record);
+                if deleted::marks_by_id(rt, plan) {
+                    // Gone for a read here, and for the other mock's read under its
+                    // parent: by its key there and by its own id, as its delete marks.
+                    deleted::mark(&mut state, session, (plan.op, call), t, id, None).await;
+                    let under = parent.as_ref().and_then(|parent| {
+                        let scope = rt.shared_types.parent_scope(rt, &other)?;
+                        Some((scope.read_parent(parent)?, scope))
+                    });
+                    if let Some((at, scope)) = under {
+                        let mut ids = vec![record.id.clone()];
+                        if let Some(key) = record.data.get(scope.key_member()).and_then(id_text) {
+                            ids.insert(0, key);
+                        }
+                        deleted::mark_under(&mut state, session, &other, &at, &ids).await;
+                    }
+                }
+                state.touch(session).await;
+                return true;
+            }
+        }
+        false
+    }
+    .instrument(state_span())
+    .await
+}
+
+/// The text a key's value is named by in a path: a string as is, a number written out.
+#[cfg(feature = "graphql")]
+fn id_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 /// Removes the resource of type `t` under `id` from the session, if held.
