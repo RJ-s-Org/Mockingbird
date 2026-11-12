@@ -1242,9 +1242,11 @@ pub struct FileMock {
     /// A scenario of this mock applied when a call names none.
     #[serde(default)]
     pub default_scenario: Option<String>,
-    /// A name the mocks of one API (GitHub's REST beside its GraphQL) give
-    /// alike to share their session records: a record one writes, the
-    /// others read, by type name and identity.
+    /// The group the mocks of one API (GitHub's REST beside its GraphQL)
+    /// keep their session records in: a record one writes, the others read,
+    /// by type name and identity. Unset, a mock joins the default group of the
+    /// mocks of its workspace whose hosts share a registrable domain with its
+    /// own (named after the domain); `none` keeps it out of every group.
     #[serde(default)]
     pub shares: Option<String>,
     /// Validate requests strictly: refuse a member the request schema does not
@@ -1691,6 +1693,7 @@ impl FileConfig {
                 ));
             }
         }
+        let groups = crate::shares::config_groups(self);
         for (name, mock) in &self.mocks {
             let prefix = format!("mocks.{name}.");
             mb_store::validate_hosts(&mock.hosts).map_err(|e| format!("{prefix}hosts: {e}"))?;
@@ -1710,11 +1713,14 @@ impl FileConfig {
                 .to_store()
                 .validate()
                 .map_err(|e| format!("{prefix}{e}"))?;
+            // A named group needs another member (one naming it, or one whose default
+            // group has its name); `none` names no group.
             if let Some(group) = &mock.shares
+                && group != crate::shares::SHARES_NONE
                 && !self.mocks.iter().any(|(other, m)| {
                     other != name
                         && m.workspace == mock.workspace
-                        && m.shares.as_ref() == Some(group)
+                        && groups.get(other).is_some_and(|g| g.group == *group)
                 })
             {
                 return Err(format!(

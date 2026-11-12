@@ -105,6 +105,8 @@ struct Mounted {
     generation: u64,
     /// What it adds to the record types of its `shares` group, when it has one.
     shared: Option<mb_protocols::SharedEntry>,
+    /// The `shares` group its runtime was built in (see [`MockRegistry::groups`]).
+    group: Option<String>,
 }
 
 /// How a mounted mock is reached.
@@ -226,6 +228,11 @@ pub struct MockRegistry {
     /// some, mounted or not: a host stays claimed while its mock fails to
     /// build, so the proxy fails closed instead of passing it through.
     configured_hosts: std::sync::Mutex<BTreeMap<MockKey, Vec<String>>>,
+    /// `(workspace, name)` → the hosts and `shares` setting of every stored
+    /// mock: what the `shares` group each runtime keeps its sessions under is
+    /// worked out from ([`crate::shares::shares_groups`]), so a mock without a
+    /// setting joins the default group of its registrable domain.
+    grouping: std::sync::Mutex<BTreeMap<MockKey, Grouping>>,
     /// Every host of the mounted mocks and of `configured_hosts`, rebuilt
     /// whenever either changes, so the proxy's per-request
     /// [`Self::claims_host`] is one lookup.
@@ -269,6 +276,7 @@ impl MockRegistry {
             grpc_published: std::sync::Mutex::new(BTreeSet::new()),
             grpc: GrpcServer::new(),
             configured_hosts: std::sync::Mutex::new(BTreeMap::new()),
+            grouping: std::sync::Mutex::new(BTreeMap::new()),
             claimed: ArcSwap::from_pointee(HashSet::new()),
             reload: Mutex::new(()),
             generations: AtomicU64::new(0),
@@ -440,12 +448,18 @@ impl MockRegistry {
             return;
         }
         let (workspace, name) = &key;
-        match self.fetch_and_build(deps, workspace, name).await {
+        let reloaded_all = match self.fetch_and_build(deps, workspace, name).await {
             Some(built) => {
                 self.apply_built(deps, workspace, name, built, Some(delay))
-                    .await;
+                    .await
             }
-            None => self.settle_retry(deps, &key, BuildEnd::Failed, Some(delay)),
+            None => {
+                self.settle_retry(deps, &key, BuildEnd::Failed, Some(delay));
+                false
+            }
+        };
+        if !reloaded_all {
+            self.regroup(deps).await;
         }
     }
 
@@ -491,6 +505,13 @@ impl MockRegistry {
                 .collect();
         }
         self.refresh_claimed();
+        if let Ok(mut grouping) = self.grouping.lock() {
+            *grouping = mocks
+                .iter()
+                .map(|m| ((m.workspace.clone(), m.name.clone()), Grouping::of(m)))
+                .collect();
+        }
+        let groups = self.groups();
         let current = self.mounted.load_full();
         let mut failed = BTreeMap::new();
         let mut next: Vec<Mounted> = Vec::new();
@@ -500,6 +521,7 @@ impl MockRegistry {
         let mut builds = futures::stream::iter(mocks)
             .map(|mock| {
                 let key: MockKey = (mock.workspace.clone(), mock.name.clone());
+                let mock = in_group(mock, &groups);
                 let deps = deps.clone();
                 let previous = current
                     .iter()
@@ -587,14 +609,16 @@ impl MockRegistry {
     /// may now be mountable, so every mock is rebuilt instead.
     pub async fn reload_mock(&self, deps: &RuntimeDeps, workspace: &str, name: &str) {
         let _guard = self.reload.lock().await;
-        match self.fetch_and_build(deps, workspace, name).await {
-            Some(built) => {
-                self.apply_built(deps, workspace, name, built, None).await;
-            }
+        let reloaded_all = match self.fetch_and_build(deps, workspace, name).await {
+            Some(built) => self.apply_built(deps, workspace, name, built, None).await,
             None => {
                 let key: MockKey = (workspace.to_owned(), name.to_owned());
                 self.settle_retry(deps, &key, BuildEnd::Failed, None);
+                false
             }
+        };
+        if !reloaded_all {
+            self.regroup(deps).await;
         }
     }
 
@@ -654,7 +678,84 @@ impl MockRegistry {
     /// [`Self::reload_mock`] for each of `keys`, built concurrently and
     /// applied in `(workspace, name)` order, for a caller holding
     /// `self.reload`. Stops once applying one reloaded every mock.
+    /// Then every mounted mock whose `shares` group changed is rebuilt (see
+    /// [`Self::regroup`]).
     async fn reload_keys_locked(&self, deps: &RuntimeDeps, keys: BTreeSet<MockKey>) {
+        if !self.build_keys_locked(deps, keys).await {
+            self.regroup(deps).await;
+        }
+    }
+
+    /// Rebuilds each mounted mock whose runtime was built in another `shares`
+    /// group than [`Self::groups`] now puts it in (a mock of its workspace
+    /// changed hosts or `shares`, or was added or deleted, or several were built
+    /// at once from groups some had not updated yet), for a caller holding
+    /// `self.reload`. A rebuild reloads a mock from the store, which may move
+    /// the groups again, so it repeats until none is stale, at most
+    /// [`REGROUP_ROUNDS`] times. A mock whose last build failed is left to its retry.
+    async fn regroup(&self, deps: &RuntimeDeps) {
+        for _ in 0..REGROUP_ROUNDS {
+            let groups = self.groups();
+            let failed: BTreeSet<MockKey> = self
+                .failed
+                .lock()
+                .map(|f| f.keys().cloned().collect())
+                .unwrap_or_default();
+            let stale: BTreeSet<MockKey> = self
+                .mounted
+                .load()
+                .iter()
+                .map(|m| ((m.workspace.clone(), m.name.clone()), m.group.as_ref()))
+                .filter(|(key, built)| !failed.contains(key) && groups.get(key) != *built)
+                .map(|(key, _)| key)
+                .collect();
+            if stale.is_empty() || self.build_keys_locked(deps, stale).await {
+                return;
+            }
+        }
+    }
+
+    /// The `shares` group of each stored mock that is in one, by workspace and
+    /// name ([`crate::shares::shares_groups`] over each workspace's mocks).
+    fn groups(&self) -> BTreeMap<MockKey, String> {
+        let Ok(grouping) = self.grouping.lock() else {
+            return BTreeMap::new();
+        };
+        let mut by_workspace: BTreeMap<&str, Vec<crate::shares::SharesInput<'_>>> = BTreeMap::new();
+        for ((workspace, name), g) in grouping.iter() {
+            by_workspace
+                .entry(workspace)
+                .or_default()
+                .push(crate::shares::SharesInput {
+                    name,
+                    hosts: &g.hosts,
+                    shares: g.shares.as_deref(),
+                });
+        }
+        by_workspace
+            .into_iter()
+            .flat_map(|(workspace, mocks)| {
+                crate::shares::shares_groups(mocks)
+                    .into_iter()
+                    .map(move |(name, group)| ((workspace.to_owned(), name), group.group))
+            })
+            .collect()
+    }
+
+    /// Records stored mock `name`'s grouping inputs, or that it is gone.
+    fn set_grouping(&self, workspace: &str, name: &str, mock: Option<&Mock>) {
+        if let Ok(mut grouping) = self.grouping.lock() {
+            let key = (workspace.to_owned(), name.to_owned());
+            match mock {
+                Some(m) => grouping.insert(key, Grouping::of(m)),
+                None => grouping.remove(&key),
+            };
+        }
+    }
+
+    /// [`Self::reload_keys_locked`] without rebuilding the mocks regrouped:
+    /// returns whether applying one reloaded every mock.
+    async fn build_keys_locked(&self, deps: &RuntimeDeps, keys: BTreeSet<MockKey>) -> bool {
         let builds: Vec<_> = futures::stream::iter(keys)
             .map(|(workspace, name)| async move {
                 let built = self.fetch_and_build(deps, &workspace, &name).await;
@@ -667,12 +768,13 @@ impl MockRegistry {
             match built {
                 Some(built) => {
                     if self.apply_built(deps, &workspace, &name, built, None).await {
-                        return;
+                        return true;
                     }
                 }
                 None => self.settle_retry(deps, &(workspace, name), BuildEnd::Failed, None),
             }
         }
+        false
     }
 
     /// Loads mock `name` and builds it: `Ok(None)` when it was deleted or
@@ -696,12 +798,15 @@ impl MockRegistry {
         match loaded {
             Ok(Some(mock)) => {
                 self.set_configured_hosts(workspace, name, &mock.hosts);
+                self.set_grouping(workspace, name, Some(&mock));
+                let mock = in_group(mock, &self.groups());
                 let previous = self.mounted_world(workspace, name);
                 let generation = self.next_generation();
                 Some(build_mounted(deps, &mock, previous.as_ref(), generation).await)
             }
             Ok(None) => {
                 self.set_configured_hosts(workspace, name, &[]);
+                self.set_grouping(workspace, name, None);
                 Some(Ok(None))
             }
             Err(error) => {
@@ -1356,6 +1461,36 @@ fn rewrite_path(uri: &Uri, path: &str) -> Result<Uri, axum::http::Error> {
     Uri::builder().path_and_query(path_and_query).build()
 }
 
+/// How many times [`MockRegistry::regroup`] rebuilds the mocks it finds in a stale
+/// group before it leaves the rest to the next reload.
+const REGROUP_ROUNDS: usize = 4;
+
+/// What a stored mock's `shares` group is worked out from.
+#[derive(Clone, Debug)]
+struct Grouping {
+    hosts: Vec<String>,
+    shares: Option<String>,
+}
+
+impl Grouping {
+    fn of(mock: &Mock) -> Self {
+        Self {
+            hosts: mock.hosts.clone(),
+            shares: mock.behavior.shares.clone(),
+        }
+    }
+}
+
+/// `mock` as its runtime is built: its `shares` the group `groups` (see
+/// [`MockRegistry::groups`]) puts it in, a named one or its domain's default,
+/// and none for a mock in no group (`shares: none` included).
+fn in_group(mut mock: Mock, groups: &BTreeMap<MockKey, String>) -> Mock {
+    mock.behavior.shares = groups
+        .get(&(mock.workspace.clone(), mock.name.clone()))
+        .cloned();
+    mock
+}
+
 /// The mounted router for `mock`, as build `generation`; `Ok(None)` when it
 /// has no active contract; `Err` (logged) when it cannot be built.
 /// `previous` is the world description of the runtime it replaces, which it
@@ -1461,6 +1596,7 @@ async fn build_mounted(
             world,
             generation,
             shared,
+            group: mock.behavior.shares.clone(),
         })),
         Err(error) => {
             tracing::error!(mock = %label, %error, "cannot route mock; keeping any previous version mounted");

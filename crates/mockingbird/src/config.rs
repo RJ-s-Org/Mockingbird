@@ -1014,6 +1014,9 @@ async fn build_app_inner(
         audit,
         web_auth,
         ext: deps.ext.clone(),
+        // The groups the registry builds the runtimes with, worked out of the stored
+        // mocks alike on every node (a control node included).
+        shares_group: crate::shares::shares_group_of,
         // A control node serves no mocks, so it has none to wait on (a data
         // node serves no Admin API).
         world_mounts: match role {

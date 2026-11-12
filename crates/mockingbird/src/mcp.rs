@@ -464,7 +464,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "start_server",
             title: "Start Mockingbird in the background",
-            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env (or proxy_env_error, why this project's proxy could not be handed out). With a config, also world_review: for each mock whose world description has gaps, the next_steps and world_gaps an import answers (review them as after import_contract, the mockingbird-world skill); and next_steps naming mocks that answer for one host without a common shares group (give mocks of one API the same mocks.<name>.shares); and unknown_ids: per mock, how a read of an id the session does not hold is answered (its setting, or the types inferred to answer 404 once the session has written one of their records, and those that generate; get_world says why).",
+            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env (or proxy_env_error, why this project's proxy could not be handed out). With a config, also world_review: for each mock whose world description has gaps, the next_steps and world_gaps an import answers (review them as after import_contract, the mockingbird-world skill); shares: the shares group each mock of the config keeps its sessions in (as the config's mocks group them), {group, default} (default: true when it set no shares and joined the group of the mocks whose hosts share its registrable domain, named after the domain; null when in none); and next_steps naming mocks that answer for one host in no common shares group (one sets shares: none, they name different groups, or the host has no registrable domain); and unknown_ids: per mock, how a read of an id the session does not hold is answered (its setting, or the types inferred to answer 404 once the session has written one of their records, and those that generate; get_world says why).",
             schema: obj(
                 json!({
                     "config": s("Config file (preferred)."),
@@ -2502,23 +2502,12 @@ impl McpServer {
     /// lists, for each mock of the config whose active world description
     /// has gaps, what [`next_steps`] adds to an import (at most
     /// [`START_GAPS`] gaps in all), `unknown_ids` how each mock answers an id
-    /// the session does not hold ([`unknown_ids_summary`]), and `next_steps`
-    /// names the mocks that answer for one host without a common `shares` group.
+    /// the session does not hold ([`unknown_ids_summary`]). Its `shares` and
+    /// same-host `next_steps` come from [`daemon::start`], as the CLI's do.
     async fn add_start_review(&self, started: &mut Value, config: &std::path::Path) {
         let Ok(cfg) = crate::file_config::load(config) else {
             return;
         };
-        let steps: Vec<Value> = same_host_without_shares(cfg.mocks.iter().map(|(name, m)| {
-            (
-                name.as_str(),
-                m.workspace.as_str(),
-                m.hosts.as_slice(),
-                m.shares.as_deref(),
-            )
-        }))
-        .into_iter()
-        .map(|(mocks, hosts)| json!(unshared_hosts_step(&mocks, &hosts)))
-        .collect();
         let admin = started
             .get("admin")
             .and_then(Value::as_str)
@@ -2543,9 +2532,6 @@ impl McpServer {
         };
         if !unknown_ids.is_empty() {
             obj.insert("unknown_ids".into(), Value::Object(unknown_ids));
-        }
-        if !steps.is_empty() {
-            obj.insert("next_steps".into(), Value::Array(steps));
         }
         if !review.is_empty() {
             obj.insert("world_review".into(), Value::Array(review));
@@ -3410,61 +3396,6 @@ fn world_review(read: Vec<(String, WorldGaps)>) -> Vec<Value> {
     review
 }
 
-/// The mocks (by name) that answer for one host without all naming the same
-/// `shares` group, with the hosts they have in common: each set of mocks
-/// once, with all its hosts. Only mocks of one workspace are compared, as a
-/// `shares` group holds mocks of one workspace. Host names are compared
-/// without case.
-fn same_host_without_shares<'a>(
-    mocks: impl IntoIterator<Item = (&'a str, &'a str, &'a [String], Option<&'a str>)>,
-) -> Vec<(Vec<String>, Vec<String>)> {
-    use std::collections::{BTreeMap, BTreeSet};
-    /// A mock's name and `shares` group.
-    type Member<'a> = (&'a str, Option<&'a str>);
-    let mut by_host: BTreeMap<(&str, String), Vec<Member<'_>>> = BTreeMap::new();
-    for (name, workspace, hosts, shares) in mocks {
-        let hosts: BTreeSet<String> = hosts.iter().map(|h| h.to_ascii_lowercase()).collect();
-        for host in hosts {
-            by_host
-                .entry((workspace, host))
-                .or_default()
-                .push((name, shares));
-        }
-    }
-    let mut groups: BTreeMap<Vec<String>, Vec<String>> = BTreeMap::new();
-    for ((_, host), mocks) in by_host {
-        let Some(&(_, first)) = mocks.first() else {
-            continue;
-        };
-        if mocks.len() < 2 || (first.is_some() && mocks.iter().all(|&(_, s)| s == first)) {
-            continue;
-        }
-        let names: BTreeSet<String> = mocks.iter().map(|&(n, _)| n.to_owned()).collect();
-        groups
-            .entry(names.into_iter().collect())
-            .or_default()
-            .push(host);
-    }
-    groups.into_iter().collect()
-}
-
-/// The next step for `mocks` that answer for `hosts` without a common
-/// `shares` group.
-fn unshared_hosts_step(mocks: &[String], hosts: &[String]) -> String {
-    let quote = |names: &[String]| {
-        names
-            .iter()
-            .map(|n| format!("{n:?}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    format!(
-        "Mocks {} answer for the same host ({}) but have no common shares group. If they serve the same API (REST beside GraphQL, for example), give each the same `shares: <group>` in the config (mocks.<name>.shares) so a record created through one is read through the other, and where a type's name differs between their contracts, describe it with the world's types.<type>.same_as (the mockingbird-world skill).",
-        quote(mocks),
-        quote(hosts)
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3632,81 +3563,6 @@ mod tests {
                 .is_some_and(|s| s.contains("timed out"))
         );
         assert!(answer["next_steps"].is_array());
-    }
-
-    #[test]
-    fn same_host_mocks_without_a_common_shares_group_are_named() {
-        let hosts = |h: &[&str]| h.iter().map(|h| (*h).to_owned()).collect::<Vec<_>>();
-        let (api, both, other) = (
-            hosts(&["api.example.com"]),
-            hosts(&["API.example.com", "uploads.example.com"]),
-            hosts(&["other.example.com"]),
-        );
-        let found = same_host_without_shares([
-            ("rest", "default", api.as_slice(), None),
-            ("graph", "default", both.as_slice(), None),
-            ("lone", "default", other.as_slice(), None),
-        ]);
-        assert_eq!(
-            found,
-            vec![(
-                vec!["graph".to_owned(), "rest".to_owned()],
-                vec!["api.example.com".to_owned()]
-            )]
-        );
-        // One group in common: nothing to say.
-        assert!(
-            same_host_without_shares([
-                ("rest", "default", api.as_slice(), Some("api")),
-                ("graph", "default", both.as_slice(), Some("api")),
-            ])
-            .is_empty()
-        );
-        // Different groups, or one without: named.
-        for (a, b) in [(Some("a"), Some("b")), (Some("a"), None), (None, Some("a"))] {
-            assert_eq!(
-                same_host_without_shares([
-                    ("rest", "default", api.as_slice(), a),
-                    ("graph", "default", api.as_slice(), b)
-                ])
-                .len(),
-                1,
-                "{a:?} {b:?}"
-            );
-        }
-        // Mocks of different workspaces cannot share a group: nothing to say.
-        assert!(
-            same_host_without_shares([
-                ("rest", "one", api.as_slice(), None),
-                ("graph", "two", api.as_slice(), None),
-            ])
-            .is_empty()
-        );
-        // Hosts listed by only one mock, or none, say nothing.
-        assert!(
-            same_host_without_shares([
-                ("rest", "default", api.as_slice(), None),
-                ("x", "default", &[][..], None)
-            ])
-            .is_empty()
-        );
-    }
-
-    #[test]
-    fn the_unshared_hosts_step_names_the_mocks_shares_and_same_as() {
-        let step = unshared_hosts_step(
-            &["graph".to_owned(), "rest".to_owned()],
-            &["api.example.com".to_owned()],
-        );
-        for part in [
-            "\"graph\", \"rest\"",
-            "\"api.example.com\"",
-            "mocks.<name>.shares",
-            "same_as",
-            "mockingbird-world",
-        ] {
-            assert!(step.contains(part), "{part}: {step}");
-        }
     }
 
     #[test]

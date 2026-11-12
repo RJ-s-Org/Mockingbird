@@ -3732,6 +3732,20 @@ async fn shares_needs_another_mock_and_reaches_the_runtime() {
         .unwrap()
         .unwrap();
     assert_eq!(rest.behavior.shares.as_deref(), Some("shop"));
+
+    // `none` names no group; a named group whose other member joined it by
+    // default (its domain's) has one.
+    ws.write("mocks:\n  rest:\n    contract: orders.yaml\n    shares: none\n");
+    file_config::load(&ws.config_path()).unwrap();
+    ws.write(
+        "mocks:\n  rest:\n    contract: orders.yaml\n    hosts: [api.shop.test]\n    shares: shop.test\n  other:\n    contract: orders.yaml\n    route_prefix: /other\n    hosts: [www.shop.test, api.other.test]\n  third:\n    contract: orders.yaml\n    route_prefix: /third\n    hosts: [api.other.test]\n",
+    );
+    let err = file_config::load(&ws.config_path()).unwrap_err();
+    assert!(format!("{err:#}").contains("mocks.rest.shares"), "{err:#}");
+    ws.write(
+        "mocks:\n  rest:\n    contract: orders.yaml\n    hosts: [api.shop.test]\n    shares: shop.test\n  other:\n    contract: orders.yaml\n    route_prefix: /other\n    hosts: [www.shop.test]\n  third:\n    contract: orders.yaml\n    route_prefix: /third\n    hosts: [files.shop.test]\n",
+    );
+    file_config::load(&ws.config_path()).unwrap();
 }
 
 const TWO_HOSTED: &str = "mocks:\n  rest:\n    contract: orders.yaml\n    route_prefix: /\n    hosts: [api.github.test]\n  other:\n    contract: orders.yaml\n    route_prefix: /\n    hosts: [HOSTS2]\n";

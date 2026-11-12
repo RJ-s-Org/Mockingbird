@@ -52,7 +52,7 @@ Types (`types.<resource type>`):
 - `unique: [{members, scope?, conflict?}]`: member sets the docs say are unique, within a member's scope (a member path such as `warehouse.id` when they are unique within a referenced record), with the declared conflict status.
 - `concurrency: {member?, header?, conflict?}`: the body member and/or header holding a version or ETag, and the declared conflict status.
 - `computed: {<member>: <expression>}`: a member the docs define from other data (a count of children, a total, a label), evaluated whenever a record is answered and never stored. See [Expressions](#expressions). (`derived`, the older count/sum form, still loads.)
-- `same_as: [<type name>]`: in a mock that `shares` its sessions with another mock of the same API (REST beside GraphQL), the names this type has there when they differ beyond case and a plural `s` (`pulls` beside `pullrequest`).
+- `same_as: [<type name>]`: in a mock that `shares` its sessions with another mock of the same API (REST beside GraphQL; mocks whose hosts share a registrable domain do by default, `get_world` answers the group as `shares`), the names this type has there when they differ beyond case and a plural `s` (`pulls` beside `pullrequest`).
 
 Operations (`operations.<operation id>`):
 - `kind`: `create`, `read`, `list`, `update`, `replace`, `delete` or `action`; `type`: the resource type. A `PUT` to an item path whose body is the whole record (`PUT /widgets/{id}` with a `Widget`) is `replace`, not `update`: it drops the members it does not send (identity, read-only, lifecycle and computed members stay), where an update merges.

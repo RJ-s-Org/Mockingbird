@@ -31,6 +31,14 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### Mocks of one domain share their sessions by default
+
+No migration. A mock that sets no `mocks.<name>.shares` now joins the default group of the other mocks of its workspace whose `hosts` share a registrable domain with its own, named after the domain (`github.com`), so a REST and a GraphQL mock of one vendor read each other's records without a setting ([configuration](configuration.md#mocks)):
+
+- **Sessions move to the group's name**: such mocks keep their sessions under the domain from now on; sessions written before stay under the mock's own name and are no longer read. Set `shares: none` on a mock to keep it out of every group (two versions of one API on one host, for example).
+- **The answers name the group**: CLI `server start` and MCP `start_server` gain `shares` (each config mock's `{group, default}`, `null` for none), and `GET .../contracts/{version}/world` (MCP `get_world`) gains `shares`. The same-host `next_steps` now names only mocks of one host in no common group.
+- **Rust API**: `mb_admin::AdminState` gains `shares_group` (an `mb_admin::SharesGroupOf`; `AdminState::new` sets `mb_admin::named_group`, which knows no default groups), and `WorldView` gains `shares`.
+
 ### Unknown ids are decided per type unless a mock sets them
 
 No migration. `mocks.<name>.unknown_ids` gains a third value, `inferred`, which is the new default ([configuration](configuration.md)):

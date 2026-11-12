@@ -178,7 +178,7 @@ mocks:
     consistency: on
     unknown_ids: inferred
     default_scenario: friendly
-    shares: shop          # mocks of one API keep their sessions together
+    shares: shop          # mocks of one API keep their sessions together (unset: the default group of mocks sharing a registrable domain; none: no group)
     strict_requests: false  # true: refuse undeclared request members, and validate an inferred contract strictly
     faker_seed: 42
     data_plane_auth:

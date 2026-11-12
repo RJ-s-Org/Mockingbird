@@ -515,3 +515,111 @@ fn server_start_fails_on_a_busy_proxy_port_set_in_the_config() {
     assert!(!state.join("server.pid").exists(), "no server was spawned");
     assert_eq!(std::fs::read_to_string(&config).unwrap(), text);
 }
+
+/// `server start -c` names the `shares` group each mock of the config keeps its
+/// sessions in: a REST and a GraphQL mock of one registrable domain that set no
+/// `shares` join its default group, and a record created over one is read over
+/// the other, and through the Admin API's sessions of either.
+#[tokio::test]
+async fn server_start_names_the_default_shares_group_of_one_domain() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("notes.yaml"),
+        "openapi: 3.0.3\ninfo: {title: notes, version: \"1\"}\npaths:\n  /notes:\n    post:\n      operationId: createNote\n      requestBody:\n        required: true\n        content:\n          application/json:\n            schema: {type: object, required: [title], properties: {title: {type: string}}}\n      responses:\n        \"201\":\n          description: created\n          content: {application/json: {schema: {$ref: \"#/components/schemas/Note\"}}}\n  /notes/{number}:\n    get:\n      operationId: getNote\n      parameters: [{name: number, in: path, required: true, schema: {type: integer}}]\n      responses:\n        \"200\":\n          description: the note\n          content: {application/json: {schema: {$ref: \"#/components/schemas/Note\"}}}\n        \"404\": {description: missing}\ncomponents:\n  schemas:\n    Note:\n      type: object\n      required: [number, title]\n      properties:\n        number: {type: integer}\n        title: {type: string}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("notes.graphql"),
+        "type Note { id: ID! number: Int! title: String! }\ntype Query { noteByNumber(number: Int!): Note }\ntype Mutation { createNote(title: String!): Note }\n",
+    )
+    .unwrap();
+    let config = tmp.path().join("mockingbird.yaml");
+    std::fs::write(
+        &config,
+        "storage:\n  url: \"sqlite::memory:\"\nmocks:\n  rest:\n    contract: notes.yaml\n    route_prefix: /\n    hosts: [api.example.test]\n  gql:\n    contract: notes.graphql\n    route_prefix: /graphql\n    hosts: [api.example.test]\n",
+    )
+    .unwrap();
+    let state = tmp.path().join("state");
+    let (ports, out) = on_free_ports(|| {
+        let ports = Ports::new();
+        let (data, admin, grpc) = (
+            ports.data.to_string(),
+            ports.admin.to_string(),
+            ports.grpc.to_string(),
+        );
+        let out = mockingbird(
+            &[
+                "server",
+                "start",
+                "--state-dir",
+                state.to_str().unwrap(),
+                "-c",
+                config.to_str().unwrap(),
+                "--offline",
+                "--port",
+                &data,
+                "--admin-port",
+                &admin,
+                "--grpc-port",
+                &grpc,
+            ],
+            &[],
+        );
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+        }
+        logged_admin(&state.join("server.log"), ports.admin)
+            .map(|()| (ports, out))
+            .inspect_err(|_| drop(Server(state.clone())))
+    });
+    let _server = Server(state.clone());
+    let started = json_out(&out);
+    let default = json!({"group": "example.test", "default": true});
+    assert_eq!(started["shares"]["rest"], default, "{started}");
+    assert_eq!(started["shares"]["gql"], default, "{started}");
+    assert!(started.get("next_steps").is_none(), "{started}");
+
+    let http = reqwest::Client::new();
+    let made: Value = http
+        .post(ports.data_url("/notes"))
+        .header("host", "api.example.test")
+        .json(&json!({"title": "Over REST"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let number = made["number"].as_u64().unwrap();
+    let read: Value = http
+        .post(ports.data_url("/graphql"))
+        .header("host", "api.example.test")
+        .json(&json!({"query": format!("{{ noteByNumber(number: {number}) {{ title }} }}")}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(read["data"]["noteByNumber"]["title"], "Over REST", "{read}");
+    // The Admin API reaches the session through either mock.
+    for mock in ["rest", "gql"] {
+        let sessions: Value = http
+            .get(format!(
+                "{}/api/v1/workspaces/default/mocks/{mock}/sessions",
+                ports.admin_url()
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            sessions
+                .as_array()
+                .is_some_and(|s| s.iter().any(|s| s["session"] == "default")),
+            "{mock}: {sessions}"
+        );
+    }
+}
