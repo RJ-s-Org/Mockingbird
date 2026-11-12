@@ -338,7 +338,7 @@ fn scalars_enums_lists_nonnull_map() {
                 "required": ["__typename", "i", "s", "id", "l", "c"],
                 "additionalProperties": false
             },
-            "Url": {"description": "GraphQL scalar Url"}
+            "Url": {"description": "GraphQL scalar Url", "type": "string", "format": "uri-reference"}
         })
     );
     let op = b.operation("Query.thing").unwrap();
@@ -602,9 +602,10 @@ fn introspection_keeps_custom_executable_directives() {
 
 /// Custom scalars holding dates and times import as formatted strings, by
 /// name or by a description naming ISO 8601; an epoch-seconds scalar and an
-/// unrelated one stay untyped.
+/// unrelated one stay untyped. A link scalar (`Url`, or one whose description
+/// names RFC 3986) imports as a `uri-reference` string.
 #[test]
-fn date_and_time_scalars_import_as_formatted_strings() {
+fn date_time_and_link_scalars_import_as_formatted_strings() {
     let sdl = r#"
         scalar DateTime
         scalar Date
@@ -617,10 +618,13 @@ fn date_and_time_scalars_import_as_formatted_strings() {
         "When something happened, as an ISO 8601 date."
         scalar When
         scalar Url
+        "An RFC 3986, RFC 3987, and RFC 6570 (level 4) compliant URI string."
+        scalar Link
+        scalar Curl
         scalar Update
         "An ISO 8601 date-time with milliseconds precision."
         scalar Precise
-        type Query { a: DateTime b: Date c: Time d: ISO8601DateTime e: GitTimestamp f: Timestamp g: When h: Url i: Update j: Precise }
+        type Query { a: DateTime b: Date c: Time d: ISO8601DateTime e: GitTimestamp f: Timestamp g: When h: Url i: Update j: Precise k: Link l: Curl }
     "#;
     let b = mb_import::compile(sdl.as_bytes()).unwrap();
     let format = |name: &str| {
@@ -638,6 +642,10 @@ fn date_and_time_scalars_import_as_formatted_strings() {
     assert_eq!(format("GitTimestamp").as_deref(), Some("date-time"));
     assert_eq!(format("Timestamp"), None);
     assert_eq!(format("When").as_deref(), Some("date"));
-    assert_eq!(format("Url"), None);
+    assert_eq!(format("Url").as_deref(), Some("uri-reference"));
+    assert_eq!(format("Link").as_deref(), Some("uri-reference"));
+    assert_eq!(b.defs["Link"]["type"], "string");
+    assert_eq!(format("Curl"), None);
+    assert!(b.defs["Curl"].get("type").is_none());
     assert_eq!(b.defs["DateTime"]["type"], "string");
 }

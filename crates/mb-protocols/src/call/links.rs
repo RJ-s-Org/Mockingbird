@@ -27,6 +27,11 @@
 //!   repository): its collection segment and own identity follow the parent's path
 //!   (`…/owner/repo` + `issues/7`), and a value pointing at the parent's own place
 //!   (`…/issues/42#issuecomment-1` for a comment) is the parent's URL, its fragment kept.
+//!   The record's own link (`url`, `href`, `html_url`, `htmlUrl`) holding a drawn word,
+//!   or a link showing no identity that is relative or on a placeholder host, is built
+//!   there: the
+//!   parent's URL, the type's name in the plural and the record's numeric identity
+//!   (`…/owner/repo/issues/7`), else its first.
 //! - **The host**: a value rebuilt along the read path takes the contract's example host
 //!   for its member, when it has one. Otherwise a placeholder (`example.com`,
 //!   `example.org`, `example.net`, `.invalid`, `.example`) is replaced by the example
@@ -221,6 +226,24 @@ fn url_named(name: &str) -> bool {
         || (name.len() > 3 && name.ends_with("Url"))
 }
 
+/// `word` in the plural, as a URL's collection segment names it: `tickets`, `entries`,
+/// `boxes`.
+fn plural(word: &str) -> String {
+    let lower = word.to_ascii_lowercase();
+    if let Some(stem) = lower.strip_suffix('y')
+        && !stem.ends_with(['a', 'e', 'i', 'o', 'u'])
+    {
+        return format!("{stem}ies");
+    }
+    if ["s", "x", "z", "ch", "sh"]
+        .iter()
+        .any(|e| lower.ends_with(e))
+    {
+        return format!("{lower}es");
+    }
+    format!("{lower}s")
+}
+
 /// Whether `host` is a placeholder no real API serves: `example.com`, `example.org`,
 /// `example.net` and their subdomains, and any host under `.invalid` or `.example`.
 fn placeholder(host: &str) -> bool {
@@ -393,6 +416,8 @@ struct Known<'a> {
     accepted: Vec<String>,
     /// The records the call's required id arguments name.
     parents: &'a [StoredResource],
+    /// The type's collection segment under a parent's URL (`tickets`).
+    collection: String,
 }
 
 impl Known<'_> {
@@ -403,7 +428,10 @@ impl Known<'_> {
         let own_link = self.own_link(name, example);
         let Some(url) = Url::parse(text) else {
             // No URL at all (a drawn word): the record's own link is built, when its
-            // read says where it is.
+            // read says where it is, else under its parent's.
+            if self.links.read.is_empty() {
+                return self.own_under_parent(name);
+            }
             if !own_link {
                 return None;
             }
@@ -426,9 +454,19 @@ impl Known<'_> {
         };
         let parent = self.parent_url(name);
         let rebuilt = if self.links.read.is_empty() {
-            parent
+            let placed = parent
                 .as_ref()
-                .and_then(|p| self.under_parent(&url.segments, &p.segments))
+                .and_then(|p| self.under_parent(&url.segments, &p.segments));
+            // A drawn link showing no identity, relative or on a placeholder host (the
+            // faker's `/harbor/cedar` or `https://example.com/harbor`), is the record's
+            // own link built afresh.
+            if placed.is_none()
+                && url.origin.is_none_or(|o| placeholder(&host_of(o)))
+                && let Some(built) = self.own_under_parent(name)
+            {
+                return Some(built);
+            }
+            placed
         } else {
             self.along_read(&url.segments, example, own_link)
                 .or_else(|| own_link.then(|| self.build(example)).flatten())
@@ -615,6 +653,41 @@ impl Known<'_> {
         Some(out)
     }
 
+    /// For a type with no read by path, the record's own link (member `name` being
+    /// `url`, `href`, `html_url` or `htmlUrl`) built under the URL its first parent holds
+    /// in the same member: the parent's URL (on the mock's host when the parent's is a
+    /// placeholder), the type's collection and the record's numeric identity
+    /// (`…/acme/roadmap/tickets/82`), else its first; `None` for any other member, or
+    /// when no parent holds a URL there.
+    fn own_under_parent(&self, name: &str) -> Option<String> {
+        if !matches!(name, "url" | "href" | "html_url" | "htmlUrl") {
+            return None;
+        }
+        let parent = self.parent_url(name)?;
+        let own = self
+            .owns
+            .iter()
+            .find(|o| !o.is_empty() && o.bytes().all(|b| b.is_ascii_digit()))
+            .or_else(|| self.owns.iter().find(|o| !o.is_empty()))?;
+        let origin = match parent.origin {
+            Some(o) if placeholder(&host_of(o)) => self
+                .host
+                .map(|h| format!("https://{h}"))
+                .or_else(|| Some(o.to_owned())),
+            o => o.map(str::to_owned),
+        };
+        let mut segments: Vec<String> = parent.segments.iter().map(|s| (*s).to_owned()).collect();
+        segments.push(self.collection.clone());
+        segments.push(own.clone());
+        let blank = Url {
+            origin: None,
+            segments: Vec::new(),
+            slash: false,
+            rest: "",
+        };
+        Some(blank.render(origin.as_deref(), &segments, false))
+    }
+
     /// The URL the first parent holds in member `name`.
     fn parent_url(&self, name: &str) -> Option<Url<'_>> {
         self.parents.iter().find_map(|p| {
@@ -782,6 +855,7 @@ pub(super) async fn settle(
             .find(|h| !placeholder(h)),
         accepted,
         parents: &held,
+        collection: plural(t),
     };
     let Value::Object(members) = record else {
         return;
@@ -805,6 +879,20 @@ mod tests {
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
             .collect()
+    }
+
+    #[test]
+    fn collections_are_named_in_the_plural() {
+        for (word, collection) in [
+            ("ticket", "tickets"),
+            ("Issue", "issues"),
+            ("entry", "entries"),
+            ("key", "keys"),
+            ("box", "boxes"),
+            ("branch", "branches"),
+        ] {
+            assert_eq!(plural(word), collection, "{word}");
+        }
     }
 
     #[test]
@@ -884,6 +972,7 @@ mod tests {
             host: Some("api.tracker.test"),
             accepted: vec!["api.tracker.test".to_owned(), "tracker.test".to_owned()],
             parents: &[],
+            collection: "pulls".to_owned(),
         }
     }
 
@@ -996,6 +1085,7 @@ mod tests {
             own: None,
             owns: vec!["C_1".to_owned(), "42".to_owned()],
             parents: &parents,
+            collection: "comments".to_owned(),
             ..known_of(&links)
         };
         // A comment's link pointing at its issue's place is the issue's URL.
@@ -1018,6 +1108,38 @@ mod tests {
                 .settle("href", "https://example.invalid/comments/42")
                 .as_deref(),
             Some("https://api.tracker.test/comments/42")
+        );
+        // A drawn word, or a drawn link on a placeholder host showing no identity, is
+        // its own place under the parent's, by its numeric identity.
+        let own = "https://tracker.test/acme/roadmap/issues/7/comments/42";
+        assert_eq!(known.settle("url", "sable").as_deref(), Some(own));
+        assert_eq!(
+            known.settle("url", "https://example.com/harbor").as_deref(),
+            Some(own)
+        );
+        assert_eq!(known.settle("url", "/harbor/cedar").as_deref(), Some(own));
+        // A real host's link is left as it is, as is a word in a link to anything else.
+        assert_eq!(known.settle("url", "https://elsewhere.test/harbor"), None);
+        assert_eq!(known.settle("comments_url", "sable"), None);
+        // With no parent holding a URL, a drawn word stays.
+        let orphan = Known {
+            parents: &[],
+            ..known_of(&links)
+        };
+        assert_eq!(orphan.settle("url", "sable"), None);
+        // A parent on a placeholder host gives the mock's host.
+        let drawn = [StoredResource {
+            resource_type: "issue".into(),
+            id: "I_1".into(),
+            data: serde_json::json!({"url": "https://example.com/acme/roadmap/issues/7"}),
+        }];
+        let placed = Known {
+            parents: &drawn,
+            ..known
+        };
+        assert_eq!(
+            placed.settle("url", "sable").as_deref(),
+            Some("https://api.tracker.test/acme/roadmap/issues/7/comments/42")
         );
     }
 
