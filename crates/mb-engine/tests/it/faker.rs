@@ -1035,3 +1035,31 @@ fn dates_and_timestamps_are_recent() {
         assert!(v["n"].as_i64().unwrap() < 1_000_000, "{v}");
     }
 }
+
+/// An id or the record it names (an expandable reference, as Stripe's `customer`) is
+/// drawn as the id or `null`, never the object: an API embeds the record only when
+/// asked to. A choice whose object has no `id` is drawn from every branch.
+#[test]
+fn a_reference_choice_is_drawn_as_its_id() {
+    let schema = json!({
+        "type": "object",
+        "required": ["customer", "setting"],
+        "properties": {
+            "customer": {"anyOf": [{"type": "string"}, {"$ref": "#/$defs/Customer"}, {"type": "null"}]},
+            "setting": {"anyOf": [{"type": "string"}, {"$ref": "#/$defs/Settings"}]}
+        },
+        "$defs": {
+            "Customer": {"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}, "email": {"type": "string"}}},
+            "Settings": {"type": "object", "required": ["mode"], "properties": {"mode": {"type": "string"}}}
+        }
+    });
+    let faker = Faker::default();
+    let mut settings_objects = 0;
+    for seed in 0..200u64 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let v = faker.fake(&schema, &mut rng);
+        assert!(!v["customer"].is_object(), "seed {seed}: {v}");
+        settings_objects += usize::from(v["setting"].is_object());
+    }
+    assert!(settings_objects > 0);
+}

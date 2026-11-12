@@ -4879,3 +4879,41 @@ async fn a_nullable_object_parent_is_reached_one_object_down() {
         assert_eq!(order_ids(&body), [1, 3], "{body}");
     }
 }
+
+const REFERENCED_PAYMENTS: &str = r##"
+openapi: 3.1.0
+info: {title: Payments, version: "1"}
+paths:
+  /payments:
+    get:
+      operationId: listPayments
+      parameters: [{name: customer, in: query, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Payment"}}}}}}
+  /customers/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getCustomer
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Customer"}}}}}
+components:
+  schemas:
+    Customer: {type: object, properties: {id: {type: string}, email: {type: string}}}
+    Payment:
+      type: object
+      properties:
+        id: {type: string}
+        amount: {type: integer}
+        customer: {anyOf: [{type: string}, {$ref: "#/components/schemas/Customer"}, {type: "null"}]}
+"##;
+
+/// A member that is an id or the record it names (an expandable reference, as
+/// Stripe's `customer`) is an equality filter on the id, as a text member is.
+#[tokio::test]
+async fn a_reference_member_filters_by_its_id() {
+    let answer = json!([
+        {"id": "p1", "amount": 5, "customer": "c1"},
+        {"id": "p2", "amount": 7, "customer": "c2"},
+    ]);
+    let api = api_of(REFERENCED_PAYMENTS, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/payments?customer=c1").await;
+    assert_eq!(ids(&body), ["p1"]);
+}
