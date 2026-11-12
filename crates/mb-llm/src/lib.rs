@@ -121,6 +121,11 @@ pub struct ChatRequest {
     pub max_answer_bytes: Option<usize>,
     /// How long one request may take.
     pub timeout: Duration,
+    /// `0` for a first call; `n` for the `n`th hedge of it, the same request
+    /// sent again while the earlier ones are slow. A provider that routes
+    /// requests (OpenRouter) routes each hedge by another rule, so that it is
+    /// not served where the earlier call is stuck; others ignore it.
+    pub hedge: u8,
 }
 
 /// Tokens spent on a completion.

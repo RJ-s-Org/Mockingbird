@@ -443,6 +443,18 @@ impl OpenAiCompatible {
             if let Some(reasoning) = self.sent_reasoning(reasoning) {
                 obj.insert("reasoning".to_string(), reasoning);
             }
+            // A model slug with a routing variant (`:nitro`, `:floor`) routes
+            // by itself.
+            let variant = [":nitro", ":floor"]
+                .iter()
+                .any(|v| self.config.model.ends_with(v));
+            if !obj.contains_key("provider")
+                && !variant
+                && is_openrouter(&self.config.base_url)
+                && let Some(routing) = openrouter_routing(req.hedge)
+            {
+                obj.insert("provider".to_string(), routing);
+            }
         }
         body
     }
@@ -587,6 +599,7 @@ impl OpenAiCompatible {
         reasoning: Reasoning,
         json_only: bool,
     ) -> Result<ChatResponse, LlmError> {
+        let started = std::time::Instant::now();
         let resp = self.open_stream_once(req, reasoning, json_only).await?;
         let content_type = resp
             .headers()
@@ -623,6 +636,7 @@ impl OpenAiCompatible {
         );
         let mut done = false;
         let mut any = false;
+        let mut first_token = None;
         while let Some(event) = events.next().await {
             let event = event.map_err(|e| LlmError::Transport(e.to_string()))?;
             any = true;
@@ -637,7 +651,22 @@ impl OpenAiCompatible {
                 return Err(error);
             }
             reply.absorb(&v)?;
+            if first_token.is_none() && reply.bytes() > 0 {
+                first_token = Some(started.elapsed());
+            }
         }
+        // Where the time went, per provider: the serving provider and its
+        // time to the first token, for a slow tail to be traced to one.
+        let ms = |d: std::time::Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        let provider = reply.provider.as_ref().and_then(Value::as_str);
+        tracing::info!(
+            provider = provider.unwrap_or("-"),
+            hedge = req.hedge,
+            first_token_ms = first_token.map(ms),
+            ms = ms(started.elapsed()),
+            bytes = reply.bytes(),
+            "LLM reply streamed"
+        );
         if !any {
             // An empty body, as a plain request reads it.
             return parse_reply_text("", req.max_tokens);
@@ -812,6 +841,25 @@ fn rejects_reasoning(body: &str, sent: Reasoning) -> bool {
     ]
     .iter()
     .any(|phrase| body.contains(phrase))
+}
+
+/// The OpenRouter `provider` routing of a request when `extra_body` sets
+/// none, by its [`ChatRequest::hedge`] number. A first call goes to the
+/// provider of the model with the highest recent throughput (`sort:
+/// "throughput"`): OpenRouter's default spreads calls by price over every
+/// provider of a model, cheap queued tiers (`flex`, `spot`) included, whose
+/// speed varies severalfold, and a mock answer is small enough that speed,
+/// not price, is what it costs. A sorted request always goes to the same
+/// provider, so a hedge, sent because the first call is slow, is routed by
+/// another rule: the first hedge by the default spread (`None`), which seldom
+/// picks the fastest provider again, the second to the lowest recent latency.
+/// Sorted providers may cost more per token than the spread's cheapest.
+fn openrouter_routing(hedge: u8) -> Option<Value> {
+    match hedge % 3 {
+        0 => Some(json!({"sort": "throughput"})),
+        1 => None,
+        _ => Some(json!({"sort": "latency"})),
+    }
 }
 
 /// Whether `base_url` is OpenRouter's API.
@@ -1506,6 +1554,68 @@ mod tests {
             json_in(r#"so: {"s": "a\"}b", "n": -1.5e3, "t": true, "z": null, "e": {}}"#),
             Some(r#"{"s": "a\"}b", "n": -1.5e3, "t": true, "z": null, "e": {}}"#)
         );
+    }
+
+    /// On OpenRouter, a first call goes to the fastest provider, its hedges by
+    /// other rules; a `provider` the profile sets is sent as it is, and other
+    /// endpoints get no `provider` member.
+    #[test]
+    fn openrouter_routes_each_hedge_by_another_rule() {
+        use super::{OpenAiCompatible, OpenAiConfig, OutputMode, Reasoning};
+        use crate::{ChatMessage, ChatRequest, HttpOptions, ResponseFormat, Role};
+        use serde_json::json;
+        let client = |base_url: &str, extra_body: serde_json::Value| {
+            OpenAiCompatible::new(OpenAiConfig {
+                base_url: base_url.into(),
+                api_key: None,
+                model: "m".into(),
+                output_mode: OutputMode::JsonObject,
+                headers: Vec::new(),
+                extra_body: extra_body.as_object().cloned().unwrap_or_default(),
+                http: HttpOptions::default(),
+            })
+            .unwrap()
+        };
+        let req = |hedge: u8| ChatRequest {
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: "hi".into(),
+            }],
+            response_format: ResponseFormat::JsonObject,
+            temperature: 0.0,
+            max_tokens: 10,
+            max_answer_bytes: None,
+            timeout: std::time::Duration::from_secs(1),
+            hedge,
+        };
+        let routing = |c: &OpenAiCompatible, hedge: u8| {
+            c.body(&req(hedge), Reasoning::Unset, false)
+                .get("provider")
+                .cloned()
+        };
+        let router = client("https://openrouter.ai/api/v1", json!({}));
+        assert_eq!(routing(&router, 0), Some(json!({"sort": "throughput"})));
+        assert_eq!(routing(&router, 1), None, "the default spread by price");
+        assert_eq!(routing(&router, 2), Some(json!({"sort": "latency"})));
+
+        let pinned = json!({"order": ["atlas-cloud"]});
+        let router = client(
+            "https://openrouter.ai/api/v1",
+            json!({ "provider": pinned.clone() }),
+        );
+        for hedge in 0..3 {
+            assert_eq!(routing(&router, hedge).as_ref(), Some(&pinned));
+        }
+
+        let other = client("https://api.openai.com/v1", json!({}));
+        for hedge in 0..3 {
+            assert_eq!(routing(&other, hedge), None);
+        }
+
+        // A slug's routing variant routes by itself.
+        let mut nitro = client("https://openrouter.ai/api/v1", json!({}));
+        nitro.config.model = "vendor/model:nitro".into();
+        assert_eq!(routing(&nitro, 0), None);
     }
 
     /// Nesting past serde_json's limit is no JSON value, as parsing into a

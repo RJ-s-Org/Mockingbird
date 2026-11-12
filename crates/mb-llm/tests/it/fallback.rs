@@ -18,6 +18,7 @@ fn request() -> ChatRequest {
         max_tokens: 64,
         max_answer_bytes: None,
         timeout: Duration::from_secs(1),
+        hedge: 0,
     }
 }
 
