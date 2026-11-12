@@ -11,7 +11,7 @@ use axum::http::Request;
 use base64::Engine as _;
 use mb_engine::{Engine, EngineConfig};
 use mb_import::compile;
-use mb_llm::{Provider, ScriptedProvider};
+use mb_llm::{LlmError, Provider, ScriptedProvider};
 use mb_protocols::{MockRuntime, http_rest};
 use mb_state::{CachingStateStore, MemoryStore, StateStore};
 use serde_json::{Value, json};
@@ -43,7 +43,7 @@ paths:
               required: [content]
               properties:
                 content: {type: string}
-                encoding: {type: string}
+                encoding: {type: string, enum: [base64, utf-8]}
                 data: {type: string}
       responses:
         "201":
@@ -58,14 +58,36 @@ paths:
           description: the blob
           content: {application/json: {schema: {$ref: "#/components/schemas/Blob"}}}
         "404": {description: missing}
+  /files/{file_id}:
+    get:
+      operationId: getFile
+      parameters: [{name: file_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: the file
+          content: {application/json: {schema: {$ref: "#/components/schemas/Stored"}}}
+  /files/{file_id}/close:
+    post:
+      operationId: closeFile
+      parameters: [{name: file_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "204": {description: closed}
 components:
   schemas:
+    Stored:
+      type: object
+      required: [id, status, content, encoding]
+      properties:
+        id: {type: string}
+        status: {type: string, enum: [open, closed]}
+        content: {type: string}
+        encoding: {type: string, enum: [base64, utf-8]}
     File:
       type: object
       required: [name, encoding, content]
       properties:
         name: {type: string}
-        encoding: {type: string}
+        encoding: {type: string, enum: [base64, utf-8]}
         content: {type: string}
     Blob:
       type: object
@@ -73,14 +95,16 @@ components:
       properties:
         id: {type: string}
         content: {type: string}
-        encoding: {type: string}
+        encoding: {type: string, enum: [base64, utf-8]}
         data: {type: string, format: byte}
 "##;
 
 fn router(script: Vec<Value>) -> axum::Router {
-    let provider = Arc::new(ScriptedProvider::new(
-        script.into_iter().map(|v| Ok(v.to_string())).collect(),
-    ));
+    router_with(script.into_iter().map(|v| Ok(v.to_string())).collect())
+}
+
+fn router_with(script: Vec<Result<String, LlmError>>) -> axum::Router {
+    let provider = Arc::new(ScriptedProvider::new(script));
     let rt = MockRuntime::new(
         "contents",
         Arc::new(compile(CONTENTS.as_bytes()).unwrap()),
@@ -181,4 +205,71 @@ async fn a_record_stored_with_text_content_is_read_as_base64() {
     assert_eq!(read["encoding"], "base64", "{read}");
     assert_eq!(decoded(read["content"].as_str().unwrap()), "hello, world");
     assert_eq!(decoded(read["data"].as_str().unwrap()), "raw bytes");
+}
+
+fn png() -> String {
+    base64::engine::general_purpose::STANDARD.encode([
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0xfe,
+    ])
+}
+
+/// A client's binary file (valid base64 of bytes that are no UTF-8) goes through
+/// state unchanged: stored by a create, served back by it and by a later read.
+#[tokio::test]
+async fn a_client_s_binary_file_round_trips_through_state() {
+    let router = router(vec![]);
+    let png = png();
+    let made = send(
+        &router,
+        "POST",
+        "/blobs",
+        Some(json!({"content": png, "encoding": "base64", "data": png})),
+    )
+    .await;
+    assert_eq!(made["content"], png, "{made}");
+    assert_eq!(made["data"], png, "{made}");
+    let id = made["id"].as_str().unwrap();
+    let (source, read) = send_with_source(&router, "GET", &format!("/blobs/{id}"), None).await;
+    assert_eq!(source, "state");
+    assert_eq!(read["content"], png, "{read}");
+    assert_eq!(read["encoding"], "base64", "{read}");
+    assert_eq!(read["data"], png, "{read}");
+}
+
+/// A read that cannot catch up with a later write is answered from state (the
+/// catch-up fallback): what it holds is served as it was, a valid base64 value
+/// kept and still valid.
+#[tokio::test]
+async fn a_catch_up_fallback_serves_valid_base64() {
+    let down = || Err(LlmError::Transport("down".into()));
+    let text = base64::engine::general_purpose::STANDARD.encode("# Notes");
+    let router = router_with(vec![
+        Ok(
+            json!({"id": "f1", "status": "open", "content": text, "encoding": "base64"})
+                .to_string(),
+        ),
+        down(),
+        down(),
+    ]);
+    let first = send(&router, "GET", "/files/f1", None).await;
+    assert_eq!(first["content"], text, "{first}");
+    let req = Request::builder()
+        .method("POST")
+        .uri("/files/f1/close")
+        .header("x-mockingbird-session", "s1")
+        .body(Body::empty())
+        .unwrap();
+    assert!(
+        router
+            .clone()
+            .oneshot(req)
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let (source, read) = send_with_source(&router, "GET", "/files/f1", None).await;
+    assert_eq!(source, "state", "{read}");
+    assert_eq!(read["content"], text, "{read}");
+    assert_eq!(read["encoding"], "base64", "{read}");
 }

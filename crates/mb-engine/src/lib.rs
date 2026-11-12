@@ -1534,7 +1534,9 @@ impl Engine {
     /// base64 fields valid base64: a `format: byte` or
     /// `contentEncoding: base64` field, or the `content` beside an `encoding` of
     /// `"base64"` (or one its schema declares, which then says `"base64"`), that does
-    /// not decode is encoded from its text. Only a JSON 2xx body is looked at, by the
+    /// not decode is encoded from its text. Any value that decodes is kept, to any
+    /// bytes (a client's binary file stored and read back): only the model's own
+    /// answer, checked in generation, must hold UTF-8 text in a `content`. Only a JSON 2xx body is looked at, by the
     /// narrowed `response_schema` when given, else by its status's schema; the change
     /// is kept when the body validates after it or did not before it either. Nothing is
     /// copied or validated when no field needs it.
@@ -1561,7 +1563,7 @@ impl Engine {
         let Some(patched) = response
             .body
             .as_ref()
-            .and_then(|body| encoded::patch(bundle, schema, body))
+            .and_then(|body| encoded::patch(bundle, schema, body, encoded::Writer::Other))
         else {
             return response;
         };
@@ -2180,6 +2182,9 @@ impl Engine {
             schema,
             op,
         } = target;
+        // The model's (or the faker's) own answer, before the request is reflected in
+        // it: a base64 `content` it wrote must be text.
+        let response = encode_base64(validator, bundle, schema, response, encoded::Writer::Model);
         // A create reflects the defaults of what its body leaves out; a scenario's
         // `set` still beats them.
         let defaulted = prompt::with_body_defaults(bundle, op, call);
@@ -2237,8 +2242,9 @@ impl Engine {
         let response = with_http_status(validator, bundle, schema, response);
         let response = apply_scenario(validator, op, call, ctx, response);
         // Last, so nothing above (a reflected request, a persona format, a
-        // scenario's `set`) leaves a base64 field undecodable.
-        encode_base64(validator, bundle, schema, response)
+        // scenario's `set`) leaves a base64 field undecodable; what they wrote is kept
+        // whenever it decodes (a client's binary file).
+        encode_base64(validator, bundle, schema, response, encoded::Writer::Other)
     }
 
     /// A 2xx body whose values break a format the persona declares, patched
@@ -3433,6 +3439,7 @@ fn encode_base64(
     bundle: &Bundle,
     schema: &Value,
     mut response: GeneratedResponse,
+    writer: encoded::Writer,
 ) -> GeneratedResponse {
     if !(200..300).contains(&response.status) {
         return response;
@@ -3440,7 +3447,7 @@ fn encode_base64(
     let Some(body) = &response.body else {
         return response;
     };
-    if let Some(patched) = encoded::patch(bundle, schema, body)
+    if let Some(patched) = encoded::patch(bundle, schema, body, writer)
         && (validator.is_valid(&patched) || !validator.is_valid(body))
     {
         tracing::info!("encoded base64 fields from their text");

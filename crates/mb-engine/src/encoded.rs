@@ -7,14 +7,17 @@
 //! A field is base64 when its schema says `format: byte` or
 //! `contentEncoding: base64`, or when it is the `content` of an object whose
 //! `encoding` is `"base64"` (GitHub's contents API) or whose schema declares a
-//! string `content` beside an `encoding` that may say `"base64"`. The prompt
-//! asks for such a `content` as plain text, so a model may well write
-//! `encoding: "utf-8"` beside it: the server encodes it all the same and makes
-//! `encoding` say `"base64"`.
+//! string `content` beside an `encoding` that may say `"base64"`: a free-form one
+//! (GitHub's), or one whose `enum` (or `const`) names it. The prompt asks for such
+//! a declared `content` as plain text, so a model may well write another encoding
+//! (`"utf-8"`) beside it: the server encodes it all the same and makes `encoding`
+//! say `"base64"`. An `encoding` whose `enum` or `const` does not admit `"base64"`
+//! declares nothing.
 //!
 //! [`crate::Engine::encode_base64`] applies this to any 2xx body, whatever
 //! made it (a model, the faker, state, a scenario): the protocols call it on
-//! every answer they serve.
+//! every answer they serve. Only a model's own answer must hold UTF-8 text in a
+//! base64 `content` ([`Writer::Model`]); anything else that decodes is kept.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
@@ -33,20 +36,40 @@ const MAX_DEPTH: usize = 24;
 /// `doc` (a prompt schema) with [`PLAIN_TEXT_HINT`] as the description of
 /// every base64 field it declares.
 pub(crate) fn hint(mut doc: Value) -> Value {
-    hint_in(&mut doc);
+    let defs = doc.get("$defs").cloned().unwrap_or(Value::Null);
+    hint_in(&mut doc, &defs);
     doc
 }
 
-fn hint_in(value: &mut Value) {
+/// `schema` through its `$ref`s into the prompt schema's `defs`.
+fn local<'a>(defs: &'a Value, mut schema: &'a Value) -> &'a Value {
+    for _ in 0..8 {
+        match schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+            .and_then(|name| defs.get(name))
+        {
+            Some(next) => schema = next,
+            None => break,
+        }
+    }
+    schema
+}
+
+fn hint_in(value: &mut Value, defs: &Value) {
     match value {
         Value::Object(obj) => {
             if declares_base64(obj) {
                 obj.insert("description".into(), Value::from(PLAIN_TEXT_HINT));
             }
-            if let Some(Value::Object(props)) = obj.get_mut("properties")
-                && props.contains_key("encoding")
+            let pair = obj
+                .get("properties")
+                .and_then(Value::as_object)
+                .is_some_and(|props| base64_pair(props, |s| local(defs, s)));
+            if pair
+                && let Some(Value::Object(props)) = obj.get_mut("properties")
                 && let Some(Value::Object(content)) = props.get_mut("content")
-                && content.get("type").and_then(Value::as_str) == Some("string")
             {
                 let note = match content.get("description").and_then(Value::as_str) {
                     Some(d) => format!("{d} {PLAIN_TEXT_HINT}"),
@@ -54,9 +77,9 @@ fn hint_in(value: &mut Value) {
                 };
                 content.insert("description".into(), Value::from(note));
             }
-            obj.values_mut().for_each(hint_in);
+            obj.values_mut().for_each(|v| hint_in(v, defs));
         }
-        Value::Array(items) => items.iter_mut().for_each(hint_in),
+        Value::Array(items) => items.iter_mut().for_each(|v| hint_in(v, defs)),
         _ => {}
     }
 }
@@ -75,41 +98,63 @@ fn says_base64(value: Option<&Value>) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("base64"))
 }
 
-/// Whether `schema` (one branch of an object's) declares a string `content` beside an
-/// `encoding` that may say `"base64"`: the pair whose `content` [`hint`] asks for as
-/// plain text, so the server encodes it and its `encoding` says so.
-fn declares_base64_pair(bundle: &Bundle, schema: &Value) -> bool {
-    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
-        return false;
-    };
+/// Whether `props` (an object schema's, `resolve` following a `$ref`) declare a string
+/// `content` beside an `encoding` whose `enum` or `const` names `"base64"`: the pair whose
+/// `content` [`hint`] asks for as plain text, so the server encodes it and its
+/// `encoding` says so. A free-form `encoding` (GitHub's) may say it; one whose
+/// `enum` or `const` does not admit `"base64"` declares no such pair.
+fn base64_pair<'a>(
+    props: &'a Map<String, Value>,
+    resolve: impl Fn(&'a Value) -> &'a Value,
+) -> bool {
     let (Some(content), Some(encoding)) = (props.get("content"), props.get("encoding")) else {
         return false;
     };
-    let content = deref(bundle, content);
-    if content.get("type").and_then(Value::as_str) != Some("string") {
+    if resolve(content).get("type").and_then(Value::as_str) != Some("string") {
         return false;
     }
-    let encoding = deref(bundle, encoding);
-    let admits = |values: &[Value]| values.iter().any(|v| says_base64(Some(v)));
+    let encoding = resolve(encoding);
     match (encoding.get("enum"), encoding.get("const")) {
-        (Some(Value::Array(values)), _) => admits(values),
+        (Some(Value::Array(values)), _) => values.iter().any(|v| says_base64(Some(v))),
         (_, Some(value)) => says_base64(Some(value)),
         _ => true,
     }
 }
 
-/// `body` (answered for `schema`) with every base64 field that does not
-/// decode replaced by the encoding of its text, and the `encoding` beside a
-/// declared base64 `content` saying `"base64"`; `None` when nothing
-/// changed. Nothing is copied unless something changes.
-pub(crate) fn patch(bundle: &Bundle, schema: &Value, body: &Value) -> Option<Value> {
+fn declares_base64_pair(bundle: &Bundle, schema: &Value) -> bool {
+    schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .is_some_and(|props| base64_pair(props, |s| deref(bundle, s)))
+}
+
+/// Who wrote a body [`patch`] checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Writer {
+    /// A model (or the faker): a base64 `content` must decode to UTF-8 text, else
+    /// what decodes as readable text is kept.
+    Model,
+    /// Anything else (a client's request, state, a scenario): any value that decodes
+    /// is kept as it is, so a client's binary file is served back unchanged.
+    Other,
+}
+
+/// `body` (answered for `schema`, written by `writer`) with every base64 field that
+/// does not decode replaced by the encoding of its text, and the `encoding` beside a
+/// declared base64 `content` saying `"base64"`; `None` when nothing changed.
+/// Nothing is copied unless something changes.
+pub(crate) fn patch(
+    bundle: &Bundle,
+    schema: &Value,
+    body: &Value,
+    writer: Writer,
+) -> Option<Value> {
     let mut edits = Vec::new();
     walk(
         bundle,
         Some(schema),
         body,
-        &mut String::new(),
-        0,
+        (&mut String::new(), 0, writer),
         &mut edits,
     );
     if edits.is_empty() {
@@ -144,8 +189,7 @@ fn walk(
     bundle: &Bundle,
     schema: Option<&Value>,
     value: &Value,
-    pointer: &mut String,
-    depth: usize,
+    (pointer, depth, writer): (&mut String, usize, Writer),
     edits: &mut Vec<(String, Value)>,
 ) {
     if depth > MAX_DEPTH {
@@ -168,7 +212,7 @@ fn walk(
             for (i, v) in items.iter().enumerate() {
                 pointer.push('/');
                 pointer.push_str(&i.to_string());
-                walk(bundle, item, v, pointer, depth + 1, edits);
+                walk(bundle, item, v, (pointer, depth + 1, writer), edits);
                 pointer.truncate(len);
             }
         }
@@ -198,7 +242,7 @@ fn walk(
                     let fixed = if text {
                         (!s.is_empty()).then(|| encode(s, s.contains('\n')))
                     } else {
-                        fix(s, false)
+                        fix(s, writer == Writer::Other)
                     };
                     if let Some(fixed) = fixed {
                         push_key(pointer, key);
@@ -211,7 +255,7 @@ fn walk(
                     .iter()
                     .find_map(|b| b.get("properties").and_then(|p| p.get(key)));
                 push_key(pointer, key);
-                walk(bundle, member, v, pointer, depth + 1, edits);
+                walk(bundle, member, v, (pointer, depth + 1, writer), edits);
                 pointer.truncate(len);
             }
         }
@@ -369,17 +413,18 @@ paths: {}
     #[test]
     fn a_declared_pair_is_encoded_whatever_its_encoding_says() {
         let bundle = bundle();
+        let encoding = json!({"type": "string", "enum": ["base64", "utf-8", "none"]});
         let schema = json!({"type": "object", "properties": {
             "content": {"type": "string"},
-            "encoding": {"type": "string"},
+            "encoding": encoding,
             "files": {"type": "array", "items": {"type": "object", "properties": {
-                "content": {"type": "string"}, "encoding": {"type": "string"},
+                "content": {"type": "string"}, "encoding": encoding,
             }}},
         }});
         // `README` looks like base64, but `utf-8` says it is text.
         let body = json!({"content": "README", "encoding": "utf-8",
                           "files": [{"content": "a/b ~c"}, {"content": "", "encoding": "none"}]});
-        let patched = patch(&bundle, &schema, &body).unwrap();
+        let patched = patch(&bundle, &schema, &body, Writer::Model).unwrap();
         assert_eq!(patched["encoding"], "base64");
         assert_eq!(decoded(patched["content"].as_str().unwrap()), "README");
         // A missing `encoding` is added; empty content keeps what it says.
@@ -394,14 +439,58 @@ paths: {}
         );
         // Valid base64 under `base64` is left alone, and nothing is copied.
         let ok = json!({"content": STANDARD.encode("hi"), "encoding": "base64"});
-        assert_eq!(patch(&bundle, &schema, &ok), None);
+        assert_eq!(patch(&bundle, &schema, &ok, Writer::Model), None);
         // An `encoding` that cannot say base64 declares no base64 content.
         let text_only = json!({"type": "object", "properties": {
             "content": {"type": "string"},
             "encoding": {"type": "string", "enum": ["utf-8"]},
         }});
         let body = json!({"content": "# hi", "encoding": "utf-8"});
-        assert_eq!(patch(&bundle, &text_only, &body), None);
+        assert_eq!(patch(&bundle, &text_only, &body, Writer::Model), None);
+    }
+
+    /// A free-form `encoding` (GitHub's) beside a string `content` is a base64
+    /// pair: a model's `encoding: "utf-8"` text is encoded and the encoding set, and
+    /// the prompt hints it as plain text.
+    #[test]
+    fn a_free_form_encoding_declares_a_base64_pair() {
+        let bundle = bundle();
+        let schema = json!({"type": "object", "properties": {
+            "content": {"type": "string"}, "encoding": {"type": "string"},
+        }});
+        let text = json!({"content": "# hi", "encoding": "utf-8"});
+        let patched = patch(&bundle, &schema, &text, Writer::Model).unwrap();
+        assert_eq!(patched["encoding"], "base64");
+        assert_eq!(decoded(patched["content"].as_str().unwrap()), "# hi");
+        let doc = hint(schema);
+        assert_eq!(doc["properties"]["content"]["description"], PLAIN_TEXT_HINT);
+        // An enum without base64 is no pair, for the hint as for the server.
+        let text_only = hint(json!({"type": "object", "properties": {
+            "content": {"type": "string"},
+            "encoding": {"type": "string", "enum": ["utf-8"]},
+        }}));
+        assert!(
+            text_only["properties"]["content"]
+                .get("description")
+                .is_none()
+        );
+    }
+
+    /// A model's base64 `content` must decode to text; anything else's (a client's
+    /// PNG stored and read back) is kept whenever it decodes.
+    #[test]
+    fn only_a_model_s_content_must_be_text() {
+        let bundle = bundle();
+        let schema = json!({"type": "object", "properties": {
+            "content": {"type": "string"}, "encoding": {"type": "string"},
+        }});
+        let png = STANDARD.encode([0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00]);
+        let body = json!({"content": png, "encoding": "base64"});
+        assert_eq!(patch(&bundle, &schema, &body, Writer::Other), None);
+        assert!(patch(&bundle, &schema, &body, Writer::Model).is_some());
+        // Text that does not decode is encoded whoever wrote it.
+        let text = json!({"content": "# hi", "encoding": "base64"});
+        assert!(patch(&bundle, &schema, &text, Writer::Other).is_some());
     }
 
     #[test]
@@ -410,7 +499,7 @@ paths: {}
             "type": "object",
             "properties": {
                 "content": {"type": "string"},
-                "encoding": {"type": "string"},
+                "encoding": {"type": "string", "enum": ["base64", "utf-8"]},
                 "blob": {"type": "string", "format": "byte"},
                 "name": {"type": "string"},
             },
