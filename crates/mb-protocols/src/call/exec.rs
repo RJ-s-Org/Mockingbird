@@ -128,6 +128,10 @@ pub(super) enum Ran {
     /// completed for a read that still does not render), which the generated answer's
     /// usage counts too.
     Spent(Option<Earlier>, mb_llm::Usage),
+    /// The call's answer is this one, built from what the model wrote of a first read's
+    /// record ([`create::first_read`]): it goes on as a generated answer, stored and
+    /// cached as one is.
+    Built(Box<GeneratedResponse>),
 }
 
 /// The call's target as [`super::prepare`] found it.
@@ -360,7 +364,8 @@ pub(super) async fn run(
     }
 }
 
-/// A read of one record: the held record rendered, else generation.
+/// A read of one record: the held record rendered, else the record pool's, else a large
+/// record built as a create builds one ([`create::first_read`]), else generation.
 async fn read(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
@@ -387,8 +392,22 @@ async fn read(
     let stored = match held.target.or(within.as_ref().map(|e| &e.child)) {
         Some(stored) => stored,
         None => {
-            // From the mock's record pool, when it holds the type.
-            pooled = pool::read(state, plan, call).await;
+            // From the mock's record pool, when it holds the type, else built as a
+            // create builds its record, the model writing only what it alone can.
+            pooled = match pool::read(state, plan, call).await {
+                Some(pooled) => Some(pooled),
+                None => match create::first_read(state, plan, call, response_schema).await {
+                    Some(create::FirstRead::Built(answer)) => {
+                        fell_back(rt, plan, kind, Fallback::NotHeld.as_str());
+                        return Ran::Built(answer);
+                    }
+                    Some(create::FirstRead::Spent(usage)) => {
+                        fell_back(rt, plan, kind, Fallback::NotHeld.as_str());
+                        return Ran::Filled(usage);
+                    }
+                    None => None,
+                },
+            };
             let Some(stored) = pooled.as_ref() else {
                 fell_back(rt, plan, kind, Fallback::NotHeld.as_str());
                 return Ran::Generate(None);

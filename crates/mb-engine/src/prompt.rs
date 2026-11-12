@@ -812,20 +812,31 @@ record an API has just stored. Output only a single JSON object conforming to th
 only the members it declares. Never output real personal data. Keep free-text strings under 200 \
 characters unless the schema allows more.";
 
+/// The opening of a [`fill_messages`] prompt for a record a read answers.
+const FILL_READ_ROLE_STATEMENT: &str = "You fill in realistic synthetic values for members of a \
+record an API already holds, as the read below answers it. Output only a single JSON object \
+conforming to the schema, holding only the members it declares. A link names the place the \
+request names. Never output real personal data. Keep free-text strings under 200 characters \
+unless the schema allows more.";
+
 /// Messages asking for the members of a record a create stored that nothing else
 /// decides ([`crate::Engine::fill`]): the operation, the request, the record as stored
 /// so far (`known`, for coherence) and `schema`, the record's schema restricted to the
-/// members asked for.
+/// members asked for; for a record a first `read` answers ([`crate::Engine::fill_read`])
+/// when `read`.
 pub(crate) fn fill_messages(
     bundle: &Bundle,
-    op: &Operation,
+    (op, read): (&Operation, bool),
     schema: &Value,
     call: &OperationCall,
     known: &Map<String, Value>,
     persona: Option<&str>,
 ) -> Vec<ChatMessage> {
     let mut system = String::new();
-    system.push_str(FILL_ROLE_STATEMENT);
+    system.push_str(match read {
+        true => FILL_READ_ROLE_STATEMENT,
+        false => FILL_ROLE_STATEMENT,
+    });
     system.push_str("\n\n");
     binding_lines(&mut system, bundle, op, persona);
     let _ = write!(system, "Response JSON Schema:\n{schema}");

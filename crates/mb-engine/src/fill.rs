@@ -50,6 +50,13 @@ pub struct Filled {
     pub members: Map<String, Value>,
     /// What the LLM call cost; nothing offline.
     pub usage: Usage,
+    /// The model was asked and its call failed, never gave a valid answer, or (for
+    /// [`Engine::fill_read`]) answered none of what it was asked: what it was asked for
+    /// is the faker's. Never so offline.
+    pub fell_back: bool,
+    /// The model was asked: there was something to ask, a provider, and a schema to check
+    /// its answer by.
+    pub called: bool,
 }
 
 /// Whether [`Engine::fill`] answers `null` for the member `name` (`member`, its schema)
@@ -115,6 +122,47 @@ impl Engine {
         missing: &[String],
         ctx: FillContext<'_>,
     ) -> Filled {
+        self.fill_as(bundle, schema, known, missing, ctx, false)
+            .await
+    }
+
+    /// [`Engine::fill`] for a record a read answers that nothing stored yet (the first
+    /// read of it), the record holding `known` already (what the path says, its ids,
+    /// its start states). The model is asked for what only it can write of a record
+    /// that already lived: its free text, its links (`*_url`, `href`, a URL `format`:
+    /// the model writes a generated read's links today, and nothing builds them), its
+    /// booleans (inside the objects asked for too), an enum the persona speaks of, a
+    /// scalar the persona names (`vote_average`) and a list of objects it names (a
+    /// movie's `genres`); an object is asked for those alone, but for another record
+    /// below the top (an object requiring an `id` or `uri` of its own: a pull
+    /// request's `base.repo`), which the faker and the call's context write. Another
+    /// record at the top that may be null (an issue's `assignee`) is null: nothing
+    /// names one. The rest is filled as a create's is, but that a scalar that may be
+    /// null is the faker's, not a fresh record's `null`, and a member the model leaves
+    /// out of its answer is the faker's too. [`Filled::fell_back`] says whether the
+    /// model was asked and gave nothing.
+    pub async fn fill_read(
+        &self,
+        bundle: &Bundle,
+        schema: &Value,
+        known: &Map<String, Value>,
+        missing: &[String],
+        ctx: FillContext<'_>,
+    ) -> Filled {
+        self.fill_as(bundle, schema, known, missing, ctx, true)
+            .await
+    }
+
+    /// [`Engine::fill`], or [`Engine::fill_read`] when `read`.
+    async fn fill_as(
+        &self,
+        bundle: &Bundle,
+        schema: &Value,
+        known: &Map<String, Value>,
+        missing: &[String],
+        ctx: FillContext<'_>,
+        read: bool,
+    ) -> Filled {
         let FillContext {
             op,
             call,
@@ -173,7 +221,11 @@ impl Engine {
         let mut left_out = Vec::new();
         for (name, schema) in &declared {
             let name = *name;
-            if nulled_by_fill(bundle, &required, name, schema) {
+            // On a read, so is another record that may be null (an issue's `assignee`):
+            // nothing names one.
+            if nulled_by_fill(bundle, &required, name, schema)
+                || (read && admits_null(bundle, schema) && own_identity(bundle, schema))
+            {
                 filled.members.insert(name.to_string(), Value::Null);
                 continue;
             }
@@ -190,8 +242,14 @@ impl Engine {
                 asked.push((name, schema.clone()));
                 continue;
             }
-            // A list of objects the request sent nothing for holds none yet.
-            if empty_list_fits(bundle, schema) {
+            // A list of objects the request sent nothing for holds none yet; on a read,
+            // one the persona names (a movie's `genres`) is the model's.
+            let listed = empty_list_fits(bundle, schema);
+            if listed && read && persona_names(&persona, leaf_of(name)) {
+                asked.push((name, schema.clone()));
+                continue;
+            }
+            if listed {
                 filled
                     .members
                     .insert(name.to_string(), Value::Array(Vec::new()));
@@ -205,9 +263,9 @@ impl Engine {
                 .is_some_and(|value| echo_fits(bundle, schema, value));
             // Free text the request and the call's context (the path, the query, who
             // the caller is) do not give is the model's.
-            if free_text_in(bundle, name, schema, &resolved) && !echoed {
+            if free_text_in(bundle, name, schema, &resolved, read, &persona) && !echoed {
                 // An object is asked for its free text alone; the faker writes the rest.
-                match free_text_schema(bundle, name, schema, &resolved) {
+                match free_text_schema(bundle, name, schema, &resolved, read, &persona) {
                     Some(only_text) => {
                         pruned.push((name, only_text.clone()));
                         asked.push((name, only_text));
@@ -223,9 +281,12 @@ impl Engine {
             // boolean false (not a coin's toss of `deleted` or `archived`), and an
             // enum what the persona says of it (`enum_choice`); a state the caller
             // found no start for is the model's.
-            if fresh_null(bundle, schema) {
+            // A read's record lived before it: its nullable scalars are the faker's, but a
+            // moment that may not have come yet (`closed_at` of an open issue).
+            let null = fresh_null(bundle, schema);
+            if null && (!read || moment(bundle, name, schema)) {
                 filled.members.insert(name.to_string(), Value::Null);
-            } else if boolean(bundle, schema) {
+            } else if !read && boolean(bundle, schema) {
                 filled.members.insert(name.to_string(), Value::Bool(false));
             } else {
                 let choice = match states.iter().any(|s| s == name) {
@@ -240,13 +301,17 @@ impl Engine {
                         asked.push((name, schema.clone()));
                         enums.push((name, schema.clone()));
                     }
+                    // A read's scalar the persona names (`vote_average`) is the model's.
+                    None if read && persona_names(&persona, leaf_of(name)) => {
+                        asked.push((name, schema.clone()));
+                    }
                     None => {}
                 }
             }
         }
         if !asked.is_empty() {
             let asked: Vec<&(&str, Value)> = asked.iter().collect();
-            self.fill_with_llm(bundle, op, call, known, &asked, &mut filled)
+            self.fill_with_llm(bundle, (op, call, read), known, &asked, &mut filled)
                 .await;
         }
         // An enum the model wrote no value for is its `default`, else, for a state
@@ -277,6 +342,15 @@ impl Engine {
             {
                 let mut text = text.clone();
                 keep_asked(&mut text, only_text);
+                // A read's links and moments the answer's repair wrote as words.
+                if read {
+                    let mut written = Value::Object(text);
+                    self.settle_drawn(bundle, member, &mut written, (&mut draws, true), 0);
+                    text = match written {
+                        Value::Object(text) => text,
+                        _ => Map::new(),
+                    };
+                }
                 let member = timestamp_string(bundle, name, member);
                 // The rest is drawn as an object (a nullable one's faker draw may be
                 // `null`); a draw that is still no object stands whole, as the model's
@@ -287,9 +361,12 @@ impl Engine {
                     drawn = self.fake_member(bundle, name, &shape, &hints, &mut draws);
                 }
                 mint_nested_ids(bundle, &member, &mut drawn, &mut draws.rng, 0);
+                if read {
+                    self.settle_drawn(bundle, &member, &mut drawn, (&mut draws, false), 0);
+                }
                 let value = match drawn {
                     Value::Object(whole) => {
-                        lay_under(&mut text, whole, only_text);
+                        lay_under(&mut text, whole, only_text, read);
                         Value::Object(text)
                     }
                     other => other,
@@ -318,7 +395,22 @@ impl Engine {
             }
             let member = timestamp_string(bundle, name, member);
             let mut value = self.fake_member(bundle, name, &member, &hints, &mut draws);
+            // An id the model was asked for and left out is minted, never a word.
+            let echoed = hints.echoes.contains_key(mb_mcm::leaf_member(name));
+            if value.is_string()
+                && !echoed
+                && one_id_name(leaf_of(name))
+                && plain_string(bundle, &member)
+            {
+                value = Value::String(drawn_id(bundle, &member, &mut draws.rng));
+            }
             mint_nested_ids(bundle, &member, &mut value, &mut draws.rng, 0);
+            // On a read, the faker's links and moments are settled, at the top too (a
+            // create's are as they were: its links are built after, from the call).
+            if read {
+                self.settle_drawn(bundle, &member, &mut value, (&mut draws, false), 0);
+                self.settle_scalar(bundle, (name, &member), &mut value, (&mut draws, false));
+            }
             let value = self.with_context(bundle, name, &member, value, &context);
             if !value.is_null() {
                 filled.members.insert((*name).to_string(), value);
@@ -332,8 +424,7 @@ impl Engine {
     async fn fill_with_llm(
         &self,
         bundle: &Bundle,
-        op: &Operation,
-        call: &OperationCall,
+        (op, call, read): (&Operation, &OperationCall, bool),
         known: &Map<String, Value>,
         asked: &[&(&str, Value)],
         filled: &mut Filled,
@@ -344,10 +435,17 @@ impl Engine {
             .collect();
         let names: Vec<&str> = asked.iter().map(|(name, _)| *name).collect();
         let restricted = json!({"type": "object", "properties": properties, "required": names});
+        // A read's answer stands without a member the model left out: the faker writes
+        // it, as it writes what the model was not asked.
+        let checked = match read {
+            true => json!({"type": "object", "properties": restricted["properties"]}),
+            false => restricted.clone(),
+        };
         if let (Ok(provider), Ok(validator)) = (
             self.live_provider(),
-            self.schema_validator(bundle, &restricted),
+            self.schema_validator(bundle, &checked),
         ) {
+            filled.called = true;
             let prompt_schema = compact::response_prompt_schema(
                 bundle,
                 &restricted,
@@ -355,7 +453,7 @@ impl Engine {
             );
             let messages = prompt::fill_messages(
                 bundle,
-                op,
+                (op, read),
                 &prompt_schema,
                 call,
                 known,
@@ -382,17 +480,22 @@ impl Engine {
                 .await
             {
                 Ok(answer) => {
+                    let mut wrote = false;
                     if let Value::Object(mut answered) = answer.value {
                         for name in &names {
                             if let Some(value) = answered.remove(*name) {
                                 filled.members.insert((*name).to_string(), value);
+                                wrote = true;
                             }
                         }
                     }
+                    // A read's answer of none of them gave nothing.
+                    filled.fell_back = read && !wrote;
                 }
                 Err(reason) if crate::provider_down(&reason) => {}
                 Err(reason) => {
                     tracing::warn!(operation = %op.id, %reason, "fill fell back to the faker");
+                    filled.fell_back = true;
                 }
             }
         }
@@ -516,26 +619,38 @@ const FREE_TEXT_DEPTH: usize = 8;
 /// strings are not: the faker writes them as well as a model would.
 #[must_use]
 pub fn free_text(bundle: &Bundle, name: &str, schema: &Value) -> bool {
-    free_text_in(bundle, name, schema, &|_| false)
+    free_text_in(bundle, name, schema, &|_| false, false, "")
 }
+
+/// What decides which members are asked of the model: the paths the call's context
+/// gives, whether the record is a read's, and the persona (lower case).
+type Asking<'a> = (&'a dyn Fn(&str) -> bool, bool, &'a str);
 
 /// [`free_text`] of member `path` (dotted below the record's top), but a string at a
 /// path `resolved` says the call's context gives (inside an object; a list's items are
-/// never resolved).
+/// never resolved). On a `read` ([`Engine::fill_read`]) a link and a boolean count too
+/// ([`asked_scalar`]).
 fn free_text_in(
     bundle: &Bundle,
     path: &str,
     schema: &Value,
     resolved: &dyn Fn(&str) -> bool,
+    read: bool,
+    persona: &str,
 ) -> bool {
     fn walk(
         bundle: &Bundle,
         name: &str,
         schema: &Value,
         depth: usize,
-        resolved: &dyn Fn(&str) -> bool,
+        (resolved, read, persona): Asking<'_>,
     ) -> bool {
         if depth > FREE_TEXT_DEPTH {
+            return false;
+        }
+        // On a read, another record below the top (a pull request's `base.repo`) is
+        // the faker's and the context's, not the model's to write out again.
+        if read && name.contains('.') && own_identity(bundle, schema) {
             return false;
         }
         let Some(s) = bundle.resolve(schema).as_object() else {
@@ -546,13 +661,9 @@ fn free_text_in(
         }
         let never = |_: &str| false;
         // Cheapest first, each part only while none said yes.
-        (string_typed(s)
-            && !s.contains_key("format")
-            && !s.contains_key("pattern")
-            && !structured_name(leaf_of(name))
-            && !resolved(name))
+        (asked_scalar(s, leaf_of(name), read, persona) && !resolved(name))
             || s.get("items")
-                .is_some_and(|items| walk(bundle, name, items, depth + 1, &never))
+                .is_some_and(|items| walk(bundle, name, items, depth + 1, (&never, read, persona)))
             || s.get("properties")
                 .and_then(Value::as_object)
                 .is_some_and(|ms| {
@@ -562,19 +673,56 @@ fn free_text_in(
                             &format!("{name}.{member}"),
                             schema,
                             depth + 1,
-                            resolved,
+                            (resolved, read, persona),
                         )
                     })
                 })
             || ["anyOf", "oneOf", "allOf"].iter().any(|k| {
                 s.get(*k).and_then(Value::as_array).is_some_and(|bs| {
                     bs.iter()
-                        .any(|b| walk(bundle, name, b, depth + 1, resolved))
+                        .any(|b| walk(bundle, name, b, depth + 1, (resolved, read, persona)))
                 })
             })
     }
-    walk(bundle, path, schema, 0, resolved)
+    walk(bundle, path, schema, 0, (resolved, read, persona))
 }
+
+/// Whether scalar schema `s` of member `leaf` is the model's to write: free text (a
+/// string of no `format` or `pattern` whose name says no identifier, link or moment),
+/// an id of no declared form the persona names (`node_id values use GitHub's
+/// prefixes`: the model writes it in the persona's shape), and on a `read` a link too
+/// (named as one, or of a URL `format`) and a boolean.
+fn asked_scalar(s: &Map<String, Value>, leaf: &str, read: bool, persona: &str) -> bool {
+    if string_typed(s) {
+        let formless = !s.contains_key("format") && !s.contains_key("pattern");
+        let url_format = s
+            .get("format")
+            .and_then(Value::as_str)
+            .is_some_and(|f| URL_FORMATS.contains(&f));
+        let link = !s.contains_key("pattern") && (link_named(leaf) || url_format);
+        // A compound id name (`node_id`, `nodeId`): a persona speaking of "ids" names
+        // no bare `id`, which every nested record holds.
+        let compound = !["id", "uuid", "guid"].contains(&leaf.to_ascii_lowercase().as_str());
+        let named_id = formless && compound && one_id_name(leaf) && persona_names(persona, leaf);
+        return (formless && !structured_name(leaf)) || named_id || (read && link);
+    }
+    let boolean = match s.get("type") {
+        Some(Value::String(t)) => t == "boolean",
+        Some(Value::Array(ts)) => ts.iter().any(|t| t == "boolean"),
+        _ => false,
+    };
+    read && boolean
+}
+
+/// The string formats that hold a URL.
+const URL_FORMATS: [&str; 6] = [
+    "uri",
+    "url",
+    "uri-reference",
+    "iri",
+    "iri-reference",
+    "uri-template",
+];
 
 /// The last segment of a dotted member path.
 fn leaf_of(path: &str) -> &str {
@@ -593,24 +741,30 @@ fn string_typed(s: &Map<String, Value>) -> bool {
 /// Whether a string member's name says what it holds without free text: an
 /// identifier, a link or a moment.
 fn structured_name(name: &str) -> bool {
+    id_like(name) || link_named(name) || crate::faker::timestamp_field(name)
+}
+
+/// Whether a member's name says it holds a link: `url`, `uri`, `href`, `*_url`,
+/// `*-uri`, `*Url`, `*Href`.
+fn link_named(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     let camel = |suffixes: &[&str]| {
         suffixes
             .iter()
             .any(|suffix| name.len() > suffix.len() && name.ends_with(suffix))
     };
-    let link_like = ["url", "uri", "href"].iter().any(|word| {
+    ["url", "uri", "href"].iter().any(|word| {
         lower == *word
             || lower.ends_with(&format!("_{word}"))
             || lower.ends_with(&format!("-{word}"))
-    }) || camel(&["Url", "URL", "Uri", "URI", "Href"]);
-    id_like(name) || link_like || crate::faker::timestamp_field(name)
+    }) || camel(&["Url", "URL", "Uri", "URI", "Href"])
 }
 
 /// Gives each id member below the top of `value`, a faker draw of `schema` (an id
 /// [`one_id_name`] names, whose schema is a plain string: no format, pattern, enum or
-/// const), an id of 20 letters and digits drawn from `rng` in place of the faker's
-/// word, in objects and list items alike.
+/// const), an id drawn from `rng` in place of the faker's word ([`drawn_id`]: in the
+/// shape its examples show, else 20 letters and digits), in objects and list items
+/// alike.
 fn mint_nested_ids(
     bundle: &Bundle,
     schema: &Value,
@@ -618,8 +772,6 @@ fn mint_nested_ids(
     rng: &mut rand::rngs::StdRng,
     depth: usize,
 ) {
-    use rand::RngExt;
-    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
     if depth > FREE_TEXT_DEPTH {
         return;
     }
@@ -630,11 +782,7 @@ fn mint_nested_ids(
                     continue;
                 };
                 if inner.is_string() && one_id_name(key) && plain_string(bundle, &member) {
-                    let id: String = (0..20)
-                        .filter_map(|_| ALPHABET.get(rng.random_range(0..ALPHABET.len())))
-                        .map(|&b| char::from(b))
-                        .collect();
-                    *inner = Value::String(id);
+                    *inner = Value::String(drawn_id(bundle, &member, rng));
                 } else {
                     mint_nested_ids(bundle, &member, inner, rng, depth + 1);
                 }
@@ -649,6 +797,252 @@ fn mint_nested_ids(
         }
         _ => {}
     }
+}
+
+/// An id for a member of schema `schema` (a plain string), drawn from `rng` in the
+/// shape its first text example shows: the example's prefix up to its last `_` or `-`
+/// where that is letters (`R_kgDO`... keeps `R_`), then as many characters of the
+/// classes (digits, lower and upper case letters) its rest holds
+/// (`MDEwOlJlcG9zaXRvcnkxMjk2MjY5`: 28 letters and digits); else 20 letters and digits.
+fn drawn_id(bundle: &Bundle, schema: &Value, rng: &mut rand::rngs::StdRng) -> String {
+    use rand::RngExt;
+    const DIGITS: &[u8] = b"0123456789";
+    const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+    const UPPER: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let example = text_examples(bundle, schema).into_iter().find(|e| {
+        e.len() >= 8
+            && e.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_-=+/".contains(c))
+    });
+    let (prefix, rest) = match &example {
+        Some(example) => {
+            let cut = example.rfind(['_', '-']).map_or(0, |at| at + 1);
+            let (prefix, rest) = example.split_at(cut);
+            match prefix
+                .chars()
+                .all(|c| c.is_ascii_alphabetic() || c == '_' || c == '-')
+            {
+                true => (prefix.to_string(), rest.to_string()),
+                false => (String::new(), example.clone()),
+            }
+        }
+        None => (String::new(), String::new()),
+    };
+    let rest: Vec<u8> = rest.bytes().filter(u8::is_ascii_alphanumeric).collect();
+    let mut alphabet: Vec<u8> = Vec::new();
+    for class in [DIGITS, LOWER, UPPER] {
+        if rest.iter().any(|b| class.contains(b)) {
+            alphabet.extend_from_slice(class);
+        }
+    }
+    let len = match rest.len() {
+        0..8 => 20,
+        n => n,
+    };
+    if alphabet.len() < DIGITS.len() + LOWER.len() || rest.len() < 8 {
+        alphabet = [DIGITS, LOWER, UPPER].concat();
+    }
+    let drawn: String = (0..len)
+        .filter_map(|_| alphabet.get(rng.random_range(0..alphabet.len())))
+        .map(|&b| char::from(b))
+        .collect();
+    format!("{prefix}{drawn}")
+}
+
+/// The text `example` and `examples` of `schema` (through `$ref`s and a nullable
+/// union's branch).
+fn text_examples(bundle: &Bundle, schema: &Value) -> Vec<String> {
+    let s = bundle.resolve(schema);
+    let mut parts = vec![s];
+    for key in ["anyOf", "oneOf"] {
+        parts.extend(
+            s.get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|b| bundle.resolve(b)),
+        );
+    }
+    parts
+        .into_iter()
+        .flat_map(|p| {
+            p.get("example").into_iter().chain(
+                p.get("examples")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten(),
+            )
+        })
+        .filter_map(|e| e.as_str().map(str::to_owned))
+        .collect()
+}
+
+impl Engine {
+    /// Settles what the faker drew below the top of `value` (a draw of `schema`), each
+    /// scalar as [`Engine::settle_scalar`] settles it; with `only_wrong`, what the model
+    /// wrote, where it holds no link or moment at all (a faker word the answer's repair
+    /// put in for a member it left out).
+    fn settle_drawn(
+        &self,
+        bundle: &Bundle,
+        schema: &Value,
+        value: &mut Value,
+        (draws, only_wrong): (&mut seed::Draws, bool),
+        depth: usize,
+    ) {
+        if depth > FREE_TEXT_DEPTH {
+            return;
+        }
+        match value {
+            Value::Object(members) => {
+                for (key, inner) in members.iter_mut() {
+                    let Some(member) = consistency::property_schema(bundle, schema, key) else {
+                        continue;
+                    };
+                    match inner {
+                        Value::Object(_) | Value::Array(_) => {
+                            self.settle_drawn(
+                                bundle,
+                                &member,
+                                inner,
+                                (&mut *draws, only_wrong),
+                                depth + 1,
+                            );
+                        }
+                        _ => self.settle_scalar(
+                            bundle,
+                            (key, &member),
+                            inner,
+                            (&mut *draws, only_wrong),
+                        ),
+                    }
+                }
+            }
+            Value::Array(items) => {
+                if let Some(item) = items_schema(bundle, schema) {
+                    for inner in items {
+                        self.settle_drawn(
+                            bundle,
+                            &item,
+                            inner,
+                            (&mut *draws, only_wrong),
+                            depth + 1,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Settles `value`, the faker's draw of member `key` (of schema `member`): a moment
+    /// ([`moment`]) that may be null is null, as on a fresh record, and any other is a
+    /// timestamp (a `*date` or `date` one a date), never a word; a link (named as one, or
+    /// of a URL format) that may be null is null, else the contract's example of it,
+    /// else a URL: what the faker writes there is a word or a placeholder.
+    fn settle_scalar(
+        &self,
+        bundle: &Bundle,
+        (key, member): (&str, &Value),
+        value: &mut Value,
+        (draws, only_wrong): (&mut seed::Draws, bool),
+    ) {
+        let Value::String(text) = value else {
+            return;
+        };
+        let decided = whole_of(bundle, member).iter().any(|p| {
+            ["enum", "const", "pattern"]
+                .iter()
+                .any(|k| p.get(*k).is_some())
+        });
+        if decided {
+            return;
+        }
+        // A link standing (an `https://` URL, a path, a `spotify:track:` URI) is kept,
+        // but one on a placeholder host.
+        let placeholder = ["example.com", "example.org", "example.net", ".invalid"]
+            .iter()
+            .any(|host| text.contains(host));
+        let linked = (text.contains(':') || text.starts_with('/')) && !placeholder;
+        if only_wrong && (dated(text) || linked) {
+            return;
+        }
+        let draw = |format: &str, draws: &mut seed::Draws| {
+            self.fake_member(
+                bundle,
+                key,
+                &json!({"type": "string", "format": format}),
+                &FakerHints::default(),
+                draws,
+            )
+        };
+        let dated_format = matches!(format_of(bundle, member), Some("date" | "date-time"));
+        if moment(bundle, key, member) && (dated_format || format_of(bundle, member).is_none()) {
+            if admits_null(bundle, member) {
+                *value = Value::Null;
+            } else if !dated(text) {
+                let date = key.to_ascii_lowercase().ends_with("date")
+                    || format_of(bundle, member) == Some("date");
+                let drawn = draw(if date { "date" } else { "date-time" }, draws);
+                if drawn.is_string() {
+                    *value = drawn;
+                }
+            }
+        } else if (link_named(leaf_of(key)) || url_formatted(bundle, member)) && !linked {
+            if admits_null(bundle, member) {
+                *value = Value::Null;
+            } else if let Some(example) = text_examples(bundle, member).into_iter().next() {
+                *value = Value::String(example);
+            } else {
+                let drawn = draw("uri", draws);
+                if drawn.is_string() {
+                    *value = drawn;
+                }
+            }
+        }
+    }
+}
+
+/// `schema` and the branches of its union, through `$ref`s.
+fn whole_of<'a>(bundle: &'a Bundle, schema: &'a Value) -> Vec<&'a Value> {
+    let s = bundle.resolve(schema);
+    let mut parts = vec![s];
+    for key in ["anyOf", "oneOf", "allOf"] {
+        parts.extend(
+            s.get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|b| bundle.resolve(b)),
+        );
+    }
+    parts
+}
+
+/// Whether `text` opens as a date (`2026-01-02`).
+fn dated(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.len() >= 10
+        && b.iter().take(4).all(u8::is_ascii_digit)
+        && b.get(4) == Some(&b'-')
+        && b.get(7) == Some(&b'-')
+}
+
+/// The `format` of `schema` (through `$ref`s and a union's branches).
+fn format_of<'a>(bundle: &'a Bundle, schema: &'a Value) -> Option<&'a str> {
+    let s = bundle.resolve(schema);
+    s.get("format").and_then(Value::as_str).or_else(|| {
+        ["anyOf", "oneOf"]
+            .iter()
+            .filter_map(|k| s.get(*k).and_then(Value::as_array))
+            .flatten()
+            .find_map(|b| bundle.resolve(b).get("format").and_then(Value::as_str))
+    })
+}
+
+/// Whether `schema` is a string in a URL format.
+fn url_formatted(bundle: &Bundle, schema: &Value) -> bool {
+    format_of(bundle, schema).is_some_and(|f| URL_FORMATS.contains(&f))
 }
 
 /// The item schema of list `schema` (through `$ref`s and a nullable `anyOf`/`oneOf`).
@@ -833,13 +1227,15 @@ fn free_text_schema(
     path: &str,
     schema: &Value,
     resolved: &dyn Fn(&str) -> bool,
+    read: bool,
+    persona: &str,
 ) -> Option<Value> {
     fn prune(
         bundle: &Bundle,
         path: &str,
         schema: &Value,
         depth: usize,
-        resolved: &dyn Fn(&str) -> bool,
+        (resolved, read, persona): Asking<'_>,
     ) -> Option<Value> {
         if depth > FREE_TEXT_DEPTH {
             return None;
@@ -858,7 +1254,7 @@ fn free_text_schema(
                 if s.contains_key("properties") {
                     return None;
                 }
-                let inner = prune(bundle, path, only, depth + 1, resolved)?;
+                let inner = prune(bundle, path, only, depth + 1, (resolved, read, persona))?;
                 return Some(match nullable || shapes.len() < branches.len() {
                     true => json!({"anyOf": [inner, {"type": "null"}]}),
                     false => inner,
@@ -869,11 +1265,18 @@ fn free_text_schema(
         let kept: Map<String, Value> = members
             .iter()
             .filter(|(name, member)| {
-                free_text_in(bundle, &format!("{path}.{name}"), member, resolved)
+                free_text_in(
+                    bundle,
+                    &format!("{path}.{name}"),
+                    member,
+                    resolved,
+                    read,
+                    persona,
+                )
             })
             .map(|(name, member)| {
                 let below = format!("{path}.{name}");
-                let member = prune(bundle, &below, member, depth + 1, resolved)
+                let member = prune(bundle, &below, member, depth + 1, (resolved, read, persona))
                     .unwrap_or_else(|| member.clone());
                 (name.clone(), member)
             })
@@ -894,7 +1297,7 @@ fn free_text_schema(
             false => object,
         })
     }
-    prune(bundle, path, schema, 0, resolved)
+    prune(bundle, path, schema, 0, (resolved, read, persona))
 }
 
 /// The members of `schema` when it is an object [`free_text_schema`] pruned (alone or
@@ -934,11 +1337,19 @@ fn keep_asked(text: &mut Map<String, Value>, only_text: &Value) {
 /// Lays `whole` (the faker's draw of a pruned object) under `over` (the model's free
 /// text of it, its schema `only_text`): each member `over` lacks is set, and a member
 /// pruned in turn takes what it lacks the same way. A member kept whole (a union of
-/// several shapes) is the model's as written, never mixed with another draw.
-fn lay_under(over: &mut Map<String, Value>, whole: Map<String, Value>, only_text: &Value) {
+/// several shapes) is the model's as written, never mixed with another draw. On a
+/// `read`, a member the model was asked for and left out (an optional one: it was
+/// required of it otherwise) stays out, never a faker word or placeholder link.
+fn lay_under(
+    over: &mut Map<String, Value>,
+    whole: Map<String, Value>,
+    only_text: &Value,
+    read: bool,
+) {
     let members = pruned_members(only_text);
     for (name, value) in whole {
         match (over.get_mut(&name), value) {
+            (None, _) if read && members.is_some_and(|m| m.contains_key(&name)) => {}
             (None, value) => {
                 over.insert(name, value);
             }
@@ -946,7 +1357,7 @@ fn lay_under(over: &mut Map<String, Value>, whole: Map<String, Value>, only_text
                 if let Some(schema) = members.and_then(|m| m.get(&name))
                     && pruned_members(schema).is_some()
                 {
-                    lay_under(held, below, schema);
+                    lay_under(held, below, schema, read);
                 }
             }
             _ => {}
@@ -1141,6 +1552,14 @@ fn initial_state(value: &Value) -> bool {
     let squeezed = squeeze(text);
     INITIAL_STATES.contains(&squeezed.as_str())
         || INITIAL_PREFIXES.iter().any(|p| squeezed.starts_with(p))
+}
+
+/// Whether `persona` (lower case) names member `member`: speaks of it as written, or
+/// with its `_`s and camel-case humps as spaces, in the singular or the plural
+/// (`node_id values`, `node ids`).
+#[must_use]
+pub fn persona_names(persona: &str, member: &str) -> bool {
+    !persona.is_empty() && (spoken_of(persona, member) || spoken_of(persona, &format!("{member}s")))
 }
 
 /// Whether `persona` (lower case) speaks of `word` (a member's name or an enum value):
@@ -1348,6 +1767,38 @@ impl Engine {
         }
         kept
     }
+}
+
+/// Whether member `name` (`schema`, through `$ref`s and a union's branches) holds a
+/// moment: named as one (`closed_at`), or a string in the `date` or `date-time` format.
+fn moment(bundle: &Bundle, name: &str, schema: &Value) -> bool {
+    if crate::faker::timestamp_field(mb_mcm::leaf_member(name)) {
+        return true;
+    }
+    let s = bundle.resolve(schema);
+    let dated = |part: &Value| {
+        matches!(
+            bundle.resolve(part).get("format").and_then(Value::as_str),
+            Some("date" | "date-time")
+        )
+    };
+    dated(s)
+        || ["anyOf", "oneOf"].iter().any(|k| {
+            s.get(*k)
+                .and_then(Value::as_array)
+                .is_some_and(|bs| bs.iter().any(dated))
+        })
+}
+
+/// Whether `schema` (a member's, [`object_shape`]) is another record: an object that
+/// requires an `id` or `uri` of its own.
+fn own_identity(bundle: &Bundle, schema: &Value) -> bool {
+    let shape = object_shape(bundle, schema);
+    shape.get("properties").is_some()
+        && shape
+            .get("required")
+            .and_then(Value::as_array)
+            .is_some_and(|r| r.iter().any(|n| n == "id" || n == "uri"))
 }
 
 /// The one object shape of `schema` (a member's): through `$ref`s and a union or
