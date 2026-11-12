@@ -47,14 +47,29 @@ async fn run(invocation: Invocation) -> ExitCode {
             token,
             workspace,
             cmd,
-        } => return exit_code(workflow(&admin_url, token.as_deref(), &workspace, cmd).await),
+        } => {
+            let admin_url = match admin_url {
+                Some(url) => url,
+                None => {
+                    let cwd = std::env::current_dir().unwrap_or_default();
+                    daemon::project_admin_url(&mockingbird::config::default_state_dir(), None, &cwd)
+                        .await
+                }
+            };
+            return exit_code(workflow(&admin_url, token.as_deref(), &workspace, cmd).await);
+        }
         Invocation::Cli(cli) => *cli,
         _ => {
             eprintln!("error: unsupported command");
             return ExitCode::from(1);
         }
     };
-    let admin_url = cli.resolved_admin_url();
+    // Only commands that talk to a server look for one.
+    let admin_url = if cli.uses_admin_url() {
+        cli.resolved_admin_url().await
+    } else {
+        String::new()
+    };
     let result = match cli.cmd {
         Command::Run(args) => {
             return match mockingbird::run::run(args).await {

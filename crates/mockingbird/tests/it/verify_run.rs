@@ -1250,3 +1250,206 @@ fn mcp_verify_run_serves_the_app_and_stops_it() {
     assert!(exited, "the MCP server did not exit after stdin closed");
     assert!(gone(&pid), "the app outlived the MCP client");
 }
+
+/// Stops the background server of folder `dir` (its default state
+/// directory) when dropped.
+struct StopServer(std::path::PathBuf);
+
+impl Drop for StopServer {
+    fn drop(&mut self) {
+        let _ = mockingbird(&self.0).args(["server", "stop"]).output();
+    }
+}
+
+/// A Mockingbird server of another project, answering `/readyz` on its own
+/// port.
+async fn foreign_server() -> wiremock::MockServer {
+    use wiremock::matchers::path;
+    let foreign = wiremock::MockServer::builder().start().await;
+    wiremock::Mock::given(path("/readyz"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ready",
+                "role": "all",
+                "config": "/elsewhere/other/mockingbird.yaml",
+                "dir": "/elsewhere/other",
+            })),
+        )
+        .mount(&foreign)
+        .await;
+    foreign
+}
+
+/// A config serving `orders` for `api.orders.test` whose admin port is
+/// `admin` and whose other ports are free.
+fn write_config_on(dir: &Path, admin: u16) {
+    std::fs::write(
+        dir.join("mockingbird.yaml"),
+        format!(
+            "storage:\n  url: \"sqlite::memory:\"\nserver:\n  port: {}\n  admin_port: {admin}\n  grpc_port: {}\nproxy:\n  port: {}\n  unmapped: block\nmocks:\n  orders:\n    contract: {}\n    route_prefix: /\n    hosts: [api.orders.test]\n",
+            free_port(),
+            free_port(),
+            free_port(),
+            fixture("openapi/orders-3.0.yaml").display()
+        ),
+    )
+    .unwrap();
+}
+
+/// `server start` of the config in `dir` with `--proxy`, extra arguments
+/// `extra` and environment `env`; returns its JSON once the server runs
+/// and logged the admin port `admin`.
+fn start(
+    dir: &Path,
+    extra: &[String],
+    env: &[(&str, String)],
+    admin: u16,
+) -> Result<Value, String> {
+    let mut cmd = mockingbird(dir);
+    cmd.args([
+        "server",
+        "start",
+        "-c",
+        "mockingbird.yaml",
+        "--offline",
+        "--proxy",
+        "--no-watch",
+    ])
+    .args(extra)
+    .timeout(std::time::Duration::from_secs(90));
+    for (name, value) in env {
+        cmd.env(name, value);
+    }
+    let out = cmd.output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        let _ = mockingbird(dir).args(["server", "stop"]).output();
+        return Err(format!("{stderr}{}", String::from_utf8_lossy(&out.stdout)));
+    }
+    if let Err(e) = logged_admin(&dir.join(".mockingbird/server.log"), admin) {
+        let _ = mockingbird(dir).args(["server", "stop"]).output();
+        return Err(e);
+    }
+    Ok(serde_json::from_slice(&out.stdout).unwrap())
+}
+
+/// `run`, `verify --run` and `mocks list` from `dir` all reach this
+/// project's background server, never start a second one, and never use
+/// the other project's server on the config's admin port.
+fn uses_the_projects_server(dir: &Path) {
+    let curl = "curl -sSf -o /dev/null -w '%{http_code}' https://api.orders.test/orders";
+    let run = mockingbird(dir)
+        .args(["run", "--", "sh", "-c", curl])
+        .timeout(std::time::Duration::from_secs(90))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(0), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "200", "{stderr}");
+    assert!(
+        !stderr.contains("already runs") && !stderr.contains("server started"),
+        "{stderr}"
+    );
+
+    let out = mockingbird(dir)
+        .args(["verify", "--format", "json", "--run", curl])
+        .timeout(std::time::Duration::from_secs(120))
+        .output()
+        .unwrap();
+    let json: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stderr)));
+    assert_eq!(out.status.code(), Some(0), "{json:#}");
+    assert_eq!(json["window"]["server_started"], false, "{json:#}");
+
+    // A client subcommand, and a workflow one (parsed apart from them).
+    for (args, says) in [
+        (&["mocks", "list"][..], "\"orders\""),
+        (&["contracts", "list", "orders"][..], "\"active\""),
+    ] {
+        let out = mockingbird(dir).args(args).output().unwrap();
+        assert!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains(says),
+            "{args:?}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// The field trial: another project's server took the admin port the
+/// config names, so the project's server is started on ports given to
+/// `server start`. Those are written into the config, and `run`, `verify
+/// --run` and the client subcommands then use that server.
+#[tokio::test(flavor = "multi_thread")]
+async fn ports_given_to_server_start_are_written_and_used_by_run_verify_and_the_client() {
+    let foreign = foreign_server().await;
+    let taken = foreign.address().port();
+    tokio::task::spawn_blocking(move || {
+        let dir = tempfile::tempdir().unwrap();
+        write_config_on(dir.path(), taken);
+        // The config's admin port is taken, and set: the start refuses.
+        let refused = start(dir.path(), &[], &[], taken).unwrap_err();
+        assert!(refused.contains("other/mockingbird.yaml"), "{refused}");
+
+        let _stop = StopServer(dir.path().to_path_buf());
+        let (out, admin) = on_free_ports(|| {
+            let (port, admin, grpc) = (free_port(), free_port(), free_port());
+            let flags = [
+                ("--port", port),
+                ("--admin-port", admin),
+                ("--grpc-port", grpc),
+            ]
+            .iter()
+            .flat_map(|(flag, port)| [(*flag).to_owned(), port.to_string()])
+            .collect::<Vec<_>>();
+            start(dir.path(), &flags, &[], admin).map(|out| (out, admin))
+        });
+        assert!(
+            out["note"]
+                .as_str()
+                .is_some_and(|n| n.contains(&format!("server.admin_port {admin} (was {taken})"))),
+            "{out:#}"
+        );
+        assert!(
+            out["ports_written"]["ports"].as_array().is_some_and(|p| p
+                .iter()
+                .any(|p| p["key"] == "server.admin_port"
+                    && p["was"] == taken
+                    && p["port"] == admin)),
+            "{out:#}"
+        );
+        let text = std::fs::read_to_string(dir.path().join("mockingbird.yaml")).unwrap();
+        assert!(text.contains(&format!("admin_port: {admin}")), "{text}");
+        uses_the_projects_server(dir.path());
+    })
+    .await
+    .unwrap();
+}
+
+/// A background server started on another admin port than the config's
+/// (here by `MB_ADMIN_PORT`, which is not written into the config) is
+/// found from the project's state directory.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_projects_recorded_server_is_used_wherever_it_listens() {
+    let foreign = foreign_server().await;
+    let taken = foreign.address().port();
+    tokio::task::spawn_blocking(move || {
+        let dir = tempfile::tempdir().unwrap();
+        write_config_on(dir.path(), taken);
+        let _stop = StopServer(dir.path().to_path_buf());
+        on_free_ports(|| {
+            let admin = free_port();
+            start(
+                dir.path(),
+                &[],
+                &[("MB_ADMIN_PORT", admin.to_string())],
+                admin,
+            )
+        });
+        let text = std::fs::read_to_string(dir.path().join("mockingbird.yaml")).unwrap();
+        assert!(text.contains(&format!("admin_port: {taken}")), "{text}");
+        uses_the_projects_server(dir.path());
+    })
+    .await
+    .unwrap();
+}

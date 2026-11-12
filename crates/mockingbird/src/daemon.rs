@@ -60,7 +60,9 @@ pub struct StartArgs {
     /// With `-c`, a port the config leaves at its default that is taken is
     /// replaced by a free one, written into the config; a port set by a
     /// flag, `MB_*` variable or config key is kept, and the start fails
-    /// when it is taken.
+    /// when it is taken. A port given by this flag (or `--admin-port`,
+    /// `--grpc-port`) that differs from the config is written into it, so
+    /// that the config and the running server agree.
     #[arg(long)]
     pub port: Option<u16>,
     /// Admin API port [default: the config's `server.admin_port`, else
@@ -432,6 +434,39 @@ fn write_ports(path: &Path, chosen: &[ChosenPort]) -> anyhow::Result<Value> {
     Ok(json!({"written": path, "backup": backup, "ports": ports}))
 }
 
+/// For `server start -c`: each port given by a flag (`--port`,
+/// `--admin-port`, `--grpc-port`; the MCP `start_server` arguments) that
+/// differs from what the config file says, as a [`ChosenPort`] whose
+/// `busy` is the config's port. [`write_ports`] records them in the config,
+/// so that the config and the running server never disagree: `run`,
+/// `verify --run`, `proxy env` and the client subcommands, which read the
+/// ports from the config, then find this server.
+///
+/// # Errors
+///
+/// The config does not load.
+fn given_ports(args: &StartArgs) -> anyhow::Result<Vec<ChosenPort>> {
+    let Some(path) = &args.config else {
+        return Ok(Vec::new());
+    };
+    let server = file_config::load(path)?.server;
+    Ok([
+        ("server.port", args.port, server.port),
+        ("server.admin_port", args.admin_port, server.admin_port),
+        ("server.grpc_port", args.grpc_port, server.grpc_port),
+    ]
+    .into_iter()
+    .filter_map(|(key, flag, file)| {
+        flag.filter(|&p| p != 0 && p != file)
+            .map(|port| ChosenPort {
+                key,
+                busy: file,
+                port,
+            })
+    })
+    .collect())
+}
+
 /// `port` with `chosen`'s replacement for `key` applied.
 fn chosen_or(chosen: &[ChosenPort], key: &str, port: u16) -> u16 {
     chosen
@@ -627,11 +662,26 @@ pub async fn start_child(args: &StartArgs) -> anyhow::Result<(Value, std::proces
         error.holder = holder(error.address).await;
         return Err(error.into());
     }
-    // Only once every port is known to be free: a failed start leaves the
-    // config as it was.
-    let ports_chosen = match &args.config {
-        Some(path) if !chosen.is_empty() => write_ports(path, &chosen)?,
-        _ => Value::Null,
+    // Only once every port is known to be free: a start that fails on a
+    // port leaves the config as it was.
+    let given = given_ports(args)?;
+    let (ports_chosen, ports_given) = match &args.config {
+        Some(path) if !chosen.is_empty() || !given.is_empty() => {
+            let all: Vec<ChosenPort> = chosen.iter().chain(&given).copied().collect();
+            let written = write_ports(path, &all)?;
+            let part = |ports: &[ChosenPort], name: &str| {
+                if ports.is_empty() {
+                    return Value::Null;
+                }
+                let entries: Vec<Value> = ports
+                    .iter()
+                    .map(|c| json!({"key": c.key, name: c.busy, "port": c.port}))
+                    .collect();
+                json!({"written": written["written"], "backup": written["backup"], "ports": entries})
+            };
+            (part(&chosen, "busy"), part(&given, "was"))
+        }
+        _ => (Value::Null, Value::Null),
     };
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let exe = std::env::current_exe().context("locating the mockingbird binary")?;
@@ -710,6 +760,18 @@ pub async fn start_child(args: &StartArgs) -> anyhow::Result<(Value, std::proces
     }
     if !ports_chosen.is_null() {
         info["ports_chosen"] = ports_chosen;
+    }
+    if !ports_given.is_null() {
+        let set: Vec<String> = given
+            .iter()
+            .map(|c| format!("{} {} (was {})", c.key, c.port, c.busy))
+            .collect();
+        info["note"] = json!(format!(
+            "the ports given here differ from the config, so they were written into {}: {}; run, verify --run, proxy env and the client commands read them from there",
+            ports_given["written"].as_str().unwrap_or_default(),
+            set.join(", ")
+        ));
+        info["ports_written"] = ports_given;
     }
     std::fs::write(info_file(dir), serde_json::to_vec_pretty(&info)?)?;
 
@@ -980,13 +1042,98 @@ pub fn resolve_state_dir(state_dir: &Path, config: Option<&Path>, cwd: &Path) ->
         .unwrap_or_else(|| config_dir.join(state_dir))
 }
 
-/// The admin URL the background server of state directory `dir` recorded,
-/// while that server runs.
+/// A running background server, as its state directory records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedServer {
+    /// Its Admin API URL.
+    pub admin: String,
+    /// Its data plane URL, when recorded.
+    pub data_plane: Option<String>,
+    /// The config it was started with (absolute; `None` without one).
+    pub config: Option<PathBuf>,
+}
+
+/// The background server of the project in `cwd` that the state directory
+/// `state_dir` records (found as [`resolve_state_dir`] finds it for
+/// `config`), while its process runs. With `config`, only a server started
+/// with that same config counts; without one, the server recorded in
+/// `<cwd>/<state_dir>`, whatever it serves.
+///
+/// This is the first place the MCP server, `run`, `verify --run` and the
+/// client subcommands look for a project's server ([`project_admin_url`]):
+/// a server started on other ports than the config says (flags, `MB_*`
+/// variables) is still found.
 #[must_use]
-pub fn running_admin(dir: &Path) -> Option<String> {
-    read_pid(dir).filter(|&pid| alive(pid))?;
-    let info: Value = serde_json::from_slice(&std::fs::read(info_file(dir)).ok()?).ok()?;
-    info["admin"].as_str().map(String::from)
+pub fn recorded_server(
+    state_dir: &Path,
+    config: Option<&Path>,
+    cwd: &Path,
+) -> Option<RecordedServer> {
+    let dir = resolve_state_dir(state_dir, config, cwd);
+    read_pid(&dir).filter(|&pid| alive(pid))?;
+    let info: Value = serde_json::from_slice(&std::fs::read(info_file(&dir)).ok()?).ok()?;
+    // A relative `-c` was relative to the folder `server start` ran in:
+    // the one holding the state directory, else this one.
+    let base = if state_dir.is_absolute() {
+        cwd
+    } else {
+        dir.ancestors()
+            .nth(state_dir.components().count())
+            .unwrap_or(cwd)
+    };
+    let recorded = info["config"].as_str().map(|c| {
+        [base, cwd]
+            .iter()
+            .map(|b| same_file_key(&b.join(c)))
+            .find(|p| p.exists())
+            .unwrap_or_else(|| same_file_key(&base.join(c)))
+    });
+    if let Some(config) = config
+        && recorded.as_ref() != Some(&same_file_key(&cwd.join(config)))
+    {
+        return None;
+    }
+    Some(RecordedServer {
+        admin: info["admin"].as_str()?.to_owned(),
+        data_plane: info["data_plane"].as_str().map(String::from),
+        config: recorded,
+    })
+}
+
+/// [`recorded_server`], unless the server answering at its admin URL says
+/// it was started with another config (its process ended and another
+/// server took the port): when `/readyz` does not say (an older server, or
+/// auth hides it) the record is trusted.
+pub async fn project_server(
+    state_dir: &Path,
+    config: Option<&Path>,
+    cwd: &Path,
+) -> Option<RecordedServer> {
+    let server = recorded_server(state_dir, config, cwd)?;
+    let (_, _, body) = readyz(&server.admin).await;
+    if body["dir"].is_string() {
+        let same = match (&server.config, body["config"].as_str()) {
+            (Some(config), Some(_)) => started_with(&body, config),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            return None;
+        }
+    }
+    Some(server)
+}
+
+/// The Admin API of the project in `cwd` with `config` (else
+/// `./mockingbird.yaml`), as `run`, `verify --run` and the client
+/// subcommands find it when no `--admin-url`/`MB_ADMIN_URL` names one:
+/// its running background server ([`project_server`]), else the admin
+/// listener the config describes ([`crate::client::resolve_admin_url`]).
+pub async fn project_admin_url(state_dir: &Path, config: Option<&Path>, cwd: &Path) -> String {
+    match project_server(state_dir, config, cwd).await {
+        Some(server) => server.admin,
+        None => crate::client::resolve_admin_url(None, config),
+    }
 }
 
 /// `path` canonicalized when it exists, else made absolute: for comparing
@@ -1393,5 +1540,136 @@ mod tests {
         assert_eq!(describe_holder(&json!({"status": "ok"})), None);
         assert_eq!(describe_holder(&json!({"status": 404})), None);
         assert_eq!(describe_holder(&Value::Null), None);
+    }
+
+    #[test]
+    fn ports_given_that_differ_from_the_config_are_written_into_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("mockingbird.yaml");
+        std::fs::write(&config, "# header\nserver:\n  admin_port: 9091\n").unwrap();
+        let mut args = start_args(&config);
+        args.port = Some(8080); // the config's (default) port: kept as is
+        args.admin_port = Some(19091);
+        args.grpc_port = Some(15052);
+        let given = given_ports(&args).unwrap();
+        assert_eq!(
+            given,
+            vec![
+                ChosenPort {
+                    key: "server.admin_port",
+                    busy: 9091,
+                    port: 19091
+                },
+                ChosenPort {
+                    key: "server.grpc_port",
+                    busy: 50051,
+                    port: 15052
+                },
+            ]
+        );
+        write_ports(&config, &given).unwrap();
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(text.starts_with("# header\n"), "{text}");
+        let cfg = file_config::load(&config).unwrap();
+        assert_eq!(
+            (cfg.server.port, cfg.server.admin_port, cfg.server.grpc_port),
+            (8080, 19091, 15052)
+        );
+        // Now the config says so: nothing more to write.
+        assert!(given_ports(&args).unwrap().is_empty());
+        args.config = None;
+        assert!(given_ports(&args).unwrap().is_empty());
+    }
+
+    /// Writes a background server record into `<dir>/.mockingbird` for
+    /// process `pid`, started with `config` and on admin URL `admin`.
+    fn record(dir: &Path, pid: u32, config: Value, admin: &str) {
+        let state = dir.join(DEFAULT_STATE_DIR);
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(pid_file(&state), pid.to_string()).unwrap();
+        std::fs::write(
+            info_file(&state),
+            json!({"pid": pid, "admin": admin, "data_plane": "http://127.0.0.1:18081", "config": config})
+                .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_projects_recorded_server_is_found_wherever_it_listens() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("mockingbird.yaml");
+        std::fs::write(&config, "server:\n  admin_port: 9091\n").unwrap();
+        let rel = Path::new(DEFAULT_STATE_DIR);
+        let me = std::process::id();
+        // Recorded relative to the folder it was started in.
+        record(
+            dir.path(),
+            me,
+            json!("mockingbird.yaml"),
+            "http://127.0.0.1:19091",
+        );
+        let found = recorded_server(rel, Some(Path::new("mockingbird.yaml")), dir.path()).unwrap();
+        assert_eq!(found.admin, "http://127.0.0.1:19091");
+        assert_eq!(found.data_plane.as_deref(), Some("http://127.0.0.1:18081"));
+        assert_eq!(found.config, Some(same_file_key(&config)));
+        // From a subfolder, by an absolute config path.
+        let sub = dir.path().join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert!(recorded_server(rel, Some(&config), &sub).is_some());
+        // Without a config: the server recorded for this folder.
+        assert!(recorded_server(rel, None, dir.path()).is_some());
+        // Another config of the same folder is not that server's.
+        assert_eq!(
+            recorded_server(rel, Some(Path::new("other.yaml")), dir.path()),
+            None
+        );
+        // A server started without a config is not the config's.
+        record(dir.path(), me, Value::Null, "http://127.0.0.1:19091");
+        assert_eq!(
+            recorded_server(rel, Some(Path::new("mockingbird.yaml")), dir.path()),
+            None
+        );
+        // A record whose process ended counts for nothing.
+        record(
+            dir.path(),
+            99_999_999,
+            json!(config),
+            "http://127.0.0.1:19091",
+        );
+        assert_eq!(recorded_server(rel, None, dir.path()), None);
+    }
+
+    #[tokio::test]
+    async fn a_recorded_server_whose_port_another_server_took_is_not_used() {
+        use wiremock::matchers::path;
+        let admin = wiremock::MockServer::start().await;
+        wiremock::Mock::given(path("/readyz"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                "status": "ready", "role": "all",
+                "config": "/elsewhere/other/mockingbird.yaml", "dir": "/elsewhere/other",
+            })))
+            .mount(&admin)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("mockingbird.yaml");
+        std::fs::write(&config, "").unwrap();
+        record(dir.path(), std::process::id(), json!(config), &admin.uri());
+        let rel = Path::new(DEFAULT_STATE_DIR);
+        assert!(recorded_server(rel, Some(&config), dir.path()).is_some());
+        assert_eq!(project_server(rel, Some(&config), dir.path()).await, None);
+        // Not answering (or not saying whose it is): the record is trusted.
+        record(
+            dir.path(),
+            std::process::id(),
+            json!(config),
+            "http://127.0.0.1:1",
+        );
+        assert_eq!(
+            project_server(rel, Some(&config), dir.path())
+                .await
+                .map(|s| s.admin),
+            Some("http://127.0.0.1:1".to_owned())
+        );
     }
 }

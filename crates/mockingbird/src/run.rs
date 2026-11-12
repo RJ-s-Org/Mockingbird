@@ -1,6 +1,7 @@
 //! `mockingbird run -- <command…>`: runs a command against the mocks. Starts
 //! the server (with its proxy) unless the config's own server already
-//! answers, waits until it is ready, runs the command with the proxy
+//! answers (its running background server, found from the state directory
+//! wherever it listens, else the one on the config's admin port), waits until it is ready, runs the command with the proxy
 //! environment for every runtime ([`crate::proxy::env`]), stops what it
 //! started and exits with the command's exit code. The command only ever
 //! gets the config's own proxy ([`crate::proxy::owner`]): when the server
@@ -174,11 +175,24 @@ pub async fn open(args: &RunArgs) -> anyhow::Result<Session> {
         }
     };
     let server_ip = reach(cfg.server.host);
-    let mut admin_url = format!(
-        "http://{}",
-        SocketAddr::new(server_ip, cfg.server.admin_port)
+    // The project's running background server first: it may run on other
+    // ports than the config says (started with flags or `MB_*` variables),
+    // and another server may hold the config's.
+    let cwd = std::env::current_dir().context("reading the working folder")?;
+    let recorded = daemon::project_server(&args.state_dir, Some(&config), &cwd).await;
+    let mut admin_url = recorded.as_ref().map_or_else(
+        || {
+            format!(
+                "http://{}",
+                SocketAddr::new(server_ip, cfg.server.admin_port)
+            )
+        },
+        |s| s.admin.clone(),
     );
-    let data_url = format!("http://{}", SocketAddr::new(server_ip, cfg.server.port));
+    let data_url = recorded
+        .as_ref()
+        .and_then(|s| s.data_plane.clone())
+        .unwrap_or_else(|| format!("http://{}", SocketAddr::new(server_ip, cfg.server.port)));
 
     let mut started = Started::default();
     let result = prepare(args, &config, &cfg, &admin_url, &data_url, &mut started).await;

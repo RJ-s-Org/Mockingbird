@@ -194,7 +194,9 @@ mockingbird verify -c mockingbird.yaml --run "bundle exec rspec spec/checkout_sp
 ```
 
 - **How it runs.** As `mockingbird run` does: the config's server is used
-  when it answers, else one is started for the run (`--offline`,
+  when it answers (the project's background server recorded in its state
+  directory, wherever it listens, else the one on the config's admin port
+  when it was started with this config), else one is started for the run (`--offline`,
   `--state-dir`, default `$MB_STATE_DIR` else `.mockingbird`) and stopped
   after it; the command gets the proxy environment and the CA preloads for
   every runtime. It runs with `sh -c` (`cmd /C`, the line passed as
