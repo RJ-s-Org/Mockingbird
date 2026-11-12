@@ -3506,9 +3506,12 @@ fn reflect(
     let body = match op.kind {
         OperationKind::Query => match ctx.target {
             // A faker's text is no restatement: the stored record answers.
-            Some(target) if ctx.restates.is_some() && !from_llm => {
-                overlay_target(validator, target, body)
-            }
+            Some(target) if ctx.restates.is_some() && !from_llm => overlay_target(
+                validator,
+                target,
+                body,
+                op.protocol == mb_mcm::Protocol::Graphql,
+            ),
             Some(target) if ctx.restates.is_some() => restate(validator, target, body),
             Some(target) if ahead => caught_up(validator, body, target, ctx.earlier_own_body),
             Some(target) => overlay_target(
