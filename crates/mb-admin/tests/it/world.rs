@@ -1595,9 +1595,10 @@ async fn patch_world(
 }
 
 /// The root pointer `""` says a create's answer is itself the record: the
-/// write stores it, refusing nothing, and the effective view shows it.
+/// write stores it, refusing nothing, and the effective view shows it. As a
+/// `records` pointer on an answer that is no array, it parses but is refused.
 #[tokio::test]
-async fn put_world_accepts_a_root_answer_record() {
+async fn put_world_takes_a_root_record_and_refuses_root_records_on_an_object() {
     let (_st, app, uri, _t) = widgets_v1().await;
     let doc = json!({"operations": {"createWidget": {"answer": {"record": ""}}}});
     let result = put_world(&app, &uri, &doc).await;
@@ -1614,8 +1615,9 @@ async fn put_world_accepts_a_root_answer_record() {
         view["world"]["operations"]["createWidget"]["answer"]["record"], "",
         "{view}"
     );
-    // The same pointer on a list is no record pointer: still refused.
-    let (status, ctype, body) = call(
+    // As a `records` pointer, the root says the answer is the array of records:
+    // it parses, but this answer is one widget, so validation refuses the entry.
+    let (status, _, body) = call(
         &app,
         Method::PUT,
         &uri,
@@ -1626,12 +1628,12 @@ async fn put_world_accepts_a_root_answer_record() {
             .into_bytes(),
     )
     .await;
-    assert_eq!(status, 422, "{body}");
-    assert_eq!(ctype, "application/problem+json");
+    assert_eq!(status, 201, "{body}");
     assert_eq!(
-        body["path"], "/operations/createWidget/answer/records",
+        body["refused"][0]["path"], "/operations/createWidget/answer/records",
         "{body}"
     );
+    assert_eq!(body["refused"][0]["code"], "invalid", "{body}");
 }
 
 #[tokio::test]

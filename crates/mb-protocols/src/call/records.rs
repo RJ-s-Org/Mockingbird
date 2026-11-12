@@ -36,7 +36,7 @@
 //!   guessed one.
 
 use mb_engine::headers::{IdentityHeader as Header, IdentityHeaderKind};
-use mb_mcm::world::IdentityHeader;
+use mb_mcm::world::{IdentityHeader, Pointer};
 
 use super::*;
 
@@ -189,8 +189,161 @@ pub(super) fn created(
         .unwrap_or_default()
 }
 
+/// A bulk create's `request.records` pointer, and its `answer.records` one when the
+/// description says it too.
+fn bulk_pointers<'a>(
+    rt: &'a MockRuntime,
+    op: &Operation,
+) -> Option<(&'a Pointer, Option<&'a Pointer>)> {
+    let desc = rt.described().op(&op.id)?;
+    let sent = desc.request.as_ref()?.records.as_ref()?;
+    let answered = desc.answer.as_ref().and_then(|a| a.records.as_ref());
+    Some((sent, answered))
+}
+
+/// The records `call`, a bulk create's (see [`bulk_pointers`]), sends at
+/// `request.records`; empty when it sends none.
+fn sent_records(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Vec<Value> {
+    let Some((sent, _)) = bulk_pointers(rt, op) else {
+        return Vec::new();
+    };
+    items(
+        call.body.as_ref().map(|b| request_record(rt, op, b)),
+        Some(sent),
+    )
+}
+
+/// A bulk create described with both `request.records` and `answer.records` answers
+/// one record per record its request sends, in order: the answer's array is cut to as
+/// many object items as the request sends, and one it lacks is a copy of its last
+/// object item without an identity (an empty object when it holds none), for
+/// [`mint_created`] to give one and [`set_each`] to set. Nothing changes when the
+/// request sends no record or the answer holds no array there.
+pub(super) fn align_bulk(
+    rt: &MockRuntime,
+    (op, t, call): (&Operation, &str, &OperationCall),
+    generated: &mut GeneratedResponse,
+) {
+    let Some((_, Some(at))) = bulk_pointers(rt, op) else {
+        return;
+    };
+    let wanted = sent_records(rt, op, call).len();
+    if wanted == 0 {
+        return;
+    }
+    let field = identity_member(rt, op, t);
+    let Some(Value::Array(answered)) = generated
+        .body
+        .as_mut()
+        .and_then(|b| b.pointer_mut(at.as_str()))
+    else {
+        return;
+    };
+    answered.retain(Value::is_object);
+    answered.truncate(wanted);
+    let mut copy = answered
+        .last()
+        .cloned()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    if let Value::Object(members) = &mut copy {
+        members.remove(field);
+    }
+    while answered.len() < wanted {
+        answered.push(copy.clone());
+    }
+}
+
+/// Applies a bulk create's described initial state and `set` to each record it makes,
+/// as a create's on its one record: the `set` evaluated once per record,
+/// `request.body` the record its request sends at the same place. The records are the
+/// answer's at `answer.records` ([`align_bulk`] made them one per record sent), else
+/// `minted`, the request's own ([`mint_created`]), which are stored as they are.
+///
+/// A `set` that gives a record another identity is checked as a single create's is:
+/// an identity the session holds in the create's collection answers that record, as
+/// an idempotent create, and one held elsewhere, or given to an earlier record of the
+/// same call (which that record keeps), is answered as set. Answers the places, among
+/// the object records made, of those not to be stored.
+pub(super) async fn set_each(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: &str,
+    (generated, minted): (&mut GeneratedResponse, &mut [Value]),
+) -> Vec<usize> {
+    let rt = state.rt;
+    let op = plan.op;
+    let mut unstored = Vec::new();
+    let Some((_, answered_at)) = bulk_pointers(rt, op) else {
+        return unstored;
+    };
+    let sent = sent_records(rt, op, call);
+    if sent.is_empty() {
+        return unstored;
+    }
+    let sets = super::exprs::sets(rt, &op.id);
+    let field = identity_member(rt, op, t);
+    let answered = answered_at
+        .zip(generated.body.as_mut())
+        .and_then(|(at, body)| body.pointer_mut(at.as_str()))
+        .and_then(Value::as_array_mut)
+        .filter(|a| a.iter().any(Value::is_object));
+    let made: &mut [Value] = match answered {
+        Some(answered) => answered,
+        None => minted,
+    };
+    // Each identity a record of this call is stored under, with that record.
+    let mut kept: Vec<(String, Value)> = Vec::new();
+    let records = made.iter_mut().filter(|r| r.is_object());
+    for (at, (record, request)) in records.zip(sent).enumerate() {
+        super::lifecycle::initial(rt, t, record, Some(&request));
+        let before = mb_mcm::member_at(record, field).cloned();
+        if sets {
+            let one = OperationCall {
+                body: Some(request),
+                ..call.clone()
+            };
+            plan.exprs.forget_set();
+            super::transitions::apply_on_create(state, (plan, &one), record, false).await;
+        }
+        let id = mb_mcm::member_at(record, field).and_then(id_string);
+        let moved = mb_mcm::member_at(record, field) != before.as_ref();
+        if let Some(id) = id.filter(|_| moved) {
+            if let Some((_, earlier)) = kept.iter().find(|(k, _)| *k == id) {
+                tracing::info!(
+                    mock = %rt.name,
+                    operation = %op.id,
+                    id = %log_capped(&id),
+                    "a bulk create's set repeats an identity an earlier record of the call has: not stored"
+                );
+                *record = earlier.clone();
+                unstored.push(at);
+                continue;
+            }
+            if let Some(held) = state.get(&plan.session, t, &id).await {
+                tracing::info!(
+                    mock = %rt.name,
+                    operation = %op.id,
+                    id = %log_capped(&id),
+                    "a bulk create's set names a held record: not stored over it"
+                );
+                if super::owners::in_create_collection(rt, &plan.session, op, call, &held) {
+                    *record = held.data;
+                }
+                unstored.push(at);
+                continue;
+            }
+        }
+        if let Some(id) = mb_mcm::member_at(record, field).and_then(id_string) {
+            kept.push((id, record.clone()));
+        }
+    }
+    // What a later step of the call evaluates reads the call's whole request again.
+    plan.exprs.forget_set();
+    unstored
+}
+
 /// The object items of the array at `at` in `doc`.
-fn items(doc: Option<&Value>, at: Option<&mb_mcm::world::Pointer>) -> Vec<Value> {
+fn items(doc: Option<&Value>, at: Option<&Pointer>) -> Vec<Value> {
     let Some(Value::Array(items)) = doc.zip(at).and_then(|(d, p)| d.pointer(p.as_str())) else {
         return Vec::new();
     };

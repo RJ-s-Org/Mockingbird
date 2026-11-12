@@ -293,6 +293,9 @@ struct Scope<'a, 's> {
     /// The operation whose request it reads; `None` checks no request member (a
     /// computed member is answered by whichever operation answers its record).
     op: Option<&'a Operation>,
+    /// The schema `request.body` is read against, where it is not the operation's
+    /// request body: a bulk create's `set` reads each of its `request.records`.
+    body: Option<&'a Value>,
     /// `record`: its schema and type.
     record: (Option<&'a Value>, Option<&'s str>),
     /// The type of the records `it` is bound to, or why it is not bound.
@@ -310,6 +313,7 @@ impl<'a, 's> Scope<'a, 's> {
     fn of_op(op: &'a Operation, record: (Option<&'a Value>, Option<&'s str>)) -> Self {
         Self {
             op: Some(op),
+            body: None,
             record,
             it: Err("`it` is bound only inside count(), exists(), sum() and the list macros"),
             computed: false,
@@ -469,12 +473,12 @@ impl<'a> Ctx<'a> {
             // an array whose items resolve. A refused one leaves the lookup
             // to the bundle's own record location.
             Some(d)
-                if at(&d.records, false)
+                if at(&d.records, true)
                     .filter(|s| is_array(b, s))
                     .and_then(|s| items(b, s))
                     .is_some() =>
             {
-                at(&d.records, false).and_then(|s| items(b, s))
+                at(&d.records, true).and_then(|s| items(b, s))
             }
             _ => match op.identity.as_ref().and_then(|i| i.record.as_ref()) {
                 None => Some(answer),
@@ -736,9 +740,9 @@ impl<'a> Ctx<'a> {
     }
 
     /// A pointer into `schema`, the operation's `what` schema; `records`
-    /// pointers must land on an array. With `root_ok` (a `record` pointer) the
-    /// root pointer `""` is accepted, and says the whole `what` is the record,
-    /// so its schema must be an object's.
+    /// pointers (`array`) must land on an array. With `root_ok` the root pointer
+    /// `""` is accepted, and says the whole `what` is the record (whose schema must
+    /// then be an object's) or, for `records`, the array of records.
     fn check_pointer(
         &mut self,
         schema: Option<&'a Value>,
@@ -772,7 +776,7 @@ impl<'a> Ctx<'a> {
             );
             return false;
         };
-        if root_ok && pointer.is_root() && !is_object(self.bundle, target) {
+        if root_ok && !array && pointer.is_root() && !is_object(self.bundle, target) {
             self.refuse(
                 path,
                 RefusalCode::Unresolved,
@@ -1449,7 +1453,7 @@ impl<'a> Ctx<'a> {
                         self.check_pointer(
                             body,
                             ptr,
-                            (true, false),
+                            (true, true),
                             "request body",
                             &p.join("records"),
                         )
@@ -1498,7 +1502,7 @@ impl<'a> Ctx<'a> {
                         self.check_pointer(answer, ptr, (false, true), "answer", &p.join("record"))
                     }),
                     records: a.records.clone().filter(|ptr| {
-                        self.check_pointer(answer, ptr, (true, false), "answer", &p.join("records"))
+                        self.check_pointer(answer, ptr, (true, true), "answer", &p.join("records"))
                     }),
                     long_running,
                     identity_header: a
@@ -1603,12 +1607,26 @@ impl<'a> Ctx<'a> {
                 "`set` applies to a create, update, replace or action".to_string(),
             );
         } else {
+            // A bulk create's `set` runs once per record it makes: `request.body` is
+            // each item of its `request.records`.
+            let each = out
+                .request
+                .as_ref()
+                .and_then(|r| r.records.as_ref())
+                .filter(|_| kind == Some(OpKind::Create))
+                .zip(body)
+                .and_then(|(ptr, b)| at_pointer(self.bundle, b, &ptr.tokens()))
+                .and_then(|s| items(self.bundle, s));
+            let scope = Scope {
+                body: each,
+                ..Scope::of_op(op, (record, ty))
+            };
             for (member, source) in &d.set {
                 let mp = p.join(member);
                 if !self.check_member(record, ty, member, &mp) {
                     continue;
                 }
-                if self.check_expression(&Scope::of_op(op, (record, ty)), source, &mp) {
+                if self.check_expression(&scope, source, &mp) {
                     out.set.insert(member.clone(), source.clone());
                 }
             }
@@ -2059,7 +2077,7 @@ impl<'a> Ctx<'a> {
             Root::Body | Root::Query | Root::Path | Root::Headers if scope.op.is_none() => None,
             Root::Body => {
                 let op = scope.op?;
-                let body = op.input.body.as_ref();
+                let body = scope.body.or(op.input.body.as_ref());
                 match body {
                     Some(schema) if declares_path(b, schema, &m.path) => None,
                     Some(_) => Some(format!(
@@ -2126,6 +2144,7 @@ impl<'a> Ctx<'a> {
         let record = self.record_schema(name);
         let scope = Scope {
             op: None,
+            body: None,
             record: (record, Some(name)),
             it: Err("`it` is not bound in a computed member: read the record as `record`"),
             computed: true,
@@ -3811,6 +3830,78 @@ mod tests {
         // An item of an array resolves through `items`.
         let w = world(json!({"operations": {"ListFolders": {"answer": {"record": "/folders/0"}}}}));
         assert_eq!(validate(&w, &folders()).refused, vec![]);
+    }
+
+    #[test]
+    fn validate_accepts_the_root_records_pointer_of_a_batch_create() {
+        // Postmark's `POST /email/batch`: an array of emails in, one result per
+        // email out. `""` says each whole body is the array of records, and the
+        // create's `set` reads `request.body` as each email.
+        let result = json!({"type": "array", "items": {"type": "object", "properties": {
+            "To": {"type": "string"}, "MessageID": {"type": "string"},
+            "ErrorCode": {"type": "integer"}, "Message": {"type": "string"}}}});
+        let mut b = bundle(&[("sendEmailBatch", "POST", "/email/batch", result)]);
+        let op = &mut b.operations[0];
+        op.resource_type = Some("message".into());
+        op.input.body = Some(json!({"type": "array", "items": {"type": "object",
+            "properties": {"From": {"type": "string"}, "To": {"type": "string"}}}}));
+        let w = world(json!({
+            "types": {"message": {"identity": {"member": "MessageID"}}},
+            "operations": {"sendEmailBatch": {
+                "kind": "create", "type": "message",
+                "request": {"records": ""}, "answer": {"records": ""},
+                "set": {"To": "request.body.To", "ErrorCode": "0", "Message": "'OK'"}
+            }}
+        }));
+        let v = validate(&w, &b);
+        assert_eq!(v.refused, vec![]);
+        let op = &v.applied.operations["sendEmailBatch"];
+        let records = |p: Option<&Pointer>| p.is_some_and(Pointer::is_root);
+        assert!(records(
+            op.request.as_ref().and_then(|r| r.records.as_ref())
+        ));
+        assert!(records(op.answer.as_ref().and_then(|a| a.records.as_ref())));
+        assert_eq!(op.set.len(), 3);
+
+        // A member no email has is still refused, read against the items.
+        let w = world(json!({"operations": {"sendEmailBatch": {
+            "kind": "create", "type": "message", "request": {"records": ""},
+            "set": {"To": "request.body.Nope"}
+        }}}));
+        assert_eq!(
+            paths(&validate(&w, &b)),
+            vec![("/operations/sendEmailBatch/set/To", RefusalCode::Unresolved)]
+        );
+    }
+
+    #[test]
+    fn validate_reads_a_bulk_create_set_against_each_enveloped_record() {
+        // `request.records: /Messages`: `set` reads `request.body` as each message,
+        // so a member of the envelope is no member of it, and one of a message is.
+        let mut b = bundle(&[(
+            "sendEmails",
+            "POST",
+            "/emails",
+            json!({"type": "object", "properties": {"To": {"type": "string"}}}),
+        )]);
+        let op = &mut b.operations[0];
+        op.resource_type = Some("message".into());
+        op.input.body = Some(json!({"type": "object", "properties": {
+            "Messages": {"type": "array", "items": {"type": "object",
+                "properties": {"To": {"type": "string"}}}}}}));
+        let w = world(json!({"operations": {"sendEmails": {
+            "kind": "create", "type": "message", "request": {"records": "/Messages"},
+            "set": {"To": "request.body.Messages[0].To"}
+        }}}));
+        assert_eq!(
+            paths(&validate(&w, &b)),
+            vec![("/operations/sendEmails/set/To", RefusalCode::Unresolved)]
+        );
+        let w = world(json!({"operations": {"sendEmails": {
+            "kind": "create", "type": "message", "request": {"records": "/Messages"},
+            "set": {"To": "request.body.To"}
+        }}}));
+        assert_eq!(validate(&w, &b).refused, vec![]);
     }
 
     #[test]

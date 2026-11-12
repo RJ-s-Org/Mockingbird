@@ -141,8 +141,9 @@ fn schema_accepts_every_serialized_field() {
     assert_eq!(errors(&validator(), &back), Vec::<String>::new());
 }
 
-/// The root pointer `""` is a record pointer only: `answer.record` and
-/// `request.record` take it, the `records` pointers and `from_request` do not.
+/// The root pointer `""` is a record or records pointer only: `record` and
+/// `records` (the whole body is the record, or the array of records) take it,
+/// `from_request` does not.
 #[test]
 fn schema_accepts_a_root_answer_record_only() {
     let v = validator();
@@ -150,12 +151,13 @@ fn schema_accepts_a_root_answer_record_only() {
         json!({"operations": {"o": {"answer": {"record": ""}}}}),
         json!({"operations": {"o": {"request": {"record": ""}}}}),
         json!({"operations": {"o": {"answer": {"record": "/data/result/0"}}}}),
+        json!({"operations": {"o": {"answer": {"records": ""}}}}),
+        json!({"operations": {"o": {"request": {"records": ""}}}}),
     ] {
         assert_eq!(errors(&v, &good), Vec::<String>::new(), "{good}");
     }
     for bad in [
-        json!({"operations": {"o": {"answer": {"records": ""}}}}),
-        json!({"operations": {"o": {"request": {"records": ""}}}}),
+        json!({"operations": {"o": {"answer": {"records": "Messages"}}}}),
         json!({"operations": {"o": {"changes": {"m": {"from_request": ""}}}}}),
         json!({"operations": {"o": {"answer": {"record": "data"}}}}),
     ] {

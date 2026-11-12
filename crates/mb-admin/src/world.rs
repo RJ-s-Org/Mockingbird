@@ -1508,8 +1508,9 @@ fn trimmed(mut v: Validation) -> Validation {
 fn bad_pointer(world: &World) -> Option<Refusal> {
     for (id, op) in &world.operations {
         let base = format!("/operations/{}", escape(id));
-        // Each pointer, where it is, and whether it is a record pointer (which
-        // may be the root `""`: the whole answer or request body is the record).
+        // Each pointer, where it is, and whether it may be the root `""` (a
+        // record or records pointer: the whole answer or request body is the
+        // record, or the array of records).
         let mut pointers: Vec<(String, &Pointer, bool)> = Vec::new();
         if let Some(r) = &op.request {
             pointers.extend(
@@ -1520,7 +1521,7 @@ fn bad_pointer(world: &World) -> Option<Refusal> {
             pointers.extend(
                 r.records
                     .iter()
-                    .map(|p| (format!("{base}/request/records"), p, false)),
+                    .map(|p| (format!("{base}/request/records"), p, true)),
             );
         }
         if let Some(a) = &op.answer {
@@ -1532,7 +1533,7 @@ fn bad_pointer(world: &World) -> Option<Refusal> {
             pointers.extend(
                 a.records
                     .iter()
-                    .map(|p| (format!("{base}/answer/records"), p, false)),
+                    .map(|p| (format!("{base}/answer/records"), p, true)),
             );
         }
         for (member, change) in &op.changes {

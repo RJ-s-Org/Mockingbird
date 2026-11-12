@@ -1269,6 +1269,9 @@ pub(crate) async fn complete(
     let mut header_id: Option<Value> = None;
     // A bulk create's request records, with the ids minted for them.
     let mut request_records: Vec<Value> = Vec::new();
+    // The places, among the records a bulk create makes, of those not stored (see
+    // [`records::set_each`]).
+    let mut bulk_unstored: Vec<usize> = Vec::new();
     // What state keeps of an answer holding its record in an envelope or a one-item
     // array is the record, and of a request the record it holds the same way.
     let held_in = op.identity.as_ref().filter(|i| i.record.is_some());
@@ -1427,10 +1430,22 @@ pub(crate) async fn complete(
                 };
                 // What the description says of the answer: a long-running create is done.
                 records::settle_create(rt, op, &mut generated);
+                // A bulk create answers one record per record its request sends.
+                records::align_bulk(rt, (op, t, call), &mut generated);
                 // Each record a bulk or long-running create makes holds an id.
                 request_records =
                     records::mint_created(&mut state, (session, op, t, state_call), &mut generated)
                         .await;
+                // What the description sets on each record a bulk create makes, each
+                // reading the request's record at its place.
+                bulk_unstored = records::set_each(
+                    &mut state,
+                    (plan, call),
+                    t,
+                    (&mut generated, &mut request_records),
+                )
+                .instrument(state_span())
+                .await;
                 // A record answered with no identity (a model writing only what the
                 // schema requires) would not be stored: it is given one.
                 mint_create_id(
@@ -1748,6 +1763,7 @@ pub(crate) async fn complete(
                         held: target.is_some() && !generated.new_record,
                         header_id: header_id.clone(),
                         request_records: std::mem::take(&mut request_records),
+                        bulk_unstored: std::mem::take(&mut bulk_unstored),
                     },
                 )
                 .await;

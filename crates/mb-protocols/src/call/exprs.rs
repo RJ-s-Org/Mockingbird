@@ -109,6 +109,16 @@ impl CallExprs {
         f(&mut notes);
     }
 
+    /// Forgets the call's `set` values, so the next [`set_values`] evaluates them
+    /// again: a bulk create's `set` runs once per record it makes, each reading its
+    /// own request record.
+    pub(super) fn forget_set(&self) {
+        *self
+            .set
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
     /// Notes that the executor went on to generation for `reason`, caused by `on`.
     pub(super) fn fell_back(&self, reason: &str, on: Option<&str>) {
         self.with_notes(|n| {

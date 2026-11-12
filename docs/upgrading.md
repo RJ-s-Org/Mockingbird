@@ -46,6 +46,16 @@ No migration or configuration.
 - **Offline, a list the world describes is answered from state after its first answer.** The faker's first list of a collection that asks for nothing but a page (Plaid's `/accounts/get` for an Item) is seeded and marks the collection listed, as a model's always did, so later lists of it (`/auth/get`, `/accounts/balance/get`, `/accounts/get` again) come from state with the same records instead of a fresh draw each, and a later faker list of it that state cannot serve lists the same records, the faker filling only the members they lack, cut to a page size the request asks for. Before, every offline list was a new draw with new ids.
 - **The same holds when the LLM call fails for good**: offline, or a provider refusing the key (`401`, `402`, `403`). Such answers are still reported `source: fallback`, so `verify --no-fallbacks` still flags them. A failure a retry may get past (a `429`, a `5xx`, a timeout) seeds nothing, as before, and the next list goes to the model.
 
+### Bulk creates set each record and answer one per record sent
+
+No migration or configuration, but a world describing a bulk create may change:
+
+- **`records: ""`**: `request.records` and `answer.records` take the root pointer, which says the whole request body (answer) is the array of records (a batch endpoint such as Postmark's `POST /email/batch`). It used to be refused as an empty pointer.
+- **A bulk create's `set` reads each record**: with `request.records`, `set` runs once per record the create makes, `request.body` being the record sent at that place, and is validated against the items' schema. A `set` that read the envelope (`request.body.Messages`) is now refused; it never ran before, as no `set` did on a bulk create. The type's initial state applies to each record too.
+- **Bulk answers are aligned**: a create described with both `request.records` and `answer.records` answers exactly one record per record sent, in order; a generated answer with more is cut, and one with fewer gets copies of its last record under fresh identities.
+- **A repeated `set` identity stores nothing over a record**: a record whose `set` identity the session holds, or an earlier record of the same call has, is answered as that record and not stored.
+- **Admin API**: `PUT .../world` with `records: ""` on an answer that is not an array is accepted with that entry refused (`invalid`, "does not point to an array"), instead of a `422`.
+
 ### Single-record read prompts show held records trimmed
 
 No migration or configuration.
