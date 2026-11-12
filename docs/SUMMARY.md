@@ -58,6 +58,7 @@
   - [GitHub CLI (Go)](trials/gh-cli.md)
   - [Next.js Commerce](trials/nextjs-commerce.md)
   - [Stripe accept-a-payment (Java)](trials/stripe-java.md)
+  - [Stripe example apps, no model (in-repo, FastAPI and Node)](trials/stripe-example-apps-offline.md)
   - [github-readme-stats (holdout)](trials/github-readme-stats.md)
   - [Twilio CLI (holdout, messaging)](trials/twilio-cli.md)
   - [django-anymail on Postmark (holdout, email)](trials/anymail-postmark.md)
