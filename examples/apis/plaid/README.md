@@ -82,9 +82,13 @@ stored accounts lack). `/item/get` answers the Item the exchange created, and a 
 exchange issued answers 400. A `/transactions/sync` that re-syncs with the last
 `next_cursor` is answered by the model.
 
-Known limits: only the accounts come from state. The `item` in a list's answer is
-generated on each call, so its `item_id` does not match the exchanged Item's, and the
-`numbers.ach[].account_id` of `/auth/get` can name an account the list does not hold.
+An account list's `item` is the exchanged Item, and `numbers.ach[].account_id` in
+`/auth/get` names accounts the list holds. Once an account list has listed the Item's
+accounts, the `account_id`s that `/transactions/sync` names are among them.
+
+Known limits: `numbers.ach` has as many entries as the model draws, each naming a listed
+account (one can repeat), often just one; Plaid lists every depository account (checking
+and savings).
 
 Check the description with `mockingbird world show plaid`; edit the file to change it (see
 [In a config file](../../../docs/world.md#in-a-config-file)).
