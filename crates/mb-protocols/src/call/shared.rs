@@ -489,6 +489,10 @@ pub struct SharedTypes(Arc<RwLock<Registry>>);
 pub struct SharedEntry {
     group: String,
     types: Arc<Vec<RecordType>>,
+    /// Its types by each form of their name ([`forms`]): two types are one by name when
+    /// they share a form, so a lookup here stands for a pass over every type (thousands
+    /// in GitHub's GraphQL schema, for each type an answer reaches).
+    by_form: Arc<HashMap<String, Vec<usize>>>,
     /// What each of its types read by path shows of where its records live, by type.
     twins: Arc<HashMap<String, Arc<Twin>>>,
 }
@@ -503,10 +507,31 @@ impl SharedEntry {
             .iter()
             .filter_map(|r| Some((r.key.to_lowercase(), Arc::new(twin_of(rt, &r.key)?))))
             .collect();
-        Some(Self {
+        Some(Self::with(group, types, twins))
+    }
+
+    fn with(group: String, types: Vec<RecordType>, twins: HashMap<String, Arc<Twin>>) -> Self {
+        let mut by_form: HashMap<String, Vec<usize>> = HashMap::new();
+        for (at, r) in types.iter().enumerate() {
+            for form in forms(&r.key) {
+                by_form.entry(form).or_default().push(at);
+            }
+        }
+        Self {
             group,
             types: Arc::new(types),
+            by_form: Arc::new(by_form),
             twins: Arc::new(twins),
+        }
+    }
+
+    /// Whether one of its types is the type named `forms` by name, other than `except`.
+    fn named(&self, forms: &[String], except: Option<&str>) -> bool {
+        forms.iter().any(|f| {
+            self.by_form.get(f).is_some_and(|at| {
+                at.iter()
+                    .any(|&i| except.is_none_or(|key| self.types[i].key != key))
+            })
         })
     }
 }
@@ -542,13 +567,58 @@ const MAX_INFERRED: usize = 4096;
 struct RecordType {
     /// The name its records are stored under, as written.
     key: String,
-    /// The words of each name it goes by: its own, and the schema its records are
-    /// answered in (REST's `pulls` holds `pull-request`s).
-    names: Vec<Vec<String>>,
+    /// Each name it goes by: its own, and the schema its records are answered in
+    /// (REST's `pulls` holds `pull-request`s).
+    names: Vec<Name>,
     /// The identity members its records declare.
     number: bool,
     id: bool,
     node_id: bool,
+}
+
+impl RecordType {
+    /// Adds the name of `words`, unless it has it.
+    fn named(&mut self, words: Vec<String>) {
+        if !self.names.iter().any(|n| n.words == words) {
+            self.names.push(Name::of(words));
+        }
+    }
+}
+
+/// A name of a [`RecordType`], with what [`names_match`] compares of it worked out
+/// once: a mock's types are compared with every type of the group's other mocks.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Name {
+    /// Its words (see [`words`]).
+    words: Vec<String>,
+    /// Its words run together.
+    whole: String,
+    /// `whole` and its [`singulars`]: two names are one word but for a plural when
+    /// they share one.
+    forms: Vec<String>,
+    /// For a one-word name, its singulars of three letters or more ([`abbreviates`]).
+    short: Vec<String>,
+}
+
+impl Name {
+    fn of(words: Vec<String>) -> Self {
+        let whole = words.concat();
+        let forms = singulars(&whole).into_iter().map(str::to_string).collect();
+        let short = match words.as_slice() {
+            [word] => singulars(word)
+                .into_iter()
+                .filter(|s| s.len() >= 3)
+                .map(str::to_string)
+                .collect(),
+            _ => Vec::new(),
+        };
+        Self {
+            words,
+            whole,
+            forms,
+            short,
+        }
+    }
 }
 
 impl SharedTypes {
@@ -601,7 +671,7 @@ impl SharedTypes {
         if let Some(hit) = registry.inferred.get(&memo) {
             return Arc::clone(hit);
         }
-        let found = Arc::new(registry.infer(rt, t));
+        let found = Arc::new(registry.infer((&rt.workspace, &rt.name), t));
         if registry.inferred.len() >= MAX_INFERRED {
             registry.inferred.clear();
         }
@@ -666,30 +736,33 @@ impl Registry {
     }
 
     /// [`SharedTypes::inferred`] without the memo.
-    fn infer(&self, rt: &MockRuntime, t: &str) -> Vec<String> {
-        let Some(mine) = self.mocks.get(&(rt.workspace.clone(), rt.name.clone())) else {
+    fn infer(&self, (workspace, name): (&str, &str), t: &str) -> Vec<String> {
+        let Some(mine) = self.mocks.get(&(workspace.to_string(), name.to_string())) else {
             return Vec::new();
         };
         let Some(own) = mine.types.iter().find(|r| r.key.eq_ignore_ascii_case(t)) else {
             return Vec::new();
         };
-        let peers: Vec<&RecordType> = self
+        let peers: Vec<&SharedEntry> = self
             .mocks
             .iter()
-            .filter(|((workspace, mock), entry)| {
-                *workspace == rt.workspace && *mock != rt.name && entry.group == mine.group
+            .filter(|((w, mock), entry)| {
+                *w == workspace && *mock != name && entry.group == mine.group
             })
-            .flat_map(|(_, entry)| entry.types.iter())
+            .map(|(_, entry)| entry)
             .collect();
-        let by_name = |a: &RecordType, b: &RecordType| same_word(&normal(&a.key), &normal(&b.key));
-        if peers.iter().any(|p| by_name(own, p)) {
+        let own_forms = forms(&own.key);
+        if peers.iter().any(|p| p.named(&own_forms, None)) {
             return Vec::new();
         }
         let mut found: Vec<String> = Vec::new();
-        for p in peers {
+        for p in peers.iter().flat_map(|entry| entry.types.iter()) {
+            // Cheap checks first: most peer types are another identity or name.
+            if !same_identity(own, p) || !names_match(own, p) || found.contains(&p.key) {
+                continue;
+            }
             // A peer type another of this mock's types is by name is that one's.
-            let taken = mine.types.iter().any(|o| o.key != own.key && by_name(o, p));
-            if !taken && same_identity(own, p) && names_match(own, p) && !found.contains(&p.key) {
+            if !mine.named(&forms(&p.key), Some(&own.key)) {
                 found.push(p.key.clone());
             }
         }
@@ -714,7 +787,7 @@ fn record_types(bundle: &mb_mcm::Bundle) -> Vec<RecordType> {
             None => {
                 out.push(RecordType {
                     key: key.to_string(),
-                    names: vec![words(key)],
+                    names: vec![Name::of(words(key))],
                     ..RecordType::default()
                 });
                 out.len() - 1
@@ -729,10 +802,7 @@ fn record_types(bundle: &mb_mcm::Bundle) -> Vec<RecordType> {
         };
         let entry = &mut out[at];
         if let Some(name) = name {
-            let name = words(name);
-            if !entry.names.contains(&name) {
-                entry.names.push(name);
-            }
+            entry.named(words(name));
         }
         entry.number |= props.contains_key("number");
         entry.id |= props.contains_key("id");
@@ -754,17 +824,14 @@ fn record_types(bundle: &mb_mcm::Bundle) -> Vec<RecordType> {
             // declares none of the type's identity: the type's own definition does.
             match out.iter_mut().find(|r| r.key.to_lowercase() == key) {
                 Some(entry) => {
-                    let own = words(name);
-                    if !entry.names.contains(&own) {
-                        entry.names.push(own);
-                    }
+                    entry.named(words(name));
                     entry.number |= number;
                     entry.id = true;
                     entry.node_id |= node_id;
                 }
                 None => out.push(RecordType {
                     key,
-                    names: vec![words(name)],
+                    names: vec![Name::of(words(name))],
                     number,
                     id: true,
                     node_id,
@@ -851,9 +918,14 @@ fn singulars(w: &str) -> Vec<&str> {
     out
 }
 
-/// Whether `a` and `b` are one word but for a plural.
-fn same_word(a: &str, b: &str) -> bool {
-    singulars(a).iter().any(|x| singulars(b).contains(x))
+/// The forms of a type's name `key`: in lower case without punctuation, as it is and
+/// without a plural ([`singulars`]). Two keys are one word but for a plural exactly
+/// when they share a form.
+fn forms(key: &str) -> Vec<String> {
+    singulars(&normal(key))
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 /// REST collections that are a short form of another type's whole name, as their
@@ -867,29 +939,22 @@ const SHORT_FORMS: &[(&str, &str)] = &[("pull", "pullrequest")];
 /// (`users` is not `UserStatus`).
 fn names_match(a: &RecordType, b: &RecordType) -> bool {
     a.names.iter().any(|x| {
-        b.names
-            .iter()
-            .any(|y| same_word(&x.concat(), &y.concat()) || abbreviates(x, y) || abbreviates(y, x))
+        b.names.iter().any(|y| {
+            x.forms.iter().any(|f| y.forms.contains(f)) || abbreviates(x, y) || abbreviates(y, x)
+        })
     })
 }
 
 /// Whether the one word `x` (a REST collection: `repos`, `orgs`, `pulls`) is a short
 /// form of the whole of `y`: the start of its one word, at least three letters
 /// longer (`repository`, `organization`), or a listed short form ([`SHORT_FORMS`]).
-fn abbreviates(x: &[String], y: &[String]) -> bool {
-    let [x] = x else {
-        return false;
-    };
-    let whole = y.concat();
-    singulars(x)
-        .into_iter()
-        .filter(|s| s.len() >= 3)
-        .any(|s| match y {
-            [word] if word.len() >= s.len() + 3 && word.starts_with(s) => true,
-            _ => SHORT_FORMS
-                .iter()
-                .any(|(short, long)| *short == s && *long == whole),
-        })
+fn abbreviates(x: &Name, y: &Name) -> bool {
+    x.short.iter().any(|s| match y.words.as_slice() {
+        [word] if word.len() >= s.len() + 3 && word.starts_with(s.as_str()) => true,
+        _ => SHORT_FORMS
+            .iter()
+            .any(|(short, long)| short == s && *long == y.whole),
+    })
 }
 
 /// Whether `a` and `b` declare the same identity: a `number` both or neither, and
@@ -953,13 +1018,16 @@ type Mutation { createPullRequest(input: CreatePullRequestInput!): CreatePullReq
         let types = record_types(&bundle);
         let own = types.iter().find(|r| r.key == "pullrequest").unwrap();
         assert!(own.number && own.id, "{own:?}");
-        assert!(own.names.contains(&words("PullRequest")), "{own:?}");
+        assert!(
+            own.names.iter().any(|n| n.words == words("PullRequest")),
+            "{own:?}"
+        );
     }
 
     fn record_type(names: &[&str], identity: &[&str]) -> RecordType {
         RecordType {
             key: names[0].to_lowercase(),
-            names: names.iter().map(|n| words(n)).collect(),
+            names: names.iter().map(|n| Name::of(words(n))).collect(),
             number: identity.contains(&"number"),
             id: identity.contains(&"id"),
             node_id: identity.contains(&"node_id"),
@@ -1010,6 +1078,81 @@ type Mutation { createPullRequest(input: CreatePullRequestInput!): CreatePullReq
         // A name alone is not enough: one has a `number`, the other none.
         assert!(!linked(&issues, &record_type(&["IssueComment"], &["id"])));
         assert!(!linked(&pulls, &record_type(&["Pull"], &["id"])));
+    }
+
+    /// A registry of a GraphQL mock (`gql`) and a REST one (`rest`) of one group.
+    fn registry(gql: Vec<RecordType>, rest: Vec<RecordType>) -> Registry {
+        let entry = |types| SharedEntry::with("api".into(), types, HashMap::new());
+        let mut registry = Registry::default();
+        registry
+            .mocks
+            .insert(("w".into(), "gql".into()), entry(gql));
+        registry
+            .mocks
+            .insert(("w".into(), "rest".into()), entry(rest));
+        registry
+    }
+
+    #[test]
+    fn a_type_is_inferred_unless_a_type_is_it_by_name() {
+        let registry = registry(
+            vec![
+                record_type(&["PullRequest"], &["id", "number"]),
+                record_type(&["Repository"], &["id"]),
+                record_type(&["Issue"], &["id", "number"]),
+                record_type(&["UserStatus"], &["id"]),
+                record_type(&["Organization"], &["id"]),
+                record_type(&["Orgs"], &["id"]),
+            ],
+            vec![
+                record_type(&["pulls", "pull-request"], &["id", "node_id", "number"]),
+                record_type(&["repos", "full-repository"], &["id", "node_id"]),
+                record_type(&["issues", "issue"], &["id", "node_id", "number"]),
+                record_type(&["users"], &["id", "node_id"]),
+                record_type(&["orgs", "organization-full"], &["id", "node_id"]),
+            ],
+        );
+        let infer = |t: &str| registry.infer(("w", "gql"), t);
+        assert_eq!(infer("pullrequest"), ["pulls"]);
+        assert_eq!(infer("Repository"), ["repos"]);
+        // The group has an `issues` already: equivalent by name, nothing to infer.
+        assert!(infer("issue").is_empty());
+        assert!(infer("userstatus").is_empty());
+        // `orgs` is this mock's own `Orgs` by name, not `Organization`.
+        assert!(infer("organization").is_empty());
+        // Another workspace, or a type the mock does not store, infers nothing.
+        assert!(registry.infer(("v", "gql"), "pullrequest").is_empty());
+        assert!(infer("comment").is_empty());
+        // And the other way round.
+        assert_eq!(registry.infer(("w", "rest"), "pulls"), ["pullrequest"]);
+    }
+
+    /// GitHub's GraphQL schema has about a thousand record types and its REST
+    /// contract hundreds; an answer through `node(id:)` reaches hundreds of them. Each
+    /// is inferred by lookups, not a pass over every pair of types (which took a
+    /// minute for one such answer).
+    #[test]
+    fn inferring_every_type_of_large_contracts_is_quick() {
+        let gql: Vec<RecordType> = (0..1500)
+            .map(|i| record_type(&[&format!("Thing{i}Kind")], &["id"]))
+            .collect();
+        let rest: Vec<RecordType> = (0..500)
+            .map(|i| record_type(&[&format!("thing{i}-kinds")], &["id", "node_id"]))
+            .collect();
+        let registry = registry(gql, rest);
+        let started = std::time::Instant::now();
+        let mut found = 0;
+        for i in 0..1500 {
+            found += registry.infer(("w", "gql"), &format!("thing{i}kind")).len();
+        }
+        // The first 500 are a REST type by name already; the others are none, after a
+        // look at every REST type.
+        assert_eq!(found, 0);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
