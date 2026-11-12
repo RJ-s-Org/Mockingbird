@@ -91,6 +91,9 @@ pub(crate) struct BundleIndex {
     /// [`lists::filtered_member`]), sorted. Auth0's `email`, which
     /// `/users-by-email?email=` requires; never an optional filter such as `state`.
     pub(super) lookup_members: HashMap<String, Vec<String>>,
+    /// Per resource type, what its URL members are built from (see [`links`]), worked
+    /// out on first use.
+    pub(super) links: std::sync::RwLock<HashMap<String, std::sync::Arc<links::TypeLinks>>>,
 }
 
 /// The schema of the record an answer of `schema` holds where `identity` says: an
@@ -455,6 +458,7 @@ impl BundleIndex {
                 .any(|op| minted::may_mint(bundle, op)),
             member_reads: member_reads_of(bundle),
             record_schemas,
+            links: std::sync::RwLock::default(),
         }
     }
 

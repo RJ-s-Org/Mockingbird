@@ -668,6 +668,12 @@ pub(crate) async fn build_runtime_tracked(
     rt.shared_types = deps.shared_types.clone();
     rt.strict_requests = mock.behavior.strict_requests;
     rt.base_paths = mb_import::base_paths(&contract.source);
+    rt.hosts = mock.hosts.iter().map(|h| h.to_ascii_lowercase()).collect();
+    for host in mb_import::server_hosts(&contract.source) {
+        if !rt.hosts.contains(&host) {
+            rt.hosts.push(host);
+        }
+    }
     rt.webhooks = webhook_dispatcher(deps, mock).await?;
     Ok(Some((rt, budget, used, loaded)))
 }
