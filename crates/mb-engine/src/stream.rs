@@ -124,7 +124,7 @@ impl Engine {
     fn chat_request(&self, messages: Vec<ChatMessage>, format: ResponseFormat) -> ChatRequest {
         ChatRequest {
             messages,
-            response_format: format,
+            response_format: crate::compact::bare_format(&format),
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
             max_answer_bytes: None,

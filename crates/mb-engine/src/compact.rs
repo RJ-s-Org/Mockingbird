@@ -3,8 +3,9 @@
 //! Real contracts reach huge schema graphs: Stripe's `payment_intent` pulls
 //! in 868 definitions through its expandable fields, 350k tokens printed.
 //! The prompt only needs the response's own shape in detail, so a schema over
-//! [`PROMPT_SCHEMA_BUDGET`] first loses long descriptions, then the
-//! definitions furthest from the root (replaced by a stub). Validation still
+//! [`PROMPT_SCHEMA_BUDGET`] first loses long descriptions, then its examples,
+//! then the definitions furthest from the root (replaced by a stub). The copy
+//! sent as the response format carries no annotations at all. Validation still
 //! uses the full schema.
 
 use mb_mcm::Bundle;
@@ -23,10 +24,11 @@ pub const MAX_DESCRIPTION: usize = 160;
 pub const SHORT_DESCRIPTION: usize = 60;
 
 /// Bytes of compact JSON the schema of an answer the model writes may take (about
-/// 7k tokens). Smaller than [`PROMPT_SCHEMA_BUDGET`]: the model reads it on every
-/// call, and with structured output reads it twice, while the answer only needs its
-/// own members in detail.
-pub const RESPONSE_SCHEMA_BUDGET: usize = 24 * 1024;
+/// 5k tokens of schema). Smaller than [`PROMPT_SCHEMA_BUDGET`]: the model reads it on
+/// every call, and with structured output reads it twice (the second copy without
+/// annotations), while the answer only needs its own members in detail. At 24k,
+/// GitHub's repository read sent a 14k-token prompt.
+pub const RESPONSE_SCHEMA_BUDGET: usize = 12 * 1024;
 
 /// `schema` with its reachable definitions, fitted to the prompt budget. A
 /// schema that carries its own `$defs` (one shaped to the output budget) is
@@ -54,7 +56,142 @@ pub(crate) fn prompt_schema_expanding(
         drop_unreachable_defs(&mut doc);
     }
     redact_descriptions(&mut doc);
+    prune_examples(&mut doc);
     fit(doc, budget)
+}
+
+/// Formats whose name says a string's whole shape: an example of one shows nothing
+/// the format does not.
+const SHAPED_FORMATS: &[&str] = &[
+    "date-time",
+    "date",
+    "time",
+    "duration",
+    "uuid",
+    "email",
+    "ipv4",
+    "ipv6",
+];
+
+/// Every subschema of `value` with at most its first example (`examples`, or the
+/// OpenAPI 3.0 `example`), and none where the schema itself says what the value
+/// looks like: a boolean, an `enum` or `const`, or a string of a
+/// [`SHAPED_FORMATS`] format. GitHub's repository answer spent a third of its schema
+/// on examples, most of them `[true]`, timestamps and second examples. For the prompt
+/// only: the faker and validation read the contract's schema.
+fn prune_examples(value: &mut Value) {
+    each_subschema(value, &mut |obj| {
+        let shaped = says_its_shape(obj);
+        for key in ["examples", "example"] {
+            match obj.get_mut(key) {
+                Some(_) if shaped => {
+                    obj.remove(key);
+                }
+                Some(Value::Array(examples)) if key == "examples" => examples.truncate(1),
+                _ => {}
+            }
+        }
+    });
+}
+
+/// Calls `f` on every subschema of `value` (an object), the outer one first, never
+/// on data (`enum`, `const`, `default`, examples, `required` and the like) or on a map
+/// whose keys are member or definition names (`properties`, `$defs`, …), only on its
+/// values.
+fn each_subschema(value: &mut Value, f: &mut dyn FnMut(&mut serde_json::Map<String, Value>)) {
+    match value {
+        Value::Object(obj) => {
+            f(obj);
+            for (key, child) in obj.iter_mut() {
+                match key.as_str() {
+                    "enum" | "const" | "default" | "examples" | "example" | "required"
+                    | "dependentRequired" | "discriminator" => {}
+                    // Named subschemas: their names are members or definitions (a
+                    // draft-07 `dependencies` entry may be a list of names: data).
+                    "properties" | "patternProperties" | "$defs" | "definitions"
+                    | "dependentSchemas" | "dependencies" => {
+                        if let Value::Object(named) = child {
+                            named
+                                .values_mut()
+                                .filter(|s| s.is_object())
+                                .for_each(|s| each_subschema(s, f));
+                        }
+                    }
+                    _ => each_subschema(child, f),
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(|s| each_subschema(s, f)),
+        _ => {}
+    }
+}
+
+/// Whether schema `obj` says what its value looks like without an example (see
+/// [`prune_examples`]).
+fn says_its_shape(obj: &serde_json::Map<String, Value>) -> bool {
+    let typed = |t: &str| match obj.get("type") {
+        Some(Value::String(s)) => s == t,
+        Some(Value::Array(types)) => {
+            types.iter().any(|x| x == t) && types.iter().all(|x| x == t || x == "null")
+        }
+        _ => false,
+    };
+    typed("boolean")
+        || obj.contains_key("enum")
+        || obj.contains_key("const")
+        || ((typed("string") || !obj.contains_key("type"))
+            && obj
+                .get("format")
+                .and_then(Value::as_str)
+                .is_some_and(|f| SHAPED_FORMATS.contains(&f)))
+}
+
+/// Annotation keywords: what a JSON Schema says about a value to a reader, not what it
+/// allows.
+const ANNOTATIONS: &[&str] = &[
+    "description",
+    "examples",
+    "example",
+    "title",
+    "default",
+    "$comment",
+    "deprecated",
+    "readOnly",
+    "writeOnly",
+];
+
+/// `format` as a provider is sent it: a JSON Schema answer's schema without its
+/// annotations (see [`without_annotations`]). The system message carries the same
+/// schema with them, so a model that reads the response format too (most count it in
+/// the prompt) reads the descriptions and examples once, not twice; a decoder held to
+/// the schema needs none of them.
+pub(crate) fn bare_format(format: &mb_llm::ResponseFormat) -> mb_llm::ResponseFormat {
+    match format {
+        mb_llm::ResponseFormat::JsonSchema { name, schema } => {
+            let mut schema = schema.clone();
+            without_annotations(&mut schema);
+            mb_llm::ResponseFormat::JsonSchema {
+                name: name.clone(),
+                schema,
+            }
+        }
+        other => other.clone(),
+    }
+}
+
+/// Removes the [`ANNOTATIONS`] and vendor extensions (`x-…`) of every subschema of
+/// `value`, leaving members of those names (keys of `properties` and the like) and
+/// data (`enum`, `const`) as they are.
+pub(crate) fn without_annotations(value: &mut Value) {
+    without_keywords(value, &|key| {
+        ANNOTATIONS.contains(&key) || key.starts_with("x-")
+    });
+}
+
+/// Removes the keywords `drop` names from every subschema of `value` (see
+/// [`each_subschema`]), leaving members of those names and data as they are.
+fn without_keywords(value: &mut Value, drop: &dyn Fn(&str) -> bool) {
+    each_subschema(value, &mut |obj| obj.retain(|key, _| !drop(key)));
 }
 
 /// The member names a request asks to have expanded: each step of the paths in
@@ -154,8 +291,15 @@ fn drop_unreachable_defs(doc: &mut Value) {
     let mut pending = Vec::new();
     if let Value::Object(root) = &*doc {
         for (k, v) in root {
-            if k != "$defs" {
-                refs(v, &mut pending);
+            match k.as_str() {
+                "$defs" => {}
+                // The root itself may be a reference (`{"$ref": "#/$defs/issue"}`).
+                "$ref" => pending.extend(
+                    v.as_str()
+                        .and_then(|r| r.strip_prefix("#/$defs/"))
+                        .map(def_name),
+                ),
+                _ => refs(v, &mut pending),
             }
         }
     }
@@ -695,14 +839,19 @@ fn require_at(doc: &mut Value, path: &[Step], name: &str, defs: &Value) -> bool 
 
 /// `doc` (a schema carrying `$defs`) fitted to `budget` bytes of compact
 /// JSON: unchanged when it fits; else with descriptions cut to
-/// [`MAX_DESCRIPTION`] characters; else also with the definitions furthest from
-/// the root stubbed (see [`fill`]); else stubbed again from descriptions cut
-/// to [`SHORT_DESCRIPTION`].
+/// [`MAX_DESCRIPTION`] characters; else also without examples; else also with the
+/// definitions furthest from the root stubbed (see [`fill`]); else stubbed again
+/// from descriptions cut to [`SHORT_DESCRIPTION`].
 pub(crate) fn fit(doc: Value, budget: usize) -> Value {
     if size(&doc) <= budget {
         return doc;
     }
-    let doc = cut_descriptions(doc, MAX_DESCRIPTION);
+    let mut doc = cut_descriptions(doc, MAX_DESCRIPTION);
+    if size(&doc) <= budget {
+        return doc;
+    }
+    // Examples go before any shape does: a stub loses what members a definition has.
+    without_keywords(&mut doc, &|key| matches!(key, "examples" | "example"));
     if size(&doc) <= budget {
         return doc;
     }
@@ -731,13 +880,21 @@ fn fill(mut doc: Value, budget: usize) -> Value {
     let stub_size = |name: &str| 2 * name.len() + 80;
     // A root that is a reference keeps its definition, which is the answer's own shape.
     // The definitions its members reference start as stubs like the rest, so a root
-    // with many large members (Stripe's `payment_intent`) still fits.
+    // with many large members (Stripe's `payment_intent`) still fits; those of its
+    // members that cannot be null are the first to be added back.
     let own = doc
         .get("$ref")
         .and_then(Value::as_str)
         .and_then(|r| r.strip_prefix("#/$defs/"))
         .map(def_name);
     let needed = non_null_refs(&doc);
+    // What the root's own definition needs whole (an `owner` that cannot be null) is
+    // added first while it fits: the model would guess its shape from a stub.
+    let own_needed = own
+        .as_deref()
+        .and_then(|own| doc.get("$defs")?.get(own))
+        .map(non_null_refs)
+        .unwrap_or_default();
     let Some(defs) = doc.get_mut("$defs").and_then(Value::as_object_mut) else {
         return doc;
     };
@@ -784,7 +941,13 @@ fn fill(mut doc: Value, budget: usize) -> Value {
         .copied()
         .filter(|n| !kept.contains(n))
         .collect();
-    order.sort_by_key(|n| (depths.get(*n).copied().unwrap_or(u64::MAX), sizes[n]));
+    order.sort_by_key(|n| {
+        (
+            !own_needed.contains(*n),
+            depths.get(*n).copied().unwrap_or(u64::MAX),
+            sizes[n],
+        )
+    });
     for _ in 0..2 {
         for name in &order {
             if kept.contains(name) || !stubs.contains(*name) {
@@ -984,6 +1147,161 @@ mod tests {
         member["anyOf"]
             .as_array()
             .is_some_and(|parts| parts.iter().any(|p| p["type"] == "null"))
+    }
+
+    #[test]
+    fn the_response_format_drops_annotations_but_not_members_of_their_names() {
+        let format = mb_llm::ResponseFormat::JsonSchema {
+            name: "op".into(),
+            schema: json!({
+                "$ref": "#/$defs/Item",
+                "$defs": {"Item": {
+                    "type": "object",
+                    "title": "Item",
+                    "description": "An item.",
+                    "x-internal": true,
+                    "required": ["description"],
+                    "properties": {
+                        "description": {"type": "string", "description": "Its text.", "examples": ["a"]},
+                        "title": {"type": ["string", "null"], "default": "t", "deprecated": true},
+                        "kind": {"enum": ["description"], "example": "description"}
+                    }
+                }}
+            }),
+        };
+        let mb_llm::ResponseFormat::JsonSchema { schema, .. } = bare_format(&format) else {
+            panic!("a JSON schema format stays one");
+        };
+        assert_eq!(
+            schema,
+            json!({
+                "$ref": "#/$defs/Item",
+                "$defs": {"Item": {
+                    "type": "object",
+                    "required": ["description"],
+                    "properties": {
+                        "description": {"type": "string"},
+                        "title": {"type": ["string", "null"]},
+                        "kind": {"enum": ["description"]}
+                    }
+                }}
+            })
+        );
+        assert!(matches!(
+            bare_format(&mb_llm::ResponseFormat::JsonObject),
+            mb_llm::ResponseFormat::JsonObject
+        ));
+    }
+
+    #[test]
+    fn examples_go_where_the_schema_says_the_shape_and_beyond_the_first() {
+        let mut doc = json!({"type": "object", "properties": {
+            "archived": {"anyOf": [{"type": "boolean", "examples": [false]}, {"type": "null"}]},
+            "state": {"type": "string", "enum": ["open", "closed"], "examples": ["open"]},
+            "created_at": {"type": "string", "format": "date-time", "examples": ["2011-01-26T19:01:12Z"]},
+            "html_url": {"type": "string", "format": "uri", "examples": ["https://x.test/a", "https://x.test/b"]},
+            "count": {"type": "integer", "example": 3},
+            "examples": {"type": "boolean"}
+        }});
+        prune_examples(&mut doc);
+        let props = &doc["properties"];
+        assert_eq!(props["archived"]["anyOf"][0], json!({"type": "boolean"}));
+        assert!(props["state"].get("examples").is_none(), "{doc}");
+        assert!(props["created_at"].get("examples").is_none(), "{doc}");
+        assert_eq!(props["html_url"]["examples"], json!(["https://x.test/a"]));
+        assert_eq!(props["count"]["example"], json!(3));
+        // A member named `examples` is a member.
+        assert_eq!(props["examples"], json!({"type": "boolean"}));
+    }
+
+    #[test]
+    fn over_budget_examples_go_before_any_definition_is_stubbed() {
+        let urls: serde_json::Map<String, Value> = (0..40)
+            .map(|i| {
+                (
+                    format!("u{i}_url"),
+                    json!({"type": "string", "examples": [format!("https://api.example.test/things/{i}/abcdefghij")]}),
+                )
+            })
+            .collect();
+        let doc = json!({"$ref": "#/$defs/Thing", "$defs": {
+            "Thing": {"type": "object", "properties": urls},
+        }});
+        let budget = size(&doc) - 100;
+        let fitted = fit(doc, budget);
+        assert!(size(&fitted) <= budget);
+        let thing = &fitted["$defs"]["Thing"];
+        assert_eq!(
+            thing["properties"]["u0_url"],
+            json!({"type": "string"}),
+            "{fitted}"
+        );
+    }
+
+    #[test]
+    fn a_required_member_of_the_answer_keeps_its_shape_before_optional_ones() {
+        // Each definition has `n` string members with long names.
+        let object = |prefix: &str, n: usize| {
+            let props: serde_json::Map<String, Value> = (0..n)
+                .map(|i| {
+                    (
+                        format!("{prefix}_member_with_a_long_name_{i}"),
+                        json!({"type": "string"}),
+                    )
+                })
+                .collect();
+            json!({"type": "object", "properties": props})
+        };
+        let mut repo = serde_json::Map::new();
+        repo.insert("owner".into(), json!({"$ref": "#/$defs/User"}));
+        let mut defs = serde_json::Map::new();
+        defs.insert("User".into(), object("user", 20));
+        for i in 0..5 {
+            repo.insert(
+                format!("extra{i}"),
+                json!({"anyOf": [{"$ref": format!("#/$defs/Extra{i}")}, {"type": "null"}]}),
+            );
+            defs.insert(format!("Extra{i}"), object(&format!("extra{i}"), 8));
+        }
+        defs.insert(
+            "Repo".into(),
+            json!({"type": "object", "required": ["owner"], "properties": repo}),
+        );
+        let doc = json!({"$ref": "#/$defs/Repo", "$defs": defs});
+        // Room for the user, not for every extra as well.
+        let budget = size(&doc) - size(&doc["$defs"]["Extra0"]) * 3;
+        let fitted = fit(doc, budget);
+        assert!(size(&fitted) <= budget);
+        assert!(
+            fitted["$defs"]["User"]["properties"].is_object(),
+            "{fitted}"
+        );
+        assert!(
+            (0..5).any(|i| fitted["$defs"][format!("Extra{i}")]["properties"].is_null()),
+            "{fitted}"
+        );
+    }
+
+    #[test]
+    fn a_root_reference_keeps_its_definition_when_an_expandable_collapses() {
+        let mut doc = json!({
+            "$ref": "#/$defs/issue",
+            "$defs": {
+                "issue": {"type": "object", "properties": {
+                    "user": {"$ref": "#/$defs/user"},
+                    "closed_by": {"anyOf": [{"type": "string"}, {"$ref": "#/$defs/actor"}]}
+                }},
+                "user": {"type": "object", "properties": {"login": {"type": "string"}}},
+                "actor": {"type": "object", "properties": {"name": {"type": "string"}}}
+            }
+        });
+        assert!(collapse_expandables(&mut doc, None, &HashSet::new()));
+        drop_unreachable_defs(&mut doc);
+        let mut kept: Vec<&String> = doc["$defs"]
+            .as_object()
+            .map_or_else(Vec::new, |d| d.keys().collect());
+        kept.sort();
+        assert_eq!(kept, ["issue", "user"], "{doc}");
     }
 
     #[test]

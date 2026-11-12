@@ -34,11 +34,11 @@ macro_rules! skill {
 /// release) sees it and is told how to get a matching binary. Raised whenever
 /// the agent surface (the MCP tools and CLI subcommands) changes; a test holds
 /// the surface's fingerprint to this level.
-pub const SKILLS_LEVEL: u32 = 1;
+pub const SKILLS_LEVEL: u32 = 2;
 
 /// The FNV-1a fingerprint of [`agent_surface`] at [`SKILLS_LEVEL`].
 #[cfg(test)]
-const SURFACE_FINGERPRINT: u64 = 570_844_583_176_563_329;
+const SURFACE_FINGERPRINT: u64 = 7_614_301_648_449_825_003;
 
 /// The agent surface the level tracks: every MCP tool and every CLI subcommand
 /// path (`world show`), sorted. Flags and tool parameters are not in it.

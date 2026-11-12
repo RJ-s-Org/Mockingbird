@@ -10,6 +10,7 @@
 //! its working folder, refusing another project's), or runs locally
 //! (doctor, init, provider tests, the background server).
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -173,6 +174,7 @@ const LOCAL_TOOLS: &[&str] = &[
     "stop_server",
     "proxy_env",
     "open_key_setup",
+    "project_hosts",
 ];
 
 /// Why a tool call failed: shown to the model as an error result.
@@ -464,7 +466,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "start_server",
             title: "Start Mockingbird in the background",
-            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env (or proxy_env_error, why this project's proxy could not be handed out). With a config, also world_review: for each mock whose world description has gaps, the next_steps and world_gaps an import answers (review them as after import_contract, the mockingbird-world skill); shares: the shares group each mock of the config keeps its sessions in (as the config's mocks group them), {group, default} (default: true when it set no shares and joined the group of the mocks whose hosts share its registrable domain, named after the domain; null when in none); and next_steps naming mocks that answer for one host in no common shares group (one sets shares: none, they name different groups, or the host has no registrable domain); and unknown_ids: per mock, how a read of an id the session does not hold is answered (its setting, or the types inferred to answer 404 once the session has written one of their records, and those that generate; get_world says why).",
+            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env (or proxy_env_error, why this project's proxy could not be handed out). With a config, also world_review: for each mock whose world description has gaps, the next_steps and world_gaps an import answers (review them as after import_contract, the mockingbird-world skill); shares: the shares group each mock of the config keeps its sessions in (as the config's mocks group them), {group, default} (default: true when it set no shares and joined the group of the mocks whose hosts share its registrable domain, named after the domain; null when in none); and next_steps naming mocks that answer for one host in no common shares group (one sets shares: none, they name different groups, or the host has no registrable domain), and one line summing up the hosts the project can call that no mock lists (project_hosts lists each with what to import); and unknown_ids: per mock, how a read of an id the session does not hold is answered (its setting, or the types inferred to answer 404 once the session has written one of their records, and those that generate; get_world says why).",
             schema: obj(
                 json!({
                     "config": s("Config file (preferred)."),
@@ -513,9 +515,20 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "server_status",
             title: "Background server status",
-            description: "Whether the background server runs, and its /readyz (ready, degraded reasons). After the app ran: next_steps, one per host the proxy blocked since the server started that no mock lists now, naming the mock of its domain to add it to and the catalog examples that list it, if any. Mock those hosts before handing back.",
+            description: "Whether the background server runs, and its /readyz (ready, degraded reasons). next_steps: one per host the proxy blocked since the server started that no mock lists now, naming the mock of its domain to add it to and the catalog examples that list it, if any; then one line summing up the hosts the project can call that no mock lists (project_hosts lists each with what to import). Mock those hosts before handing back.",
             schema: obj(
                 json!({ "config": s("Config file the server was started with; default: the one start_server used.") }),
+                &[],
+            ),
+            read_only: true,
+            destructive: false,
+        },
+        Tool {
+            name: "project_hosts",
+            title: "Hosts the project can call that no mock lists",
+            description: "Scan the project of a config (the nearest folder above it with .git or a package manifest) for the vendor hosts the app can call: hosts of OpenAPI 3 / Swagger 2 files bundled anywhere in it, installed dependencies included, and of URL literals in its own files that share a domain with one of those, a mocked host or a catalog example. Returns summary (one line), unclaimed (each host no mock lists, with its evidence: spec, catalog, or literal for a host only named by a URL in the app's files; the API descriptions that serve it, all needed when there are several: path, title, operations; the files naming it; the catalog examples listing it), claimed, scan (files, bytes, time, whether a limit stopped it) and next_steps, one per domain, naming what to import. start_server and server_status carry the summary line.",
+            schema: obj(
+                json!({ "config": s("Config file; default: the one start_server used, else ./mockingbird.yaml.") }),
                 &[],
             ),
             read_only: true,
@@ -1721,6 +1734,8 @@ impl McpServer {
                 }
                 if let Some(config) = &args.config {
                     self.add_start_review(&mut started, config).await;
+                    self.add_unclaimed_steps(&mut started, config, &HashSet::new())
+                        .await;
                 }
                 if let (Some(config), Ok(mut recorded)) = (&args.config, self.started_config.lock())
                 {
@@ -1742,8 +1757,22 @@ impl McpServer {
             "open_key_setup" => self.open_key_setup(a).await,
             "server_status" => {
                 let mut status = daemon::status(&self.server_state(a)).await?;
-                self.add_blocked_steps(&mut status).await;
+                let blocked = self.add_blocked_steps(&mut status).await;
+                if let Some(config) = self.project_config(a) {
+                    self.add_unclaimed_steps(&mut status, &config, &blocked)
+                        .await;
+                }
                 Ok(status)
+            }
+            "project_hosts" => {
+                let config = self.project_config(a).ok_or_else(|| {
+                    ToolError(
+                        "give config: there is no ./mockingbird.yaml and start_server used none"
+                            .into(),
+                    )
+                })?;
+                let answer = crate::hosts::project_hosts_async(config, Default::default()).await?;
+                Ok(serde_json::to_value(answer).map_err(anyhow::Error::from)?)
             }
             "server_logs" => {
                 let lines = opt_u64(a, "lines").unwrap_or(100);
@@ -2538,25 +2567,63 @@ impl McpServer {
         }
     }
 
+    /// The config a project tool reads: its `config` argument, else the
+    /// one `start_server` used, else `./mockingbird.yaml` when it exists.
+    fn project_config(&self, a: &Value) -> Option<PathBuf> {
+        let config = opt_str(a, "config")
+            .map(PathBuf::from)
+            .or_else(|| self.recorded_config());
+        crate::proxy::env::config_or_local(config.as_deref())
+    }
+
+    /// Appends the summary line of the project host scan of `config`
+    /// ([`crate::hosts::project_hosts`]) to the `next_steps` of a
+    /// `start_server` or `server_status` answer (after any already there):
+    /// how many hosts the project can call that no mock of the config, or
+    /// of the running server, lists, leaving out the `blocked` hosts a
+    /// step already names; `project_hosts` has the detail. A config that
+    /// does not load adds nothing.
+    async fn add_unclaimed_steps(
+        &self,
+        answer: &mut Value,
+        config: &std::path::Path,
+        blocked: &HashSet<String>,
+    ) {
+        let served = match answer_admin(answer) {
+            Some(admin) => {
+                crate::report::claimed_hosts(&admin, self.token.as_deref(), &self.workspace).await
+            }
+            None => HashSet::new(),
+        };
+        let Ok(scan) = crate::hosts::project_hosts_async(config.to_path_buf(), served).await else {
+            return;
+        };
+        if let Some(line) = scan.summary_without(blocked) {
+            append_step(answer, line);
+        }
+    }
+
     /// Adds `next_steps` to a `server_status` answer for each host the
     /// server's proxy blocked so far ([`crate::report::blocked_host_steps`]): the
     /// app called a host no mock serves, and the step names the catalog
     /// contract for it, if any.
-    async fn add_blocked_steps(&self, status: &mut Value) {
+    /// Returns the blocked hosts it added a step for.
+    async fn add_blocked_steps(&self, status: &mut Value) -> HashSet<String> {
         if status.get("admin_reachable").and_then(Value::as_bool) != Some(true) {
-            return;
+            return HashSet::new();
         }
         let Some(admin) = status["server"]["admin"].as_str().map(str::to_owned) else {
-            return;
+            return HashSet::new();
         };
-        let Ok(steps) =
+        let Ok((hosts, steps)) =
             crate::report::blocked_steps(&admin, self.token.as_deref(), &self.workspace).await
         else {
-            return;
+            return HashSet::new();
         };
-        if !steps.is_empty() {
-            status["next_steps"] = json!(steps);
+        for step in steps {
+            append_step(status, step);
         }
+        hosts.into_iter().collect()
     }
 
     /// The data-plane base URL: the argument, `MB_DATA_URL`, the one the
@@ -3396,6 +3463,30 @@ fn world_review(read: Vec<(String, WorldGaps)>) -> Vec<Value> {
     review
 }
 
+/// The Admin API URL of a `start_server` (`admin`) or `server_status`
+/// (`server.admin`) answer.
+fn answer_admin(answer: &Value) -> Option<String> {
+    answer
+        .get("admin")
+        .or_else(|| answer.get("server").and_then(|s| s.get("admin")))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Appends `step` to an answer's `next_steps`, creating the list.
+fn append_step(answer: &mut Value, step: String) {
+    let Some(obj) = answer.as_object_mut() else {
+        return;
+    };
+    if let Some(steps) = obj
+        .entry("next_steps")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+    {
+        steps.push(Value::String(step));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3734,6 +3825,83 @@ mod tests {
         assert!(again.contains("--force"), "{again}");
         let unknown = call_tool_error(&s, "init_example", json!({"name": "nope"})).await;
         assert!(unknown.contains("the catalog has"), "{unknown}");
+    }
+
+    /// A project whose bundled description serves a host no mock lists.
+    fn unclaimed_project() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        let spec = root.join("node_modules/sdk/api.json");
+        std::fs::create_dir_all(spec.parent().unwrap()).unwrap();
+        std::fs::write(
+            &spec,
+            r#"{"openapi": "3.0.0", "servers": [{"url": "https://other.vendor-one.com"}], "paths": {"/a": {"get": {}}}}"#,
+        )
+        .unwrap();
+        let config = root.join("mocks/mockingbird.yaml");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            "mocks:\n  api:\n    contract: api.json\n    hosts: [api.vendor-one.com]\n",
+        )
+        .unwrap();
+        (dir, config)
+    }
+
+    /// `start_server` (`admin`) and `server_status` (`server.admin`)
+    /// answers get the summary line after the steps they already carry,
+    /// without the hosts a blocked-host step names.
+    #[tokio::test]
+    async fn unclaimed_hosts_are_summed_up_after_the_other_steps() {
+        let (_dir, config) = unclaimed_project();
+        let s = server(false);
+        let none = HashSet::new();
+        for mut answer in [
+            json!({"admin": "http://127.0.0.1:1", "next_steps": ["earlier step"]}),
+            json!({"server": {"admin": "http://127.0.0.1:1"}, "next_steps": ["earlier step"]}),
+        ] {
+            assert_eq!(answer_admin(&answer).as_deref(), Some("http://127.0.0.1:1"));
+            s.add_unclaimed_steps(&mut answer, &config, &none).await;
+            let steps = answer["next_steps"].as_array().unwrap();
+            assert_eq!(steps.len(), 2, "{answer}");
+            assert_eq!(steps[0], "earlier step");
+            assert!(
+                steps[1]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("1 host the project can call has no mock: vendor-one.com 1 (1 with a bundled description). project_hosts"),
+                "{answer}"
+            );
+        }
+        let blocked: HashSet<String> = ["other.vendor-one.com".to_owned()].into();
+        let mut answer = json!({"admin": "http://127.0.0.1:1"});
+        s.add_unclaimed_steps(&mut answer, &config, &blocked).await;
+        assert!(answer.get("next_steps").is_none(), "{answer}");
+
+        let listed = call_tool(
+            &s,
+            "project_hosts",
+            json!({"config": config.display().to_string()}),
+        )
+        .await;
+        assert_eq!(listed["unclaimed"][0]["host"], "other.vendor-one.com");
+        assert_eq!(listed["unclaimed"][0]["evidence"], "spec");
+    }
+
+    #[tokio::test]
+    async fn project_hosts_without_a_config_is_an_error() {
+        let s = server(false);
+        // The tests run in the crate folder, which has no mockingbird.yaml.
+        let err = call_tool_error(&s, "project_hosts", json!({})).await;
+        assert!(err.contains("give config"), "{err}");
+        let err = call_tool_error(
+            &s,
+            "project_hosts",
+            json!({"config": "/nonexistent/m.yaml"}),
+        )
+        .await;
+        assert!(err.contains("cannot read config file"), "{err}");
     }
 
     /// A server whose Admin API is `admin`.

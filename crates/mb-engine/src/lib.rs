@@ -3198,7 +3198,7 @@ impl Engine {
     ) -> Result<Reply, String> {
         let request = ChatRequest {
             messages: messages.to_vec(),
-            response_format: format.clone(),
+            response_format: compact::bare_format(format),
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
             max_answer_bytes: answer_cap(format, self.config.output_budget),
