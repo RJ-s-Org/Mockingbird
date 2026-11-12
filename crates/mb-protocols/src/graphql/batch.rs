@@ -216,6 +216,7 @@ async fn generate(
                     update_guard: None,
                     answer_records: None,
                     restates: None,
+                    shown_target: None,
                 },
             }),
             None => unknown.push(part.key.clone()),

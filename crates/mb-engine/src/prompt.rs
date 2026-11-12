@@ -653,6 +653,7 @@ fn stream_user_message(
         update_guard: None,
         answer_records: None,
         restates: None,
+        shown_target: None,
     };
     let mut s = user_message(call, &unary, false, None, false, false, notes);
     if !ctx.request_stream.is_empty() {
@@ -1020,17 +1021,20 @@ must follow them.\n{}\n</scenario>",
         );
     }
     if let Some(target) = ctx.target {
-        let _ = writeln!(
-            s,
-            "<existing_resource>\n{}\n</existing_resource>",
-            data(&target.data)
-        );
+        let shown = ctx.shown_target.unwrap_or(&target.data);
+        let shown = match ctx.restates {
+            // Only its text is the answer's own; the rest is answered as stored.
+            Some(_) => data(&crate::restated_view(shown)),
+            None => data(shown),
+        };
+        let _ = writeln!(s, "<existing_resource>\n{shown}\n</existing_resource>");
         if let Some(representation) = ctx.restates {
             let _ = writeln!(
                 s,
                 "The request asks for <existing_resource> itself in another representation \
 (`{}`): answer that same resource, with the same identity and facts, its text written in that \
-representation.",
+representation. <existing_resource> shows its text and the values beside it; what it leaves out \
+is kept as stored.",
                 escape(representation)
             );
         }

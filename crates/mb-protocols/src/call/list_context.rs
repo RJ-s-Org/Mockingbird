@@ -167,7 +167,7 @@ fn parents<'a>(
 
 /// `value` with each text longer than [`MAX_SHOWN_TEXT`] characters cut there, `…`
 /// marking the cut.
-fn cut_texts(value: &mut Value, depth: usize) {
+pub(super) fn cut_texts(value: &mut Value, depth: usize) {
     if depth > 16 {
         return;
     }

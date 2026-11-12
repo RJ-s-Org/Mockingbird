@@ -31,6 +31,12 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### Single-record read prompts show held records trimmed
+
+No migration or configuration.
+
+- **A read by path of one record is shown its held records trimmed to what its answer needs.** A read in another language is shown what of its record holds text, with the values beside that text, without the parts a query embedded that it does not ask for (and keeps none of those parts with its variant); it takes text from the answer only where the prompt showed some, so everything else, those parts included, is answered as stored. A read generating parts it asks to be embedded (`append_to_response`) that its record lacks is shown the record's top-level values, texts over 200 characters cut with `…`; the answer is overlaid with the whole stored record as before. Related records leave out the parts their type's detail read offers to embed, and take at most 24 KiB together. With 30 TMDB movies held (three parts each, ten French variants), `/3/movie/{id}?language=de-DE` went from 15.8 KB to 10.0 KB, a read appending two more parts from 16.0 KB to 9.6 KB, and a first read of an author shown the 20 posts that refer to it (each read with its comments embedded) from 74.7 KB to 14.8 KB.
+
 ### List prompts show held records as list items
 
 No migration or configuration.

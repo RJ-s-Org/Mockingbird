@@ -365,6 +365,26 @@ fn named_members(value: &Value) -> Vec<String> {
         .collect()
 }
 
+/// The members any embedding parameter of `op`, a single-record read, is said to name
+/// ([`Embeds::offered`]); none for any other read.
+pub(super) fn offered(rt: &MockRuntime, op: &Operation) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if !single_record_read(rt, op) {
+        return out;
+    }
+    let members = embeddable_members(rt, op);
+    for (name, schema) in declared(op) {
+        if let Role::Embed { offered } = role(rt, op, (name, schema), &members) {
+            for member in offered {
+                if !out.contains(&member) {
+                    out.push(member);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// What `call`, a single-record read of `op`, asks to be embedded; empty for any other
 /// read.
 pub(super) fn embeds(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Embeds {

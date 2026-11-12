@@ -32,7 +32,7 @@ fn credit(id: u64, n: u64) -> String {
 }
 
 /// Movie `id`'s details in `language`, with every part `append_to_response` can ask for.
-fn movie_details(id: u64, language: &str) -> Value {
+pub(crate) fn movie_details(id: u64, language: &str) -> Value {
     let title = format!("Movie {id} ({language})");
     let overview = format!(
         "{title}: a long overview that goes on about the plot, the cast and the making of \
@@ -91,7 +91,7 @@ the film, as TMDB's overviews do. {}",
 }
 
 /// TV show `id`'s details in `language`, with every part `append_to_response` can ask for.
-fn tv_details(id: u64, language: &str) -> Value {
+pub(crate) fn tv_details(id: u64, language: &str) -> Value {
     let movie = movie_details(id, language);
     let seasons: Vec<Value> = (1..=4)
         .map(|n| {
@@ -172,7 +172,7 @@ fn multi_page(ids: &[u64]) -> Value {
 }
 
 /// The `<tag>` block of `prompt`.
-fn block<'a>(prompt: &'a str, tag: &str) -> Option<&'a str> {
+pub(crate) fn block<'a>(prompt: &'a str, tag: &str) -> Option<&'a str> {
     let open = format!("<{tag}>");
     let start = prompt.find(&open)? + open.len();
     let end = prompt.find(&format!("</{tag}>"))?;
@@ -180,7 +180,7 @@ fn block<'a>(prompt: &'a str, tag: &str) -> Option<&'a str> {
 }
 
 /// The bytes of every message of the last LLM request.
-fn last_prompt_bytes(provider: &mb_llm::ScriptedProvider) -> usize {
+pub(crate) fn last_prompt_bytes(provider: &mb_llm::ScriptedProvider) -> usize {
     provider
         .requests()
         .last()
@@ -189,7 +189,7 @@ fn last_prompt_bytes(provider: &mb_llm::ScriptedProvider) -> usize {
 }
 
 /// The user message of the last LLM request.
-fn last_prompt(provider: &mb_llm::ScriptedProvider) -> String {
+pub(crate) fn last_prompt(provider: &mb_llm::ScriptedProvider) -> String {
     provider
         .requests()
         .last()
@@ -199,7 +199,7 @@ fn last_prompt(provider: &mb_llm::ScriptedProvider) -> String {
 }
 
 /// The held records `prompt` shows, one per line.
-fn related(prompt: &str) -> Vec<Value> {
+pub(crate) fn related(prompt: &str) -> Vec<Value> {
     block(prompt, "related_resources")
         .unwrap_or_default()
         .lines()
@@ -212,11 +212,11 @@ const HELD: u64 = 30;
 const MOVIE_PARTS: &str = "append_to_response=credits,videos,images,external_ids,release_dates";
 const TV_PARTS: &str = "append_to_response=credits,videos,images,external_ids,content_ratings";
 
-fn movie_ids() -> Vec<u64> {
+pub(crate) fn movie_ids() -> Vec<u64> {
     (1..=HELD).map(|n| 1000 + n).collect()
 }
 
-fn tv_ids() -> Vec<u64> {
+pub(crate) fn tv_ids() -> Vec<u64> {
     (1..=10).map(|n| 5000 + n).collect()
 }
 

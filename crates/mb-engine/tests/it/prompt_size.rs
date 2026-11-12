@@ -147,6 +147,7 @@ fn ctx() -> GenerationContext<'static> {
         update_guard: None,
         answer_records: None,
         restates: None,
+        shown_target: None,
     }
 }
 
