@@ -1772,6 +1772,38 @@ impl Engine {
         drawn
     }
 
+    /// A faker value for the member at JSON `pointer` of an instance of `schema` (an
+    /// answer of `op`; see [`consistency::schema_at`]), valid against that member's
+    /// schema: what replaces one member of an answer built from a stored record that
+    /// breaks the answer's schema, the rest kept. Drawn from the engine's seed (`0`
+    /// without one) mixed with the contract, the operation and the pointer, so every
+    /// call draws it alike. `None` when the pointer names nothing the schema declares,
+    /// or no draw validates.
+    #[must_use]
+    pub fn draw_at(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        schema: &Value,
+        pointer: &str,
+    ) -> Option<Value> {
+        let member_schema = consistency::schema_at(bundle, schema, pointer)?;
+        let validator = self.schema_validator(bundle, &member_schema).ok()?;
+        let mut draws = seed::Draws::seeded(
+            self.faker_seed.unwrap_or_default(),
+            &[&bundle.source_digest, &op.id, "redraw", pointer],
+            &[],
+        );
+        let (value, valid) = self.fake_checked(
+            bundle,
+            &member_schema,
+            Some(validator.as_ref()),
+            &FakerHints::default(),
+            &mut draws,
+        );
+        valid.then_some(value)
+    }
+
     /// A `404` for a resource the session does not hold: the operation's
     /// declared `404` response (or its `default`); else the status
     /// it declares for that (a `410`, or its one declared

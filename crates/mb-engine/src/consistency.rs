@@ -345,6 +345,31 @@ pub(crate) fn member_property_schema(
     find(bundle, schema, field, 0)
 }
 
+/// The schema of the value at JSON `pointer` (RFC 6901, `""` for the instance itself) of
+/// an instance of `schema`: each step a member [`property_schema`] finds by its very name, or, by
+/// an array index, the array's `items`, through `$ref`s and a nullable `anyOf`/`oneOf`.
+/// `None` when a step names nothing the schema declares (a map's key, an undeclared
+/// member, an item of a tuple).
+#[must_use]
+pub fn schema_at(bundle: &Bundle, schema: &Value, pointer: &str) -> Option<Value> {
+    if pointer.is_empty() {
+        return Some(schema.clone());
+    }
+    pointer
+        .strip_prefix('/')?
+        .split('/')
+        .map(|step| step.replace("~1", "/").replace("~0", "~"))
+        .try_fold(schema.clone(), |at, step| {
+            let at = deref(bundle, non_null(bundle, &at)).clone();
+            if step.parse::<usize>().is_ok()
+                && let Some(items) = at.get("items").filter(|i| i.is_object())
+            {
+                return Some(items.clone());
+            }
+            member_property_schema(bundle, &at, &step)
+        })
+}
+
 /// The schema of one item of list `body` answered for `schema`.
 pub fn item_schema(bundle: &Bundle, schema: &Value, body: &Value) -> Option<Value> {
     let list = match body {
