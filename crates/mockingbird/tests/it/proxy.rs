@@ -892,6 +892,99 @@ print("pool=%d" % r.status)
     );
 }
 
+/// `ruby`, when installed.
+fn ruby() -> Option<PathBuf> {
+    let out = std::process::Command::new("ruby")
+        .arg("--version")
+        .output()
+        .ok()?;
+    out.status.success().then(|| PathBuf::from("ruby"))
+}
+
+/// `Net::HTTP.new(host, port, nil)` (an explicit nil proxy, as stripe-ruby
+/// passes) reaches the mock through the preload, verifying TLS with the
+/// local CA although the client names an unrelated `ca_file` or its own
+/// cert store. Unmapped hosts are blocked and the host does not resolve, so
+/// a request that bypassed the proxy would fail; without the preload it
+/// does.
+#[tokio::test(flavor = "multi_thread")]
+async fn ruby_preload_routes_net_http_with_an_explicit_nil_proxy() {
+    let Some(ruby) = ruby() else {
+        eprintln!("skipped: ruby is not installed");
+        return;
+    };
+    let registry = hosted_registry("api.orders.test").await;
+    let (proxy, ca_dir, _stop) = start_proxy(registry, Unmapped::Block, vec![]).await;
+    let port: u16 = proxy.rsplit(':').next().unwrap().parse().unwrap();
+    let env = mockingbird::proxy::env::proxy_env_with(
+        &mockingbird::proxy::env::ProxyEnvOptions {
+            host: "127.0.0.1".into(),
+            port,
+            ca_dir: ca_dir.path().into(),
+        },
+        |_| None,
+    )
+    .unwrap();
+    // Another CA: trusting only it would fail verification.
+    let other = tempfile::tempdir().unwrap();
+    let other_ca = LocalCa::load_or_create(other.path()).unwrap().cert_path();
+    let script = r#"
+require 'net/http'
+require 'openssl'
+def get(ssl)
+  http = Net::HTTP.new('api.orders.test', ssl ? 443 : 80, nil)
+  if ssl
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_PEER
+    yield http if block_given?
+  end
+  http.start { |h| h.get('/orders').code }
+rescue StandardError => e
+  e.class.name
+end
+ca_file = get(true) { |h| h.ca_file = ARGV[0] }
+store = get(true) do |h|
+  s = OpenSSL::X509::Store.new
+  s.add_file(ARGV[0])
+  h.cert_store = s
+end
+puts "ca_file=#{ca_file} store=#{store} default=#{get(true)} http=#{get(false)}"
+"#;
+    let run = |with_preload: bool| {
+        let mut vars = env.vars.clone();
+        if !with_preload {
+            vars.remove("RUBYOPT");
+        }
+        let ruby = ruby.clone();
+        let script = script.to_owned();
+        let other_ca = other_ca.clone();
+        tokio::task::spawn_blocking(move || {
+            std::process::Command::new(ruby)
+                .arg("-e")
+                .arg(script)
+                .arg(other_ca)
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .envs(&vars)
+                .output()
+                .unwrap()
+        })
+    };
+    let out = run(true).await.unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "ca_file=200 store=200 default=200 http=200",
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = run(false).await.unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("ca_file=200") && !stdout.contains("http=200"),
+        "without the preload: {stdout}"
+    );
+}
+
 #[test]
 fn proxy_browser_prints_the_chromium_flags() {
     let dir = tempfile::tempdir().unwrap();
