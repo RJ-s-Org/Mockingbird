@@ -345,8 +345,20 @@ async fn verify_run(
             "verify --run prints --format text or json".into(),
         ));
     }
+    let serve = args.serve.clone().map(|command| verify_run::ServeOptions {
+        command,
+        port: args.serve_port,
+        ready: args.serve_ready.clone(),
+        timeout: args
+            .serve_timeout
+            .map_or(verify_run::DEFAULT_SERVE_TIMEOUT, Into::into)
+            .min(verify_run::MAX_SERVE_TIMEOUT),
+    });
     let opts = verify_run::Options {
         command,
+        // Both commands run from where `verify` was started.
+        cwd: std::env::current_dir().ok(),
+        serve,
         config: args.config.clone(),
         offline: args.offline,
         state_dir: args
@@ -372,10 +384,16 @@ async fn verify_run(
     if args.format != report::Format::Text || args.output.is_some() {
         eprintln!(
             "verify --run failed: exit code {}, {} failures pointing at the mock",
-            outcome
-                .command
-                .exit_code
-                .map_or_else(|| "none (timed out)".to_owned(), |c| c.to_string()),
+            outcome.command.exit_code.map_or_else(
+                || {
+                    if outcome.command.not_run {
+                        "none (not run)".to_owned()
+                    } else {
+                        "none (stopped)".to_owned()
+                    }
+                },
+                |c| c.to_string()
+            ),
             outcome.failures.len() + outcome.more_failures
         );
     }

@@ -243,7 +243,7 @@ A fresh Claude Code in a clean copy of the sample, with the plugin from the mark
 
 **`verify --run`.** `start_server` named the app's tests in its next steps: "The app's tests: `bundle exec rspec` (spec/), `cd playwright && npm test` (playwright/package.json scripts.test). Run each with verify_run …". The agent did not run them. It named why in its hand-back: the RSpec gems aren't installed (`bundle install`), and the Playwright suite runs in Docker against browser-side Stripe. That is the hand-back rule's second branch (a remaining failure named as out of scope), so it complied. It's still a gap: `bundle exec rspec` alone can't pass here anyway, because each spec needs its integration's Node server on port 4242.
 
-The trial ran it instead: `verify --run` with a script that starts custom-payment-flow's server and runs its spec. Result: exit 1, "7 requests logged while it ran; no failures point at the mock". The one spec failure (below) shows in the output tail. A relative command path resolves from the project root, not the current folder.
+The trial ran it instead: `verify --run` with a script that starts custom-payment-flow's server and runs its spec. Result: exit 1, "7 requests logged while it ran; no failures point at the mock". The one spec failure (below) shows in the output tail. A relative command path resolved from the project root, not the current folder; `verify --run` now runs from the caller's folder, and `--serve` runs an integration's server beside its spec (start_server proposes the pair).
 
 **Scorecard.**
 
@@ -259,3 +259,22 @@ The specs now run with Mockingbird's own Ruby preload (`RUBYLIB`/`RUBYOPT` from 
 **The two failures, both out of scope:**
 - **No refusal for `au_becs_debit` in USD.** custom-payment-flow expects a 400. That's a validation rule the agent wasn't asked to model, and nothing in the contract says it. Left as is.
 - **Checkout's hosted page.** The prebuilt spec follows the 303 to `https://checkout.stripe.com/c/pay/cs_test…`. That's a sibling of the mocked `api.stripe.com`, so the proxy blocks it with a 502. The hosted page is a third-party web page, not an API, so the block is correct. The spec also wants a `#fragment` in the URL.
+
+## `verify --run --serve` (2026-11-12)
+
+A fresh Claude Code in a clean copy of the sample, with the plugin from the marketplace and the binary from this PR's first round. Same one-line prompt as before.
+
+**Build.** 47 turns, $2.25 of Claude Code usage. The agent moved the mock to free ports, wrote a world description and checked all four Node servers through the proxy. It passed `verify --no-unmapped --no-unmatched`. `start_server` named a ready-to-run pair: "The app's tests need its own server running: verify_run {command: "bundle exec rspec spec/custom_payment_flow_server_spec.rb", serve: "cd custom-payment-flow/server/node && npm start", serve_port: 4242}, and 3 more". The agent didn't run it. It named why: "the Ruby specs in `spec/`, because their gems aren't installed (`bundle install` first)", and handed back the exact command: `mockingbird verify --run "bundle exec rspec spec/payment_element_server_spec.rb" --serve "cd payment-element/server/node && npm start" --serve-port 4242`.
+
+**The detected pairs, run by the trial** (with the specs' gems on `GEM_HOME`):
+
+| Pair | Result | What `verify --run` reported |
+| --- | --- | --- |
+| custom-payment-flow | 5/6, exit 1 | no failures point at the mock (the `au_becs_debit` 400 rule) |
+| payment-element | 3/3, exit 0 | passed |
+| prebuilt-checkout-page | 1/2, exit 1 | `blocked_host`: checkout.stripe.com, with its next step (out of scope: a hosted web page) |
+| elements-with-checkout-sessions | 4/5 or 5/5 | once, `retrieve(expand: [line_items])` came back without `line_items`. The expected 404 for an invalid session id is shown as "if the test expected this status, ignore it" |
+
+Each server was ready in about 0.3 s on port 4242 and stopped after its tests. The standard harness gives 14/16 on the same mock, with every call from `state`.
+
+The `line_items` miss is intermittent on `main` (13/16 and 14/16 in two runs). It doesn't happen on #552's branch (14/16 twice). Separately, an expandable `customer` (`anyOf` string or object) comes back as the id string when expanded, on both.

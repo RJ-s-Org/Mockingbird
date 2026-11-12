@@ -27,7 +27,16 @@
 //!   description or catalog example serves but no mock lists
 //!   ([`crate::hosts`]); the project's others are a note;
 //! - `check`: an assertion given beside `--run` (`--called`, ...) that the
-//!   window fails.
+//!   window fails;
+//! - `serve_failed`: the app's own server, given with `--serve` (MCP
+//!   `serve`), exited or did not become ready, so the command was not run.
+//!
+//! With `--serve "<cmd>"`, the app's server runs under the same environment
+//! for the command's whole run: it is started after the window opens (its
+//! requests count), waited for ([`ServeOptions`]), and its process group is
+//! stopped once the command ends (TERM, then KILL after [`SERVE_GRACE`]),
+//! whatever ends it: an exit, the timeout, Ctrl-C, an error or the MCP
+//! client going away.
 //!
 //! Costs are capped: the command's time ([`Options::timeout`], then its
 //! process group is stopped), the output kept ([`TAIL_LINES`] lines of
@@ -81,12 +90,50 @@ const SETTLE: Duration = Duration::from_secs(3);
 /// process it left running may hold its pipes open).
 const DRAIN: Duration = Duration::from_secs(2);
 
+/// How long a serve command is given to end after TERM before its process
+/// group is killed.
+pub const SERVE_GRACE: Duration = Duration::from_secs(5);
+
+/// The default limit on the time a serve command takes to become ready.
+pub const DEFAULT_SERVE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The longest readiness wait accepted (`--serve-timeout`, MCP
+/// `serve_timeout_secs`).
+pub const MAX_SERVE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How long a serve command with no readiness signal (no port, no line,
+/// none detected) must keep running before the command starts.
+pub const SERVE_SETTLE: Duration = Duration::from_secs(3);
+
+/// Lines of the serve command's output kept (its last ones).
+pub const SERVE_TAIL_LINES: usize = 30;
+
+/// The app's own server, run while the command runs (`--serve`).
+#[derive(Debug, Clone)]
+pub struct ServeOptions {
+    /// The command, run with `sh -c` (`cmd /C` on Windows) from
+    /// [`Options::cwd`], in a process group of its own.
+    pub command: String,
+    /// Ready once something accepts TCP connections on this localhost port.
+    pub port: Option<u16>,
+    /// Ready once a line of its output matches this regular expression
+    /// (ECMA 262, as a JSON Schema `pattern`; found anywhere in the line).
+    pub ready: Option<String>,
+    /// How long it may take to become ready.
+    pub timeout: Duration,
+}
+
 /// What to run and against which server.
 #[derive(Debug, Clone)]
 pub struct Options {
-    /// The command, run with `sh -c` (`cmd /C` on Windows) from the
-    /// project root of the config.
+    /// The command, run with `sh -c` (`cmd /C` on Windows) from
+    /// [`Options::cwd`].
     pub command: String,
+    /// Where the command (and the serve command) run; `None` is the
+    /// project root of the config.
+    pub cwd: Option<PathBuf>,
+    /// The app's own server, run while the command runs.
+    pub serve: Option<ServeOptions>,
     /// The config; `None` is `./mockingbird.yaml`.
     pub config: Option<PathBuf>,
     /// Faker only, for a server this run starts.
@@ -106,8 +153,13 @@ pub struct Options {
 #[derive(Serialize, Debug, Default)]
 pub struct CommandRun {
     pub command: String,
-    /// Where it ran: the project root.
+    /// Where it ran: the caller's folder (`--run`), the MCP tool's `cwd`,
+    /// else the project root.
     pub cwd: String,
+    /// Whether it was not started: the serve command failed or was
+    /// interrupted first.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub not_run: bool,
     /// Its exit code (`128 + n` when signal `n` ended it, 127 when it could
     /// not start); `null` when it was stopped at the timeout or interrupted.
     pub exit_code: Option<i32>,
@@ -120,6 +172,30 @@ pub struct CommandRun {
     /// The last lines of its stdout and stderr, interleaved as they came.
     pub output_tail: String,
     /// Whether earlier output (or the end of long lines) was left out.
+    pub output_truncated: bool,
+}
+
+/// The serve command's run.
+#[derive(Serialize, Debug, Default)]
+pub struct ServeRun {
+    pub command: String,
+    /// Where it ran (as the command).
+    pub cwd: String,
+    /// What it was waited for: `port 4242`, `port 4242 (detected)`, `a line
+    /// matching …`, both, or `running for 3s`.
+    pub ready_by: String,
+    pub ready: bool,
+    /// How long it took to become ready.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_ms: Option<u64>,
+    /// Its exit code when it ended on its own (before it was ready, or while
+    /// the command ran).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Whether its process group was stopped (always, once it started).
+    pub stopped: bool,
+    /// The last lines of its stdout and stderr ([`SERVE_TAIL_LINES`]).
+    pub output_tail: String,
     pub output_truncated: bool,
 }
 
@@ -141,7 +217,7 @@ pub struct Window {
 #[derive(Serialize, Debug, Clone)]
 pub struct RunFailure {
     /// `unmatched_route`, `error_status`, `fallback`, `blocked_host`,
-    /// `unclaimed_hosts` or `check`.
+    /// `unclaimed_hosts`, `check` or `serve_failed`.
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
@@ -172,6 +248,9 @@ pub struct Outcome {
     /// The command exited 0 and nothing points at the mock.
     pub ok: bool,
     pub command: CommandRun,
+    /// The app's server run beside the command (`--serve`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serve: Option<ServeRun>,
     pub window: Window,
     pub failures: Vec<RunFailure>,
     /// Failures past [`MAX_FAILURES`], not listed.
@@ -205,6 +284,9 @@ struct MockRef {
 /// reached, or its request log cannot be read; a command that fails is a
 /// result, not an error.
 pub async fn run(opts: &Options, checks: Option<&report::VerifyArgs>) -> anyhow::Result<Outcome> {
+    if let Some(pattern) = opts.serve.as_ref().and_then(|s| s.ready.as_deref()) {
+        line_matcher(pattern, ready_arg(opts))?;
+    }
     // The proxy `open` may run in this process counts into this process's
     // recorder.
     let local = crate::telemetry::install_prometheus().ok();
@@ -248,8 +330,53 @@ async fn with_session(
     let metrics_before = metrics(own).await;
 
     let root = crate::hosts::project_root(&session.config);
+    let cwd = opts.cwd.clone().unwrap_or_else(|| root.clone());
     let env = crate::proxy::env::proxy_env(&session.proxy)?;
-    let command = execute(opts, &root, &env.vars).await?;
+    let mut serve_run = None;
+    let mut serve_failure = None;
+    let mut served = None;
+    let mut serve_interrupted = false;
+    if let Some(serve) = &opts.serve {
+        let mut run = ServeRun {
+            command: serve.command.clone(),
+            cwd: cwd.display().to_string(),
+            ..ServeRun::default()
+        };
+        let mut own = crate::test_commands::config_ports(&session.config);
+        own.push((session.proxy.port, "proxy port (proxy.port)"));
+        if let Ok(url) = reqwest::Url::parse(admin)
+            && let Some(port) = url.port_or_known_default()
+        {
+            own.push((port, "Admin API port (server.admin_port)"));
+        }
+        let port = match (serve.port, &serve.ready) {
+            (None, None) => detected_port(&root, &serve.command, &own)
+                .await
+                .map(|p| (p, true)),
+            (port, _) => port.map(|p| (p, false)),
+        };
+        match start_serve(opts, serve, port, &own, &cwd, &env.vars, &mut run).await {
+            ServeStart::Ready(s) => served = Some(s),
+            ServeStart::Failed(f) => serve_failure = Some(f),
+            ServeStart::Interrupted => serve_interrupted = true,
+        }
+        serve_run = Some(run);
+    }
+    let command = if serve_failure.is_some() || serve_interrupted {
+        CommandRun {
+            command: opts.command.clone(),
+            cwd: cwd.display().to_string(),
+            not_run: true,
+            interrupted: serve_interrupted,
+            ..CommandRun::default()
+        }
+    } else {
+        // An error here drops `served`, which kills its process group.
+        execute(opts, &cwd, &env.vars).await?
+    };
+    if let (Some(s), Some(run)) = (served, serve_run.as_mut()) {
+        s.stop(run).await;
+    }
 
     settle(admin, token).await;
     // Mocks created while the command ran have no baseline: all theirs count.
@@ -295,6 +422,21 @@ async fn with_session(
     let command_ok = command.exit_code == Some(0);
     let (mut failures, expected) = request_failures(&entries, command_ok);
     outcome.notes.extend(expected);
+    if let Some(f) = serve_failure {
+        failures.insert(0, f);
+    } else if let Some(s) = serve_run.as_ref().filter(|s| s.ready) {
+        if s.ready_by.starts_with("running for") {
+            outcome.notes.push(format!(
+                "the serve command was taken as ready because it still ran after {}s (no port or ready line was given or detected); pass --serve-port (MCP serve_port) or --serve-ready (serve_ready) to wait for it properly",
+                SERVE_SETTLE.as_secs()
+            ));
+        }
+        if let Some(code) = s.exit_code {
+            outcome.notes.push(format!(
+                "the serve command exited {code} while the command ran (serve.output_tail says why)"
+            ));
+        }
+    }
     add_details(admin, token, &mut failures).await;
 
     let mut claimed = HashSet::new();
@@ -390,6 +532,7 @@ async fn with_session(
     outcome.ok = command_ok && failures.is_empty();
     outcome.failures = failures;
     outcome.command = command;
+    outcome.serve = serve_run;
     Ok(outcome)
 }
 
@@ -959,21 +1102,46 @@ fn problem_detail(body: &Value) -> Option<String> {
 }
 
 /// The last lines of a command's output.
-#[derive(Default)]
 struct Tail {
     lines: VecDeque<String>,
+    max: usize,
     truncated: bool,
+    /// The serve command's readiness line, and whether a line matched it.
+    ready: Option<jsonschema::Validator>,
+    matched: bool,
+}
+
+impl Default for Tail {
+    fn default() -> Self {
+        Self::new(TAIL_LINES)
+    }
 }
 
 impl Tail {
+    fn new(max: usize) -> Self {
+        Self {
+            lines: VecDeque::new(),
+            max,
+            truncated: false,
+            ready: None,
+            matched: false,
+        }
+    }
+
     fn push(&mut self, line: &[u8]) {
         let text = String::from_utf8_lossy(line);
+        let text = strip_ansi(&text);
         let text = text.trim_end_matches(['\n', '\r']);
+        if !self.matched
+            && let Some(ready) = &self.ready
+        {
+            self.matched = ready.is_valid(&Value::String(text.to_owned()));
+        }
         if text.chars().count() > LINE_CHARS {
             self.truncated = true;
         }
         self.lines.push_back(report::shorten(text, LINE_CHARS));
-        if self.lines.len() > TAIL_LINES {
+        if self.lines.len() > self.max {
             self.lines.pop_front();
             self.truncated = true;
         }
@@ -986,6 +1154,55 @@ impl Tail {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+/// A matcher for the lines of `pattern` (`--serve-ready`): an ECMA 262
+/// regular expression, found anywhere in the line (a JSON Schema
+/// `pattern`).
+fn line_matcher(pattern: &str, arg: &str) -> anyhow::Result<jsonschema::Validator> {
+    jsonschema::validator_for(&serde_json::json!({"type": "string", "pattern": pattern}))
+        .map_err(|e| anyhow!("{arg} {pattern:?} is not a valid regular expression: {e}"))
+}
+
+/// `text` without ANSI escape sequences (colours, cursor moves), as a
+/// terminal would show it.
+fn strip_ansi(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('\u{1b}') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            // CSI: parameters, then one final byte in @..~.
+            Some('[') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC: up to BEL or ESC \.
+            Some(']') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' || (c == '\u{1b}' && chars.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// Reads `stream` into `tail` line by line (a line past [`LINE_CHARS`] is
@@ -1039,6 +1256,90 @@ fn cancel_channel() -> &'static tokio::sync::watch::Sender<bool> {
     CANCEL.get_or_init(|| tokio::sync::watch::channel(false).0)
 }
 
+/// Resolves once the run is asked to stop: Ctrl-C or SIGTERM to the CLI
+/// (with `interactive`), or [`cancel_running`].
+async fn stop_requested(interactive: bool) {
+    let mut cancel = cancel_channel().subscribe();
+    let cancelled = async move {
+        // A closed channel never cancels.
+        if cancel.wait_for(|c| *c).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+    let interrupt = async {
+        if interactive {
+            crate::server::shutdown_signal().await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        () = cancelled => {}
+        () = interrupt => {}
+    }
+}
+
+/// `command` run by the shell from `cwd` with `env`, no stdin, its output
+/// piped, in a process group of its own (so what it starts can be stopped
+/// with it).
+fn shell(
+    command: &str,
+    cwd: &std::path::Path,
+    env: &BTreeMap<String, String>,
+) -> tokio::process::Command {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = tokio::process::Command::new("cmd");
+        // Passed as written: cmd.exe does its own parsing of the line.
+        c.arg("/C").raw_arg(command);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = tokio::process::Command::new("sh");
+        c.arg("-c").arg(command);
+        c.process_group(0);
+        c
+    };
+    cmd.current_dir(cwd)
+        .envs(env)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    cmd
+}
+
+/// Starts reading `child`'s stdout and stderr into `tail`.
+fn read_output(
+    child: &mut tokio::process::Child,
+    tail: &Arc<Mutex<Tail>>,
+    echo: bool,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut readers = Vec::new();
+    if let Some(out) = child.stdout.take() {
+        readers.push(tokio::spawn(read_lines(out, tail.clone(), echo)));
+    }
+    if let Some(err) = child.stderr.take() {
+        readers.push(tokio::spawn(read_lines(err, tail.clone(), echo)));
+    }
+    readers
+}
+
+/// Waits up to [`DRAIN`] for each reader; returns whether one was still
+/// held (a process left running holds the pipes).
+async fn drain(readers: Vec<tokio::task::JoinHandle<()>>) -> bool {
+    let mut held = false;
+    for reader in readers {
+        let abort = reader.abort_handle();
+        if tokio::time::timeout(DRAIN, reader).await.is_err() {
+            abort.abort();
+            held = true;
+        }
+    }
+    held
+}
+
 /// Runs `opts.command` from `cwd` with `env`, within `opts.timeout`. When
 /// the command ends, what it left running in its process group is stopped
 /// too.
@@ -1052,28 +1353,7 @@ async fn execute(
         cwd: cwd.display().to_string(),
         ..CommandRun::default()
     };
-    #[cfg(windows)]
-    let mut cmd = {
-        let mut c = tokio::process::Command::new("cmd");
-        // Passed as written: cmd.exe does its own parsing of the line.
-        c.arg("/C").raw_arg(&opts.command);
-        c
-    };
-    #[cfg(not(windows))]
-    let mut cmd = {
-        let mut c = tokio::process::Command::new("sh");
-        c.arg("-c").arg(&opts.command);
-        // Its own process group, so what it starts can be stopped with it.
-        c.process_group(0);
-        c
-    };
-    cmd.current_dir(cwd)
-        .envs(env)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let mut cancel = cancel_channel().subscribe();
+    let mut cmd = shell(&opts.command, cwd, env);
     let started = Instant::now();
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -1085,49 +1365,18 @@ async fn execute(
     };
     let pid = child.id();
     let tail = Arc::new(Mutex::new(Tail::default()));
-    let mut readers = Vec::new();
-    if let Some(out) = child.stdout.take() {
-        readers.push(tokio::spawn(read_lines(
-            out,
-            tail.clone(),
-            opts.interactive,
-        )));
-    }
-    if let Some(err) = child.stderr.take() {
-        readers.push(tokio::spawn(read_lines(
-            err,
-            tail.clone(),
-            opts.interactive,
-        )));
-    }
+    let readers = read_output(&mut child, &tail, opts.interactive);
     let deadline = tokio::time::sleep(opts.timeout);
     tokio::pin!(deadline);
-    let interrupt = async {
-        if opts.interactive {
-            crate::server::shutdown_signal().await;
-        } else {
-            std::future::pending::<()>().await;
-        }
-    };
-    tokio::pin!(interrupt);
-    let cancelled = async {
-        // A closed channel never cancels.
-        if cancel.wait_for(|c| *c).await.is_err() {
-            std::future::pending::<()>().await;
-        }
-    };
-    tokio::pin!(cancelled);
+    let stop = stop_requested(opts.interactive);
+    tokio::pin!(stop);
     let status = tokio::select! {
         status = child.wait() => Some(status?),
         () = &mut deadline => {
             run.timed_out = true;
             None
         }
-        () = &mut interrupt => {
-            run.interrupted = true;
-            None
-        }
-        () = &mut cancelled => {
+        () = &mut stop => {
             run.interrupted = true;
             None
         }
@@ -1156,16 +1405,10 @@ async fn execute(
     if let Some(pid) = pid {
         stop_group(pid, false);
     }
-    let mut held = false;
-    for reader in readers {
-        let abort = reader.abort_handle();
-        if tokio::time::timeout(DRAIN, reader).await.is_err() {
-            abort.abort();
-            held = true;
-        }
-    }
     // A process that ignored TERM still holds the output pipes.
-    if held && let Some(pid) = pid {
+    if drain(readers).await
+        && let Some(pid) = pid
+    {
         stop_group(pid, true);
     }
     if !run.timed_out && !run.interrupted {
@@ -1176,6 +1419,280 @@ async fn execute(
         run.output_truncated = t.truncated;
     }
     Ok(run)
+}
+
+/// The serve command, running.
+struct Served {
+    child: tokio::process::Child,
+    pid: Option<u32>,
+    tail: Arc<Mutex<Tail>>,
+    readers: Vec<tokio::task::JoinHandle<()>>,
+    /// Whether [`Served::stop`] ran; until then, dropping it kills its
+    /// process group (an error or a panic on the way).
+    stopped: bool,
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        if !self.stopped
+            && let Some(pid) = self.pid
+        {
+            stop_group(pid, true);
+        }
+    }
+}
+
+impl Served {
+    /// Stops its process group (TERM, then KILL after [`SERVE_GRACE`]) and
+    /// fills `run` with its exit code (when it ended on its own) and output.
+    async fn stop(mut self, run: &mut ServeRun) {
+        let ended = self.child.try_wait().ok().flatten();
+        let mut leader_ended = ended.is_some();
+        if let Some(pid) = self.pid {
+            // Signal the group first, then reap its leader.
+            stop_group(pid, false);
+            let deadline = Instant::now() + SERVE_GRACE;
+            leader_ended |= tokio::time::timeout(SERVE_GRACE, self.child.wait())
+                .await
+                .is_ok();
+            // The rest of its group (`npm start` runs node below it).
+            while group_alive(pid) && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            // Past the grace: what is left is killed. Without a group check
+            // (Windows), a leader that did not end is.
+            if group_alive(pid) || !leader_ended {
+                stop_group(pid, true);
+            }
+        }
+        if tokio::time::timeout(Duration::from_secs(3), self.child.wait())
+            .await
+            .is_err()
+        {
+            let _ = self.child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(3), self.child.wait()).await;
+        }
+        self.stopped = true;
+        // A process that kept the output pipes past TERM (on Windows, one
+        // the leader started) is killed with the group.
+        if drain(std::mem::take(&mut self.readers)).await
+            && let Some(pid) = self.pid
+        {
+            stop_group(pid, true);
+        }
+        run.stopped = true;
+        run.exit_code = ended.map(exit_code);
+        if let Ok(t) = self.tail.lock() {
+            run.output_tail = t.text();
+            run.output_truncated = t.truncated;
+        }
+    }
+}
+
+/// How starting the serve command ended.
+enum ServeStart {
+    Ready(Served),
+    /// It exited, never became ready or could not start: it is stopped.
+    Failed(RunFailure),
+    /// The run was asked to stop while waiting: it is stopped.
+    Interrupted,
+}
+
+/// Starts `serve` from `cwd` with `env` and waits until it is ready: `port`
+/// accepts connections and/or a line matches `serve.ready`; with neither,
+/// it must still run after [`SERVE_SETTLE`]. `port` is `(port, detected)`;
+/// `own` are Mockingbird's own ports, named when the port is one of them.
+#[allow(clippy::too_many_arguments)]
+async fn start_serve(
+    opts: &Options,
+    serve: &ServeOptions,
+    port: Option<(u16, bool)>,
+    own: &[(u16, &str)],
+    cwd: &std::path::Path,
+    env: &BTreeMap<String, String>,
+    run: &mut ServeRun,
+) -> ServeStart {
+    let mut by = Vec::new();
+    if let Some((p, detected)) = port {
+        by.push(if detected {
+            format!("port {p} (detected)")
+        } else {
+            format!("port {p}")
+        });
+    }
+    if let Some(pattern) = &serve.ready {
+        by.push(format!("a line matching {pattern:?}"));
+    }
+    if by.is_empty() {
+        by.push(format!("running for {}s", SERVE_SETTLE.as_secs()));
+    }
+    run.ready_by = by.join(" and ");
+    let fail = |detail: String, next: String| {
+        ServeStart::Failed(RunFailure::plain("serve_failed", 1, detail, Some(next)))
+    };
+    if let Some((p, _)) = port
+        && let Some((_, what)) = own.iter().find(|(o, _)| *o == p)
+    {
+        return fail(
+            format!("port {p} is Mockingbird's own {what} in this config, not the app's"),
+            format!(
+                "The app cannot listen on port {p}: Mockingbird's server uses it. Give the port the app's server listens on (--serve-port, MCP serve_port), or move Mockingbird's {what} in the config, then run verify --run again."
+            ),
+        );
+    }
+    if let Some((p, _)) = port
+        && port_open(p).await
+    {
+        return fail(
+            format!(
+                "port {p} already accepted connections before `{}` started: another process listens there, and the tests would reach it instead",
+                serve.command
+            ),
+            format!(
+                "Stop the process that listens on port {p} (one you started; check with `lsof -i :{p}`), then run verify --run again."
+            ),
+        );
+    }
+    let mut tail = Tail::new(SERVE_TAIL_LINES);
+    if let Some(pattern) = &serve.ready {
+        // Checked before the run started.
+        tail.ready = line_matcher(pattern, ready_arg(opts)).ok();
+    }
+    let tail = Arc::new(Mutex::new(tail));
+    let mut cmd = shell(&serve.command, cwd, env);
+    let started = Instant::now();
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return fail(
+                format!("cannot run the serve command `{}`: {error}", serve.command),
+                "Fix the serve command (it runs with sh -c), then run verify --run again.".into(),
+            );
+        }
+    };
+    let readers = read_output(&mut child, &tail, opts.interactive);
+    let mut served = Served {
+        pid: child.id(),
+        child,
+        tail: tail.clone(),
+        readers,
+        stopped: false,
+    };
+    let deadline = started + serve.timeout;
+    let stop = stop_requested(opts.interactive);
+    tokio::pin!(stop);
+    let failure = loop {
+        tokio::select! {
+            () = &mut stop => {
+                served.stop(run).await;
+                return ServeStart::Interrupted;
+            }
+            () = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+        if let Ok(Some(status)) = served.child.try_wait() {
+            break Some((
+                format!(
+                    "the serve command `{}` exited {} before it was ready ({} waited for)",
+                    serve.command,
+                    exit_code(status),
+                    run.ready_by
+                ),
+                format!(
+                    "Read serve.output_tail for why it exited, fix the serve command or install what it needs (it runs from {}; `cd <dir> && …` moves it), then run verify --run again.",
+                    cwd.display()
+                ),
+            ));
+        }
+        let port_ok = match port {
+            Some((p, _)) => port_open(p).await,
+            None => true,
+        };
+        let line_ok = serve.ready.is_none() || tail.lock().is_ok_and(|t| t.matched);
+        let settled = port.is_some() || serve.ready.is_some() || started.elapsed() >= SERVE_SETTLE;
+        if port_ok && line_ok && settled {
+            break None;
+        }
+        if Instant::now() >= deadline {
+            break Some((
+                format!(
+                    "the serve command `{}` was not ready within {}s ({} waited for)",
+                    serve.command,
+                    serve.timeout.as_secs(),
+                    run.ready_by
+                ),
+                "Read serve.output_tail: pass the port the app listens on (--serve-port, MCP serve_port) or a line it prints once ready (--serve-ready, serve_ready), or allow it longer (--serve-timeout, serve_timeout_secs), then run verify --run again.".into(),
+            ));
+        }
+    };
+    match failure {
+        None => {
+            run.ready = true;
+            run.ready_ms = Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+            ServeStart::Ready(served)
+        }
+        Some((detail, next)) => {
+            served.stop(run).await;
+            fail(detail, next)
+        }
+    }
+}
+
+/// The readiness line's argument as the caller gave it.
+fn ready_arg(opts: &Options) -> &'static str {
+    if opts.interactive {
+        "--serve-ready"
+    } else {
+        "serve_ready"
+    }
+}
+
+/// Whether something accepts TCP connections on `port` of localhost (IPv4
+/// or IPv6).
+async fn port_open(port: u16) -> bool {
+    for ip in [
+        std::net::IpAddr::from([127, 0, 0, 1]),
+        std::net::IpAddr::from(std::net::Ipv6Addr::LOCALHOST),
+    ] {
+        let connect = tokio::net::TcpStream::connect((ip, port));
+        if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(500), connect).await {
+            return true;
+        }
+    }
+    false
+}
+
+/// The port of the pair the project's test detection proposes for the
+/// serve command `serve` ([`crate::test_commands`]), if any.
+async fn detected_port(root: &std::path::Path, serve: &str, own: &[(u16, &str)]) -> Option<u16> {
+    let root = root.to_path_buf();
+    let serve = serve.trim().to_owned();
+    let avoid: Vec<u16> = own.iter().map(|(p, _)| *p).collect();
+    tokio::task::spawn_blocking(move || {
+        crate::test_commands::detect_all(&root, &avoid)
+            .pairs
+            .into_iter()
+            .find(|p| p.serves(&serve))
+            .and_then(|p| p.serve_port)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Whether any process of the group `pid` leads is left.
+#[cfg(unix)]
+fn group_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", "--", &format!("-{pid}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[cfg(not(unix))]
+fn group_alive(_pid: u32) -> bool {
+    false
 }
 
 /// Signals the process group `pid` leads (TERM, or KILL with `force`).
@@ -1215,25 +1732,32 @@ pub fn text(o: &Outcome) -> String {
     let c = &o.command;
     let secs = Duration::from_millis(c.duration_ms).as_secs_f64();
     let ended = match (c.timed_out, c.interrupted, c.exit_code) {
+        _ if c.not_run && c.interrupted => {
+            "was not run (interrupted while the serve command started)".to_owned()
+        }
+        _ if c.not_run => "was not run (the serve command failed)".to_owned(),
         (true, _, _) => format!("was stopped at the timeout after {secs:.1}s"),
         (false, true, _) => format!("was interrupted after {secs:.1}s"),
         (false, false, Some(code)) => format!("exited {code} after {secs:.1}s"),
         (false, false, None) => format!("ended without an exit code after {secs:.1}s"),
     };
+    let serve_failed = o.failures.iter().any(|f| f.kind == "serve_failed");
     let mut s = format!(
-        "verify --run {}: `{}` {ended}; {} logged while it ran{}; {}\n",
+        "verify --run {}: `{}` {ended}; {} logged{}{}; {}\n",
         if o.ok { "passed" } else { "failed" },
         c.command,
         plural(
             usize::try_from(o.window.requests).unwrap_or(usize::MAX),
             "request"
         ),
+        if c.not_run { "" } else { " while it ran" },
         if o.window.truncated {
             format!(" (the newest {MAX_REQUESTS} examined)")
         } else {
             String::new()
         },
-        match o.failures.len() + o.more_failures {
+        match (o.failures.len() + o.more_failures).saturating_sub(usize::from(serve_failed)) {
+            0 if serve_failed => "the app's server failed to start".to_owned(),
             0 => "no failures point at the mock".to_owned(),
             n => format!(
                 "{} point{} at the mock",
@@ -1242,6 +1766,22 @@ pub fn text(o: &Outcome) -> String {
             ),
         }
     );
+    if let Some(serve) = &o.serve {
+        let state = match serve.ready_ms {
+            Some(ms) => format!(
+                "ready after {:.1}s ({})",
+                Duration::from_millis(ms).as_secs_f64(),
+                serve.ready_by
+            ),
+            None => format!("not ready ({})", serve.ready_by),
+        };
+        let _ = writeln!(
+            s,
+            "Served `{}`: {state}{}",
+            serve.command,
+            if serve.stopped { "; stopped" } else { "" }
+        );
+    }
     for f in &o.failures {
         let _ = writeln!(s, "  {}: {}", f.kind, f.detail);
         if let Some(step) = &f.next_step {
@@ -1261,6 +1801,15 @@ pub fn text(o: &Outcome) -> String {
     if c.exit_code != Some(0) && !c.output_tail.is_empty() {
         let _ = writeln!(s, "Output (last lines):");
         for line in c.output_tail.lines() {
+            let _ = writeln!(s, "  | {line}");
+        }
+    }
+    if let Some(serve) = &o.serve
+        && (!serve.ready || c.exit_code != Some(0) || serve.exit_code.is_some())
+        && !serve.output_tail.is_empty()
+    {
+        let _ = writeln!(s, "Serve output (last lines):");
+        for line in serve.output_tail.lines() {
             let _ = writeln!(s, "  | {line}");
         }
     }
@@ -1485,5 +2034,74 @@ mod tests {
             "{s}"
         );
         assert!(s.contains("  | FAIL orders.test.js"), "{s}");
+    }
+
+    #[test]
+    fn the_serve_ready_pattern_is_a_regex_found_anywhere_in_a_line() {
+        let error = line_matcher("(unclosed", "serve_ready")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("serve_ready \"(unclosed\" is not a valid"),
+            "{error}"
+        );
+        let mut t = Tail::new(SERVE_TAIL_LINES);
+        t.ready = Some(line_matcher(r"^Node server listening (on|at) .*:\d+$", "x").unwrap());
+        t.push(b"starting\n");
+        assert!(!t.matched);
+        // Colours are stripped first, and a trailing \r.
+        t.push(b"\x1b[32mNode server listening at\x1b[0m http://localhost:4242\r\n");
+        assert!(t.matched);
+        assert_eq!(
+            t.lines.back().unwrap(),
+            "Node server listening at http://localhost:4242"
+        );
+        for i in 0..40 {
+            t.push(format!("{i}\n").as_bytes());
+        }
+        assert_eq!(t.lines.len(), SERVE_TAIL_LINES);
+        assert!(t.matched, "a match stays");
+    }
+
+    #[test]
+    fn text_names_the_serve_command_and_its_output_when_it_failed() {
+        let o = Outcome {
+            command: CommandRun {
+                command: "bundle exec rspec".into(),
+                not_run: true,
+                ..CommandRun::default()
+            },
+            serve: Some(ServeRun {
+                command: "cd server && npm start".into(),
+                ready_by: "port 4242".into(),
+                exit_code: Some(1),
+                stopped: true,
+                output_tail: "Error: Cannot find module 'express'".into(),
+                ..ServeRun::default()
+            }),
+            failures: vec![RunFailure::plain(
+                "serve_failed",
+                1,
+                "the serve command `cd server && npm start` exited 1 before it was ready (port 4242 waited for)".into(),
+                Some("Read serve.output_tail".into()),
+            )],
+            ..Outcome::default()
+        };
+        let s = text(&o);
+        assert!(
+            s.starts_with(
+                "verify --run failed: `bundle exec rspec` was not run (the serve command failed);"
+            ),
+            "{s}"
+        );
+        assert!(
+            s.contains("Served `cd server && npm start`: not ready (port 4242); stopped\n"),
+            "{s}"
+        );
+        assert!(s.contains("  serve_failed: the serve command"), "{s}");
+        assert!(
+            s.contains("Serve output (last lines):\n  | Error: Cannot find module 'express'"),
+            "{s}"
+        );
     }
 }

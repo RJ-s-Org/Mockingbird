@@ -91,7 +91,7 @@ pub struct VerifyArgs {
     /// Write the result to this file instead of stdout.
     #[arg(long, short = 'o')]
     pub output: Option<PathBuf>,
-    /// Run this command (with `sh -c`, from the project root of `-c`)
+    /// Run this command (with `sh -c`, from the current folder)
     /// against the mocks as `mockingbird run` does, starting the server
     /// when none answers, and check only the requests it made: unmatched
     /// routes, 4xx/5xx answers, fallbacks, blocked hosts and the project's
@@ -110,6 +110,25 @@ pub struct VerifyArgs {
     /// $MB_STATE_DIR, else .mockingbird].
     #[arg(long, requires = "run")]
     pub state_dir: Option<PathBuf>,
+    /// Run the app's own server with this command (`sh -c`, from the
+    /// current folder, under the same environment) while the `--run`
+    /// command runs: it is started first and waited for, and its process
+    /// group is stopped after the command. When it exits or is not ready
+    /// in time, the command is not run and verify fails (`serve_failed`).
+    #[arg(long, value_name = "COMMAND", requires = "run")]
+    pub serve: Option<String>,
+    /// Ready once something accepts connections on this localhost port.
+    #[arg(long, value_name = "PORT", requires = "serve", value_parser = clap::value_parser!(u16).range(1..))]
+    pub serve_port: Option<u16>,
+    /// Ready once a line of its output (colours stripped) matches this
+    /// regular expression. With neither this nor `--serve-port`, the port the test detection
+    /// proposes for this serve command, else it must still run after 3s.
+    #[arg(long, value_name = "REGEX", requires = "serve")]
+    pub serve_ready: Option<String>,
+    /// How long the serve command may take to become ready, at most 10m
+    /// [default: 60s]. It counts apart from `--timeout`.
+    #[arg(long, requires = "serve")]
+    pub serve_timeout: Option<humantime::Duration>,
 }
 
 /// Requests of one operation (or of a whole mock).
