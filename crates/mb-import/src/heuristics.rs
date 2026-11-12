@@ -862,7 +862,9 @@ fn identity_at(
     defs: &Map<String, Value>,
     keys: &Keys,
 ) -> Option<Identity> {
-    let props = schema_properties(success_schema, defs)?;
+    let Some(props) = schema_properties(success_schema, defs) else {
+        return choice_identity(path_param, success_schema?, defs, keys);
+    };
     let props = props.as_ref();
     let named = path_param.and_then(|p| param_field(p, props, defs));
     let field = if props.contains_key("id") {
@@ -889,6 +891,61 @@ fn identity_at(
         path_field: named.filter(|n| *n != field).map(str::to_owned),
         record: None,
     })
+}
+
+/// The object branches of `schema` when it is a choice (`anyOf` or `oneOf`, its `null`
+/// branches aside) between objects that each declare members, else none. A schema
+/// that declares members of its own is not a choice.
+fn choice_objects<'a>(schema: &'a Value, defs: &'a Map<String, Value>) -> Vec<&'a Value> {
+    let Some(schema) = resolve(schema, defs) else {
+        return Vec::new();
+    };
+    if schema.get("properties").is_some() || schema.get("allOf").is_some() {
+        return Vec::new();
+    }
+    let mut objects = Vec::new();
+    for key in ["anyOf", "oneOf"] {
+        for branch in schema
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(branch) = resolve(branch, defs) else {
+                return Vec::new();
+            };
+            if is_null_schema(branch) {
+                continue;
+            }
+            if !schema_properties(Some(branch), defs).is_some_and(|p| !p.is_empty()) {
+                return Vec::new();
+            }
+            objects.push(branch);
+        }
+    }
+    objects
+}
+
+/// The identity of an answer that is a choice between objects ([`choice_objects`])
+/// each of which has the same identity: the states or forms of one record, as a read
+/// answering a record or its deleted stub (`customer` or `deleted_customer`), or a
+/// `Cat` or a `Dog` both keyed by `id`. A choice whose branches are named differently,
+/// or one that has none, has none.
+fn choice_identity(
+    path_param: Option<&str>,
+    schema: &Value,
+    defs: &Map<String, Value>,
+    keys: &Keys,
+) -> Option<Identity> {
+    let mut identities = choice_objects(schema, defs)
+        .into_iter()
+        .map(|branch| identity_at(path_param, Some(branch), defs, keys));
+    let first = identities.next()??;
+    identities
+        .all(|other| {
+            other.is_some_and(|o| o.field == first.field && o.path_field == first.path_field)
+        })
+        .then_some(first)
 }
 
 /// The one scalar member of `props` named for its own type, as `user_id` is for
@@ -2078,12 +2135,16 @@ fn is_opaque(schema: Option<&Value>, defs: &Map<String, Value>) -> bool {
     !has_members(Some(schema)) && !has_members(schema.get("items"))
 }
 
-/// What an answer is about: itself, and the object a one-member envelope
+/// What an answer is about: itself, the branches of a choice that is one record
+/// ([`choice_identity`]), and the object a one-member envelope
 /// holds. A lone string is the answer's own member, not what it wraps.
 fn answered_things(schema: &Value, defs: &Map<String, Value>) -> Vec<Value> {
     let mut things = Vec::new();
     if let Some(resolved) = resolve(schema, defs) {
         things.push(resolved.clone());
+    }
+    if choice_identity(None, schema, defs, &Keys::new()).is_some() {
+        things.extend(choice_objects(schema, defs).into_iter().cloned());
     }
     if let Some(props) = schema_properties(Some(schema), defs)
         && props.len() == 1
