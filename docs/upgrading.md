@@ -31,6 +31,12 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### List prompts show held records as list items
+
+No migration or configuration.
+
+- **A list read's prompt shows only what its page can hold**: the held records of the list's type among its related resources are shown as the list's items declare them (a detail read's embedded parts, such as `append_to_response`'s credits, and detail-only members are left out), without those whose member holds another value than the request's filter, or than its parent path parameter, asks; the newest, at most the requested page size (up to 20) and 24 KiB of them. A narrowed list looks through the 100 newest records of its type for them, instead of the 20 newest. Where the answer's items are overlaid with what the store holds (REST, with consistency on, items declaring their members), a text longer than 200 characters other than the identity is cut with `…` in the prompt; the item naming the record serves the stored text whole. With 30 TMDB movies held, each read with every part appended, `/3/movie/popular`'s prompt went from about 145 KB to 13 KB.
+
 ### GraphQL links follow the REST twin's page link
 
 No migration or configuration.

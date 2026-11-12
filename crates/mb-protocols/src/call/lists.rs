@@ -493,7 +493,7 @@ impl Filter<'_> {
 /// Whether `item` holds another value than the filter's under its member: one of the
 /// same shape, so a missing member, another shape, or `null` other than in a reference
 /// says nothing.
-fn contradicts(item: &Value, filter: &Filter<'_>) -> bool {
+pub(super) fn contradicts(item: &Value, filter: &Filter<'_>) -> bool {
     let wanted = &filter.values;
     let Some(held) = filter.held(item) else {
         return false;

@@ -284,18 +284,23 @@ fn texts(raw: &Value) -> Vec<String> {
     all.into_iter().filter(|t| !t.trim().is_empty()).collect()
 }
 
-/// The schema of one item of `op`'s list answer.
-fn item_schema(bundle: &mb_mcm::Bundle, op: &Operation) -> Option<Value> {
+/// The schema of `op`'s list answer's array: the answer's own, or its one list member's.
+pub(super) fn array_schema(bundle: &mb_mcm::Bundle, op: &Operation) -> Option<Value> {
     let schema = op.success_output()?.schema.as_ref()?;
     let (parts, _) = schema_parts(bundle, Some(schema));
-    if let Some(items) = parts.iter().find_map(|p| p.get("items")) {
-        return Some(items.clone());
+    if parts.iter().any(|p| p.get("items").is_some()) {
+        return Some(schema.clone());
     }
     let members = list_members(bundle, schema);
     let [member] = members.as_slice() else {
         return None;
     };
-    let array = property_schema(bundle, schema, member)?;
+    property_schema(bundle, schema, member)
+}
+
+/// The schema of one item of `op`'s list answer.
+pub(super) fn item_schema(bundle: &mb_mcm::Bundle, op: &Operation) -> Option<Value> {
+    let array = array_schema(bundle, op)?;
     let (parts, _) = schema_parts(bundle, Some(&array));
     parts.iter().find_map(|p| p.get("items")).cloned()
 }
