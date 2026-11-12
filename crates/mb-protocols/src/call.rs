@@ -46,6 +46,7 @@ mod exec;
 mod exprs;
 mod header_ids;
 mod lifecycle;
+mod links;
 mod list_exprs;
 mod list_query;
 mod lists;
@@ -1440,6 +1441,39 @@ pub(crate) async fn complete(
                         }
                     }
                     None => {}
+                }
+                // The record's URL members show the place the call names (see [`links`]).
+                // What the request sent stays, and the parents are found from the
+                // call as sent. Settled once the record is known to be stored.
+                if !unstored
+                    && matches!(generated.source, Source::Llm | Source::Repaired)
+                    && (200..300).contains(&generated.status)
+                {
+                    let kept = links::sent_members(call);
+                    // The body is the record, unless the description says where the
+                    // answer holds it and the identity did not take it out already.
+                    let at = rt
+                        .described()
+                        .op(&op.id)
+                        .and_then(|d| d.answer.as_ref())
+                        .and_then(|a| a.record.as_ref())
+                        .map(|p| p.as_str().to_owned())
+                        .filter(|_| answered.is_none());
+                    let record = generated
+                        .body
+                        .as_mut()
+                        .and_then(|body| match at.as_deref() {
+                            None | Some("") => Some(body),
+                            Some(pointer) => body.pointer_mut(pointer),
+                        });
+                    if let Some(record) = record {
+                        links::settle(&mut state, session, (op, call), (t, &kept), record).await;
+                    }
+                    if let (Some(identity), Some(answer)) = (held_in, answered.as_mut())
+                        && let Some(record) = identity.record_in_mut(answer)
+                    {
+                        links::settle(&mut state, session, (op, call), (t, &kept), record).await;
+                    }
                 }
             }
             // An action's new record goes under its own id, not over another's.
