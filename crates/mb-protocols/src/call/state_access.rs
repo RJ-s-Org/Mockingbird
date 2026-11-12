@@ -347,6 +347,24 @@ impl<'a> StateAccess<'a> {
             .contains(&(r.resource_type.clone(), r.id.clone()))
     }
 
+    /// Whether `r` is in the collection at `path` (`/repos/a/x/issues`) because this
+    /// call found it under its parent's key ([`Self::found_placed`]) and `path` is where
+    /// that parent's records of its type sit ([`scopes::ParentScope::read_parent`]).
+    /// What the runtime noted of the collection a write put a record in is noted by the
+    /// record's own id, which two parents' records may share.
+    pub(super) fn placed_in(&self, r: &StoredResource, path: &str) -> bool {
+        let t = r.resource_type.as_str();
+        self.found_placed(r)
+            && self
+                .rt
+                .index()
+                .parent_scopes()
+                .get(t)
+                .zip(self.parent_of(t))
+                .and_then(|(scope, parent)| scope.read_parent(&parent))
+                .is_some_and(|at| at == path)
+    }
+
     /// Whether `r`, a record stored under no parent (before its type was scoped, by
     /// the Admin API, or where nothing named one), may be the one under `scope`: its
     /// own links show no other parent.

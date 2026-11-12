@@ -295,7 +295,7 @@ async fn answer(
         // Another parent's records are in no collection of this one.
         if !(placed_here
             || !issued
-                && (lists::in_collection(rt, (plan, call), t, &field, r)
+                && (lists::in_collection(state, (plan, call), t, &field, r)
                     || under_parent(rt, call, t, r)))
         {
             continue;
