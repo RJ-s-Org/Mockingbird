@@ -133,3 +133,44 @@ Unit tests: 241/242, the same `calculateRank` rounding failure as with no mock. 
 | 5 | Model latency | p50 < 2 s, p95 < 5 s, rare | p50 1.52 s and p95 3.68 s ✓; not rare (12 of 15) | p50 1.69 s and p95 3.23 s ✓; not rare (13 of 15) |
 | 6 | Model spend per session | < $0.05 | ✓ about $0.002 | ✓ about $0.002 |
 | 7 | Errors: unknown ids, invalid input | declared status and body | n/a: no declared GraphQL errors (G6) | Same |
+
+## Rerun with GraphQL lookup reads (2026-11-11, third holdout run)
+
+The same app at `54a7985`, on this PR's branch with #473 (the nested-lookup hint) merged in. Both mocks were built by a fresh headless agent (`claude -p`, Sonnet 5.5), in a fresh clone, with the plugin installed the README's way (`--scope local`, 3 s) and the same one-line prompt as before, with no hints.
+
+### Run 1: the agent turned consistency off
+
+- **Build:** 5.5 min, 47 turns, $0.98. The agent took the catalog's full GitHub contracts, not hand-written ones.
+- **Finding:** with consistency on, a `user(login:)` read is now found in state. The stats card stores the user with `repositories { nodes { name stargazers } }`, and the top-langs read of that user was answered from state with `languages: null`, crashing the card. The agent worked around it by setting `consistency: "off"` and said so.
+- **Fixed in this PR:**
+  - A held GraphQL record answers from state only when it holds every member the selection asks for, at every depth.
+  - Otherwise the read is generated, and the record is merged into the answer at every depth, aliased reads included.
+
+### Run 2
+
+| | |
+| --- | --- |
+| Build | 4.1 min, 24 turns, $0.51. Full catalog contracts, consistency left on, no world, proxy moved to 18888 by the agent because 8888 was taken. |
+| Run command | `PAT_1=ghp_mock mockingbird run -c mock/mockingbird.yaml -- node express.js` |
+| Flows | 13/14 cards render. The one failure, top-langs for `octocat` right after its stats card, was a model timeout (20 s, 518-token answer); the same request rendered on a retry in 16 s. All five pins render, `vercel/next.js` and `torvalds/linux` included. |
+| Calls | 20 GraphQL and 1 REST: 16 `llm`, 3 `cache`, 1 `fallback` (the timeout) |
+| Tokens | 74.2k prompt, 5.3k completion. The full contracts make prompts larger (2.8k–6.3k per call). |
+
+### Scorecard (measures 1–7)
+
+| # | Measure | Target | This run |
+| --- | --- | --- | --- |
+| 1 | App's tests and main flows pass | 100% | ✗ 13/14 (one model timeout); was 12/14 |
+| 2 | Consistency the flows rely on | 100% | Better: a second read of a user (`user(login:)`) finds the record the first stored, with no world; repeats are served from state or cache. Different selections still generate what the record lacks. |
+| 3 | Agent build ≤ 15 min, skills/MCP/CLI only | ≤ 15 min | ✓ 4.1 min, 24 turns |
+| 4 | State/pool latency | p50 < 50 ms | ✓ 4 ms (n = 3) |
+| 5 | Model latency | p50 < 2 s, p95 < 5 s, rare | ✗ p50 4.5 s, p95 16.0 s, on full-contract prompts; not rare (16 of 21) |
+| 6 | Model spend per session | < $0.05 | ✓ about $0.003 |
+| 7 | Errors: unknown ids, invalid input | declared status and body | n/a: no declared GraphQL errors |
+
+### Open
+
+- **Aliased reads are not served from state.** The narrowed schema is keyed by response key, but the held record is rendered by field name, so an aliased repeat such as the stats card's generates again. It is still consistent, because the merge keeps the record's values.
+- **A type with no `id`** is keyed by its lookup member, but a mutation does not update that record, and a delete is checked against the member, not the key.
+- **A list item whose `id` is aliased** pairs with the generated item by position, not by id.
+- **Model latency** with full contracts is over target; the timeout, not the engine, cost the one card.

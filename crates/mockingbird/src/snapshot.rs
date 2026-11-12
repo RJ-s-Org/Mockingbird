@@ -1265,6 +1265,7 @@ mod tests {
             max_tokens: 100,
             max_answer_bytes: None,
             timeout: Duration::from_secs(1),
+            hedge: 0,
         }
     }
 

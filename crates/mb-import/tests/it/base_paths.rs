@@ -91,3 +91,27 @@ fn no_base_paths_without_servers_or_for_other_formats() {
     assert!(base_paths(b"type Query { hello: String }").is_empty());
     assert!(base_paths(b"not a contract").is_empty());
 }
+
+#[test]
+fn server_hosts_of_each_format() {
+    use mb_import::server_hosts;
+    let mut doc: Value = serde_json::from_slice(&swagger(Some("/v1"))).unwrap();
+    doc["host"] = json!("API.Tracker.test:8443");
+    assert_eq!(
+        server_hosts(&serde_json::to_vec(&doc).unwrap()),
+        ["api.tracker.test"]
+    );
+    assert!(server_hosts(&swagger(None)).is_empty());
+    let servers = openapi(json!([
+        {"url": "https://{region}.tracker.test/v1", "variables": {"region": {"default": "eu"}}},
+        {"url": "https://user@api.tracker.test:443/v2"},
+        {"url": "https://{tenant}.tracker.test"},
+        {"url": "/relative"},
+        {"url": "https://eu.tracker.test/v3"}
+    ]));
+    assert_eq!(
+        server_hosts(&servers),
+        ["eu.tracker.test", "api.tracker.test"]
+    );
+    assert!(server_hosts(b"not a contract").is_empty());
+}

@@ -183,8 +183,9 @@ fn described_list_of(rt: &MockRuntime, t: &str) -> bool {
 }
 
 /// Whether `call` asks for nothing of the list but a page: each query parameter is
-/// the described paging's, or one that pages the list by its name, and its body holds
-/// nothing but the described paging's members.
+/// the described paging's, one that pages the list by its name or one the description
+/// `ignores`, and its body holds nothing but the described paging's members and those
+/// it `ignores` with no described parameter below them ([`ListQuery::ignores_whole`]).
 fn asks_only_a_page(rt: &MockRuntime, op: &Operation, call: &OperationCall, q: &ListQuery) -> bool {
     let bundle = rt.bundle();
     // An issued scope names the collection, not a part of it.
@@ -206,16 +207,11 @@ fn asks_only_a_page(rt: &MockRuntime, op: &Operation, call: &OperationCall, q: &
         .and_then(Value::as_object)
         .is_none_or(|members| {
             members.iter().all(|(name, value)| {
-                let asks_nothing = match value {
-                    Value::Null => true,
-                    Value::String(text) => text.trim().is_empty(),
-                    Value::Array(items) => items.is_empty(),
-                    Value::Object(inner) => inner.is_empty(),
-                    _ => false,
-                };
-                asks_nothing
+                let pointer = format!("/{}", name.replace('~', "~0").replace('/', "~1"));
+                !list_query::asks(value)
                     || issued.as_deref() == Some(name.as_str())
-                    || paged(&format!("/{}", name.replace('~', "~0").replace('/', "~1")))
+                    || q.ignores_whole(&pointer)
+                    || paged(&pointer)
             })
         });
     if !body_pages_only {
@@ -228,7 +224,7 @@ fn asks_only_a_page(rt: &MockRuntime, op: &Operation, call: &OperationCall, q: &
     let paging = runs::Paging::of(rt.bundle(), op, size.as_deref());
     call.query
         .keys()
-        .all(|param| q.pages_with(param) || paging.pages_list(param))
+        .all(|param| q.pages_with(param) || q.ignores(param) || paging.pages_list(param))
 }
 
 /// Marks the collection list `call` names as listed, with the ids of the items of
@@ -550,6 +546,20 @@ impl Shape {
     /// that is the array.
     pub(super) fn parents(&self) -> &[String] {
         self.path.split_last().map_or(&[], |(_, parents)| parents)
+    }
+
+    /// The envelope's top member holding the list (the list itself or one above it);
+    /// `None` for an answer that is the array.
+    pub(super) fn top_member(&self) -> Option<&str> {
+        self.path.first().map(String::as_str)
+    }
+
+    /// The items `body`, an answer of this shape, holds where the shape places them.
+    pub(super) fn items_in<'b>(&self, body: &'b Value) -> Option<&'b Vec<Value>> {
+        self.path
+            .iter()
+            .try_fold(body, |at, member| at.get(member))?
+            .as_array()
     }
 
     /// The envelope of an empty page, its other required members filled as a held

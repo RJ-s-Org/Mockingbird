@@ -922,6 +922,7 @@ async fn build_app_inner(
         },
         webhook_log: Default::default(),
         record_pools: Default::default(),
+        shared_types: Default::default(),
     };
     let snapshot = open_snapshot(args)?;
     crate::snapshot::install(snapshot.clone());

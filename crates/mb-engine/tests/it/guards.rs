@@ -748,6 +748,8 @@ async fn a_chain_waits_at_most_the_generation_timeout() {
 struct PacedProvider {
     script: Vec<(Duration, String)>,
     calls: AtomicU64,
+    /// The `hedge` number of each call, in the order made.
+    hedges: std::sync::Mutex<Vec<u8>>,
 }
 
 #[async_trait]
@@ -759,7 +761,8 @@ impl Provider for PacedProvider {
         }
     }
 
-    async fn complete(&self, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
+    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, LlmError> {
+        self.hedges.lock().unwrap().push(req.hedge);
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         let index = usize::try_from(n).unwrap_or(usize::MAX);
         let Some((delay, body)) = self.script.get(index).cloned() else {
@@ -791,6 +794,7 @@ fn hedging_engine_with(
     let provider = Arc::new(PacedProvider {
         script,
         calls: AtomicU64::new(0),
+        hedges: std::sync::Mutex::default(),
     });
     let config = EngineConfig {
         timeout: Duration::from_secs(60),
@@ -826,6 +830,97 @@ async fn a_slow_call_is_hedged_and_the_faster_answer_served() {
         "took {elapsed:?}: 2 s before the hedge, 1 s for its answer"
     );
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+}
+
+/// A call whose first request and first hedge both stall (a provider that
+/// stopped answering) gets a second hedge at three times `hedge_after`, each
+/// numbered for the router, and is answered well before the generation timeout.
+#[tokio::test(start_paused = true)]
+async fn a_second_hedge_goes_out_when_both_calls_stall() {
+    let bundle = bundle();
+    let (provider, engine) = hedging_engine(vec![
+        (Duration::from_secs(60), contact("stalled@example.com")),
+        (Duration::from_secs(60), contact("stalled-too@example.com")),
+        (Duration::from_secs(1), contact("third@example.com")),
+    ]);
+    let started = tokio::time::Instant::now();
+    let response = generate(&engine, &bundle).await;
+    let elapsed = started.elapsed();
+    assert_eq!(
+        response.source,
+        Source::Llm,
+        "{:?}",
+        response.fallback_reason
+    );
+    assert_eq!(
+        response.body.as_ref().and_then(|b| b["email"].as_str()),
+        Some("third@example.com")
+    );
+    assert!(
+        elapsed >= Duration::from_secs(7) && elapsed < Duration::from_secs(8),
+        "took {elapsed:?}: 6 s before the second hedge, 1 s for its answer"
+    );
+    assert_eq!(*provider.hedges.lock().unwrap(), vec![0, 1, 2]);
+}
+
+/// A mark with no free slot sends nothing; the next mark sends the hedge once a
+/// slot is free, numbered as the first hedge sent.
+#[tokio::test(start_paused = true)]
+async fn a_hedge_without_a_slot_waits_for_the_next_mark() {
+    let bundle = bundle();
+    let guards = EngineGuards {
+        limiter: Some(GenerationLimiter::new_shared(2)),
+        ..EngineGuards::default()
+    };
+    let (provider, engine) = hedging_engine_with(
+        vec![
+            // Another request, holding the second slot for 4 s.
+            (Duration::from_secs(4), contact("other@example.com")),
+            (Duration::from_secs(60), contact("stalled@example.com")),
+            (Duration::from_secs(1), contact("hedge@example.com")),
+        ],
+        Duration::from_secs(2),
+        guards,
+    );
+    let started = tokio::time::Instant::now();
+    let (other, response) = tokio::join!(generate(&engine, &bundle), async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        generate(&engine, &bundle).await
+    });
+    assert_eq!(
+        other.body.as_ref().and_then(|b| b["email"].as_str()),
+        Some("other@example.com")
+    );
+    assert_eq!(
+        response.body.as_ref().and_then(|b| b["email"].as_str()),
+        Some("hedge@example.com"),
+        "{:?}",
+        response.fallback_reason
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_secs(7) && elapsed < Duration::from_secs(8),
+        "took {elapsed:?}: no slot at 2 s, the hedge at 6 s, 1 s for its answer"
+    );
+    assert_eq!(*provider.hedges.lock().unwrap(), vec![0, 0, 1]);
+}
+
+/// No more than two hedges go out, however long the calls take.
+#[tokio::test(start_paused = true)]
+async fn at_most_two_hedges() {
+    let bundle = bundle();
+    let (provider, engine) = hedging_engine(vec![
+        (Duration::from_secs(15), contact("first@example.com")),
+        (Duration::from_secs(60), contact("second@example.com")),
+        (Duration::from_secs(60), contact("third@example.com")),
+        (Duration::from_millis(1), contact("never@example.com")),
+    ]);
+    let response = generate(&engine, &bundle).await;
+    assert_eq!(
+        response.body.as_ref().and_then(|b| b["email"].as_str()),
+        Some("first@example.com")
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
 }
 
 /// An answer that does not pass its check sends the hedge at once, and the

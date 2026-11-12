@@ -15,6 +15,7 @@ struct Header {
     asyncapi: Option<Value>,
     #[serde(rename = "basePath")]
     base_path: Option<Value>,
+    host: Option<Value>,
     servers: Option<Value>,
 }
 
@@ -82,6 +83,86 @@ fn of_header(h: &Header) -> Vec<String> {
         }
     }
     out
+}
+
+/// The hosts the contract in `source` (the bytes [`compile`](crate::compile)
+/// takes, an archive included) says its API is served at, in declaration
+/// order, lower case, without duplicates, port or credentials:
+///
+/// - Swagger 2.0: `host`.
+/// - OpenAPI 3.x: the host of each top-level `servers[].url` whose
+///   `{variables}` all have a `default`; a relative URL has none.
+///
+/// Every other format, and bytes that are no contract, have none. A mock
+/// links the records it answers under them (see `mb_protocols`' URL members).
+#[must_use]
+pub fn server_hosts(source: &[u8]) -> Vec<String> {
+    if archive::is_archive(source) {
+        return unpack_archive(source)
+            .ok()
+            .and_then(|files| http_root(&files).map(|root| server_hosts(&root.bytes)))
+            .unwrap_or_default();
+    }
+    let header = serde_json::from_slice::<Header>(source)
+        .ok()
+        .or_else(|| serde_saphyr::from_slice::<Header>(source).ok());
+    let Some(h) = header else {
+        return Vec::new();
+    };
+    let mut versions = Map::new();
+    for (key, v) in [("openapi", &h.openapi), ("swagger", &h.swagger)] {
+        if let Some(v) = v {
+            versions.insert(key.into(), v.clone());
+        }
+    }
+    let candidates: Vec<String> = match detect_format(&Value::Object(versions)) {
+        Ok(SourceFormat::Swagger2) => h
+            .host
+            .as_ref()
+            .and_then(Value::as_str)
+            .and_then(authority_host)
+            .into_iter()
+            .collect(),
+        Ok(SourceFormat::OpenApi3) => h
+            .servers
+            .as_ref()
+            .and_then(Value::as_array)
+            .map(|servers| servers.iter().filter_map(server_host).collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let mut out: Vec<String> = Vec::new();
+    for host in candidates {
+        if !out.contains(&host) {
+            out.push(host);
+        }
+    }
+    out
+}
+
+/// The host of a server object's URL, its variables replaced by their
+/// defaults; `None` for a relative URL or a variable with no default.
+fn server_host(server: &Value) -> Option<String> {
+    let url = substitute(server.get("url")?.as_str()?, server.get("variables"))?;
+    let (scheme, rest) = url.split_once("://")?;
+    if scheme.is_empty()
+        || !scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+    {
+        return None;
+    }
+    authority_host(rest.split(['/', '?', '#']).next().unwrap_or_default())
+}
+
+/// The host of an authority (`user@host:port`), lower case; `None` when empty.
+fn authority_host(authority: &str) -> Option<String> {
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split_once(']').map_or(v6, |(h, _)| h),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 /// The path of a server object's URL, its variables replaced by their

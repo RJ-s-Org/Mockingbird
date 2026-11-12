@@ -17,6 +17,7 @@ fn req(format: ResponseFormat, timeout: Duration) -> ChatRequest {
         max_tokens: 100,
         max_answer_bytes: None,
         timeout,
+        hedge: 0,
     }
 }
 

@@ -1621,6 +1621,20 @@ pub(super) fn projected(
     }
 }
 
+/// Whether a 2xx answer of read `plan` with target `target_id` is a list whose own
+/// items [`overlay_stored`] and the filters after it take: no target, no record held in
+/// an envelope (`{user}`), and [`deleted::applies`]. [`reused_ids::show_held`] leaves
+/// those items to it.
+pub(super) fn overlays_own_items(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    target_id: Option<&str>,
+) -> bool {
+    target_id.is_none()
+        && plan.op.identity.as_ref().is_none_or(|i| i.record.is_none())
+        && deleted::applies(rt, plan)
+}
+
 /// Has each item of list answer `body` that the session holds, by its identity and its
 /// type, show the stored record's members as the item declares them, but for an item
 /// whose own parent the record contradicts, which stays as generated (see the module's

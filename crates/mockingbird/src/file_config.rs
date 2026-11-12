@@ -339,7 +339,8 @@ pub struct LimitsConfig {
     pub generation_timeout: Duration,
     /// How long an LLM call of a served answer may go unanswered before the same
     /// request is sent once more, the first answer that passes its check being
-    /// taken; an answer that does not pass sends it at once. `0s`: never.
+    /// taken; an answer that does not pass sends it at once. One more goes out
+    /// at three times this while no answer has passed. `0s`: never.
     #[serde(with = "humantime_serde")]
     pub hedge_after: Duration,
 }

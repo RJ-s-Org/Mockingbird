@@ -15,10 +15,10 @@
 //! `Described::default()` describes nothing; whether a world is attached at all is
 //! [`MockRuntime::world`](crate::MockRuntime::world).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use mb_mcm::world::{IdentityHeader, OpDesc, OpKind, TypeDesc, World};
+use mb_mcm::world::{IdentityHeader, OpDesc, TypeDesc, World};
 use mb_mcm::{Bundle, OperationKind};
 use serde_json::Value;
 
@@ -196,30 +196,18 @@ impl Described {
     }
 }
 
-/// The static gaps of every operation of `bundle` under `world`: `no_identity` on each
-/// operation that writes a type with no identity (a read or list of it is not marked),
-/// then its own `no_target` and `no_record`.
+/// The static gaps of every operation of `bundle` (with `world` applied) under `world`: `no_identity` on each
+/// operation whose calls have no identity to work with ([`world_gaps::unidentified`],
+/// the rule the executor falls back to the model by), then its own `no_target` and
+/// `no_record`.
 fn static_gaps(bundle: &Bundle, world: &World) -> HashMap<String, Vec<GapCode>> {
     let all = world_gaps::structural_gaps(bundle, world, &[]);
-    let unidentified: HashSet<&str> = all
-        .iter()
-        .filter(|g| g.code == GapCode::NoIdentity)
-        .filter_map(|g| g.r#type.as_deref())
-        .collect();
     let mut out: HashMap<String, Vec<GapCode>> = HashMap::new();
-    let none = OpDesc::default();
-    for op in &bundle.operations {
-        let d = world.operations.get(&op.id).unwrap_or(&none);
-        let t = d.r#type.as_deref().or(op.resource_type.as_deref());
-        let kind = d.kind.or_else(|| OpKind::of(op));
-        if let (Some(t), Some(k)) = (t, kind)
-            && is_write(k)
-            && unidentified.contains(t)
-        {
-            out.entry(op.id.clone())
-                .or_default()
-                .push(GapCode::NoIdentity);
-        }
+    for op in world_gaps::unidentified(bundle, world)
+        .into_values()
+        .flatten()
+    {
+        out.entry(op).or_default().push(GapCode::NoIdentity);
     }
     for code in [GapCode::NoTarget, GapCode::NoRecord] {
         for g in all.iter().filter(|g| g.code == code) {
@@ -232,13 +220,6 @@ fn static_gaps(bundle: &Bundle, world: &World) -> HashMap<String, Vec<GapCode>> 
         }
     }
     out
-}
-
-fn is_write(k: OpKind) -> bool {
-    matches!(
-        k,
-        OpKind::Create | OpKind::Update | OpKind::Replace | OpKind::Delete | OpKind::Action
-    )
 }
 
 /// The schema of one record of type `t`: what a read of it answers where its identity

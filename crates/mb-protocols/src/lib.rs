@@ -80,6 +80,7 @@ mod call;
 pub use call::exec_pool::{
     MIN_POOL_TOKENS, POOL_SIZE, RecordPool, fill as fill_record_pool, warm_validators,
 };
+pub use call::shared::{SharedEntry, SharedTypes};
 pub mod chaos;
 #[cfg(any(
     feature = "http-rest",
@@ -400,6 +401,10 @@ pub struct MockRuntime {
     /// The name the mocks of one API keep their sessions under together
     /// (see `call::shared`); `None` keeps this mock's own.
     pub shares: Option<String>,
+    /// The record types of the mocks of each `shares` group: what a type of this
+    /// mock is in the others is inferred from them. Every runtime of a server holds
+    /// the same one, which the server sets to its mounted mocks.
+    pub shared_types: SharedTypes,
     /// Validate requests strictly: refuse a member the request schema does not
     /// declare, which is otherwise let through, and validate a contract the smart
     /// import inferred (whose request schemas are guesses, see [`mb_mcm::Bundle::inferred`]) as any other.
@@ -411,6 +416,11 @@ pub struct MockRuntime {
     /// source: Swagger `basePath`, OpenAPI `servers[].url` paths). Read
     /// when the REST router is built. Empty by default.
     pub base_paths: Vec<String>,
+    /// The hosts the records this mock answers link under, the first one
+    /// preferred: the mock's own `hosts`, then those its contract's `servers`
+    /// name (`mb_import::server_hosts`). The URL members of a record it stores
+    /// are built on them (see `call::links`). Empty by default.
+    pub hosts: Vec<String>,
     /// The credential header and query names derived from
     /// `data_plane_auth` and `bundle`, recomputed whenever either changes
     /// (see [`MockRuntime::credential_names`]).
@@ -482,6 +492,7 @@ impl std::fmt::Debug for MockRuntime {
             .field("default_scenario", &self.default_scenario)
             .field("webhooks", &self.webhooks)
             .field("base_paths", &self.base_paths)
+            .field("hosts", &self.hosts)
             .finish_non_exhaustive()
     }
 }
@@ -563,9 +574,11 @@ impl MockRuntime {
             unknown_ids: UnknownIds::default(),
             default_scenario: None,
             shares: None,
+            shared_types: SharedTypes::default(),
             strict_requests: false,
             webhooks: None,
             base_paths: Vec::new(),
+            hosts: Vec::new(),
             credential_names,
             index,
             path_aliases: call::PathAliases::default(),
