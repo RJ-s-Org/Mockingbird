@@ -31,6 +31,14 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### A new build recompiles unchanged contracts
+
+No migration or configuration. A mock from the config file used to keep its active contract version while the contract file's digest matched it, so import fixes in a new build reached it only after the file changed. Now the build compiles the file on every reconcile, and when the result differs from the stored bundle it adds and activates a new version, as an edited file does: the world description is carried forward, and session records are kept.
+
+- **Once per build**: reconciling again with the same build adds nothing.
+- **Rolling upgrades**: reconcile runs on the leader, so while old and new builds share a control store, each move of leadership between them adds a version. It settles once every node runs the new build.
+- **Pinning an older version** of a file-backed mock is not possible: the file and the running build decide the active version.
+
 ### Single-record read prompts show held records trimmed
 
 No migration or configuration.
@@ -123,7 +131,7 @@ No migration or configuration. The importer keeps an OpenAPI 3, Swagger 2 or Asy
 
 - **WSDL documentation**: a WSDL's `wsdl:documentation` (of `definitions` and its services) is its API description; an operation's is its summary, and `xs:annotation/xs:documentation` becomes schema descriptions. A WSDL contract shows it once imported again. Every operation's and channel's `Summary:` line is now escaped, redacted and cut at 500 characters, and every hint line escaped, redacted and cut at 1000, so a summary with `<`, `&`, line breaks or a credential, or a hint with `<`, `&` or a credential, reads differently than before; plain text is unchanged.
 - **Bundle format**: `Bundle` gains an optional `description`. A bundle stored before this release loads with none and serializes byte for byte as before; one compiled with a description writes it as a top-level `description` member, which an older node ignores during a rolling upgrade.
-- **Recompile to show it**: a stored bundle has no description, so its prompts stay as they were until the contract is imported again (for a mock from the config file with a persistent control store, change a byte of the contract, as for [action routes](#action-routes-act-on-their-parent-resource)). `source_digest` is unchanged: it hashes the source, which already held the description, so response cache keys stay correct.
+- **Recompile to show it**: a stored bundle has no description, so its prompts stay as they were until the contract is imported again (for a mock from the config file, restart: [a build that compiles the file differently adds a version](#a-new-build-recompiles-unchanged-contracts)). `source_digest` is unchanged: it hashes the source, which already held the description, so response cache keys stay correct.
 - **More prompt tokens**: a contract with a description adds about 40 tokens plus up to 6000 characters of it to every system message (2000 before the cap was raised). It comes right after the `API:` line, before anything per operation, so the cached prefix is shared across the contract's operations. A contract without one gets the prompt it did.
 - **Credentials are redacted in contract text**: the API description, response descriptions, parameter descriptions, refusal-status descriptions and the descriptions inside the prompt's JSON Schema (also sent as the structured-output schema) now replace what looks like a credential with `[redacted]` ([what counts](concepts.md#how-an-answer-is-made)). A description that showed an example key or token now shows `[redacted]` in its place. Scope names, plain words and small numbers under a credential's name are kept. Each block is also cut after escaping, so a description full of `<` or `&` is now shorter than before in characters it covers. `mb_mcm::credentials::is_token_shaped` is new and shareable; nothing else uses it yet.
 - **Joint GraphQL prompts** show the `API:` line once, before the fields, where each field repeated it.
@@ -329,7 +337,7 @@ A `POST <static>/{param}/<verb>` the contract shows acting on its parent ([how t
 - its webhook event type, from `confirm.created` to `payment_intent.updated`, or for a command that answers a record of its own, from `cancel.created` to `booking.updated`;
 - what state it writes: resources stored under the old type (`confirm`) in a session or a session snapshot are no longer read by anything, and `on_state_change` triggers on that type stop firing.
 
-A bundle takes this on recompile, and stored bundles are not recompiled on their own. For a mock managed through the API, upload the contract again. For a mock from the config file, restart: with an in-memory control store that is enough, but with a persistent one a mock keeps its active version while the contract's digest matches it, so also change a byte of the contract, such as a comment.
+A bundle takes this on recompile, and stored bundles are not recompiled on their own. For a mock managed through the API, upload the contract again. For a mock from the config file, restart: [a build that compiles the file differently adds a version](#a-new-build-recompiles-unchanged-contracts).
 
 ### Action routes come from the contract's structure
 

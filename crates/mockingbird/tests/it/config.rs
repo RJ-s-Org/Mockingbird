@@ -702,6 +702,100 @@ async fn reconcile_new_contract_digest_new_version() {
     );
 }
 
+/// A mock whose file is unchanged but whose stored bundle another Mockingbird
+/// compiled (before an upgrade that reads the contract differently) gets a new
+/// version with this build's bundle; reconciling again adds nothing.
+#[tokio::test]
+async fn reconcile_recompiles_a_bundle_an_older_build_stored() {
+    let ws = Workspace::new();
+    let cfg = ws.load(BASIC);
+    let store = store().await;
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    // What an older build stored for the same source: one operation read differently.
+    let source = std::fs::read(fixture()).unwrap();
+    let mut older = mb_import::compile(&source).unwrap();
+    older.operations[0].identity = None;
+    older.operations[0].resource_type = Some("something_else".into());
+    let stale = store
+        .add_contract_version(
+            mock.id,
+            NewContractVersion {
+                source,
+                bundle: older.clone(),
+                status: ContractStatus::Approved,
+                created_by: Some("file".into()),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .activate_contract_version(mock.id, stale.version)
+        .await
+        .unwrap();
+
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert_eq!(report.new_versions, [("orders".to_string(), 3)]);
+    let active = store.active_contract(mock.id).await.unwrap().unwrap();
+    assert_eq!(active.version, 3);
+    let source = std::fs::read(fixture()).unwrap();
+    assert_eq!(active.bundle, mb_import::compile(&source).unwrap());
+
+    let again = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert!(again.new_versions.is_empty(), "{again:?}");
+}
+
+/// A contract whose bundle does not survive the store's JSON round trip as compiled
+/// (a `null` body schema, floats) is still the stored version on the next reconcile.
+#[tokio::test]
+async fn reconcile_keeps_a_bundle_the_store_round_trips() {
+    let ws = Workspace::new();
+    let cfg = ws.load(BASIC);
+    std::fs::write(
+        ws.dir.path().join("orders.yaml"),
+        r#"
+openapi: 3.0.0
+info: {title: Orders, version: "1"}
+paths:
+  /orders:
+    post:
+      operationId: createOrder
+      requestBody: {content: {application/json: {schema: null}}}
+      responses:
+        "201":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {type: string}
+                  total: {type: number, maximum: 1.7976931348623157e308, multipleOf: 0.1, example: 0.30000000000000004}
+        "400": {description: out of stock}
+"#,
+    )
+    .unwrap();
+    let store = store().await;
+    let first = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert_eq!(first.new_versions, [("orders".to_string(), 1)]);
+    let again = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert!(again.new_versions.is_empty(), "{again:?}");
+}
+
 #[tokio::test]
 async fn reconcile_carries_the_world_description_to_a_new_version() {
     let ws = Workspace::new();

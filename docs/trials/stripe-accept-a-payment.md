@@ -278,3 +278,35 @@ A fresh Claude Code in a clean copy of the sample, with the plugin from the mark
 Each server was ready in about 0.3 s on port 4242 and stopped after its tests. The standard harness gives 14/16 on the same mock, with every call from `state`.
 
 The `line_items` miss is intermittent on `main` (13/16 and 14/16 in two runs). It doesn't happen on #552's branch (14/16 twice). Separately, an expandable `customer` (`anyOf` string or object) comes back as the id string when expanded, on both.
+
+## Model-off fresh-agent run (2026-11-12)
+
+No model at all: the OpenRouter key was out of credit, so every answer had to come from state, world rules or the faker. A fresh Claude Code in a clean clone, with the plugin from the marketplace and `main` at `95979a49` on `PATH`. The prompt said there's no model key and gave the agent a port range (34000–34999); otherwise it was the same as before. Only wording-free checks were scored.
+
+**Build.** 1139 s, 83 turns, $4.19 of Claude Code usage. The agent:
+- used `project_hosts`, `init_example` and the full Stripe spec, ran `get_world`, and called `verify_run` 14 times;
+- added `PORT` support to three sample servers;
+- wrote a world description with id prefixes, `client_secret` built from the id, and starting statuses;
+- added a small mock for the hosted `checkout.stripe.com` page;
+- ran the four specs with mise's Ruby 3.3 through a `run-sample.sh` script, all offline.
+
+**App tests** (rerun cold by the trial, `verify --run --no-unmapped --no-unmatched --no-fallbacks`): **16/16**, 17 requests. The expected 404 (an unknown session) and 400 (`au_becs_debit`) are reported as notes.
+
+**Wording-free Stripe checks** (`state-check.sh`: create, read, update, list, 404, delete, transitions): **11/19** on `main`. The customer read was classified as a list, because `GET /v1/customers/{customer}` answers `anyOf [customer, deleted_customer]`. So:
+- a created customer never read back;
+- updates did not persist;
+- an unknown id answered 200.
+
+#587 makes such a choice a read: **15/19**.
+
+The rest are outside what the app calls and what the agent described:
+- `confirm` and `cancel` do not move the status (no `set` or transition on those actions);
+- the list's `customer` filter is undescribed;
+- refunds have no `re_` prefix.
+
+A mock created before an upgrade kept its old compiled bundle until the contract file changed. The PR that adds this section fixes that: a new build recompiles an unchanged contract ([upgrading](../upgrading.md#a-new-build-recompiles-unchanged-contracts)).
+
+**Expand checks (#572).**
+- Expanding `customer` on a PaymentIntent or a Checkout Session gives the same record as its id.
+- `GET /checkout/sessions/{id}/line_items` does not hold the created price, and `expand[]=line_items.data.price.product` does not reach it.
+- An invoice's `discounts[0][coupon]` is not stored, so `expand[]=discounts` has nothing to expand. These two are queued in the engine session.

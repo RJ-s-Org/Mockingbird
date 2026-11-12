@@ -65,6 +65,23 @@ The creates are about twice as fast as in the proxy trial, from L1's output budg
 
 `verify --no-fallbacks --no-unmapped` passes for both.
 
+## Model-off fresh-agent run (2026-11-12)
+
+No model at all (the OpenRouter key was out of credit). A fresh Claude Code in a clean clone of `stripe-samples/accept-a-payment`, with the plugin from the marketplace and `main` at `95979a49`. The prompt asked for the Java server in `custom-payment-flow/server/java` and its spec, said there's no model key, and gave a port range (33000–33999, the app on 4242).
+
+**Build.** 279 s, 36 turns, $1.86. The agent:
+- loaded the `mockingbird` and `mockingbird-world` skills and used `project_hosts`, `init_example`, `get_world`, `call_mock` and `verify_run` (twice) over MCP;
+- started from the catalog's hand-written Stripe example and added `payment_method_options` and a declared 400;
+- wrote a world description: request members copied, `client_secret` from the id, cursor paging, and the `au_becs_debit` 400 with Stripe's message for a US account;
+- dropped the example's webhooks, which this app's `/webhook` rejects;
+- handed back the one-step `verify --run ... --serve ... --serve-port 4242` command.
+
+A first run of this trial, launched in parallel with three others, lost its project-scoped plugin install to a race in Claude Code's shared plugin registry. Without the plugin, the agent read the skills from disk and got the same 6/6. The numbers here are from the rerun with the plugin loaded.
+
+**App tests** (rerun cold by the trial, `verify --run 'rspec spec/custom_payment_flow_server_spec.rb' --serve <the jar> --serve-port 4242`): **6/6**, 7 requests, with no failures pointing at the mock.
+
+**Wording-free Stripe checks:** **17/19**. The hand-written example has no `cancel` route, and `confirm` does not move the status. Expanding `customer` stays a string, because the example contract declares `customer` as a plain string with no `expand` parameter: that is example-contract scope.
+
 ## Notes
 
 - The relative `storage.url` gotcha (Open since the proxy trials) hit again: running from `server/java` with `sqlite://./mockingbird-b1/…` failed with `unable to open database file`; the config now uses an absolute path.

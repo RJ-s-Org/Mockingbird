@@ -618,7 +618,11 @@ async fn apply_mock(
         .await
         .with_context(|| format!("loading the active contract of mock {name:?}"))?;
     let mut active_version = active.as_ref().map(|v| v.version);
-    if active.map(|v| v.source_digest) != Some(p.digest.clone()) {
+    // The same file compiled by another Mockingbird (an upgrade that reads contracts
+    // better) is a new version too: the stored bundle is what the mock serves.
+    let current =
+        active.is_some_and(|v| v.source_digest == p.digest && stored_as(&v.bundle, &p.bundle));
+    if !current {
         let version = store
             .add_contract_version(
                 mock.id,
@@ -992,6 +996,18 @@ pub(crate) fn valid_secret_ref(reference: &str) -> bool {
 
 /// The secret-reference forms [`valid_secret_ref`] accepts, for messages.
 pub(crate) const SECRET_REF_FORMS: &str = "env:NAME, file:/path or vault:<mount>/<path>#<field>";
+
+/// Whether `stored` is `fresh` as the store keeps it. A control store writes a bundle
+/// as JSON text and reads it back, which is not lossless (a `null` schema reads back
+/// as none; a float may come back a unit in the last place apart), so `fresh` is
+/// compared after the same round trip when it differs as compiled.
+fn stored_as(stored: &Bundle, fresh: &Bundle) -> bool {
+    stored == fresh
+        || serde_json::to_string(fresh)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Bundle>(&text).ok())
+            .is_some_and(|kept| kept == *stored)
+}
 
 /// Hex sha256, as the store computes `source_digest`.
 fn sha256_hex(bytes: &[u8]) -> String {
