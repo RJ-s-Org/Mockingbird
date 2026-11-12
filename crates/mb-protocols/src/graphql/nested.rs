@@ -25,6 +25,17 @@
 //! A stored record is drawn into the generated shape: the generated item
 //! with its id (or another one, or the faker's when there is none) under
 //! the record's members.
+//!
+//! Any other object of the answer that names a held record, by its type
+//! (its `__typename`, else its place in the schema) and its `id`, shows
+//! that record's members too: a comment a mutation stored, generated again
+//! inside a parent's connection that no lookup answered from state, keeps
+//! its stored `body` and flags however the model answers them now. Each
+//! selected member the record holds takes the stored value (re-keyed, and a
+//! stored reference expanded, as above) when that value validates against
+//! the member's narrowed schema; the generated value stays otherwise, and
+//! for the members the record lacks. At most [`MAX_OVERLAID`] objects per
+//! answer, from the records already read for the walk: no further reads.
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -47,6 +58,10 @@ const DEFAULT_PAGE: usize = 100;
 
 /// Bounds the walk (recursive types).
 const MAX_DEPTH: usize = 12;
+
+/// Generated objects naming a held record that may take its members, per answer
+/// (as many as REST's, see `call::reused_ids`).
+const MAX_OVERLAID: usize = 50;
 
 /// The definition `schema` refers to, through a nullable `anyOf`.
 pub(crate) fn def_of<'a>(bundle: &'a Bundle, schema: &Value) -> Option<&'a Value> {
@@ -244,6 +259,7 @@ pub(crate) async fn from_state(
         held,
         referred: None,
         contested: RefCell::new(HashSet::new()),
+        overlaid: 0,
     };
     // A root selection carries no arguments of its own.
     let sel = Selection {
@@ -273,6 +289,7 @@ pub(crate) async fn from_state(
         }
         walk.referred = Some(referred);
         walk.superseded.clear();
+        walk.overlaid = 0;
         walk.field(schema, &sel, body, None, 0);
     }
     for (t, id) in walk.superseded {
@@ -356,6 +373,8 @@ struct Walk<'a> {
     /// The types of which a lookup named several records before `referred`
     /// was read.
     contested: RefCell<HashSet<String>>,
+    /// Generated objects naming a held record looked at so far.
+    overlaid: usize,
 }
 
 impl Walk<'_> {
@@ -523,6 +542,9 @@ impl Walk<'_> {
             }),
             _ => None,
         };
+        if let Some(own) = &own {
+            self.overlay_held(own, props, sel, obj);
+        }
         let parent = own.as_ref().or(parent);
         for (key, child) in &sel.fields {
             let (Some(member), Some(field)) =
@@ -531,6 +553,46 @@ impl Walk<'_> {
                 continue;
             };
             self.field(field, child, member, parent, depth + 1);
+        }
+    }
+
+    /// Has `obj`, a generated object of the held record `own` names (keyed by
+    /// `sel`'s response keys, its type's fields `props`), show each selected
+    /// member the record holds, where the stored value fits the member's
+    /// narrowed schema (see the module's doc).
+    fn overlay_held(
+        &mut self,
+        own: &Parent,
+        props: &Map<String, Value>,
+        sel: &Selection,
+        obj: &mut Map<String, Value>,
+    ) {
+        if self.overlaid >= MAX_OVERLAID {
+            return;
+        }
+        let Some(record) = self
+            .held
+            .get(&own.ty)
+            .and_then(|records| records.iter().find(|r| r.id == own.id))
+        else {
+            return;
+        };
+        self.overlaid += 1;
+        let mut stored = obj.clone();
+        overlay(&mut stored, &record.data, sel);
+        self.expand_references(&own.ty, sel, &record.data, &mut stored);
+        for (key, child) in &sel.fields {
+            let Some(value) = stored.get(key).filter(|v| obj.get(key) != Some(*v)) else {
+                continue;
+            };
+            let Some(schema) = child.names().find_map(|n| props.get(n)) else {
+                continue;
+            };
+            let fits = mb_engine::SchemaValidator::new(&narrow(schema, &self.bundle.defs, child))
+                .is_ok_and(|validator| validator.is_valid(value));
+            if fits {
+                obj.insert(key.clone(), value.clone());
+            }
         }
     }
 

@@ -1168,9 +1168,15 @@ pub(crate) async fn complete(
             .filter(|i| i.path_param.is_none())
             .and_then(|i| i.input_field.as_deref().filter(|f| *f != i.field))
             .zip(acted_on.as_deref());
-        reused_ids::remint(&mut state, session, rt, body, schema, (skip, named_by))
+        let shown = reused_ids::remint(&mut state, session, rt, body, schema, (skip, named_by))
             .instrument(state_span())
             .await;
+        // A read's answer shows what the session holds of the records it nests. GraphQL
+        // answers do in their own walk (see `graphql::nested`), by response key.
+        if matches!(op.kind, OperationKind::Query) && op.protocol != mb_mcm::Protocol::Graphql {
+            let listed = lists::overlays_own_items(rt, plan, target_id.as_deref());
+            reused_ids::show_held(rt, body, &shown, listed);
+        }
     }
     let resource_type = op.resource_type.as_deref();
     let is_query = matches!(op.kind, OperationKind::Query);
@@ -1210,10 +1216,9 @@ pub(crate) async fn complete(
         // answer holding one record (`/users/me` answering `{user}`) is no list.
         let fallback = transient_fallback(&generated);
         if is_query
-            && target_id.is_none()
+            && lists::overlays_own_items(rt, plan, target_id.as_deref())
             && answered.is_none()
             && (200..300).contains(&generated.status)
-            && deleted::applies(rt, plan)
             && let Some(body) = generated.body.as_mut()
         {
             // The model's own next page, after a rest the mock served: not those again,

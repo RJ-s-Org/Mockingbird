@@ -17,6 +17,16 @@
 //!
 //! The record the call acts on, the same record shown twice, and a held one the answer
 //! only renames keep their ids.
+//!
+//! What the session holds of each record that keeps a held id is handed back
+//! ([`Shown`]), as it is read here anyway, and [`show_held`] has a read's answer show
+//! it: below the answer's root, each such object takes the stored record's members its
+//! place in the schema declares, each projected as declared (see
+//! [`lists::projected`]) and only where the projected value validates against the
+//! member's schema. The record's identity stays, and so do the generated members the
+//! record lacks. A comment a create stored, generated again inside its issue with
+//! another body and flags, shows the stored ones. The main list's items of a list
+//! read are left to [`lists::overlay_stored`], which knows their parent.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -39,19 +49,34 @@ type Parent = (String, String, Vec<Step>);
 /// How many new ids are drawn for one record before it is left as it was.
 const DRAWS: u64 = 8;
 
+/// A record of an answer that keeps an id the session holds, with the held record.
+pub(super) struct Shown<'a> {
+    path: Vec<Step>,
+    /// Its identity member, and the id there.
+    member: String,
+    id: String,
+    /// Its place's schema.
+    schema: Option<&'a Value>,
+    held: StoredResource,
+}
+
+/// Generated objects that take a held record's members, per answer.
+const MAX_SHOWN: usize = 50;
+
 /// Gives each record of `body` that reuses another record's id a new one (see the
-/// module doc). `skip` is the record the call acts on, which keeps its id; `named_by`
+/// module doc), and returns those that keep an id the session holds, with what it
+/// holds. `skip` is the record the call acts on, which keeps its id; `named_by`
 /// the member and value the call names its record by besides its id (GraphQL's
 /// `product(handle:)`): the answer's root under a held id whose record has another
 /// value there is another record.
-pub(super) async fn remint(
+pub(super) async fn remint<'a>(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
-    rt: &MockRuntime,
+    rt: &'a MockRuntime,
     body: &mut Value,
-    schema: Option<&Value>,
+    schema: Option<&'a Value>,
     (skip, named_by): (Option<Pair<'_>>, Option<Pair<'_>>),
-) {
+) -> Vec<Shown<'a>> {
     let mut found = Vec::new();
     collect(rt, (body, schema), 0, (&mut Vec::new(), None), &mut found);
     // (type, id) → the naming members and parent of the first record seen with it;
@@ -60,12 +85,16 @@ pub(super) async fn remint(
     let mut seen: HashMap<(String, String), Seen> = HashMap::new();
     let mut renamed: HashMap<(String, String, String), String> = HashMap::new();
     let mut moved: HashMap<Vec<Step>, String> = HashMap::new();
+    // The held record under each (type, id) read, and the records that keep one.
+    let mut held_by: HashMap<(String, String), StoredResource> = HashMap::new();
+    let mut shown = Vec::new();
     for Found {
         path,
         t,
         member,
         id,
         parent,
+        schema,
     } in found
     {
         if skip == Some((t.as_str(), id.as_str())) {
@@ -86,16 +115,32 @@ pub(super) async fn remint(
             Some((first, _)) => differs(first, &names),
             None => match state.get(session, &t, &id).await {
                 None => false,
-                Some(held) if path.is_empty() => named_by.is_some_and(|(m, v)| {
-                    held.data
-                        .get(m)
-                        .and_then(Value::as_str)
-                        .is_some_and(|h| h != v)
-                }),
-                Some(held) => under_another(&held.data, parent.as_ref()),
+                Some(held) => {
+                    let another = if path.is_empty() {
+                        named_by.is_some_and(|(m, v)| {
+                            held.data
+                                .get(m)
+                                .and_then(Value::as_str)
+                                .is_some_and(|h| h != v)
+                        })
+                    } else {
+                        under_another(&held.data, parent.as_ref())
+                    };
+                    held_by.insert(key.clone(), held);
+                    another
+                }
             },
         };
         if !another {
+            if let Some(held) = held_by.get(&key).filter(|_| shown.len() < MAX_SHOWN) {
+                shown.push(Shown {
+                    path,
+                    member,
+                    id,
+                    schema,
+                    held: held.clone(),
+                });
+            }
             seen.entry(key).or_insert((names, parent_id));
             continue;
         }
@@ -123,10 +168,58 @@ pub(super) async fn remint(
         moved.insert(path, new_id.clone());
         seen.entry((t, new_id)).or_insert((names, parent_id));
     }
+    shown
+}
+
+/// Has each object of `body`, a read's answer, that [`remint`] found keeping a held id
+/// show the held record's members (see the module doc): not the root, and with
+/// `listed`, not the items of the answer's main list.
+pub(super) fn show_held(rt: &MockRuntime, body: &mut Value, shown: &[Shown<'_>], listed: bool) {
+    let bundle = rt.bundle();
+    // Where the main list's items are: the body's own elements, or its list member's.
+    let body_is_list = body.is_array();
+    let list_key = mb_engine::consistency::list_member(body).map(str::to_owned);
+    let main_item = |path: &[Step]| match path {
+        [Step::Index(_)] => body_is_list,
+        [Step::Key(key), Step::Index(_)] => list_key.as_deref() == Some(key.as_str()),
+        _ => false,
+    };
+    for one in shown {
+        if one.path.is_empty() || (listed && main_item(&one.path)) {
+            continue;
+        }
+        let place = Place::of(rt, one.schema);
+        let (Some(Value::Object(object)), Value::Object(stored)) =
+            (at_mut(body, &one.path), &one.held.data)
+        else {
+            continue;
+        };
+        // An earlier overlay replaced it with another value.
+        if object.get(&one.member).and_then(Value::as_str) != Some(one.id.as_str()) {
+            continue;
+        }
+        for (name, value) in stored {
+            if *name == one.member {
+                continue;
+            }
+            let Some(schema) = place.property(name) else {
+                continue;
+            };
+            let value = lists::projected(bundle, Some(schema), value, 0);
+            if object.get(name) == Some(&value) {
+                continue;
+            }
+            let fits = mb_engine::SchemaValidator::for_output(&bundle.with_reachable_defs(schema))
+                .is_ok_and(|validator| validator.is_valid(&value));
+            if fits {
+                object.insert(name.clone(), value);
+            }
+        }
+    }
 }
 
 /// A record an answer shows.
-struct Found {
+struct Found<'a> {
     path: Vec<Step>,
     /// Its type.
     t: String,
@@ -135,6 +228,8 @@ struct Found {
     id: String,
     /// The record it is shown inside, as (type, id, path).
     parent: Option<Parent>,
+    /// Its place's schema.
+    schema: Option<&'a Value>,
 }
 
 /// Each object below the root with a record type and an identity (see [`Found`]).
@@ -143,7 +238,7 @@ fn collect<'a>(
     (value, schema): (&Value, Option<&'a Value>),
     depth: usize,
     (path, parent): (&mut Vec<Step>, Option<&Parent>),
-    out: &mut Vec<Found>,
+    out: &mut Vec<Found<'a>>,
 ) {
     if depth > MAX_ENTITY_DEPTH || out.len() >= MAX_ENTITIES {
         return;
@@ -176,6 +271,7 @@ fn collect<'a>(
                     member: member.clone(),
                     id: id.clone(),
                     parent: parent.cloned(),
+                    schema,
                 });
             }
             let this = record.map(|(t, _, id)| (t, id, path.clone()));
