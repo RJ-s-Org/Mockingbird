@@ -100,8 +100,13 @@ pub(super) struct ListQuery {
     /// The request parameters a described filter, scope or paging names, those the
     /// description `ignores`, and the soft delete's `listed_with` parameter.
     params: Vec<String>,
-    /// The request body pointers of those of them read from the body.
+    /// The request body pointers of those of them the description does not ignore
+    /// (`ignored_body` holds the ignored ones').
     body_reads: Vec<String>,
+    /// The parameters the description `ignores`.
+    ignored: Vec<String>,
+    /// The request body pointers the parameters the description `ignores` name.
+    ignored_body: Vec<String>,
     /// What leaves a soft-deleted record of the list's item type out, unless the
     /// request asks for deleted ones (then `None`).
     pub(super) lifecycle: Option<lifecycle::Exclusion>,
@@ -223,13 +228,35 @@ impl ListQuery {
     /// Whether body member `pointer` is read by the description: one of its body
     /// parameters is the member or holds it.
     pub(super) fn reads_body(&self, pointer: &str) -> bool {
-        self.body_reads.iter().any(|read| within(pointer, read))
+        self.ignores_body(pointer) || self.body_reads.iter().any(|read| within(pointer, read))
     }
 
-    /// Whether some body parameter of the description is a member below `pointer`.
+    /// Whether body member `pointer` is one the description `ignores`, or within one.
+    /// Serving a list from state reads past it ([`Self::reads_body`]); recording a
+    /// generated list asks more ([`Self::ignores_whole`]).
+    pub(super) fn ignores_body(&self, pointer: &str) -> bool {
+        self.ignored_body.iter().any(|read| within(pointer, read))
+    }
+
+    /// Whether body member `pointer`, whatever its value, asks nothing of the items:
+    /// the description `ignores` it (or a member holding it) and reads no member below
+    /// it. An ignored `/options` holding a described filter `/options/account_ids` asks
+    /// something.
+    pub(super) fn ignores_whole(&self, pointer: &str) -> bool {
+        self.ignores_body(pointer) && !self.reads_below(pointer)
+    }
+
+    /// Whether path or query parameter `param` is one the description `ignores`.
+    pub(super) fn ignores(&self, param: &str) -> bool {
+        self.ignored.iter().any(|ignored| ignored == param)
+    }
+
+    /// Whether some body parameter of the description, ignored ones included, is a
+    /// member below `pointer`.
     pub(super) fn reads_below(&self, pointer: &str) -> bool {
         self.body_reads
             .iter()
+            .chain(&self.ignored_body)
             .any(|read| read != pointer && within(read, pointer))
     }
 
@@ -317,6 +344,18 @@ fn within(pointer: &str, at: &str) -> bool {
     pointer
         .strip_prefix(at)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Whether request body member value `value` asks something of the list: not `null`,
+/// blank, or an empty object or array.
+pub(super) fn asks(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(members) => !members.is_empty(),
+        _ => true,
+    }
 }
 
 /// The request body pointer described parameter `param` names: `param` itself when it
@@ -514,6 +553,12 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
     });
     let body_reads = params
         .iter()
+        .filter(|param| !d.ignores.contains(param))
+        .filter_map(|param| body_pointer(bundle, op, param))
+        .collect();
+    let ignored_body = d
+        .ignores
+        .iter()
         .filter_map(|param| body_pointer(bundle, op, param))
         .collect();
     Some(ListQuery {
@@ -529,6 +574,8 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
         scope_described: d.scope.is_some(),
         params,
         body_reads,
+        ignored: d.ignores.clone(),
+        ignored_body,
         lifecycle,
     })
 }

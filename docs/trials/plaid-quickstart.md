@@ -256,9 +256,9 @@ All of it applies in one `patch_world` (no refusals; #397). `call_mock {mock: "p
 
 | # | Repro | Class | Status |
 | --- | --- | --- | --- |
-| 1 | `world show plaid` reported **0 gaps**, while every account call carried `request.world_gap: ["no_identity"]` and was generated. The agent trusted the gap list and stopped. | engine (reporting) | fix in progress (separate PR) |
+| 1 | `world show plaid` reported **0 gaps**, while every account call carried `request.world_gap: ["no_identity"]` and was generated. The agent trusted the gap list and stopped. | engine (reporting) | fixed in #521 |
 | 2 | The catalog's Plaid example shipped no world description, so the account calls had nothing to answer from. | catalog | fixed in this PR: `plaid.world.yaml` describes accounts as children of the Item, scoped by the issued token. Later account lists come from state |
-| 3 | Lists with `client_id`/`secret` in the request body stay `never_listed` despite `ignores: [client_id, secret]` (`asks_only_a_page` does not consult `ignores`). The Python SDK sends credentials as headers, so the quickstart is unaffected. | engine | open (follow-up PR) |
+| 3 | Lists with `client_id`/`secret` in the request body stayed `never_listed` despite `ignores: [client_id, secret]` (`asks_only_a_page` did not consult `ignores`). The Python SDK sends credentials as headers, so the quickstart was unaffected. | engine | fixed by the `asks_only_a_page` `ignores` fix |
 | 4 | A list's envelope `item.item_id` is generated on every call and doesn't match the exchanged Item. `/auth/get`'s `numbers.ach[].account_id` can name an unlisted account. | engine | open (follow-up PR) |
 | 5 | `set` on the link-token create was ignored with no `expr_failed`. The `token` type has no read operation, so it has no record schema (the open follow-up from #494). | engine | open |
 | 6 | Identical requests are answered from the response cache, so two identical `link/token/create` calls give the same token. | engine default | noted; not blocking the flows |
