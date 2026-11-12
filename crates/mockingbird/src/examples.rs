@@ -323,6 +323,7 @@ fn show(name: &str) -> anyhow::Result<Value> {
 
 async fn init(args: &InitArgs) -> anyhow::Result<Value> {
     let example = find(&args.name)?;
+    let dir = resolve_dir(&args.dir)?;
     let meta = example.meta()?;
     let upstream = if args.full {
         let upstream = meta
@@ -348,8 +349,8 @@ async fn init(args: &InitArgs) -> anyhow::Result<Value> {
     if !args.force {
         let existing: Vec<String> = planned
             .iter()
-            .filter(|n| args.dir.join(n).exists())
-            .map(|n| args.dir.join(n).display().to_string())
+            .filter(|n| dir.join(n).exists())
+            .map(|n| dir.join(n).display().to_string())
             .collect();
         if !existing.is_empty() {
             bail!(
@@ -365,8 +366,7 @@ async fn init(args: &InitArgs) -> anyhow::Result<Value> {
         _ => None,
     };
 
-    std::fs::create_dir_all(&args.dir)
-        .with_context(|| format!("cannot create {}", args.dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     let mut written = Vec::new();
     let mut dropped = Vec::new();
     for (name, text) in example.files {
@@ -379,26 +379,38 @@ async fn init(args: &InitArgs) -> anyhow::Result<Value> {
             }
             _ => (*text).to_string(),
         };
-        write(&args.dir, name, text.as_bytes())?;
+        write(&dir, name, text.as_bytes())?;
         written.push((*name).to_string());
     }
     if let Some((name, bytes, _)) = &full {
-        write(&args.dir, name, bytes)?;
+        write(&dir, name, bytes)?;
         written.push(name.clone());
     }
 
-    let config = args.dir.join("mockingbird.yaml");
+    let config = dir.join("mockingbird.yaml");
     Ok(json!({
         "example": meta.name,
-        "dir": args.dir.display().to_string(),
+        "dir": dir.display().to_string(),
         "files": written,
         "contract": full.as_ref().map(|(n, _, _)| n.clone()).or_else(|| meta.contracts.first().cloned()),
         "dropped_scenarios": dropped,
         "next": [
             format!("mockingbird serve -c {} --offline", config.display()),
-            format!("see {} for a curl and an SDK snippet", args.dir.join("README.md").display()),
+            format!("see {} for a curl and an SDK snippet", dir.join("README.md").display()),
         ],
     }))
+}
+
+/// `dir` made absolute (`.` parts dropped; an empty path is the current
+/// directory). The caller may not share this process's working directory (an
+/// agent reading the MCP server's answer), so the paths init names are absolute.
+fn resolve_dir(dir: &Path) -> anyhow::Result<PathBuf> {
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    std::path::absolute(dir).with_context(|| format!("cannot resolve {}", dir.display()))
 }
 
 fn write(dir: &Path, name: &str, bytes: &[u8]) -> anyhow::Result<()> {
@@ -776,5 +788,45 @@ mocks:
     contract: b.yaml
 "
         );
+    }
+
+    /// The written directory comes back absolute and without `.` parts, so
+    /// an agent whose working directory differs from the MCP server's finds
+    /// the files.
+    #[tokio::test]
+    async fn init_names_the_directory_it_wrote_absolutely() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".").join("mocks");
+        let args = InitArgs {
+            name: "tmdb".into(),
+            dir,
+            force: false,
+            full: false,
+        };
+        let out = init(&args).await.unwrap();
+        let written = PathBuf::from(out["dir"].as_str().unwrap());
+        assert!(written.is_absolute(), "{written:?}");
+        assert!(
+            written
+                .components()
+                .all(|c| c != std::path::Component::CurDir),
+            "{out}"
+        );
+        assert!(written.join("mockingbird.yaml").is_file());
+        let serve = out["next"][0].as_str().unwrap();
+        assert!(
+            serve.contains(&written.join("mockingbird.yaml").display().to_string()),
+            "{serve}"
+        );
+    }
+
+    /// The default `--dir .` (and an empty one) is the current directory,
+    /// absolute.
+    #[test]
+    fn resolve_dir_makes_the_default_absolute() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(resolve_dir(Path::new(".")).unwrap(), cwd);
+        assert_eq!(resolve_dir(Path::new("")).unwrap(), cwd);
+        assert_eq!(resolve_dir(Path::new("mocks")).unwrap(), cwd.join("mocks"));
     }
 }
