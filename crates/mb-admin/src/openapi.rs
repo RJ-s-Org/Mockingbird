@@ -120,6 +120,8 @@ use crate::{
         imports::ImportJobView,
         contracts::ChannelSummary,
         world::WorldView,
+        world::UnknownIdsView,
+        world::UnknownIdAnswer,
         world::AuthorSchema,
         world::RefusalSchema,
         world::RefusalCodeSchema,

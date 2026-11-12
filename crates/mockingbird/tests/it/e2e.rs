@@ -71,7 +71,8 @@ async fn e2e_create_get_delete_with_wiremock_llm() {
     let http = reqwest::Client::new();
 
     // The create is seeded: a seeded create takes the generated path, which stores the
-    // order the model answered under the id it chose (`O1`).
+    // order the model answered under the id it chose (`O1` or `O2`, whichever answer
+    // the create took).
     let r = http
         .post(format!("{base}/orders"))
         .header("x-mockingbird-seed", "1")
@@ -81,25 +82,29 @@ async fn e2e_create_get_delete_with_wiremock_llm() {
         .unwrap();
     assert_eq!(r.status(), 201);
     assert_eq!(r.headers()["x-mockingbird-source"], "llm");
+    let created: Value = r.json().await.unwrap();
+    let id = created["id"].as_str().unwrap().to_owned();
+    assert!(id == O1 || id == O2, "{created}");
 
     let r = http
-        .get(format!("{base}/orders/{O1}"))
+        .get(format!("{base}/orders/{id}"))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["x-mockingbird-source"], "state");
     let body: Value = r.json().await.unwrap();
-    assert_eq!(body["id"], O1);
+    assert_eq!(body["id"], id.as_str());
 
     let r = http
-        .delete(format!("{base}/orders/{O1}"))
+        .delete(format!("{base}/orders/{id}"))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 204);
 
     let r = http
-        .get(format!("{base}/orders/{O1}"))
+        .get(format!("{base}/orders/{id}"))
         .header("X-Mockingbird-Status", "404")
         .send()
         .await

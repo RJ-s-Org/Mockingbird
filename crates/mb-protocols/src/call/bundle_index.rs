@@ -91,6 +91,11 @@ pub(crate) struct BundleIndex {
     /// [`lists::filtered_member`]), sorted. Auth0's `email`, which
     /// `/users-by-email?email=` requires; never an optional filter such as `state`.
     pub(super) lookup_members: HashMap<String, Vec<String>>,
+    /// The resource types an operation of kind create makes (its world kind, as the
+    /// effective description wrote it into the bundle): those the app can make records
+    /// of, whose unknown ids `unknown_ids` left unset answers 404 once the session holds
+    /// one (see [`crate::UnknownIds::Inferred`]).
+    pub(super) creatable: HashSet<String>,
 }
 
 /// The schema of the record an answer of `schema` holds where `identity` says: an
@@ -455,7 +460,18 @@ impl BundleIndex {
                 .any(|op| minted::may_mint(bundle, op)),
             member_reads: member_reads_of(bundle),
             record_schemas,
+            creatable: bundle
+                .operations
+                .iter()
+                .filter(|op| mb_mcm::world::OpKind::of(op) == Some(mb_mcm::world::OpKind::Create))
+                .filter_map(|op| op.resource_type.clone())
+                .collect(),
         }
+    }
+
+    /// Whether an operation of kind create makes records of `resource_type`.
+    pub(super) fn creatable(&self, resource_type: &str) -> bool {
+        self.creatable.contains(resource_type)
     }
 
     /// The position of operation `id`.

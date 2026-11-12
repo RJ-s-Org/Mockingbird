@@ -342,8 +342,17 @@ pub(crate) async fn mock_behavior_round_trips(store: &Arc<dyn ControlStore>) {
     );
     assert_eq!(
         serde_json::to_value(MockBehavior::default()).expect("serialize"),
-        json!({"consistency": "on", "unknown_ids": "generate"})
+        json!({"consistency": "on", "unknown_ids": "inferred"})
     );
+    for (written, read) in [
+        (json!("inferred"), UnknownIds::Inferred),
+        (json!("generate"), UnknownIds::Generate),
+        (json!("404"), UnknownIds::NotFound),
+    ] {
+        let parsed: MockBehavior =
+            serde_json::from_value(json!({"unknown_ids": written})).expect("deserialize");
+        assert_eq!(parsed.unknown_ids, read);
+    }
     let parsed: MockBehavior =
         serde_json::from_value(json!({"consistency": false, "unknown_ids": 404}))
             .expect("deserialize");

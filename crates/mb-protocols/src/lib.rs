@@ -494,10 +494,15 @@ impl std::fmt::Debug for MockRuntime {
 /// How a read of a path id the session holds no resource for is answered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum UnknownIds {
-    /// Generate a resource for the id (the default).
+    /// Per resource type (the default): the operation's `404` for a type the contract
+    /// can create (an operation of kind create answers it) once the session holds a
+    /// record of it that it created or listed; otherwise generated. Reference data the
+    /// app only reads (a price id from its config) keeps generating.
     #[default]
+    Inferred,
+    /// Generate a resource for the id, whatever the type.
     Generate,
-    /// Answer the operation's `404`.
+    /// Answer the operation's `404`, whatever the type.
     NotFound,
 }
 

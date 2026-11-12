@@ -1597,11 +1597,13 @@ async fn create_never_reuses_a_stored_id() {
     );
 }
 
-/// `/users/{username}` reads by login while state is keyed by `id`: a
-/// missing entry says nothing, so `unknown_ids: 404` keeps generating, with tier 0's
-/// world attached as the runtime attaches it (its target restates `{username}`).
+/// `/users/{username}` reads by login while state is keyed by `id`. The parameter is the
+/// route's last, so it selects the user whatever its name, as tier 0's target (which
+/// restates `{username}`) says: under `unknown_ids: 404` a login no held user goes by is
+/// missing, and a held user is still found by its `login`. Under the default, `users`,
+/// which nothing creates, is reference data and generates.
 #[tokio::test]
-async fn unknown_ids_404_only_when_the_path_names_the_identity() {
+async fn unknown_ids_404_covers_a_trailing_parameter_by_what_it_selects() {
     let src = r#"
 openapi: 3.1.0
 info: {title: Users, version: "1"}
@@ -1617,16 +1619,43 @@ paths:
     let bundle = Arc::new(compile(src.as_bytes()).unwrap());
     let base = mb_mcm::world::tier0(&bundle);
     assert!(base.operations["getUser"].target.is_some());
-    let mut rt = MockRuntime::new(
-        "users",
-        bundle,
-        Arc::new(Engine::new(None, EngineConfig::default())),
-        memory_state(),
-    )
-    .with_world(&base, &base, 0);
-    rt.unknown_ids = UnknownIds::NotFound;
-    let router = http_rest::router(Arc::new(rt));
+    let users = |unknown_ids| {
+        let mut rt = MockRuntime::new(
+            "users",
+            Arc::clone(&bundle),
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            memory_state(),
+        )
+        .with_world(&base, &base, 0);
+        rt.unknown_ids = unknown_ids;
+        Arc::new(rt)
+    };
+    let rt = users(UnknownIds::NotFound);
+    let held = SessionKey {
+        workspace: "default".into(),
+        mock: "users".into(),
+        session: "default".into(),
+    };
+    rt.state
+        .upsert(
+            &held,
+            StoredResource {
+                resource_type: "users".into(),
+                id: "1".into(),
+                data: json!({"id": 1, "login": "octocat"}),
+            },
+        )
+        .await
+        .unwrap();
+    let router = http_rest::router(Arc::clone(&rt));
+    let resp = router.clone().oneshot(get("/users/ghost")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let resp = router.oneshot(get("/users/octocat")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "state");
+
+    let router = http_rest::router(users(UnknownIds::default()));
+    let resp = router.oneshot(get("/users/ghost")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
 

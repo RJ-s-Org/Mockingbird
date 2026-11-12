@@ -704,8 +704,9 @@ async fn an_alternate_is_not_tried_without_a_description() {
     ] {
         h.send("POST", "/templates", Some(json!({"Alias": "welcome"})), &[])
             .await;
-        let (_, headers, _) = h.send("GET", "/templates/welcome", None, &[]).await;
-        assert_ne!(source(&headers), "state");
+        // Missed, so a template the session (holding the one it created) does not hold.
+        let (status, _, _) = h.send("GET", "/templates/welcome", None, &[]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }
 
@@ -960,8 +961,9 @@ async fn a_described_alternate_adds_to_the_detected_members() {
         .await;
         let (_, headers, _) = h.send("GET", "/drafts/welcome", None, &[]).await;
         assert_eq!(source(&headers), "state");
-        let (_, headers, _) = h.send("GET", "/drafts/hi", None, &[]).await;
-        assert_ne!(source(&headers), "state");
+        // Missed, so a draft the session (holding the one it created) does not hold.
+        let (status, _, _) = h.send("GET", "/drafts/hi", None, &[]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }
 

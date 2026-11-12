@@ -341,7 +341,7 @@ async fn a_page_of_parents_lists_the_children_once() {
 #[tokio::test]
 async fn a_children_listing_cut_at_max_scan_sets_nothing() {
     let h = support::described(CONTRACT, world_by_member(), vec![order("o1")]);
-    send(&h, "POST", "/orders", Some(json!({}))).await;
+    seeded(&h, "POST", "/orders", Some(json!({}))).await;
     let session = SessionKey {
         workspace: h.rt.workspace.clone(),
         mock: h.rt.name.clone(),

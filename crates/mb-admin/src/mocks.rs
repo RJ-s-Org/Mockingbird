@@ -344,9 +344,10 @@ pub struct MockView {
     /// listed items are served by id; `off` generates every answer anew.
     #[schema(value_type = String, example = "on")]
     pub consistency: Consistency,
-    /// `generate` (default) or `404`: how a read of an id the session does
-    /// not hold is answered.
-    #[schema(value_type = String, example = "generate")]
+    /// `inferred` (default), `generate` or `404`: how a read of an id the session
+    /// does not hold is answered. `inferred` decides per resource type (the world
+    /// view's `unknown_ids` says how); the others decide for every type.
+    #[schema(value_type = String, example = "inferred")]
     pub unknown_ids: UnknownIds,
     /// The scenario applied when a call names none; absent when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -431,7 +432,7 @@ pub struct CreateMock {
     #[serde(default)]
     #[schema(value_type = Option<String>)]
     pub consistency: Consistency,
-    /// `generate` (default) or `404`.
+    /// `inferred` (default), `generate` or `404`.
     #[serde(default)]
     #[schema(value_type = Option<String>)]
     pub unknown_ids: UnknownIds,
@@ -484,7 +485,7 @@ pub struct PatchMock {
     /// `on` or `off`.
     #[schema(value_type = Option<String>)]
     pub consistency: Option<Consistency>,
-    /// `generate` or `404`.
+    /// `inferred`, `generate` or `404`.
     #[schema(value_type = Option<String>)]
     pub unknown_ids: Option<UnknownIds>,
     /// A scenario of the mock; `null` clears it.

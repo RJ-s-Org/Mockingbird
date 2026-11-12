@@ -420,7 +420,7 @@ async fn patch_consistency_settings() {
             created["consistency"].as_str(),
             created["unknown_ids"].as_str()
         ),
-        (Some("on"), Some("generate"))
+        (Some("on"), Some("inferred"))
     );
     assert!(created.get("default_scenario").is_none());
     let (status, body) = h

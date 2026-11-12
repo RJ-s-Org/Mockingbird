@@ -1466,7 +1466,7 @@ export interface components {
             persona?: string | null;
             /** @description Defaults to `/<name>`, or `/` when `hosts` is given. */
             route_prefix?: string | null;
-            /** @description `generate` (default) or `404`. */
+            /** @description `inferred` (default), `generate` or `404`. */
             unknown_ids?: string | null;
             /** @description Webhook targets; none by default. */
             webhooks?: components["schemas"]["WebhookTarget"][] | null;
@@ -1826,9 +1826,10 @@ export interface components {
             route_prefix: string;
             source: components["schemas"]["Source"];
             /**
-             * @description `generate` (default) or `404`: how a read of an id the session does
-             *     not hold is answered.
-             * @example generate
+             * @description `inferred` (default), `generate` or `404`: how a read of an id the session
+             *     does not hold is answered. `inferred` decides per resource type (the world
+             *     view's `unknown_ids` says how); the others decide for every type.
+             * @example inferred
              */
             unknown_ids: string;
             /** Format: date-time */
@@ -1888,7 +1889,7 @@ export interface components {
             path_rewrite?: components["schemas"]["PathRewrite"] | null;
             persona?: string | null;
             route_prefix?: string | null;
-            /** @description `generate` or `404`. */
+            /** @description `inferred`, `generate` or `404`. */
             unknown_ids?: string | null;
             /** @description Replaces the webhook targets; `[]` clears them. */
             webhooks?: components["schemas"]["WebhookTarget"][] | null;
@@ -2285,6 +2286,30 @@ export interface components {
             /** Format: int64 */
             prompt_tokens: number;
         };
+        /** @description One type's answer to a read of an id the session does not hold. */
+        UnknownIdAnswer: {
+            /**
+             * @description `404` (the read's declared 404) or `generate`. An inferred `404` applies once
+             *     the session holds a record of the type it created or listed; before that the
+             *     read generates.
+             */
+            answer: string;
+            /** @description Why: the mock's setting, or whether an operation of kind create makes the type. */
+            why: string;
+        };
+        /** @description How a mock answers a read by path of an id the session does not hold. */
+        UnknownIdsView: {
+            /**
+             * @description The mock's `unknown_ids`: `inferred` (unset: decided per type), `generate` or
+             *     `404` (decided for every type).
+             * @example inferred
+             */
+            setting: string;
+            /** @description Per resource type with a read by path parameter: its answer and why. */
+            types: {
+                [key: string]: components["schemas"]["UnknownIdAnswer"];
+            };
+        };
         /** @description The outcome of a contract upload. */
         UploadResult: {
             /** @description Number of event channels in the compiled contract. */
@@ -2525,6 +2550,8 @@ export interface components {
              * @description The newest revision's number; `0` when there is none.
              */
             revision: number;
+            /** @description How a read by path of an id the session does not hold is answered, per type. */
+            unknown_ids: components["schemas"]["UnknownIdsView"];
             /**
              * Format: int64
              * @description The contract version it describes (the active one's number for
@@ -3904,7 +3931,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. */
+            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. `unknown_ids` gives each type read by a path parameter its answer to an id the session does not hold (`404` or `generate`) and why. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6685,7 +6712,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. */
+            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. `unknown_ids` gives each type read by a path parameter its answer to an id the session does not hold (`404` or `generate`) and why. */
             200: {
                 headers: {
                     [name: string]: unknown;

@@ -657,6 +657,7 @@ pub(crate) async fn build_runtime_tracked(
     rt.shutdown = Shutdown::new(STOP.subscribe());
     rt.consistency = mock.behavior.consistency == Consistency::On;
     rt.unknown_ids = match mock.behavior.unknown_ids {
+        StoredUnknownIds::Inferred => UnknownIds::Inferred,
         StoredUnknownIds::Generate => UnknownIds::Generate,
         StoredUnknownIds::NotFound => UnknownIds::NotFound,
     };

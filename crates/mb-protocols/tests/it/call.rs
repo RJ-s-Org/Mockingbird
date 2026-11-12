@@ -122,8 +122,23 @@ fn actions(script: Vec<Result<String, LlmError>>) -> Actions {
 }
 
 fn actions_of(contract: &str, script: Vec<Result<String, LlmError>>) -> Actions {
+    actions_with(contract, script, mb_protocols::UnknownIds::default())
+}
+
+/// [`actions_of`] under `unknown_ids: generate`: for a test whose read of a record the
+/// session did not make (another owner's, or one only mentioned) needs its generated
+/// answer, where the default answers a type the session created with its 404.
+fn actions_generating(contract: &str, script: Vec<Result<String, LlmError>>) -> Actions {
+    actions_with(contract, script, mb_protocols::UnknownIds::Generate)
+}
+
+fn actions_with(
+    contract: &str,
+    script: Vec<Result<String, LlmError>>,
+    unknown_ids: mb_protocols::UnknownIds,
+) -> Actions {
     let provider = Arc::new(ScriptedProvider::new(script));
-    let rt = MockRuntime::new(
+    let mut rt = MockRuntime::new(
         "actions",
         Arc::new(compile(contract.as_bytes()).unwrap()),
         Arc::new(Engine::new(
@@ -132,6 +147,7 @@ fn actions_of(contract: &str, script: Vec<Result<String, LlmError>>) -> Actions 
         )),
         Arc::new(MemoryStore::new(Duration::from_secs(3600))),
     );
+    rt.unknown_ids = unknown_ids;
     Actions {
         router: http_rest::router(Arc::new(rt)),
         provider,
@@ -1171,7 +1187,7 @@ async fn a_refused_create_mention_does_not_take_the_id() {
         "customer: {$ref: \"#/components/schemas/Customer\"}",
         "customer: {type: object, properties: {id: {type: string}, name: {type: string}}}",
     );
-    let api = actions_of(
+    let api = actions_generating(
         &contract,
         vec![
             order("o2", json!({"id": "c1"})),
@@ -3669,12 +3685,16 @@ after it; or it made a new one of the same kind, so give that a new id of its ow
 /// something else, an action with no target, a read, a create.
 #[tokio::test]
 async fn other_prompts_do_not_decide_on_an_id() {
-    let h = actions(vec![
-        intent("requires_confirmation"),
-        Ok(json!({"intent": "pi_1", "status": "canceled"}).to_string()),
-        Ok(json!({"id": "pi_9", "status": "succeeded", "amount": 1}).to_string()),
-        Ok(json!({"id": "pi_8", "status": "succeeded", "amount": 1}).to_string()),
-    ]);
+    // The read of an intent the session did not create is generated, to see its prompt.
+    let h = actions_generating(
+        ACTIONS,
+        vec![
+            intent("requires_confirmation"),
+            Ok(json!({"intent": "pi_1", "status": "canceled"}).to_string()),
+            Ok(json!({"id": "pi_9", "status": "succeeded", "amount": 1}).to_string()),
+            Ok(json!({"id": "pi_8", "status": "succeeded", "amount": 1}).to_string()),
+        ],
+    );
     let id = h.create_intent().await;
     h.call("POST", &format!("/v1/payment_intents/{id}/cancel"), None)
         .await;
@@ -4622,7 +4642,7 @@ async fn a_path_with_namespace_shows_its_owner() {
         .replace("full_name: {type: string}\n        stargazers_count", "path_with_namespace: {type: string}\n        path: {type: string}\n        stargazers_count");
     assert_ne!(contract, REPOS);
     let item = json!({"id": 7, "name": "Hello World", "path": "hello", "path_with_namespace": "octo/hello", "stargazers_count": 42});
-    let api = actions_of(
+    let api = actions_generating(
         &contract,
         vec![
             Ok(json!({"total_count": 1, "items": [item]}).to_string()),
@@ -4860,16 +4880,14 @@ async fn a_plain_string_member_is_not_a_name() {
         &contract,
         vec![
             Ok(json!({"total_count": 1, "items": [site]}).to_string()),
-            Ok(
-                json!({"id": 2, "name": "hello", "full_name": "octo/hello", "stargazers_count": 1})
-                    .to_string(),
-            ),
             Ok(json!({"deleted": true}).to_string()),
         ],
     );
     read(&api, "/search/repositories?q=x").await;
-    let (source, other) = read(&api, "/repos/octo/hello").await;
-    assert_ne!(source, "state", "{other}");
+    // `site`'s description is no name: the read misses, a 404 as the session listed a
+    // repository it can create.
+    let (status, _, other) = api.call("GET", "/repos/octo/hello", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{other}");
     let (status, _, _) = api.call("DELETE", "/repos/octo/main", None).await;
     assert!(status.is_success(), "{status}");
     let (source, kept) = read(&api, "/repos/octo/site").await;

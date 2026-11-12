@@ -1918,7 +1918,7 @@ async fn deleted_item(mut script: Vec<Value>) -> Harness {
     h
 }
 
-/// `unknown_ids: generate` is the default, and a delete still sticks: the contract's
+/// Whatever `unknown_ids` says, a delete sticks: the contract's
 /// own 404, whose open `code` the LLM writes once for the operation (see
 /// [`mb_engine::error_body`]), never a generated record.
 #[tokio::test]

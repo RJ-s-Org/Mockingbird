@@ -37,12 +37,12 @@ use mb_auth::Permission;
 
 use mb_mcm::Bundle;
 use mb_mcm::world::{
-    Author, ChangeDesc, OpDesc, Pointer, Refusal, RefusalCode, TypeDesc, Validation, World,
+    Author, ChangeDesc, OpDesc, OpKind, Pointer, Refusal, RefusalCode, TypeDesc, Validation, World,
     check_size, effective_validated, tier0, validate, written_path_targets,
 };
 use mb_protocols::world_gaps::{Gap, GapCode, gaps};
 use mb_store::{
-    ContractStatus, ContractVersion, ControlStore, Mock, NewWorldRevision, StoreError,
+    ContractStatus, ContractVersion, ControlStore, Mock, NewWorldRevision, StoreError, UnknownIds,
     WorldRevision, WorldRevisionInfo,
 };
 use serde::{Deserialize, Serialize};
@@ -688,10 +688,90 @@ pub struct WorldView {
     /// Absent without `called`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gaps_left_out: Option<usize>,
+    /// How a read by path of an id the session does not hold is answered, per type.
+    pub unknown_ids: UnknownIdsView,
+}
+
+/// How a mock answers a read by path of an id the session does not hold.
+#[derive(Serialize, ToSchema, Debug)]
+pub struct UnknownIdsView {
+    /// The mock's `unknown_ids`: `inferred` (unset: decided per type), `generate` or
+    /// `404` (decided for every type).
+    #[schema(value_type = String, example = "inferred")]
+    pub setting: UnknownIds,
+    /// Per resource type with a read by path parameter: its answer and why.
+    pub types: BTreeMap<String, UnknownIdAnswer>,
+}
+
+/// One type's answer to a read of an id the session does not hold.
+#[derive(Serialize, ToSchema, Debug, PartialEq)]
+pub struct UnknownIdAnswer {
+    /// `404` (the read's declared 404) or `generate`. An inferred `404` applies once
+    /// the session holds a record of the type it created or listed; before that the
+    /// read generates.
+    pub answer: String,
+    /// Why: the mock's setting, or whether an operation of kind create makes the type.
+    pub why: String,
+}
+
+impl UnknownIdsView {
+    /// The answer of each type `world` reads by a path parameter under `setting`. Left
+    /// unset, a type an operation of kind create makes answers 404 once the session
+    /// holds one of its records; any other generates (reference data the app reads).
+    fn new(world: &World, setting: UnknownIds) -> Self {
+        let mut creates: BTreeMap<&str, &str> = BTreeMap::new();
+        let mut read: BTreeSet<&str> = BTreeSet::new();
+        for (id, op) in &world.operations {
+            let Some(t) = op.r#type.as_deref() else {
+                continue;
+            };
+            match op.kind {
+                Some(OpKind::Create) => {
+                    creates.entry(t).or_insert(id);
+                }
+                Some(OpKind::Read)
+                    if op.target.as_ref().is_some_and(|t| t.path_param.is_some()) =>
+                {
+                    read.insert(t);
+                }
+                _ => {}
+            }
+        }
+        let types = read
+            .into_iter()
+            .map(|t| {
+                let (answer, why) = match (setting, creates.get(t)) {
+                    (UnknownIds::NotFound, _) => ("404", "the mock sets unknown_ids: 404".to_owned()),
+                    (UnknownIds::Generate, _) => {
+                        ("generate", "the mock sets unknown_ids: generate".to_owned())
+                    }
+                    (UnknownIds::Inferred, Some(create)) => (
+                        "404",
+                        format!(
+                            "creatable ({create}): 404 once the session holds a record of it it created or listed; generated before that"
+                        ),
+                    ),
+                    (UnknownIds::Inferred, None) => (
+                        "generate",
+                        "not creatable: no operation of kind create makes it, so its ids are reference data the app reads".to_owned(),
+                    ),
+                };
+                (
+                    t.to_owned(),
+                    UnknownIdAnswer {
+                        answer: answer.to_owned(),
+                        why,
+                    },
+                )
+            })
+            .collect();
+        Self { setting, types }
+    }
 }
 
 impl WorldView {
-    fn new(version: i64, eff: EffectiveWorld) -> Self {
+    fn new(version: i64, eff: EffectiveWorld, unknown_ids: UnknownIds) -> Self {
+        let unknown_ids = UnknownIdsView::new(&eff.world, unknown_ids);
         Self {
             version,
             world: eff.world,
@@ -701,6 +781,7 @@ impl WorldView {
             gaps: eff.gaps,
             warnings: Vec::new(),
             gaps_left_out: None,
+            unknown_ids,
         }
     }
 
@@ -774,6 +855,7 @@ impl WorldView {
             .operations
             .retain(|id, _| operations.contains(id));
         self.world.types.retain(|t, _| types.contains(t));
+        self.unknown_ids.types.retain(|t, _| types.contains(t));
         let keeps = |pointer: &str| keeps_pointer(pointer, operations, types).unwrap_or(true);
         self.refused.retain(|r| keeps(&r.path));
         self.authors.retain(|p, _| keeps(p));
@@ -838,6 +920,7 @@ impl WorldView {
         let types = &filter.types;
         self.world.operations.retain(|id, _| ops.contains(id));
         self.world.types.retain(|t, _| types.contains(t));
+        self.unknown_ids.types.retain(|t, _| types.contains(t));
         self.gaps.retain(|g| match (&g.operation, &g.r#type) {
             (None, None) => true,
             (op, ty) => {
@@ -950,7 +1033,7 @@ pub(crate) async fn resolve_version(
         ("called" = Option<bool>, Query, description = "Answer only what the mock's request log (any session) names: the operations called, the types they touch, the gaps naming one of those operations, or naming no operation and one of those types, or skipping a route of one of those types, and their refused entries and authors; gaps about the description as a whole are kept. `gaps_left_out` counts the gaps left out. Combines with `operation` and `type`"),
     ),
     responses(
-        (status = 200, description = "The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`.", body = WorldView),
+        (status = 200, description = "The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. `unknown_ids` gives each type read by a path parameter its answer to an id the session does not hold (`404` or `generate`) and why.", body = WorldView),
         (status = 400, description = "The version is neither a number nor `active`, or `called` is not a boolean", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such mock or version, or no active version", body = Problem, content_type = "application/problem+json"),
     )
@@ -966,7 +1049,7 @@ pub async fn get_world(
     let m = st.mock(&access.ws, &mock).await?;
     let v = resolve_version(&st, &m, &version).await?;
     let eff = effective_world(st.store.as_ref(), m.id, v.version, &v.bundle).await?;
-    let mut view = WorldView::new(v.version, eff);
+    let mut view = WorldView::new(v.version, eff, m.behavior.unknown_ids);
     // Read from the whole view, before `narrow` drops the gaps whose types
     // it takes.
     let called = if filter.called {

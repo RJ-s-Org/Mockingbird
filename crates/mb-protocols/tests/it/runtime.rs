@@ -543,7 +543,11 @@ async fn a_request_touches_its_session_at_most_once() {
         inner: MemoryStore::new(Duration::from_secs(3600)),
         touches: AtomicUsize::new(0),
     });
-    let router = http_rest::router(Arc::new(runtime(None, store.clone())));
+    let mut rt = runtime(None, store.clone());
+    // The first read below is of an order the session did not create: generated and
+    // stored, as `generate` answers it (the default would answer the created type's 404).
+    rt.unknown_ids = mb_protocols::UnknownIds::Generate;
+    let router = http_rest::router(Arc::new(rt));
 
     let req = Request::post("/orders")
         .header("content-type", "application/json")
