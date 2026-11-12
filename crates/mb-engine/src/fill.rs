@@ -28,7 +28,9 @@ pub struct FillContext<'a> {
     /// The top-level enum members that are the record's state (a lifecycle member, one
     /// a world rule moves between values) whose start nothing gave: the model picks
     /// each, never the persona's single named value or the first listed one; its
-    /// `default`, else its first value, only when the model writes none.
+    /// `default`, else its first value that reads as a start (`open`, `active`,
+    /// `pending`, `requires_*`...), else its first value, only when the model writes
+    /// none.
     pub states: &'a [String],
 }
 
@@ -247,10 +249,16 @@ impl Engine {
             self.fill_with_llm(bundle, op, call, known, &asked, &mut filled)
                 .await;
         }
-        // An enum the model wrote no value for is its `default`, else its first value.
+        // An enum the model wrote no value for is its `default`, else, for a state
+        // nothing gave a start, the value that reads as one ([`initial_state`]), else
+        // its first value.
         for (name, schema) in &enums {
+            let fallback = match states.iter().any(|s| s == name) {
+                true => state_fallback(bundle, schema),
+                false => enum_fallback(bundle, schema),
+            };
             if !filled.members.contains_key(*name)
-                && let Some(value) = enum_fallback(bundle, schema)
+                && let Some(value) = fallback
             {
                 filled.members.insert((*name).to_string(), value);
             }
@@ -1014,6 +1022,49 @@ fn enum_fallback(bundle: &Bundle, schema: &Value) -> Option<Value> {
         .filter(|d| values.contains(d))
         .or_else(|| values.first().copied())
         .cloned()
+}
+
+/// Enum values that read as the state a record starts in, compared with case, `_`,
+/// `-` and spaces ignored; [`INITIAL_PREFIXES`] begin one.
+const INITIAL_STATES: [&str; 7] = [
+    "open", "active", "pending", "new", "draft", "queued", "created",
+];
+
+/// Prefixes of a start state's value (`requires_payment_method`).
+const INITIAL_PREFIXES: [&str; 1] = ["requires"];
+
+/// The start of a state member (`schema`, through one `$ref`) nothing gave one, when no
+/// model wrote it: its `default` where that is one of its values, else its first value
+/// that reads as a start ([`initial_state`]), else its first value.
+fn state_fallback(bundle: &Bundle, schema: &Value) -> Option<Value> {
+    let s = bundle.resolve(schema);
+    let default = s.get("default");
+    let values: Vec<&Value> = s
+        .get("enum")?
+        .as_array()?
+        .iter()
+        .filter(|v| !v.is_null())
+        .collect();
+    default
+        .filter(|d| values.contains(d))
+        .or_else(|| values.iter().copied().find(|v| initial_state(v)))
+        .or_else(|| values.first().copied())
+        .cloned()
+}
+
+/// Whether enum value `value` reads as the state a record starts in (see
+/// [`INITIAL_STATES`]).
+fn initial_state(value: &Value) -> bool {
+    let Some(text) = value.as_str() else {
+        return false;
+    };
+    let squeezed: String = text
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    INITIAL_STATES.contains(&squeezed.as_str())
+        || INITIAL_PREFIXES.iter().any(|p| squeezed.starts_with(p))
 }
 
 /// Whether `persona` (lower case) speaks of `word` (a member's name or an enum value):

@@ -13,7 +13,10 @@
 //!   it to (the state the transitions leave from: `OPEN` where a close sets `CLOSED`),
 //!   else in the value the create's answer shows of it in the contract's examples,
 //!   else in the model's pick ([`mb_engine::FillContext::states`]); not in its first
-//!   listed value, which fill gives an enum nothing speaks of, unless no model answers.
+//!   listed value, which fill gives an enum nothing speaks of. When no model answers,
+//!   it starts in its `default`, else its first value that reads as a start (`open`,
+//!   `active`, `pending`, `new`, `draft`, `queued`, `created`, `requires_*`), else its
+//!   first value.
 //! - A member named as an id (`id`, `*_id`, `*Id`, `*ID`, `uuid`) or formatted as a
 //!   `uuid`, a string or integer that may not be null, gets an id: when it names a
 //!   reference (`<x>Id`, `<x>_id`) the request does not declare, the id of a record of
