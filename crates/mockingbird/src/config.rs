@@ -44,8 +44,9 @@ pub const LEADER_LOCK: &str = "control";
 #[derive(Parser, Debug)]
 #[command(name = "mockingbird", version, about = "LLM-backed mock endpoints")]
 pub struct Cli {
-    /// Admin API base URL used by the client subcommands [default: the
-    /// admin listener (`server.admin_port`, `server.host`, with MB_ADMIN_PORT
+    /// Admin API base URL used by the client subcommands [default: this
+    /// project's running background server recorded in its state
+    /// directory, else the admin listener (`server.admin_port`, `server.host`, with MB_ADMIN_PORT
     /// and MB_HOST applied) of `doctor -c`/`proxy -c`, else of
     /// ./mockingbird.yaml when it exists, else http://127.0.0.1:9090].
     #[arg(long, global = true, env = "MB_ADMIN_URL")]
@@ -68,20 +69,49 @@ pub struct Cli {
 }
 
 impl Cli {
-    /// The Admin API URL the command talks to (see
-    /// [`crate::client::resolve_admin_url`]): `--admin-url` or
-    /// `MB_ADMIN_URL`, else the admin listener of the command's
-    /// `-c/--config` (`doctor`, `proxy`, `verify`), else of `./mockingbird.yaml`,
-    /// else [`crate::client::DEFAULT_ADMIN_URL`].
-    #[must_use]
-    pub fn resolved_admin_url(&self) -> String {
+    /// The Admin API URL the command talks to: `--admin-url` or
+    /// `MB_ADMIN_URL`; else the running background server of the project
+    /// here, which its state directory (`--state-dir` of `doctor` and
+    /// `verify`, else `MB_STATE_DIR`, else `.mockingbird`) records for the
+    /// command's `-c/--config` (`doctor`, `proxy`, `verify`), else for this
+    /// folder; else the admin listener of that config, else of
+    /// `./mockingbird.yaml`, else [`crate::client::DEFAULT_ADMIN_URL`] (see
+    /// [`crate::daemon::project_admin_url`]).
+    pub async fn resolved_admin_url(&self) -> String {
+        if let Some(url) = self.admin_url.as_deref().filter(|u| !u.trim().is_empty()) {
+            return url.to_owned();
+        }
         let config = match &self.cmd {
             Command::Doctor(args) => args.config.as_deref(),
             Command::Verify(args) => args.config.as_deref(),
             Command::Proxy(args) if args.cmd.is_none() => args.run.config.as_deref(),
             _ => None,
         };
-        crate::client::resolve_admin_url(self.admin_url.as_deref(), config)
+        let state_dir = match &self.cmd {
+            Command::Doctor(args) => Some(args.state.state_dir.clone()),
+            Command::Verify(args) => args.state_dir.clone(),
+            _ => None,
+        }
+        .or_else(|| std::env::var_os("MB_STATE_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| crate::daemon::DEFAULT_STATE_DIR.into());
+        let cwd = std::env::current_dir().unwrap_or_default();
+        crate::daemon::project_admin_url(&state_dir, config, &cwd).await
+    }
+
+    /// Whether the command talks to an Admin API at
+    /// [`Self::resolved_admin_url`].
+    #[must_use]
+    pub fn uses_admin_url(&self) -> bool {
+        matches!(
+            self.cmd,
+            Command::Llm(_)
+                | Command::Doctor(_)
+                | Command::Proxy(_)
+                | Command::Snapshot(_)
+                | Command::Report(_)
+                | Command::Verify(_)
+                | Command::Client(_)
+        )
     }
 }
 

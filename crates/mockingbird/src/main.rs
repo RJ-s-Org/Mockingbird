@@ -54,7 +54,12 @@ async fn run(invocation: Invocation) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let admin_url = cli.resolved_admin_url();
+    // Only commands that talk to a server look for one.
+    let admin_url = if cli.uses_admin_url() {
+        cli.resolved_admin_url().await
+    } else {
+        String::new()
+    };
     let result = match cli.cmd {
         Command::Run(args) => {
             return match mockingbird::run::run(args).await {

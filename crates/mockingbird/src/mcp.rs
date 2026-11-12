@@ -473,7 +473,7 @@ fn tools() -> Vec<Tool> {
                     "config": s("Config file (preferred)."),
                     "contracts": { "type": "array", "items": { "type": "string" }, "description": "Contracts to serve without a config file." },
                     "offline": b("Faker only, no LLM."),
-                    "port": n("Data-plane port; default the config's server.port. A port the config leaves at its default (8080) that is taken is replaced by a free one, written into the config."),
+                    "port": n("Data-plane port; default the config's server.port. A port the config leaves at its default (8080) that is taken is replaced by a free one, written into the config. A port given here that differs from the config is written into it (ports_written), so the config and the server agree."),
                     "admin_port": n("Admin API port; default the config's server.admin_port (9090, or a free port as for port)."),
                     "grpc_port": n("gRPC port; default the config's server.grpc_port (50051, or a free port as for port)."),
                     "proxy": b("Also start the HTTP(S) proxy; the result carries proxy_env."),
@@ -2769,9 +2769,8 @@ impl McpServer {
             return (self.admin_url.clone(), false);
         };
         let started = self.recorded_config();
-        let state = daemon::resolve_state_dir(&self.state_dir, started.as_deref(), dir);
-        match daemon::running_admin(&state) {
-            Some(url) => (url, true),
+        match daemon::recorded_server(&self.state_dir, started.as_deref(), dir) {
+            Some(server) => (server.admin, true),
             None => (
                 client::resolve_admin_url(None, Some(&dir.join(client::DEFAULT_CONFIG))),
                 false,
