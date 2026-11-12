@@ -476,6 +476,19 @@ mod tests {
         let bare = id.answer_holding(json!({"id": "a"}), None);
         assert_eq!(bare, json!({"data": {"result": [{"id": "a"}]}}));
         assert_eq!(id.envelope_member(), Some("data"));
+        // Each object around the record, but the array at `result`.
+        let levels: Vec<(Vec<&str>, &str)> = id
+            .envelope_levels()
+            .into_iter()
+            .map(|(path, member)| (path.iter().map(String::as_str).collect(), member))
+            .collect();
+        assert_eq!(levels, [(vec![], "data"), (vec!["data"], "result")]);
+        let member = Identity {
+            record: Some(RecordAt::Member("issue".into())),
+            ..identity("id")
+        };
+        assert_eq!(member.envelope_levels().len(), 1);
+        assert!(identity("id").envelope_levels().is_empty());
     }
 
     #[test]

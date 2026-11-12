@@ -695,8 +695,9 @@ pub enum RecordAt {
     /// Deeper than the three forms above: the RFC 6901 reference tokens of a
     /// world description's `answer.record` (`/data/result/0` is
     /// `["data", "result", "0"]`). A token `"0"` is the one item of an array
-    /// where the value there is an array, and a member named `0` otherwise. The
-    /// import heuristics never write it; a world description does.
+    /// where the value there is an array, and a member named `0` otherwise. A world
+    /// description writes it, and the GraphQL import for a create whose payload holds
+    /// its record through a Relay edge (`["noteEdge", "node"]`).
     Pointer(Vec<String>),
 }
 
@@ -819,6 +820,27 @@ impl Identity {
             Some(RecordAt::Member(member) | RecordAt::MemberItem(member)) => Some(member),
             Some(RecordAt::Pointer(tokens)) => tokens.first().map(String::as_str),
             None | Some(RecordAt::Item) => None,
+        }
+    }
+
+    /// The objects an answer holds its record in, outermost first: each as the tokens
+    /// leading to it from the answer and the member of it the record is in or under.
+    /// One level, the answer itself, for [`RecordAt::Member`] and
+    /// [`RecordAt::MemberItem`]; for a [`RecordAt::Pointer`] one per token, but a
+    /// `"0"` past the first (an array, not an object around the record):
+    /// `/noteEdge/node` is the answer around `noteEdge`, then `noteEdge` around
+    /// `node`. Empty for an answer that is the record or an array.
+    #[must_use]
+    pub fn envelope_levels(&self) -> Vec<(&[String], &str)> {
+        match &self.record {
+            Some(RecordAt::Member(member) | RecordAt::MemberItem(member)) => {
+                vec![(&[], member.as_str())]
+            }
+            Some(RecordAt::Pointer(tokens)) => (0..tokens.len())
+                .filter(|&i| i == 0 || tokens[i] != "0")
+                .map(|i| (&tokens[..i], tokens[i].as_str()))
+                .collect(),
+            None | Some(RecordAt::Item) => Vec::new(),
         }
     }
 

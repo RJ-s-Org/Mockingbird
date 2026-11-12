@@ -149,7 +149,6 @@ async fn nested_fields_answer_from_state() {
         json!({"__typename": "Repository", "id": "R_x",
                "issue": {"__typename": "Issue", "id": "I_1", "comments": {"__typename": "IssueCommentConnection", "totalCount": 1, "nodes": [
                    {"__typename": "IssueComment", "id": "C_5", "body": "Older", "createdAt": "2024-01-01T00:00:00Z"}]}}}),
-        json!({"__typename": "AddCommentPayload", "commentEdge": {"__typename": "IssueCommentEdge", "node": {"__typename": "IssueComment"}}}),
         json!({"__typename": "Repository", "id": "R_x",
                "issue": {"__typename": "Issue", "id": "I_2", "comments": {"__typename": "IssueCommentConnection", "totalCount": 0, "nodes": []}}}),
         json!({"__typename": "CloseIssuePayload", "issue": {"__typename": "Issue", "id": "I_2", "state": "CLOSED"}}),
@@ -227,9 +226,10 @@ async fn nested_fields_answer_from_state() {
     let comments = &comments["repository"]["issue"]["comments"];
     assert_eq!(comments["totalCount"], 1, "{comments}");
     assert_eq!(comments["nodes"][0]["body"], "Reproduced");
-    // What the comment does not hold is drawn from another stored comment's
-    // scalars, not the faker's words.
-    assert_eq!(comments["nodes"][0]["createdAt"], "2024-01-01T00:00:00Z");
+    // The executor wrote the comment whole (it answers at `/commentEdge/node`, with
+    // no model call): a nullable member the input does not send is stored null, not
+    // drawn per read.
+    assert_eq!(comments["nodes"][0]["createdAt"], Value::Null, "{comments}");
 
     gql(
         &base,

@@ -124,7 +124,12 @@ fn tier0_matches_bundle_identity() {
                     RecordAt::Member(m) => format!("/{m}"),
                     RecordAt::Item => "/0".to_owned(),
                     RecordAt::MemberItem(m) => format!("/{m}/0"),
-                    RecordAt::Pointer(_) => panic!("{at}: the heuristics wrote a deep pointer"),
+                    // Only a Relay create's edge (`/commentEdge/node`).
+                    RecordAt::Pointer(tokens) => {
+                        assert_eq!(tokens.len(), 2, "{at}: {tokens:?}");
+                        assert_eq!(tokens[1], "node", "{at}: {tokens:?}");
+                        tokens.iter().map(|t| format!("/{t}")).collect()
+                    }
                 })
                 .unwrap()
             });

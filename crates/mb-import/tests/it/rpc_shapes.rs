@@ -464,6 +464,80 @@ fn a_relay_mutation_names_its_record_inside_its_input() {
     );
 }
 
+/// Relay creates answering their record through a connection edge (`{noteEdge {node}}`),
+/// beside the parent the id argument names as an interface (`subject: Node`).
+const RELAY_EDGES: &str = r#"
+interface Node { id: ID! }
+union Event = Note | Ticket
+type Ticket implements Node { id: ID! title: String! }
+type Note implements Node { id: ID! body: String! }
+type NoteEdge { cursor: String! node: Note }
+type EventEdge { cursor: String! node: Event }
+type NodeEdge { cursor: String! node: Node }
+input AddNoteInput { subjectId: ID! body: String! }
+type AddNotePayload { clientMutationId: String noteEdge: NoteEdge subject: Node timelineEdge: EventEdge }
+type CreateNotePayload { noteEdge: NoteEdge }
+type AddNoteBothPayload { note: Note noteEdge: NoteEdge }
+type AddNoteTwicePayload { noteEdge: NoteEdge otherEdge: NoteEdge }
+type AddAnyPayload { nodeEdge: NodeEdge }
+type Pinned { id: ID! node: Note }
+type AddPinnedPayload { pinned: Pinned }
+type AddTicketNotePayload { noteEdge: NoteEdge }
+type Query { ticket(id: ID!): Ticket }
+type Mutation {
+  addNote(input: AddNoteInput!): AddNotePayload
+  createNote(input: AddNoteInput!): CreateNotePayload
+  addNoteBoth(input: AddNoteInput!): AddNoteBothPayload
+  addNoteTwice(input: AddNoteInput!): AddNoteTwicePayload
+  addAny(input: AddNoteInput!): AddAnyPayload
+  createTicket(input: AddNoteInput!): AddTicketNotePayload
+  pinNote(input: AddNoteInput!): AddNotePayload
+  addNotes(input: AddNoteInput!): [AddNotePayload]
+  addPinned(input: AddNoteInput!): AddPinnedPayload
+}
+"#;
+
+/// A create whose payload holds its record through one edge (a member whose type has a
+/// `node` of an identified object type), with no member holding it directly, is
+/// identified by that edge's node (`/noteEdge/node`), whether its name says `create`
+/// or `add`; an edge over an interface or a union is not one.
+#[test]
+fn a_relay_create_holds_its_record_through_an_edge() {
+    let b = compile(RELAY_EDGES.as_bytes()).unwrap();
+    let at = Some(RecordAt::Pointer(vec!["noteEdge".into(), "node".into()]));
+    for name in ["Mutation.addNote", "Mutation.createNote"] {
+        let o = op(&b, name);
+        assert_eq!(o.kind, OperationKind::Command(Effect::Create), "{name}");
+        assert_eq!(o.resource_type.as_deref(), Some("note"), "{name}");
+        assert_eq!(o.identity, identity("id", None, at.clone()), "{name}");
+    }
+    // A member holding the record directly says where it is; two edges say nothing; an
+    // edge over an interface names no type; a name naming another record than the
+    // edge's node; not a create; a list of payloads; a record with a `node`, no edge.
+    for name in [
+        "Mutation.addNoteBoth",
+        "Mutation.addNoteTwice",
+        "Mutation.addAny",
+        "Mutation.createTicket",
+        "Mutation.pinNote",
+        "Mutation.addNotes",
+        "Mutation.addPinned",
+    ] {
+        let o = op(&b, name);
+        assert_ne!(o.identity, identity("id", None, at.clone()), "{name}");
+        assert_ne!(o.resource_type.as_deref(), Some("note"), "{name}");
+    }
+
+    let world = tier0(&b);
+    let add = &world.operations["Mutation.addNote"];
+    assert_eq!(add.kind, Some(OpKind::Create));
+    assert_eq!(add.r#type.as_deref(), Some("note"));
+    assert_eq!(
+        add.answer.as_ref().and_then(|a| a.record.clone()),
+        Some(Pointer::parse("/noteEdge/node").unwrap())
+    );
+}
+
 /// An eBay Trading-style WSDL: the record is a member named for the type, keyed by
 /// `<Type>ID`; the create sends the record whole and answers its id.
 const TRADING: &str = r#"<?xml version="1.0"?>
