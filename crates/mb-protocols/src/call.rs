@@ -44,6 +44,7 @@ mod effects;
 mod entities;
 mod envelopes;
 mod exec;
+mod expansions;
 mod exprs;
 mod header_ids;
 mod lifecycle;
@@ -347,7 +348,36 @@ pub(crate) async fn generate_pending(
     if pending.variant && !pending.earlier.told.is_empty() {
         pending.variant = false;
     }
-    let target = pending.target.as_ref();
+    // A reference the read asks to be expanded, to a record the session does not hold
+    // yet, is the answer's: the generated record is stored under the id, and the target
+    // keeps that id ([`expansions`]).
+    let unbuilt = match pending.target.as_ref() {
+        Some(held) if !pending.variant => {
+            expansions::unbuilt(
+                &mut pending.state,
+                &plan.session,
+                (plan.op, call),
+                &held.data,
+            )
+            .instrument(state_span())
+            .await
+        }
+        _ => Vec::new(),
+    };
+    let without_unbuilt = pending
+        .target
+        .as_ref()
+        .filter(|_| !unbuilt.is_empty())
+        .map(|held| {
+            let mut held = held.clone();
+            if let Value::Object(members) = &mut held.data {
+                for name in &unbuilt {
+                    members.remove(name);
+                }
+            }
+            held
+        });
+    let target = without_unbuilt.as_ref().or(pending.target.as_ref());
     let representation = pending
         .variant
         .then(|| variants::representation(plan.op, call))
@@ -1789,6 +1819,34 @@ pub(crate) async fn complete(
             && target_id.is_some()
             && query_roles::single_record_read(rt, op)
             && !exec::narrows_fields(rt, op, call);
+        // The records it generated in place of references are stored under the ids they
+        // are named by, and the record keeps the ids; a record the session holds stays
+        // as held ([`expansions`]). Those the answer did not generate are drawn, so the
+        // next read does not generate them again. Not for an answer that stores nothing:
+        // a scenario's, a seeded one, or one that failed.
+        if single_record
+            && rt.consistency
+            && plain(plan)
+            && mb_engine::seed::request_seed(call).is_none()
+            && !unstored
+            && (200..300).contains(&generated.status)
+            && !transient_fallback(&generated)
+            && let Some(body) = generated.body.as_mut()
+        {
+            let built =
+                expansions::take_built(rt, (op, call), target.as_ref().map(|t| &t.data), body);
+            for record in built {
+                state
+                    .insert_seeded(session, record)
+                    .instrument(state_span())
+                    .await;
+            }
+            if let Some(held) = target.as_ref() {
+                expansions::build_unheld(&mut state, session, (op, call), &held.data)
+                    .instrument(state_span())
+                    .await;
+            }
+        }
         // A read in another language than its target: its record is that language's.
         // One generated for what it embeds keeps its language's earlier text, and what
         // it embedded is kept with the target.
@@ -1859,6 +1917,12 @@ pub(crate) async fn complete(
         // left out of its answer, as a read from the store leaves them out.
         if single_record && (200..300).contains(&generated.status) {
             query_roles::embeds(rt, op, call).leave_out_unasked(generated.body.as_mut());
+            // References it asks to be expanded are the records the session holds.
+            if let Some(body) = generated.body.as_mut() {
+                expansions::expand(&mut state, session, (op, call), body)
+                    .instrument(state_span())
+                    .await;
+            }
         }
         // An operation with no resource type is stateless, GraphQL stores the
         // objects of its answers under their own types, and a delete's answer

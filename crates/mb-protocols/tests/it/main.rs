@@ -63,6 +63,7 @@ mod events_runtime;
 mod events_triggers;
 mod events_ws;
 mod example_shaped_ids;
+mod expand_references;
 mod graphql;
 mod graphql_creates;
 mod graphql_def_effects;
