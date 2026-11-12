@@ -448,7 +448,10 @@ pub(crate) async fn generate_pending(
         restates: representation.as_deref(),
         shown_target: shown_target.as_ref(),
     };
-    let mut generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
+    let mut generated = match pending.built.take() {
+        Some(built) => *built,
+        None => plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?,
+    };
     // The request log counts the executor's fill as well as the generation.
     generated.usage = generated.usage + pending.fill_usage;
     if generated.source == Source::Fallback {
@@ -534,6 +537,9 @@ pub(crate) struct Pending<'a> {
     retry: bool,
     /// What a fill the executor ran before falling back to generation spent.
     fill_usage: Usage,
+    /// The answer the executor built in place of a generation (a first read's record,
+    /// see [`exec`]): taken as generated.
+    built: Option<Box<GeneratedResponse>>,
     /// A read in another language than its held target (see [`variants`]): its record
     /// is kept as that language's variant, and the target stays.
     variant: bool,
@@ -845,15 +851,16 @@ async fn prepare_state<'a>(
         target_id: target_id.as_deref().filter(|_| !foreign_key),
         generates: matches!(variant, Some(variants::Variant::New)),
     };
-    let (recalled, fill_usage) =
+    let (recalled, fill_usage, built) =
         match exec::run(&mut state, plan, call, held, response_schema).await {
             exec::Ran::Answered(served) => {
                 state.touch(session).instrument(state_span()).await;
                 return Prepared::Answered(served);
             }
-            exec::Ran::Generate(recalled) => (recalled, Usage::default()),
-            exec::Ran::Filled(usage) => (None, usage),
-            exec::Ran::Spent(recalled, usage) => (recalled, usage),
+            exec::Ran::Generate(recalled) => (recalled, Usage::default(), None),
+            exec::Ran::Filled(usage) => (None, usage, None),
+            exec::Ran::Spent(recalled, usage) => (recalled, usage, None),
+            exec::Ran::Built(answer) => (None, Usage::default(), Some(answer)),
         };
     if target.is_none()
         && let Some(served) = member_read(&mut state, plan, call, response_schema)
@@ -1040,6 +1047,7 @@ async fn prepare_state<'a>(
         tokens,
         retry: false,
         fill_usage,
+        built,
         variant: matches!(variant, Some(variants::Variant::New)),
     }))
 }

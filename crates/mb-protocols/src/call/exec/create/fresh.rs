@@ -18,9 +18,14 @@
 //!   `uuid`, a string or integer that may not be null, gets an id: when it names a
 //!   reference (`<x>Id`, `<x>_id`) the request does not declare, the id of a record of
 //!   the type it names the session holds; else one minted as the executor mints record
-//!   ids, in the form the contract's examples or the session's records show of the
-//!   member, else as declared, else as letters and digits
-//!   ([`crate::call::header_ids::draw_member_id`]); never a faker word.
+//!   ids: as declared (a pattern, a `uuid` format), else in the form the session's
+//!   records of the type show of the member, else in the form the contract's examples
+//!   show (their prefix and length, or with no prefix to share their characters and
+//!   length: [`crate::call::header_ids::member_example_shape`]), else as letters and
+//!   digits ([`crate::call::header_ids::draw_member_id`]); never a faker word. One of no
+//!   declared form the session's records show no form of and the persona names
+//!   (`node_id values use GitHub's prefixes`) is left to fill, which asks the model
+//!   for it in the persona's shape ([`mb_engine::persona_names`]).
 
 use mb_engine::consistency::property_schema;
 use mb_mcm::Operation;
@@ -282,6 +287,13 @@ pub(super) async fn mint_ids(
 ) {
     let rt = state.rt;
     let bundle = rt.bundle();
+    let persona = plan
+        .engine
+        .config()
+        .persona
+        .as_deref()
+        .unwrap_or_default()
+        .to_lowercase();
     for (name, member) in members {
         if name == field || known.contains_key(name) || skip.contains(name) {
             continue;
@@ -319,8 +331,25 @@ pub(super) async fn mint_ids(
         let id = match held {
             Some(id) => Some(id),
             None => {
-                let shape = match header_ids::record_id_shape(rt, t, name) {
+                // The shape the session's records of the type show (two at least);
+                // else, where the persona speaks of the member (`node_id values use
+                // GitHub's prefixes`), the model writes it in the persona's shape; else
+                // the contract's examples' shape, else one held record's.
+                let declared = header_ids::formed_member(rt, member);
+                let shared = match declared {
+                    true => None,
+                    false => {
+                        header_ids::shared_session_id_shape(state, &plan.session, t, name)
+                            .instrument(state_span())
+                            .await
+                    }
+                };
+                if shared.is_none() && !declared && mb_engine::persona_names(&persona, name) {
+                    continue;
+                }
+                let shape = match shared.or_else(|| header_ids::member_example_shape(rt, t, name)) {
                     Some(shape) => Some(shape),
+                    None if declared => None,
                     None => {
                         header_ids::session_id_shape(state, &plan.session, t, name)
                             .instrument(state_span())

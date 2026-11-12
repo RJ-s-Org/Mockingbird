@@ -696,6 +696,42 @@ impl IdShape {
         })
     }
 
+    /// The shape of `ids` that share no prefix ([`IdShape::of`]): no prefix, the
+    /// letters and digits of the first (padding such as a trailing `=` aside) and their
+    /// classes, where it is an opaque id: at least 8 of them, holding a digit and a
+    /// letter. `None` for a word (`octocat`) or anything else.
+    pub(super) fn loose(ids: &[String]) -> Option<Self> {
+        if let Some(shape) = Self::of(ids) {
+            return Some(shape);
+        }
+        let first = ids.first()?;
+        let rest: Vec<u8> = first.bytes().filter(u8::is_ascii_alphanumeric).collect();
+        let opaque = rest.len() >= 8
+            && rest.iter().any(u8::is_ascii_digit)
+            && rest.iter().any(u8::is_ascii_alphabetic)
+            && first
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'=');
+        if !opaque {
+            return None;
+        }
+        let holds = |class: fn(&u8) -> bool| rest.iter().any(class);
+        let alphabet: Vec<u8> = [
+            (holds(u8::is_ascii_digit), b'0'..=b'9'),
+            (holds(u8::is_ascii_lowercase), b'a'..=b'z'),
+            (holds(u8::is_ascii_uppercase), b'A'..=b'Z'),
+        ]
+        .into_iter()
+        .filter(|(held, _)| *held)
+        .flat_map(|(_, range)| range)
+        .collect();
+        Some(Self {
+            prefix: String::new(),
+            alphabet,
+            len: rest.len(),
+        })
+    }
+
     /// The shape of an id nothing shows a form of: 20 letters and digits.
     pub(super) fn opaque() -> Self {
         Self {
@@ -807,6 +843,32 @@ pub(super) async fn session_id_shape(
     t: &str,
     field: &str,
 ) -> Option<IdShape> {
+    IdShape::of(&session_ids(state, session, t, field).await)
+}
+
+/// [`session_id_shape`], where at least two records show it: one id alone shows no
+/// shape it shares with others (`repo-octo-hello` is no `repo-octo-` prefix).
+pub(super) async fn shared_session_id_shape(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    t: &str,
+    field: &str,
+) -> Option<IdShape> {
+    let ids = session_ids(state, session, t, field).await;
+    match ids.len() {
+        0 | 1 => None,
+        _ => IdShape::of(&ids),
+    }
+}
+
+/// The ids the session holds type `t`'s records under at member `field`, bare of the
+/// type's identity pattern.
+async fn session_ids(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    t: &str,
+    field: &str,
+) -> Vec<String> {
     let pattern = records::pattern(state.rt, t).map(str::to_string);
     let ids: Vec<String> = state
         .list(session, t, super::MAX_SCAN)
@@ -820,7 +882,19 @@ pub(super) async fn session_id_shape(
             },
         )
         .collect();
-    IdShape::of(&ids)
+    ids
+}
+
+/// Whether member schema `schema` declares a form of its own ([`formed`]).
+pub(super) fn formed_member(rt: &MockRuntime, schema: &Value) -> bool {
+    formed(rt, schema)
+}
+
+/// The shape the contract's examples show of member `field` of type `t`'s records
+/// ([`record_id_shape`]), else, for examples with no prefix to share
+/// (`MDEwOlJlcG9zaXRvcnkxMjk2MjY5`), their characters and length ([`IdShape::loose`]).
+pub(super) fn member_example_shape(rt: &MockRuntime, t: &str, field: &str) -> Option<IdShape> {
+    record_id_shape(rt, t, field).or_else(|| IdShape::loose(&record_id_examples(rt, t, field)))
 }
 
 /// Whether `schema` declares a form of its own: a `pattern`, `format`, `enum` or
