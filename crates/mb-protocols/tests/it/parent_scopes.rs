@@ -318,6 +318,31 @@ async fn creates_number_within_their_repository_and_lists_stay_apart() {
     assert!(h.provider.requests().is_empty(), "no model call");
 }
 
+/// Two repositories' issues sharing an `id`: a list of each repository shows its own
+/// issue from state, though the collection the runtime last noted for that id is the
+/// other repository's.
+#[tokio::test]
+async fn lists_show_their_repository_s_issue_when_two_share_an_id() {
+    let h = harness(vec![
+        json!({"id": 101, "number": 1, "title": "A one"}),
+        json!({"id": 101, "number": 5, "title": "B five"}),
+    ]);
+    h.send("GET", "/repos/a/x/issues/1", None, &[]).await;
+    h.send("GET", "/repos/b/x/issues/5", None, &[]).await;
+    for (repo, title) in [("a", "A one"), ("b", "B five")] {
+        let (status, headers, list) = h
+            .send("GET", &format!("/repos/{repo}/x/issues"), None, &[])
+            .await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        let fallback = h.records().pop().map(|r| r.fallback_reason);
+        assert_eq!(source(&headers), "state", "{list} {fallback:?}");
+        assert_eq!(
+            list,
+            json!([{"id": 101, "number": if repo == "a" { 1 } else { 5 }, "title": title}])
+        );
+    }
+}
+
 /// An issue's `pull_request` member holds none of a pull request's keys: it marks the
 /// issue as one, so the two number together under a repository (issue 1, pull 2,
 /// issue 3), and another repository starts at 1.

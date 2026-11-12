@@ -894,7 +894,7 @@ pub(super) async fn answer(
     let mut listed_where = list_exprs::Where::of(state, rt, (plan, call)).await;
     for r in &records {
         if !placed.contains_key(r.id.as_str())
-            && !lists::in_collection(rt, (plan, call), t, &field, r)
+            && !lists::in_collection(state, (plan, call), t, &field, r)
         {
             continue;
         }

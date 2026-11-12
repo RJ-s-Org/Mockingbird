@@ -833,24 +833,27 @@ fn mentions(value: &Value, wanted: &str, depth: usize) -> bool {
 }
 
 /// Whether stored `r` shows it is in the collection `call`'s path names: as recorded
-/// there by this runtime, or, for each path parameter, by a member tied to it holding
-/// its value (as [`overlay_stored`] ties them), or an object holding it. The record
+/// there by this runtime, found by the call under the parent whose collection it is
+/// ([`StateAccess::placed_in`]), or, for each path parameter, by a member tied to it
+/// holding its value (as [`overlay_stored`] ties them), or an object holding it. The record
 /// [`Collections`] keeps is this process's own, so on a store several nodes share, a
 /// record another node wrote counts only by its members. A route with no path
 /// parameter is one collection; [`stored_rest`] reads one only when it is the type's
 /// sole such list (see [`BundleIndex::sole_written_list`]).
 pub(super) fn in_collection(
-    rt: &MockRuntime,
+    state: &StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
     item_type: &str,
     field: &str,
     r: &StoredResource,
 ) -> bool {
+    let rt = state.rt;
     if call.path_params.is_empty() {
         return true;
     }
     if let Some(collection) = collection_of(plan.op, call)
-        && rt.collections().get(&plan.session, r) == Some(collection)
+        && (state.placed_in(r, &collection.path)
+            || rt.collections().get(&plan.session, r) == Some(collection))
     {
         return true;
     }
@@ -1068,7 +1071,7 @@ pub(super) async fn collection_records(
     let field = item_identity(bundle, op, body);
     let mut records = state.list(&plan.session, &item_type, MAX_STORED_REST).await;
     records.reverse();
-    records.retain(|r| in_collection(rt, (plan, call), &item_type, &field, r));
+    records.retain(|r| in_collection(state, (plan, call), &item_type, &field, r));
     let mut out: Vec<Value> = Vec::new();
     let mut known: Vec<String> = Vec::new();
     for r in &records {
@@ -1478,7 +1481,7 @@ async fn stored_records(
     // The store gives the most recently written first; the least recently written go
     // first here, which for records only created is the order they were made in.
     records.reverse();
-    records.retain(|r| in_collection(rt, (plan, call), &item_type, &field, r));
+    records.retain(|r| in_collection(state, (plan, call), &item_type, &field, r));
     // A value at its `default` that neither the page nor a record holds as a choice
     // asks nothing of the records.
     shown.retain(|shown| {
