@@ -30,6 +30,7 @@ pub async fn run_all_in(store: Arc<dyn StateStore>, workspace: &str) {
     publishes_changes(&store, ws).await;
     upsert_replaces_and_moves_to_front(&store, ws).await;
     list_picks_one_type_among_many(&store, ws).await;
+    list_prefix_keeps_one_prefix(&store, ws).await;
     reads_do_not_create_sessions(&store, ws).await;
     sessions_lists_with_counts(&store, ws).await;
     export_then_seed_round_trips(&store, ws).await;
@@ -453,6 +454,43 @@ async fn upsert_replaces_and_moves_to_front(st: &Arc<dyn StateStore>, ws: &str) 
     let l = st.list(&k, "order", 10).await.expect("list");
     assert_eq!(ids(&l), ["1", "2"]);
     assert_eq!(l[0].data, json!({"v": 3}));
+}
+
+/// `list_prefix` lists the ids under one prefix (a parent's, joined by U+001F), most
+/// recent first, cut to its limit: none under another prefix, a longer one sharing its
+/// start, or of another type.
+async fn list_prefix_keeps_one_prefix(st: &Arc<dyn StateStore>, ws: &str) {
+    let k = key(ws, "prefixes", "a");
+    let id = |parent: &str, n: u32| format!("{parent}\u{1f}{n}");
+    for n in 0..5 {
+        for parent in ["a", "b", "ab"] {
+            st.upsert(&k, res("issues", &id(parent, n), json!({"n": n})))
+                .await
+                .expect("upsert");
+        }
+    }
+    st.upsert(&k, res("pulls", &id("a", 9), json!({})))
+        .await
+        .expect("upsert");
+    st.upsert(&k, res("issues", &id("a", 1), json!({"n": "again"})))
+        .await
+        .expect("upsert");
+    let prefix = "a\u{1f}";
+    let l = st
+        .list_prefix(&k, "issues", prefix, 10)
+        .await
+        .expect("list");
+    let want: Vec<String> = [1, 4, 3, 2, 0].iter().map(|n| id("a", *n)).collect();
+    assert_eq!(ids(&l), want);
+    let l = st.list_prefix(&k, "issues", prefix, 2).await.expect("list");
+    assert_eq!(ids(&l), want[..2]);
+    assert!(
+        st.list_prefix(&k, "issues", "c\u{1f}", 10)
+            .await
+            .expect("list")
+            .is_empty()
+    );
+    st.reset(&k).await.expect("reset");
 }
 
 /// `list` of a sparse type in a session dominated by other types, past

@@ -63,7 +63,7 @@ A channel the mock publishes generates a message whenever one of its triggers fi
 | --- | --- | --- | --- |
 | `every: 30s` | `every:30s` | `{"schedule": {"every_ms": 30000}}` | on a schedule, at least every 100 ms |
 | `cron: "0 9 * * 1-5"` | `cron:0 9 * * 1-5` | `{"cron": {"expr": "0 9 * * 1-5"}}` | on a 5-field (or 6-field, with seconds) cron expression, UTC |
-| `on_state_change: {resource_type: orders, kind: upserted}` | `state:orders:upserted` | `{"on_state_change": {"resource_type": "orders", "kind": "upserted"}}` | when a resource of that type is upserted, deleted or either (`any`, the default) in the mock's state; the message prompt gets the changed resource and up to 5 more of its type |
+| `on_state_change: {resource_type: orders, kind: upserted}` | `state:orders:upserted` | `{"on_state_change": {"resource_type": "orders", "kind": "upserted"}}` | when a resource of that type is upserted, deleted or either (`any`, the default) in the mock's state; the message prompt gets the changed resource and up to 5 more of its type (of a record kept under a parent, such as a repository's issue, under the same parent, and the trigger names it: `"parent": ["octo", "x"]` beside the record's own `id`) |
 | `manual` | `manual` | `"manual"` | only on demand (the Admin API or `mockingbird channels publish`) |
 
 A channel with no triggers is `manual`. Schedule and cron triggers run on one instance at a time (a store-backed lease, 30 s TTL); every channel the mock publishes can also be published on demand.

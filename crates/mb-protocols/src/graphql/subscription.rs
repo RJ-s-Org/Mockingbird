@@ -730,7 +730,7 @@ async fn open(
                     .is_ok()
             }) as call::ItemCheck
         });
-    let feed = call::change_feed(&rt, plan.session.clone(), &op, check).map(Piece::Changed);
+    let feed = call::change_feed(&rt, plan.session.clone(), &op, None, check).map(Piece::Changed);
     let call = OperationCall {
         operation_id: op.id.clone(),
         headers: forwarded_headers(&rt, &conn.headers),

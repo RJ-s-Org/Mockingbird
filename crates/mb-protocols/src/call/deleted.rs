@@ -302,6 +302,28 @@ pub(super) async fn mark(
     write_markers(state, session, VALUES_INDEX, values, MAX_DELETED_VALUES).await;
 }
 
+/// Marks `ids` of a `t` deleted under `scope`, the concrete path a read of it names
+/// ([`scope`]): what a delete through another mock of the session's group removed
+/// (a GraphQL delete of a REST issue kept under its repository), so a read of it here
+/// answers that it is gone.
+pub(super) async fn mark_under(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    t: &str,
+    scope: &str,
+    ids: &[String],
+) {
+    state.own(session, t).await;
+    let mut keys: Vec<String> = Vec::new();
+    for id in ids {
+        let key = marker_key(t, Some(scope), id);
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    write_markers(state, session, INDEX, keys, MAX_DELETED).await;
+}
+
 /// Writes the markers `keys` and lists them in the index document `index`, which keeps
 /// the newest `max` and ends the markers past it.
 async fn write_markers(

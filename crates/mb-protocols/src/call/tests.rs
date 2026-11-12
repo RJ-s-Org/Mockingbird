@@ -639,7 +639,7 @@ fn a_read_with_no_target_names_no_id() {
 async fn change_feed_emits_upserts_for_resource_type() {
     let rt = stream_runtime();
     let op = rt.bundle.operations[0].clone();
-    let mut feed = change_feed(&rt, session("a"), &op, None);
+    let mut feed = change_feed(&rt, session("a"), &op, None, None);
     let tick = |id: &str| StoredResource {
         resource_type: "ticks".into(),
         id: id.into(),
@@ -672,7 +672,7 @@ async fn change_feed_is_empty_without_resource_type() {
     let rt = stream_runtime();
     let mut op = rt.bundle.operations[0].clone();
     op.resource_type = None;
-    let mut feed = change_feed(&rt, session("a"), &op, None);
+    let mut feed = change_feed(&rt, session("a"), &op, None, None);
     assert_eq!(feed.next().await, None);
 }
 
@@ -1671,4 +1671,107 @@ fn the_reads_a_description_writes_are_those_it_changes() {
     let mut found: Vec<&str> = described_reads(&base, &effective).into_iter().collect();
     found.sort_unstable();
     assert_eq!(found, ["b", "c", "d"]);
+}
+
+/// Once a list has marked that the session holds no issue under no parent, an issue
+/// written where nothing names its parent marks that it may again, and the next list
+/// under a parent finds it beside the parent's own.
+#[tokio::test]
+async fn an_unplaced_record_written_after_the_marker_still_lists() {
+    let rt = runtime_of(example("github-rest/github-rest.openapi.yaml"));
+    assert!(rt.index().parent_scopes().get("issues").is_some());
+    let s = session("a");
+    let parent = vec!["a".to_string(), "x".to_string()];
+    rt.state
+        .upsert(
+            &s,
+            StoredResource {
+                resource_type: "issues".into(),
+                id: scopes::scoped_id(&parent, "1"),
+                data: json!({"id": 1, "number": 1, "title": "Placed"}),
+            },
+        )
+        .await
+        .unwrap();
+    let marker = || async {
+        rt.state
+            .get(&s, mb_state::INTERNAL_TYPE, "#unplaced/issues")
+            .await
+            .unwrap()
+            .map(|doc| doc.data["unplaced"].clone())
+    };
+    let ids = |listed: Vec<StoredResource>| {
+        let mut ids: Vec<String> = listed.into_iter().map(|r| r.id).collect();
+        ids.sort();
+        ids
+    };
+    let listed = StateAccess::new(&rt)
+        .list_in(&s, "issues", &parent, 10)
+        .await;
+    assert_eq!(ids(listed), ["1"]);
+    assert_eq!(marker().await, Some(json!(false)));
+
+    // Written where no parent is named: stored under its own id.
+    let plain = StoredResource {
+        resource_type: "issues".into(),
+        id: "900".into(),
+        data: json!({"id": 900, "number": 9, "title": "Unplaced"}),
+    };
+    assert!(StateAccess::new(&rt).upsert(&s, plain).await);
+    assert!(rt.state.get(&s, "issues", "900").await.unwrap().is_some());
+    assert_eq!(marker().await, Some(json!(true)));
+
+    let listed = StateAccess::new(&rt)
+        .list_in(&s, "issues", &parent, 10)
+        .await;
+    assert_eq!(ids(listed), ["1", "900"]);
+}
+
+/// A change feed whose call names a parent (`/repos/a/x/issues`) sends that
+/// parent's issues, and one stored under no parent, but not another repository's.
+#[cfg(any(feature = "sse", feature = "graphql"))]
+#[tokio::test]
+async fn change_feed_under_a_parent_skips_another_parent_s_records() {
+    let rt = Arc::new(runtime_of(example("github-rest/github-rest.openapi.yaml")));
+    let op = rt
+        .bundle()
+        .operations
+        .iter()
+        .find(|o| {
+            o.resource_type.as_deref() == Some("issues")
+                && matches!(&o.binding, Binding::Http { path, method: HttpMethod::Get, .. }
+                    if path == "/repos/{owner}/{repo}/issues")
+        })
+        .cloned()
+        .unwrap();
+    let call = OperationCall {
+        operation_id: op.id.clone(),
+        path_params: serde_json::from_value(json!({"owner": "a", "repo": "x"})).unwrap(),
+        ..Default::default()
+    };
+    let check: ItemCheck = Arc::new(|_: &Value| true);
+    let mut feed = change_feed(&rt, session("a"), &op, Some(&call), Some(check));
+    let issue = |id: &str, title: &str| StoredResource {
+        resource_type: "issues".into(),
+        id: id.into(),
+        data: json!({"title": title}),
+    };
+    let s = session("a");
+    rt.state
+        .upsert(&s, issue("b\u{1f}x\u{1f}2", "B"))
+        .await
+        .unwrap();
+    rt.state
+        .upsert(&s, issue("a\u{1f}x\u{1f}3", "A"))
+        .await
+        .unwrap();
+    rt.state.upsert(&s, issue("900", "Unplaced")).await.unwrap();
+    let mut got = Vec::new();
+    for _ in 0..2 {
+        let item = tokio::time::timeout(Duration::from_secs(1), feed.next())
+            .await
+            .unwrap();
+        got.extend(item);
+    }
+    assert_eq!(got, [json!({"title": "A"}), json!({"title": "Unplaced"})]);
 }

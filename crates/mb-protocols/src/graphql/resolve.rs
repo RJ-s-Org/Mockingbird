@@ -805,11 +805,26 @@ async fn write_by_id(
     let Some(target) = super::state::by_id(&rt.bundle, op, args) else {
         return;
     };
-    let Some(held) = call::stored(rt, &plan.session, &target.resource_type, &target.id).await
-    else {
+    let held = call::stored(rt, &plan.session, &target.resource_type, &target.id).await;
+    let delete = op.kind == OperationKind::Command(mb_mcm::Effect::Delete);
+    // A record the mock this one shares stored (a REST issue, under its repository)
+    // goes as a read of this type finds it.
+    if delete
+        && held.is_none()
+        && !contradicts(
+            generated.body.as_ref(),
+            Some(&target.resource_type),
+            &target.id,
+        )
+    {
+        let target = (target.resource_type.as_str(), target.id.as_str());
+        call::delete_shared(rt, plan, call, target).await;
+        return;
+    }
+    let Some(held) = held else {
         return;
     };
-    if op.kind == OperationKind::Command(mb_mcm::Effect::Delete) {
+    if delete {
         let marks = !contradicts(generated.body.as_ref(), Some(&held.resource_type), &held.id);
         call::delete_resource(rt, plan, call, held, marks).await;
         return;

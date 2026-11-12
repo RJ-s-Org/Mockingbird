@@ -378,6 +378,30 @@ impl StateStore for RedisStateStore {
         values.iter().map(|j| decode(j)).collect()
     }
 
+    /// The list script's prefix is a field's: the type's and the id's start.
+    async fn list_prefix(
+        &self,
+        s: &SessionKey,
+        resource_type: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredResource>, StateError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let k = Keys::of(s);
+        let values: Vec<String> = self
+            .list
+            .key(&k.order)
+            .key(&k.res)
+            .arg(field(resource_type, prefix))
+            .arg(limit)
+            .arg(list_chunk(limit))
+            .invoke_async(&mut self.con())
+            .await?;
+        values.iter().map(|j| decode(j)).collect()
+    }
+
     async fn insert_seeded(&self, s: &SessionKey, r: StoredResource) -> Result<bool, StateError> {
         let k = Keys::of(s);
         let f = field(&r.resource_type, &r.id);

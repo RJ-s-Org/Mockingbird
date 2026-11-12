@@ -20,7 +20,7 @@ use crate::{
 #[derive(Default)]
 struct TypeData {
     /// id -> (recency sequence, resource)
-    by_id: HashMap<String, (u64, StoredResource)>,
+    by_id: BTreeMap<String, (u64, StoredResource)>,
     /// recency sequence -> id, so a list reads only the newest `limit`.
     order: BTreeMap<u64, String>,
 }
@@ -114,6 +114,29 @@ impl SessionData {
             .values()
             .rev()
             .filter_map(|id| data.by_id.get(id))
+            .take(limit)
+            .map(|(_, r)| r.clone())
+            .collect()
+    }
+
+    /// Up to `limit` resources of `resource_type` whose id starts with `prefix`, most
+    /// recent first: the ids under the prefix are a range of the ordered ids.
+    fn list_prefix(&self, resource_type: &str, prefix: &str, limit: usize) -> Vec<StoredResource> {
+        let Some(data) = self.resources.get(resource_type) else {
+            return Vec::new();
+        };
+        let mut found: Vec<&(u64, StoredResource)> = data
+            .by_id
+            .range::<str, _>((
+                std::ops::Bound::Included(prefix),
+                std::ops::Bound::Unbounded,
+            ))
+            .take_while(|(id, _)| id.starts_with(prefix))
+            .map(|(_, held)| held)
+            .collect();
+        found.sort_unstable_by_key(|(seq, _)| std::cmp::Reverse(*seq));
+        found
+            .into_iter()
             .take(limit)
             .map(|(_, r)| r.clone())
             .collect()
@@ -283,6 +306,20 @@ impl StateStore for MemoryStore {
             .inner
             .live(s)
             .map(|entry| entry.list(resource_type, limit))
+            .unwrap_or_default())
+    }
+
+    async fn list_prefix(
+        &self,
+        s: &SessionKey,
+        resource_type: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredResource>, StateError> {
+        Ok(self
+            .inner
+            .live(s)
+            .map(|entry| entry.list_prefix(resource_type, prefix, limit))
             .unwrap_or_default())
     }
 

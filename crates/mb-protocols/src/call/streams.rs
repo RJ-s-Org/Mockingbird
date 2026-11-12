@@ -53,12 +53,15 @@ pub(crate) type ItemCheck = std::sync::Arc<dyn Fn(&Value) -> bool + Send + Sync>
 /// The data of every resource of `op`'s resource type upserted in
 /// `session` from now on, when it is a valid stream item of `op` (or
 /// passes `check`). Events missed because the receiver lagged are skipped.
-/// Empty when `op` has no resource type.
+/// Empty when `op` has no resource type. Of a parent-scoped type
+/// ([`super::scopes`]) whose parent `call`'s path names, only the records
+/// under that parent, and those stored under none.
 #[cfg(any(feature = "sse", feature = "graphql"))]
 pub(crate) fn change_feed(
     rt: &std::sync::Arc<MockRuntime>,
     session: SessionKey,
     op: &Operation,
+    call: Option<&OperationCall>,
     check: Option<ItemCheck>,
 ) -> futures::stream::BoxStream<'static, Value> {
     use futures::StreamExt;
@@ -70,11 +73,20 @@ pub(crate) fn change_feed(
     let Some(resource_type) = op.resource_type.clone() else {
         return stream::empty().boxed();
     };
+    let parent = match (&op.binding, call) {
+        (mb_mcm::Binding::Http { path, .. }, Some(call)) => rt
+            .index()
+            .parent_scopes()
+            .get(&resource_type)
+            .and_then(|scope| scope.of_route(path, &call.path_params)),
+        _ => None,
+    };
     let feed = Feed {
         rt: Arc::clone(rt),
         op: op.clone(),
         session,
         resource_type,
+        parent,
         check,
         rx: rt.state.subscribe(),
     };
@@ -88,6 +100,7 @@ pub(crate) fn change_feed(
             if event.kind != ChangeKind::Upserted
                 || event.session != feed.session
                 || event.resource_type != feed.resource_type
+                || !feed.under_parent(&event.id)
             {
                 continue;
             }
@@ -118,6 +131,22 @@ pub(super) struct Feed {
     pub(super) op: Operation,
     pub(super) session: SessionKey,
     pub(super) resource_type: String,
+    /// The parent the feed's records are under, when its call names one.
+    pub(super) parent: Option<Vec<String>>,
     pub(super) check: Option<ItemCheck>,
     pub(super) rx: tokio::sync::broadcast::Receiver<mb_state::StateChanged>,
+}
+
+#[cfg(any(feature = "sse", feature = "graphql"))]
+impl Feed {
+    /// Whether the record stored as `id` is one of the feed's: under its parent, or
+    /// under none.
+    fn under_parent(&self, id: &str) -> bool {
+        match (&self.parent, super::scopes::split_id(id)) {
+            (Some(parent), Some((under, _))) => {
+                under.iter().copied().eq(parent.iter().map(String::as_str))
+            }
+            _ => true,
+        }
+    }
 }

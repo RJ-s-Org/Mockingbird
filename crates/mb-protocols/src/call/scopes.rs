@@ -129,6 +129,30 @@ impl ParentScope {
         &self.key_member
     }
 
+    /// The concrete path its read's record sits under, with `parent`'s values for the
+    /// parent's parameters: `/repos/b/x/issues` of `/repos/{owner}/{repo}/issues/
+    /// {issue_number}` under `["b", "x"]`, as a read of it names where it is
+    /// ([`super::deleted::scope`]). `None` when `parent` is not one value per parameter.
+    pub(crate) fn read_parent(&self, parent: &[String]) -> Option<String> {
+        if parent.len() != self.params.len() {
+            return None;
+        }
+        let mut out = String::new();
+        for (at, segment) in self
+            .template
+            .iter()
+            .enumerate()
+            .take(self.template.len().saturating_sub(1))
+        {
+            out.push('/');
+            match self.params.iter().position(|(p, _)| *p == at) {
+                Some(k) => out.push_str(parent.get(k)?),
+                None => out.push_str(segment),
+            }
+        }
+        Some(out)
+    }
+
     /// The parent a call names, by its route (`route`, a path template) and its path
     /// parameters `params`: where the route runs through the parent's segments (its
     /// read's, through the last parameter: `repos/{owner}/{repo}`), literal for literal

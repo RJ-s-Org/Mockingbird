@@ -435,6 +435,18 @@ impl StateStore for CachingStateStore {
         self.inner.list(s, resource_type, limit).await
     }
 
+    async fn list_prefix(
+        &self,
+        s: &SessionKey,
+        resource_type: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredResource>, StateError> {
+        self.inner
+            .list_prefix(s, resource_type, prefix, limit)
+            .await
+    }
+
     async fn upsert(&self, s: &SessionKey, r: StoredResource) -> Result<(), StateError> {
         let resource_type = r.resource_type.clone();
         let result = self.inner.upsert(s, r).await;

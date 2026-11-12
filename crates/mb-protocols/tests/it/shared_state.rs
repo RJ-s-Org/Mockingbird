@@ -1177,3 +1177,119 @@ type Query { repository(owner: String!, name: String!): Repository }
         );
     }
 }
+
+/// A GraphQL delete by `id` of an issue REST stored under its repository removes
+/// that repository's: `b/x`'s `#5` goes, `a/x`'s `#5` (one REST id in both) stays.
+#[tokio::test]
+async fn a_graphql_delete_removes_the_issue_of_its_repository_only() {
+    const ISSUES: &str = r##"
+openapi: 3.0.3
+info: {title: issues, version: "1"}
+paths:
+  /repos/{owner}/{repo}/issues/{issue_number}:
+    get:
+      operationId: getIssue
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+        - {name: issue_number, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+        "404": {description: missing}
+components:
+  schemas:
+    Issue:
+      type: object
+      required: [id, node_id, number, title]
+      properties:
+        id: {type: integer}
+        node_id: {type: string}
+        number: {type: integer}
+        title: {type: string}
+"##;
+    const SDL: &str = r#"
+type Issue { id: ID! number: Int! title: String! }
+type Query { issue(id: ID!): Issue }
+type Mutation { deleteIssue(id: ID!): Issue }
+"#;
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let types = SharedTypes::default();
+    let rest_rt = joined(
+        ("github-rest", ISSUES),
+        vec![
+            json!({"id": 11, "node_id": "I_a", "number": 5, "title": "In a/x"}),
+            json!({"id": 11, "node_id": "I_b", "number": 5, "title": "In b/x"}),
+            // What a read generating the deleted issue back would answer.
+            json!({"id": 12, "node_id": "I_back", "number": 5, "title": "Made up"}),
+        ],
+        &state,
+        &types,
+        None,
+    );
+    let rest_router = http_rest::router(rest_rt);
+    let gh = joined(
+        ("github-graphql", SDL),
+        vec![json!({"__typename": "Issue", "id": "I_b", "number": 5, "title": "In b/x"})],
+        &state,
+        &types,
+        None,
+    );
+    let gql_router = graphql::try_router(gh).unwrap();
+    for repo in ["a", "b"] {
+        let read = rest(
+            &rest_router,
+            "GET",
+            &format!("/repos/{repo}/x/issues/5"),
+            None,
+        )
+        .await;
+        assert_eq!(read["title"], format!("In {repo}/x"), "{read}");
+    }
+    let key = mb_state::SessionKey {
+        workspace: "default".into(),
+        mock: "gh".into(),
+        session: "s1".into(),
+    };
+    let held = |t: &'static str| {
+        let state = Arc::clone(&state);
+        let key = key.clone();
+        async move {
+            let mut ids: Vec<String> = state
+                .list(&key, t, 100)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|r| r.id)
+                .collect();
+            ids.sort();
+            ids
+        }
+    };
+    assert_eq!(
+        held("issues").await,
+        ["a\u{1f}x\u{1f}11", "b\u{1f}x\u{1f}11"]
+    );
+    gql(
+        &gql_router,
+        r#"mutation { deleteIssue(id: "I_b") { id } }"#,
+        false,
+    )
+    .await;
+    assert_eq!(held("issues").await, ["a\u{1f}x\u{1f}11"]);
+    // Gone for REST too: its read answers 404 from the deleted marker, with no model
+    // call, and the other repository's issue still reads.
+    let req = Request::builder()
+        .uri("/repos/b/x/issues/5")
+        .header("x-mockingbird-session", "s1")
+        .body(Body::empty())
+        .unwrap();
+    let resp = rest_router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    let read = rest(&rest_router, "GET", "/repos/a/x/issues/5", None).await;
+    assert_eq!(read["title"], "In a/x", "{read}");
+    assert_eq!(
+        held("issues").await,
+        ["a\u{1f}x\u{1f}11"],
+        "nothing generated back"
+    );
+}

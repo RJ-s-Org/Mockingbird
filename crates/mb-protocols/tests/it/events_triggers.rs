@@ -300,6 +300,31 @@ async fn state_change_trigger_fires_for_a_shared_session() {
     assert_eq!(published[0].1.key.as_deref(), Some(b"51".as_slice()));
 }
 
+/// A parent-scoped record's change names its parent beside its own id: issue `5` of
+/// `b/x` is told from `a/x`'s.
+#[tokio::test]
+async fn state_change_trigger_names_the_parent_of_a_scoped_record() {
+    let h = start(
+        true,
+        vec![Trigger::OnStateChange {
+            resource_type: "orders".into(),
+            kind: StateChangeKind::Upserted,
+        }],
+        ScriptedLease::new(vec![Ok(false)]),
+    );
+    let sep = char::from(0x1f_u8);
+    for owner in ["a", "b"] {
+        let id = format!("{owner}{sep}x{sep}5");
+        h.state.upsert(&session("s1"), order(&id)).await.unwrap();
+    }
+    h.broker.wait_published(2, Duration::from_secs(5)).await;
+    let records = h.records.records();
+    let trigger = &records[1].request["trigger"];
+    assert_eq!(trigger["id"], "5", "{trigger}");
+    assert_eq!(trigger["parent"], json!(["b", "x"]), "{trigger}");
+    assert_eq!(records[0].request["trigger"]["parent"], json!(["a", "x"]));
+}
+
 #[tokio::test]
 async fn state_change_kind_filter() {
     let h = start(
