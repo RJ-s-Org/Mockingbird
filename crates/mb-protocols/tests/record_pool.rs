@@ -461,15 +461,17 @@ async fn a_create_leaves_its_state_nulls_and_partly_sent_members_out_of_the_pool
         "fill's null, not the pool's: {made}"
     );
     assert_eq!(made["dims"]["w"], 1, "the request's: {made}");
-    // One fill call, for the dims the request sent part of; never for what the pool
-    // record gave, nor for the state no persona speaks of (its first value).
+    // One fill call, for the dims the request sent part of and the state nothing says
+    // a record starts in (the lifecycle names no `initial`, no rule moves it, no
+    // example shows it); never for what the pool record gave, nor the pool's state.
     let requests = h.provider.requests();
     assert_eq!(requests.len(), calls + 1, "{made}");
     let asked = format!("{:?}", requests.last().unwrap().response_format);
-    assert!(asked.contains("dims"), "{asked}");
     assert!(
-        !asked.contains("color") && !asked.contains("status"),
+        asked.contains("dims") && asked.contains("status"),
         "{asked}"
     );
+    assert!(!asked.contains("color"), "{asked}");
+    // The model wrote no state: its first value, as a last resort.
     assert_eq!(made["status"], "active", "{made}");
 }

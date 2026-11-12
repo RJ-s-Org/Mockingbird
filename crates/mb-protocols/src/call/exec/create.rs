@@ -42,7 +42,9 @@
 //!   `initial` sets, the derived members, the described concurrency token), a
 //!   `writeOnly` member, and a reference to another record the request could have sent
 //!   ([`unsent_reference`]); and what an array item or a nullable object the request
-//!   sent lacks, item by item ([`lacking`]). What fill
+//!   sent lacks, item by item ([`lacking`]). Before it, a state-like member (one the
+//!   world moves) starts in its start state and an id member gets an id
+//!   ([`fresh`]); a state-like member with no start found is the model's. What fill
 //!   leaves is settled ([`settle_filled`]). The lifecycle's `initial` (where it fits
 //!   the member, [`initial`]) and the tokens' first values ([`initial_token`]) are set
 //!   before fill, and a member named for a path parameter is the record it names
@@ -64,6 +66,8 @@
 //! Bulk creates, a create naming a record the session holds, and one repeating a value
 //! the contract says is unique that the generated path refuses (`repeated_value`), go on
 //! to generation too.
+
+mod fresh;
 
 use mb_engine::consistency::{property_schema, required_members};
 use mb_engine::error_body::{ErrorCause, RefusalFacts};
@@ -376,6 +380,25 @@ pub(super) async fn run(
     // what a read requires, then every other member nobody set, but a reference the
     // request could have sent.
     let request_schema = request_schema(rt, op);
+    // A state-like member starts where the world or the contract's examples say, else
+    // where the model picks; an id member gets an id, never a faker word.
+    let mut starts = fresh::Starts::default();
+    if let Value::Object(known) = &mut data {
+        let mut skip = owned.clone();
+        skip.extend(sent.as_object().into_iter().flat_map(|s| s.keys().cloned()));
+        starts = fresh::start_states(rt, (op, t), &shape.members, known, &skip);
+        skip.extend(starts.asked.iter().cloned());
+        fresh::mint_ids(
+            state,
+            (plan, seed),
+            (t, field),
+            (&shape.members, request_schema.as_ref()),
+            known,
+            &skip,
+        )
+        .instrument(state_span())
+        .await;
+    }
     let unsent = Unsent::All(request_schema.as_ref(), Some(&sent));
     let mut missing = gaps(rt, (t, &shape.schemas), &data, &owned, unsent);
     let required: Vec<String> = missing.iter().map(|(name, _)| name.clone()).collect();
@@ -401,7 +424,7 @@ pub(super) async fn run(
         // From the mock's record pool, when it holds the type: a pool record's values
         // for the members nothing set at all (one the request sent part of is the
         // model's to complete), but those fill answers null with no model call and the
-        // record's state (its lifecycle member, a soft-delete mark), which a create
+        // record's state (its state-like members, a soft-delete mark), which a create
         // decides, and a member the request sent that was dropped for its shape (the
         // model carries the sent items over). The model fills only what is left.
         let nulls = mb_engine::fill_nulls(rt.bundle(), &fill_schema(&missing, &required), &names);
@@ -417,6 +440,7 @@ pub(super) async fn run(
                     && !sent.as_object().is_some_and(|s| s.contains_key(*name))
                     && !nulls.contains(name)
                     && state_member.as_ref() != Some(*name)
+                    && !starts.members.contains(*name)
                     && !crate::world_gaps::SOFT_DELETE_MEMBERS
                         .contains(&name.to_ascii_lowercase().as_str())
             })
@@ -446,6 +470,7 @@ pub(super) async fn run(
                         call,
                         sent: sent.as_object(),
                         caller: &caller,
+                        states: &starts.asked,
                     },
                 )
                 .await;
