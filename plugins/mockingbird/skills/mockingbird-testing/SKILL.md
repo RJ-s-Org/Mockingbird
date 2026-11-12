@@ -21,6 +21,10 @@ mockingbird seed-fixtures --mock orders --session ci tests/fixtures/orders.json
 - **Edge cases on demand**: `X-Mockingbird-Status: 503`, `X-Mockingbird-Latency: 2s`, or a named scenario (`X-Mockingbird-Scenario: out-of-stock`) declared in `mockingbird.yaml` so it is versioned with the tests.
 - **Resilience tests**: per-mock `chaos` (`error_rate`, `latency_jitter`, `drop_stream_rate`); set `MB_CHAOS_SEED` for a reproducible sequence; `X-Mockingbird-Chaos: off` exempts a request.
 
+## Assert on content, not status alone
+
+Some apps answer a failed upstream call with status 200: an error card (`Something went wrong`), a tool result with `isError: true`, a page saying "not found". `verify` checks the mock's request log and the run command's exit code, never the app's output, and a test that only asserts status 200 passes on these. Make the `verify --run` command check what the app returned (no error markers, the field the flow needs is present) and exit non-zero when it is wrong.
+
 ## Assert on what the client sent
 
 `GET /api/v1/workspaces/default/mocks/<mock>/requests?session=<id>` (MCP `list_requests`, filters `session`, `operation`, `source`, `kind`) returns the recorded calls with redacted bodies, matched operation ids and statuses. Assert on it after the code under test runs, e.g. that exactly one `createOrder` was made.
