@@ -408,9 +408,11 @@ impl StateStore for SqlStateStore {
         }))
     }
 
-    /// The ids under `prefix` are a range of the primary key's: `[prefix, next)`, where
-    /// `next` is `prefix` with its last character one past, compared byte by byte
-    /// (SQLite's `BINARY`, Postgres's `"C"` collation).
+    /// The ids under `prefix` are a range: `[prefix, next)`, where `next` is `prefix`
+    /// with its last character one past, compared byte by byte. SQLite reads it on the
+    /// primary key (`BINARY`); Postgres on `state_resources_id_c`, the ids under the
+    /// `"C"` collation the query compares them by (its primary key follows the
+    /// database's collation, which no byte range can use).
     async fn list_prefix(
         &self,
         s: &SessionKey,
@@ -427,16 +429,27 @@ impl StateStore for SqlStateStore {
                 .take(limit)
                 .collect());
         };
-        let range = match &self.inner.pool {
-            Pool::Sqlite(_) => "id >= $5 AND id < $6",
-            Pool::Pg(_) => "id COLLATE \"C\" >= $5 AND id COLLATE \"C\" < $6",
+        let sql = match &self.inner.pool {
+            Pool::Sqlite(_) => format!(
+                "SELECT resource_type, id, data FROM state_resources \
+                 WHERE {KEY_WHERE} AND resource_type = $4 AND id >= $5 AND id < $6 AND {} \
+                 ORDER BY seq DESC LIMIT $7",
+                live_session(8)
+            ),
+            // The range is read first: left to itself, the planner walks the type's
+            // recency index for the first `limit` rows the range keeps, past every
+            // other parent's. The cost follows the prefix's rows (all of them read and
+            // sorted), as the memory store's does.
+            Pool::Pg(_) => format!(
+                "WITH under AS MATERIALIZED (\
+                 SELECT resource_type, id, data, seq FROM state_resources \
+                 WHERE {KEY_WHERE} AND resource_type = $4 \
+                 AND id COLLATE \"C\" >= $5 AND id COLLATE \"C\" < $6) \
+                 SELECT resource_type, id, data FROM under WHERE {} \
+                 ORDER BY seq DESC LIMIT $7",
+                live_session(8)
+            ),
         };
-        let sql = format!(
-            "SELECT resource_type, id, data FROM state_resources \
-             WHERE {KEY_WHERE} AND resource_type = $4 AND {range} AND {} \
-             ORDER BY seq DESC LIMIT $7",
-            live_session(8)
-        );
         let cutoff = self.inner.cutoff(now_ms());
         Ok(on_pool!(&self.inner.pool, |p| {
             let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))

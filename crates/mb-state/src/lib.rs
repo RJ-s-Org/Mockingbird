@@ -199,10 +199,10 @@ pub trait StateStore: Send + Sync {
     /// [`StateStore::list`] of the resources of `resource_type` whose id starts with
     /// `prefix`, most recent first, at most `limit`: the records a caller keys under one
     /// prefix (a parent's, `a\u{1f}x\u{1f}`). Only those records are returned; how
-    /// many a backend reads to find them is its own: the memory store and SQLite read
-    /// the ordered range of ids under the prefix alone, so the cost follows the
-    /// prefix's records; Postgres compares the range byte by byte (`"C"`), past its
-    /// key's collation, among the type's rows; Redis matches the prefix on the server
+    /// many a backend reads to find them is its own: the memory store, SQLite and
+    /// Postgres read the ordered range of ids under the prefix alone (Postgres on an
+    /// index of the ids in byte order, `"C"`, whatever the database's collation), so
+    /// the cost follows the prefix's records; Redis matches the prefix on the server
     /// as it walks the session's order. This default, for test doubles and wrappers
     /// that do not say, lists the whole type and keeps the matches.
     async fn list_prefix(

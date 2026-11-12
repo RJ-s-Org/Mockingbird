@@ -1693,12 +1693,18 @@ async fn an_unplaced_record_written_after_the_marker_still_lists() {
         )
         .await
         .unwrap();
+    // `Some(true)`: it may hold issues under no parent; `Some(false)`: its "none"
+    // document names the marker's epoch.
     let marker = || async {
-        rt.state
-            .get(&s, mb_state::INTERNAL_TYPE, "#unplaced/issues")
-            .await
-            .unwrap()
-            .map(|doc| doc.data["unplaced"].clone())
+        let doc = |id: &'static str| async {
+            rt.state
+                .get(&s, mb_state::INTERNAL_TYPE, id)
+                .await
+                .unwrap()
+                .map(|doc| doc.data["epoch"].clone())
+        };
+        let marker = doc("#unplaced/issues").await?;
+        Some(doc("#unplaced/issues\u{1f}none").await != Some(marker))
     };
     let ids = |listed: Vec<StoredResource>| {
         let mut ids: Vec<String> = listed.into_iter().map(|r| r.id).collect();
@@ -1709,7 +1715,7 @@ async fn an_unplaced_record_written_after_the_marker_still_lists() {
         .list_in(&s, "issues", &parent, 10)
         .await;
     assert_eq!(ids(listed), ["1"]);
-    assert_eq!(marker().await, Some(json!(false)));
+    assert_eq!(marker().await, Some(false));
 
     // Written where no parent is named: stored under its own id.
     let plain = StoredResource {
@@ -1719,7 +1725,7 @@ async fn an_unplaced_record_written_after_the_marker_still_lists() {
     };
     assert!(StateAccess::new(&rt).upsert(&s, plain).await);
     assert!(rt.state.get(&s, "issues", "900").await.unwrap().is_some());
-    assert_eq!(marker().await, Some(json!(true)));
+    assert_eq!(marker().await, Some(true));
 
     let listed = StateAccess::new(&rt)
         .list_in(&s, "issues", &parent, 10)
@@ -1774,4 +1780,63 @@ async fn change_feed_under_a_parent_skips_another_parent_s_records() {
         got.extend(item);
     }
     assert_eq!(got, [json!({"title": "A"}), json!({"title": "Unplaced"})]);
+}
+
+/// A change feed under a parent checks a record stored under no parent against its
+/// own links, as a read under the parent does: an issue whose `url` names `b/x` is
+/// not sent on `a/x`'s feed; one whose links name no other repository is.
+#[cfg(any(feature = "sse", feature = "graphql"))]
+#[tokio::test]
+async fn change_feed_under_a_parent_skips_an_unplaced_record_linked_elsewhere() {
+    let rt = Arc::new(runtime_of(example("github-rest/github-rest.openapi.yaml")));
+    let op = rt
+        .bundle()
+        .operations
+        .iter()
+        .find(|o| {
+            o.resource_type.as_deref() == Some("issues")
+                && matches!(&o.binding, Binding::Http { path, method: HttpMethod::Get, .. }
+                    if path == "/repos/{owner}/{repo}/issues")
+        })
+        .cloned()
+        .unwrap();
+    let call = OperationCall {
+        operation_id: op.id.clone(),
+        path_params: serde_json::from_value(json!({"owner": "a", "repo": "x"})).unwrap(),
+        ..Default::default()
+    };
+    let check: ItemCheck = Arc::new(|_: &Value| true);
+    let mut feed = change_feed(&rt, session("a"), &op, Some(&call), Some(check));
+    let elsewhere = json!({
+        "number": 7,
+        "title": "In b/x",
+        "url": "https://api.github.com/repos/b/x/issues/7",
+    });
+    let here = json!({
+        "number": 8,
+        "title": "In a/x",
+        "url": "https://api.github.com/repos/a/x/issues/8",
+    });
+    let unlinked = json!({"number": 9, "title": "Unlinked"});
+    let s = session("a");
+    for (id, data) in [
+        ("900", elsewhere),
+        ("901", here.clone()),
+        ("902", unlinked.clone()),
+    ] {
+        let issue = StoredResource {
+            resource_type: "issues".into(),
+            id: id.into(),
+            data,
+        };
+        rt.state.upsert(&s, issue).await.unwrap();
+    }
+    let mut got = Vec::new();
+    for _ in 0..2 {
+        let item = tokio::time::timeout(Duration::from_secs(1), feed.next())
+            .await
+            .unwrap();
+        got.extend(item);
+    }
+    assert_eq!(got, [here, unlinked]);
 }

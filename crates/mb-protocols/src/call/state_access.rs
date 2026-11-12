@@ -31,9 +31,6 @@ pub(crate) struct StateAccess<'a> {
     /// Parent-scoped records this call found under the parent it names, by its key
     /// there: (type, id) ([`Self::found_placed`]).
     placed: HashSet<(String, String)>,
-    /// The parent-scoped types this call marked as held under no parent
-    /// ([`unplaced_marker`]).
-    marked_unplaced: Vec<String>,
     /// The call's type and path parameters, for the parent of a parent-scoped record
     /// ([`scopes`]); `None` outside a call's path (a GraphQL helper), where a record's
     /// links alone name its parent.
@@ -64,15 +61,57 @@ enum Placement {
 /// Records of a parent-scoped type read to find one under a parent, at most.
 const MAX_SCOPED_SCAN: usize = 10_000;
 
-/// The id of the [`mb_state::INTERNAL_TYPE`] document saying whether a session holds
+/// The id of the [`mb_state::INTERNAL_TYPE`] document saying that a session may hold
 /// records of parent-scoped type `t` stored under no parent (seeded, written where
-/// nothing named a parent, or before the type was scoped): `{"unplaced": bool}`. With
-/// none held, a list under a parent reads that parent's records alone
-/// ([`mb_state::StateStore::list_prefix`]); otherwise, or with no marker yet (the
-/// first list of the type in the session, or after a reseed, which replaces the
-/// session's documents), it reads the type and writes the marker.
+/// nothing named a parent, or before the type was scoped): `{"epoch": ...}`, a value
+/// each such write gives it anew. The session holds none while the document
+/// [`unplaced_none`] names the same epoch: a list under a parent then reads that
+/// parent's records alone ([`mb_state::StateStore::list_prefix`]). Otherwise it reads
+/// the type, and with no marker yet (the first list of the type in the session, or
+/// after a reseed, which replaces the session's documents) writes it.
+///
+/// It never says none while one is held. A write of one holds a pending document of
+/// its own ([`unplaced_pending_prefix`]) and gives the marker a new epoch before it stores
+/// the record, and drops the pending document after. "None" for an epoch is written
+/// only by a call that read the marker at that epoch, then saw no pending document,
+/// then read the type and found none: a write that gave the marker its epoch before
+/// that read is seen pending or its record read, and one after gives it another
+/// epoch, which no "none" names. Nothing deletes the marker, so a first marker is
+/// written only where none is yet (`insert_seeded`) by the same order.
 fn unplaced_marker(t: &str) -> String {
     format!("#unplaced/{t}")
+}
+
+/// The id of the document naming the epoch of [`unplaced_marker`] at which the
+/// session held no record of parent-scoped type `t` stored under no parent.
+fn unplaced_none(t: &str) -> String {
+    format!("#unplaced/{t}{}none", scopes::SEP)
+}
+
+/// The ids of the pending documents of writes storing records of parent-scoped type
+/// `t` under no parent ([`unplaced_marker`]) start so.
+fn unplaced_pending_prefix(t: &str) -> String {
+    format!("#unplaced/{t}{}pending{}", scopes::SEP, scopes::SEP)
+}
+
+/// A new value: a pending document's id ([`unplaced_pending_prefix`]) ends with one, and
+/// each write gives the marker one ([`unplaced_marker`]).
+fn unplaced_nonce() -> String {
+    format!("{:016x}", rand::random::<u64>())
+}
+
+/// What a session's marker says of records of parent-scoped type `t` stored under no
+/// parent ([`unplaced_marker`]).
+enum Unplaced {
+    /// No marker yet.
+    Unmarked,
+    /// It holds none.
+    None,
+    /// It may hold some, at this epoch.
+    May(String),
+    /// A session another mock shares may hold records that mock stores under no parent
+    /// without marking them (its contract may not scope the type): never trusted.
+    Untrusted,
 }
 
 /// Whether a record of type `t` under `id` is none the call layer may name: its ids
@@ -81,6 +120,16 @@ fn unplaced_marker(t: &str) -> String {
 /// runtime's own documents ([`mb_state::INTERNAL_TYPE`]) key by scoped ids freely.
 fn refused(t: &str, id: &str) -> bool {
     t != mb_state::INTERNAL_TYPE && id.contains(scopes::SEP)
+}
+
+/// Whether `r`, a record of `rt`'s stored under no parent, may be the one under
+/// `scope`: its own links show no other parent ([`scopes::ParentScope::of_data`]).
+pub(super) fn unplaced_fits(rt: &MockRuntime, r: &StoredResource, scope: &[String]) -> bool {
+    rt.index()
+        .parent_scopes()
+        .get(&r.resource_type)
+        .and_then(|s| s.of_data(&r.data))
+        .is_none_or(|shown| shown == scope)
 }
 
 /// `r` under its own id, whatever key the store holds it by; a document of the
@@ -115,7 +164,6 @@ impl<'a> StateAccess<'a> {
             marked: Vec::new(),
             unplaced: Vec::new(),
             placed: HashSet::new(),
-            marked_unplaced: Vec::new(),
             scope_call: None,
         }
     }
@@ -303,12 +351,7 @@ impl<'a> StateAccess<'a> {
     /// the Admin API, or where nothing named one), may be the one under `scope`: its
     /// own links show no other parent.
     fn unplaced_fits(&self, r: &StoredResource, scope: &[String]) -> bool {
-        self.rt
-            .index()
-            .parent_scopes()
-            .get(&r.resource_type)
-            .and_then(|s| s.of_data(&r.data))
-            .is_none_or(|shown| shown == scope)
+        unplaced_fits(self.rt, r, scope)
     }
 
     async fn raw_get(&mut self, s: &SessionKey, t: &str, id: &str) -> Option<StoredResource> {
@@ -414,7 +457,7 @@ impl<'a> StateAccess<'a> {
         // under no parent ([`unplaced_marker`]): those are found by reading the
         // type, so the two are listed in one order.
         let marked = self.unplaced_marked(s, t).await;
-        if marked == Some(false) {
+        if let Unplaced::None = marked {
             let held = self.raw_list_prefix(s, t, &prefix, limit).await;
             let mut out = Vec::with_capacity(held.len());
             for r in held {
@@ -425,12 +468,21 @@ impl<'a> StateAccess<'a> {
             }
             return out;
         }
+        // What the type's read finds is written to the marker only when no write was in
+        // flight after the marker was read ([`unplaced_marker`]).
+        let notes = !matches!(marked, Unplaced::Untrusted) && !self.unplaced_in_flight(s, t).await;
         let all = self.raw_list(s, t, MAX_SCOPED_SCAN).await;
-        // Whether the session holds any is known now, for the next list: where it holds
-        // some of the type (so the marker creates no session), all of them read.
-        if marked.is_none() && !all.is_empty() && all.len() < MAX_SCOPED_SCAN {
-            let unplaced = all.iter().any(|r| !r.id.contains(scopes::SEP));
-            self.note_unplaced_held(s, t, unplaced, false).await;
+        let unplaced = all.iter().any(|r| !r.id.contains(scopes::SEP));
+        if notes && all.len() < MAX_SCOPED_SCAN && self.open() {
+            match marked {
+                // Where the session holds some of the type, so the marker creates no
+                // session.
+                Unplaced::Unmarked if !all.is_empty() => {
+                    self.mark_unplaced_first(s, t, unplaced).await;
+                }
+                Unplaced::May(epoch) if !unplaced => self.mark_unplaced_none(s, t, epoch).await,
+                Unplaced::Unmarked | Unplaced::May(_) | Unplaced::None | Unplaced::Untrusted => {}
+            }
         }
         let placed: HashSet<String> = all.iter().filter_map(|r| under(&r.id)).collect();
         let mut out = Vec::new();
@@ -469,54 +521,147 @@ impl<'a> StateAccess<'a> {
     }
 
     /// What the session's marker says of records of parent-scoped type `t` stored under
-    /// no parent ([`unplaced_marker`]): `Some(false)` that it holds none, `Some(true)`
-    /// that it may, `None` with no marker. A session another mock shares may hold
-    /// records that mock stores under no parent without marking them (its contract may
-    /// not scope the type), so its marker is never trusted: `Some(true)`.
-    async fn unplaced_marked(&mut self, s: &SessionKey, t: &str) -> Option<bool> {
+    /// no parent ([`unplaced_marker`]).
+    async fn unplaced_marked(&mut self, s: &SessionKey, t: &str) -> Unplaced {
         if self.rt.shares.is_some() {
-            return Some(true);
+            return Unplaced::Untrusted;
         }
-        let doc = self
+        let epoch = |doc: &StoredResource| {
+            doc.data
+                .get("epoch")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        let Some(marker) = self
             .raw_get(s, mb_state::INTERNAL_TYPE, &unplaced_marker(t))
-            .await?;
-        Some(doc.data.get("unplaced").and_then(Value::as_bool) != Some(false))
+            .await
+        else {
+            // Unreadable reads as unmarked: the type is read, and nothing is written.
+            return match self.open() {
+                true => Unplaced::Unmarked,
+                false => Unplaced::Untrusted,
+            };
+        };
+        let Some(at) = epoch(&marker) else {
+            return Unplaced::Untrusted;
+        };
+        let none = self
+            .raw_get(s, mb_state::INTERNAL_TYPE, &unplaced_none(t))
+            .await;
+        match none.as_ref().and_then(epoch) {
+            Some(none) if none == at => Unplaced::None,
+            _ => Unplaced::May(at),
+        }
     }
 
-    /// Records whether the session holds records of parent-scoped type `t` under no
-    /// parent ([`unplaced_marker`]); whether the marker was written. That it may hold
-    /// one (`stored`: a write this call is about to make) overwrites the marker, before
-    /// the record is stored, so no list misses it; that it holds none (`unplaced`
-    /// false, read by a list) is written only where no marker is yet, so it never hides
-    /// a record a concurrent call stored. Once per call and type for a write.
-    async fn note_unplaced_held(
-        &mut self,
-        s: &SessionKey,
-        t: &str,
-        unplaced: bool,
-        stored: bool,
-    ) -> bool {
-        if stored && self.marked_unplaced.iter().any(|m| m == t) {
-            return true;
-        }
-        if !self.open() {
-            return false;
-        }
+    /// Writes the first marker of parent-scoped type `t` ([`unplaced_marker`]) where none
+    /// is yet, and, when it did and the session holds none (`unplaced` false), that it
+    /// holds none at its epoch.
+    async fn mark_unplaced_first(&mut self, s: &SessionKey, t: &str, unplaced: bool) {
+        let epoch = unplaced_nonce();
         let doc = StoredResource {
             resource_type: mb_state::INTERNAL_TYPE.to_string(),
             id: unplaced_marker(t),
-            data: serde_json::json!({"unplaced": unplaced}),
+            data: serde_json::json!({"epoch": epoch}),
         };
-        if stored {
-            let r = self.rt.state.upsert(s, doc).await;
-            let ok = self.settle(r).is_some();
-            if ok {
-                self.marked_unplaced.push(t.to_string());
-            }
-            ok
-        } else {
-            let r = self.rt.state.insert_seeded(s, doc).await;
-            self.settle(r).is_some()
+        let r = self.rt.state.insert_seeded(s, doc).await;
+        if self.settle(r) == Some(true) && !unplaced {
+            self.mark_unplaced_none(s, t, epoch).await;
+        }
+    }
+
+    /// Writes that the session holds no record of parent-scoped type `t` stored under no
+    /// parent at the marker's `epoch` ([`unplaced_marker`]).
+    async fn mark_unplaced_none(&mut self, s: &SessionKey, t: &str, epoch: String) {
+        if !self.open() {
+            return;
+        }
+        let doc = StoredResource {
+            resource_type: mb_state::INTERNAL_TYPE.to_string(),
+            id: unplaced_none(t),
+            data: serde_json::json!({"epoch": epoch}),
+        };
+        let r = self.rt.state.upsert(s, doc).await;
+        self.settle(r);
+    }
+
+    /// Whether a write storing a record of parent-scoped type `t` under no parent may
+    /// be in flight: its pending document is held ([`unplaced_marker`]), or the store
+    /// could not say.
+    async fn unplaced_in_flight(&mut self, s: &SessionKey, t: &str) -> bool {
+        if !self.open() {
+            return true;
+        }
+        let r = self
+            .rt
+            .state
+            .list_prefix(s, mb_state::INTERNAL_TYPE, &unplaced_pending_prefix(t), 1)
+            .await;
+        self.settle(r).is_none_or(|held| !held.is_empty())
+    }
+
+    /// Before a record of parent-scoped type `t` is stored under no parent: holds the
+    /// write's pending document, then gives the marker a new epoch
+    /// ([`unplaced_marker`]). The pending document's id, to drop once the record is
+    /// stored ([`Self::unplaced_stored`]); `None` when the store did not take both, and
+    /// the record is not to be stored.
+    async fn unplaced_storing(&mut self, s: &SessionKey, t: &str) -> Option<String> {
+        if !self.open() {
+            return None;
+        }
+        let pending = format!("{}{}", unplaced_pending_prefix(t), unplaced_nonce());
+        let doc = |id: String, data: Value| StoredResource {
+            resource_type: mb_state::INTERNAL_TYPE.to_string(),
+            id,
+            data,
+        };
+        let r = self
+            .rt
+            .state
+            .upsert(s, doc(pending.clone(), serde_json::json!({})))
+            .await;
+        self.settle(r)?;
+        let marker = doc(
+            unplaced_marker(t),
+            serde_json::json!({"epoch": unplaced_nonce()}),
+        );
+        let r = self.rt.state.upsert(s, marker).await;
+        if self.settle(r).is_none() {
+            self.unplaced_stored(s, &pending).await;
+            return None;
+        }
+        Some(pending)
+    }
+
+    /// Drops a write's pending document ([`Self::unplaced_storing`]) once its record is
+    /// stored, or was not. Tried whatever the call's gate: one left behind (the call
+    /// dropped between the two) only keeps the type's marker from saying none again
+    /// for the session's life.
+    async fn unplaced_stored(&mut self, s: &SessionKey, pending: &str) {
+        let _ = self
+            .rt
+            .state
+            .delete(s, mb_state::INTERNAL_TYPE, pending)
+            .await;
+    }
+
+    /// After a record of parent-scoped type `t` stored under no parent left the session
+    /// (deleted, or moved under its parent): when the marker says the session may hold
+    /// some, the type is read, as a list under a parent would read it then, and the
+    /// marker says none when it holds none ([`unplaced_marker`]).
+    async fn unplaced_left(&mut self, s: &SessionKey, t: &str) {
+        let Unplaced::May(epoch) = self.unplaced_marked(s, t).await else {
+            return;
+        };
+        if self.unplaced_in_flight(s, t).await {
+            return;
+        }
+        let all = self.raw_list(s, t, MAX_SCOPED_SCAN).await;
+        if !self.open() || all.len() >= MAX_SCOPED_SCAN {
+            return;
+        }
+        if !all.iter().any(|r| !r.id.contains(scopes::SEP)) {
+            self.mark_unplaced_none(s, t, epoch).await;
         }
     }
 
@@ -558,11 +703,18 @@ impl<'a> StateAccess<'a> {
         let moved = r.id != plain;
         let unplaced = !moved && rt.index().parent_scopes().get(&t).is_some();
         // Marked before it is stored: a list between the two reads the type.
-        if unplaced && !self.note_unplaced_held(s, &t, true, true).await {
-            return false;
-        }
+        let pending = match unplaced {
+            true => match self.unplaced_storing(s, &t).await {
+                Some(pending) => Some(pending),
+                None => return false,
+            },
+            false => None,
+        };
         let r = rt.state.upsert(s, r).await;
         let ok = self.settle(r).is_some();
+        if let Some(pending) = pending {
+            self.unplaced_stored(s, &pending).await;
+        }
         self.wrote |= ok;
         // The record found under no parent is this parent's now: it goes, so no other
         // parent finds what it was.
@@ -617,7 +769,9 @@ impl<'a> StateAccess<'a> {
         self.unplaced.swap_remove(at);
         if self.open() {
             let r = self.rt.state.delete(s, t, id).await;
-            self.settle(r);
+            if self.settle(r) == Some(true) {
+                self.unplaced_left(s, t).await;
+            }
         }
     }
 
@@ -642,6 +796,9 @@ impl<'a> StateAccess<'a> {
         }
         let r = self.rt.state.delete(s, t, &stored).await;
         let mut held = self.settle(r);
+        // Whether a record stored under no parent went.
+        let scoped = self.rt.index().parent_scopes().get(t).is_some();
+        let mut unplaced_gone = scoped && !stored.contains(scopes::SEP) && held == Some(true);
         // An unplaced record of that id that fits the parent goes too: it would read
         // back as the deleted one.
         if stored != id
@@ -652,7 +809,11 @@ impl<'a> StateAccess<'a> {
             let r = self.rt.state.delete(s, t, id).await;
             if let Some(gone) = self.settle(r) {
                 held = Some(held.unwrap_or(false) || gone);
+                unplaced_gone |= gone;
             }
+        }
+        if unplaced_gone {
+            self.unplaced_left(s, t).await;
         }
         self.deleted(s, t, id, held).await
     }
@@ -727,11 +888,18 @@ impl<'a> StateAccess<'a> {
             return false;
         }
         // Marked before it is stored, as [`Self::upsert`] marks.
-        if unplaced && !self.note_unplaced_held(s, &t, true, true).await {
-            return false;
-        }
+        let pending = match unplaced {
+            true => match self.unplaced_storing(s, &t).await {
+                Some(pending) => Some(pending),
+                None => return false,
+            },
+            false => None,
+        };
         let r = rt.state.insert_seeded(s, r).await;
         let stored = self.settle(r).unwrap_or(false);
+        if let Some(pending) = pending {
+            self.unplaced_stored(s, &pending).await;
+        }
         self.wrote |= stored;
         if stored {
             rt.written_types().remember(s, &t);
