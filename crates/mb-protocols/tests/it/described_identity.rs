@@ -1115,7 +1115,7 @@ async fn a_nested_route_reaches_its_parent_by_a_described_alternate() {
 }
 
 #[tokio::test]
-async fn another_owners_record_named_by_a_described_alternate_is_not_missing() {
+async fn another_owners_record_named_by_a_described_alternate_is_missing_under_its_parent() {
     let options = HarnessOptions {
         unknown_ids_not_found: true,
         ..HarnessOptions::default()
@@ -1140,8 +1140,8 @@ async fn another_owners_record_named_by_a_described_alternate_is_not_missing() {
             )
             .await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
-        // Another space's page goes by `hx`: a route that cannot tell whose it is does
-        // not call it missing.
+        // Another space's page goes by `hx`: a page is keyed under its space, so this
+        // space holds none.
         let (status, _, _) = h.send("GET", "/spaces/s2/pages/hx", None, &[]).await;
         statuses.push(status);
         let (status, _, _) = h.send("GET", "/spaces/s2/pages/zz9", None, &[]).await;
@@ -1152,7 +1152,7 @@ async fn another_owners_record_named_by_a_described_alternate_is_not_missing() {
     // Under its own space it is read by `handle` too; a value no page holds is missing.
     // With no world `handle` names nothing.
     let (ok, missing) = (StatusCode::OK, StatusCode::NOT_FOUND);
-    assert_eq!(statuses, [ok, missing, ok, missing, missing, missing]);
+    assert_eq!(statuses, [missing, missing, ok, missing, missing, missing]);
 }
 
 /// Documents keyed by `_id`, whose replace answers a write acknowledgement

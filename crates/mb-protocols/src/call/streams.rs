@@ -16,6 +16,7 @@ pub(crate) async fn open_stream(
 
     let op = plan.op;
     let mut state = StateAccess::new(rt);
+    state.scope_to(op, &call);
     let target_id = target_id(op, &call);
     let (target, related) = async {
         let (target, mut related, followed) =

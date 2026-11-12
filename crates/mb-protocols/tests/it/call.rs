@@ -2087,10 +2087,8 @@ async fn stored_data(state: &MemoryStore, resource_type: &str, id: &str) -> Valu
         mock: "references".into(),
         session: "default".into(),
     };
-    state
-        .get(&session, resource_type, id)
+    crate::support::find_stored(state, &session, resource_type, id)
         .await
-        .unwrap()
         .unwrap()
         .data
 }
@@ -3205,8 +3203,9 @@ async fn string_id_repos_stay_apart_across_owners() {
     assert_eq!(api.provider.requests().len(), 2);
 }
 
-/// A numeric `id` is the resource's own, but an answer with no `full_name`
-/// does not say whose it is: stored, its name would answer for any owner.
+/// A numeric `id` is the resource's own, and an answer with no `full_name` does not
+/// say whose it is: a repository is keyed under its owner, so it is stored under the
+/// one the path names and answers that owner's reads only.
 #[tokio::test]
 async fn a_read_by_name_with_no_full_name_does_not_answer_for_another_owner() {
     let answer = |id: u32, stars: u32| {
@@ -3217,7 +3216,7 @@ async fn a_read_by_name_with_no_full_name_does_not_answer_for_another_owner() {
     let (_, other) = read(&api, "/repos/cat/hello").await;
     assert_eq!(other["stargazers_count"], 9, "{other}");
     let (source, again) = read(&api, "/repos/octo/hello").await;
-    assert_eq!(source, "cache");
+    assert!(["cache", "state"].contains(&source.as_str()), "{source}");
     assert_eq!(again["stargazers_count"], 42);
 }
 
@@ -3381,7 +3380,11 @@ async fn an_action_on_an_unknown_id_answers_and_stores_nothing() {
             session: "default".into(),
         };
         for id in ["nope", "sh_1"] {
-            assert!(state.get(&session, "orders", id).await.unwrap().is_none());
+            assert!(
+                crate::support::find_stored(&*state, &session, "orders", id)
+                    .await
+                    .is_none()
+            );
         }
     }
 }
@@ -3440,7 +3443,11 @@ paths:
         mock: "references".into(),
         session: "default".into(),
     };
-    assert!(state.get(&session, "things", "t1").await.unwrap().is_none());
+    assert!(
+        crate::support::find_stored(&*state, &session, "things", "t1")
+            .await
+            .is_none()
+    );
 }
 
 /// A read of an intent is stored, though `{intent}` is not named like an id:
@@ -3870,7 +3877,7 @@ components:
     h.seeded("POST", "/orgs/b/teams", None).await;
     let (_, _, copy) = h.call("POST", "/orgs/a/teams/t1/copies", None).await;
     assert_eq!(copy["name"], "copy");
-    assert_ne!(copy["id"], "t9");
+    // A team is keyed under its org: org b's `t9` leaves the id free in org a.
     let (_, _, theirs) = h.call("GET", "/orgs/b/teams/t9", None).await;
     assert_eq!(theirs["name"], "theirs");
 }
@@ -4976,7 +4983,7 @@ async fn another_owners_write_leaves_a_string_id_alone() {
 }
 
 /// A record speaks only for the resource as it was recorded: a session reset or
-/// a fixture may put another one under that id.
+/// a fixture may put another one under that id (a team is keyed under its org).
 #[tokio::test]
 async fn a_record_does_not_outlive_its_resource() {
     let provider = Arc::new(ScriptedProvider::new(vec![
@@ -5008,7 +5015,7 @@ async fn a_record_does_not_outlive_its_resource() {
             &session,
             StoredResource {
                 resource_type: "teams".into(),
-                id: "1".into(),
+                id: "octo\u{1f}1".into(),
                 data: json!({"id": 1, "slug": "core", "full_name": "cat/core", "members": 9}),
             },
         )
@@ -5079,8 +5086,9 @@ components:
     assert_gone(&api, "/airports/SFO").await;
 }
 
-/// Another organisation's read with the same small id replaces the summary, and
-/// the record goes with it: that team no longer answers for the first.
+/// Another organisation's read with the same small id is another record: a team is
+/// keyed under its organisation, so the first keeps its own summary, and no team of
+/// the other answers for it.
 #[tokio::test]
 async fn another_owners_read_over_a_summary_does_not_answer_for_the_first() {
     let contract = TEAMS
@@ -5109,8 +5117,12 @@ async fn another_owners_read_over_a_summary_does_not_answer_for_the_first() {
     );
     read(&api, "/orgs/octo/teams").await;
     read(&api, "/orgs/cat/teams/core").await;
-    let (source, own) = read(&api, "/orgs/octo/teams/core").await;
-    assert_ne!(source, "state", "cat's team answered for octo: {own}");
+    let (_, own) = read(&api, "/orgs/octo/teams/core").await;
+    assert_ne!(
+        own["full_name"], "cat/core",
+        "cat's team answered for octo: {own}"
+    );
+    assert_eq!(own["members"], 3, "octo's own summary: {own}");
 }
 
 /// A trailing slash in the contract is the same collection.
@@ -5380,7 +5392,11 @@ async fn a_write_acts_on_a_resource_that_shows_no_owner() {
         mock: "actions".into(),
         session: "default".into(),
     };
-    assert!(state.get(&session, "teams", "1").await.unwrap().is_none());
+    assert!(
+        crate::support::find_stored(&*state, &session, "teams", "1")
+            .await
+            .is_none()
+    );
 }
 
 /// A second path ending in the name under another owner is no proof: a fork
@@ -5578,8 +5594,21 @@ async fn a_delete_by_number_takes_the_issue_linking_to_its_repository() {
         mock: "actions".into(),
         session: "default".into(),
     };
-    assert!(state.get(&session, "issues", "1").await.unwrap().is_none());
-    assert!(state.get(&session, "issues", "2").await.unwrap().is_some());
+    // Each issue is stored under the repository its link names.
+    assert!(
+        state
+            .get(&session, "issues", "octo\u{1f}hello\u{1f}1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        state
+            .get(&session, "issues", "cat\u{1f}world\u{1f}2")
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 /// A delete under a repository no stored issue links to removes nothing.
@@ -6642,8 +6671,9 @@ async fn an_own_effect_is_owner_checked_as_merged() {
     let record = records.wait(1).await.remove(0);
     let outcome = &record.request["effects"][0];
     assert_eq!(outcome["outcome"], "applied", "{outcome}");
+    // Written under its org (a team is keyed under it).
     assert_eq!(
-        stored_data(&state, "teams", "core").await["org"],
+        stored_data(&state, "teams", "octo\u{1f}core").await["org"],
         json!({"login": "octo", "plan": "pro"})
     );
 }

@@ -208,6 +208,36 @@ struct Parent {
     /// Its type's definition name.
     ty: String,
     id: String,
+    /// The values it and the records around it are named by: the arguments they were
+    /// read by and their scalar members (a level down too: an `owner`'s `login`), what a
+    /// parent-scoped record's parent values must be among (see [`Walk::parents`]).
+    names: Vec<String>,
+}
+
+/// Names a parent or a lookup holds at most.
+const MAX_NAMES: usize = 64;
+
+/// The text of each scalar of `values`, a path's segments too (`a/x` names `a` and
+/// `x`), added to `out` up to [`MAX_NAMES`].
+fn add_names<'v>(values: impl Iterator<Item = &'v Value>, out: &mut Vec<String>) {
+    for value in values {
+        if out.len() >= MAX_NAMES {
+            return;
+        }
+        let text = match value {
+            Value::String(text) => text.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => continue,
+        };
+        if text.contains('/') && !text.contains(char::is_whitespace) {
+            out.extend(
+                text.split('/')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+            );
+        }
+        out.push(text);
+    }
 }
 
 /// Answers the fields below `op`'s root in `body` (keyed by response key,
@@ -227,6 +257,7 @@ pub(crate) async fn from_state(
     let mut types = BTreeSet::new();
     collect(&rt.bundle, schema, sel, 0, &mut types);
     let mut held = HashMap::new();
+    let mut parents = HashMap::new();
     for t in types {
         let own = t.to_lowercase();
         let mut records = call::stored_of_type(rt, session, &own, MAX_HELD).await;
@@ -239,11 +270,28 @@ pub(crate) async fn from_state(
             .and_then(Value::as_object);
         if let Some(props) = props {
             for other in call::shared::equivalents(rt, &own) {
-                for record in call::stored_of_type(rt, session, &other, MAX_HELD).await {
+                for (parent, record) in
+                    call::stored_with_parents(rt, session, &other, MAX_HELD).await
+                {
+                    let data = call::shared::reshape(props, &rt.bundle.defs, &record.data);
+                    // Two parents' records may share their id (issue `11` of `a/x` and
+                    // of `b/x`): such a record goes by the id its shape here gives it
+                    // (REST's `node_id` as `id`) where it has one, and its parent is
+                    // kept by position.
+                    let id = match &parent {
+                        Some(_) => data
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map_or(record.id, str::to_string),
+                        None => record.id,
+                    };
+                    if let Some(parent) = parent {
+                        parents.insert((t.clone(), records.len()), parent);
+                    }
                     records.push(StoredResource {
                         resource_type: own.clone(),
-                        data: call::shared::reshape(props, &rt.bundle.defs, &record.data),
-                        id: record.id,
+                        data,
+                        id,
                     });
                 }
             }
@@ -257,6 +305,7 @@ pub(crate) async fn from_state(
         narrowed: rt.narrowed(),
         superseded: Vec::new(),
         held,
+        parents,
         referred: None,
         contested: RefCell::new(HashSet::new()),
         overlaid: 0,
@@ -366,6 +415,12 @@ struct Walk<'a> {
     superseded: Vec<(String, String)>,
     /// By definition name, most recent first.
     held: HashMap<String, Vec<StoredResource>>,
+    /// The parent values of the held records another mock stores parent-scoped (REST's
+    /// issue `#5` of `a/x`), by definition name and position in `held` (two parents'
+    /// records may share an id): such a record is the one an object field's arguments
+    /// name only where its parent's values are among the names of the lookup and the
+    /// records around it (`repository(owner: "a", name: "x") { issue(number: 5) }`).
+    parents: HashMap<(String, usize), Vec<String>>,
     /// How many of the session's records refer to each id, by the types that
     /// can refer to a contested type (`Issue.repository`), whether or not the
     /// query selects them; read only once a lookup is contested.
@@ -536,10 +591,24 @@ impl Walk<'_> {
             obj.insert("id".into(), json!(id));
         }
         let own = match obj.get("id") {
-            Some(Value::String(id)) if props.contains_key("id") => Some(Parent {
-                ty: name.to_string(),
-                id: id.clone(),
-            }),
+            Some(Value::String(id)) if props.contains_key("id") => {
+                let mut names = Vec::new();
+                add_names(sel.args.values(), &mut names);
+                add_names(obj.values().filter(|v| !v.is_object()), &mut names);
+                add_names(
+                    obj.values()
+                        .filter_map(Value::as_object)
+                        .flat_map(|inner| inner.values()),
+                    &mut names,
+                );
+                names.extend(parent.iter().flat_map(|p| p.names.iter().cloned()));
+                names.truncate(MAX_NAMES);
+                Some(Parent {
+                    ty: name.to_string(),
+                    id: id.clone(),
+                    names,
+                })
+            }
             _ => None,
         };
         if let Some(own) = &own {
@@ -650,11 +719,29 @@ impl Walk<'_> {
         // Of several records the arguments name (one the session uses and a
         // copy written since, by a record pool or a model's answer), the one
         // the most held records refer to; the most recent among equals.
-        let mut best: Option<(usize, &String, &StoredResource)> = None;
+        // A record under a parent the lookup names (see [`Walk::parents`]) first, then
+        // the most referred to.
+        let mut best: Option<((bool, usize), &String, &StoredResource)> = None;
         let mut contested = Vec::new();
+        let mut names: Vec<String> = parent.map(|p| p.names.clone()).unwrap_or_default();
+        add_names(args.values(), &mut names);
+        // With no record around it, a lookup names a parent only where its arguments
+        // name a held record's whole parent (`repository(owner:, name:)`); one naming
+        // none (`pullRequestByNumber(number:)`) cannot tell parents apart.
+        let strict = parent.is_some()
+            || types.iter().any(|ty| {
+                let held = self.held.get(ty).map_or(0, Vec::len);
+                (0..held).any(|at| {
+                    self.parents.contains_key(&(ty.clone(), at))
+                        && self.named_parent(ty, at, &names)
+                })
+            });
         for ty in types {
-            for record in self.held.get(ty).into_iter().flatten() {
+            for (at, record) in self.held.get(ty).into_iter().flatten().enumerate() {
                 if generated == Some(record.id.as_str()) {
+                    continue;
+                }
+                if strict && !self.named_parent(ty, at, &names) {
                     continue;
                 }
                 if parent.is_some_and(|p| !self.loosely_under(record, p)) {
@@ -663,14 +750,16 @@ impl Walk<'_> {
                 if let (true, compared) = matches(args, record)
                     && compared > 0
                 {
-                    let referred = self.referrers(&record.id);
-                    if let Some((_, other, _)) = best
+                    let placed = strict && self.parents.contains_key(&(ty.clone(), at));
+                    let rank = (placed, self.referrers(&record.id));
+                    if let Some(((was_placed, _), other, _)) = best
                         && self.referred.is_none()
+                        && was_placed == placed
                     {
                         contested.extend([ty.clone(), other.clone()]);
                     }
-                    if best.is_none_or(|(n, _, _)| referred > n) {
-                        best = Some((referred, ty, record));
+                    if best.is_none_or(|(n, _, _)| rank > n) {
+                        best = Some((rank, ty, record));
                     }
                 }
             }
@@ -688,6 +777,19 @@ impl Walk<'_> {
             .and_then(|r| r.get(id))
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Whether the record held as type `ty` at position `at` is under a parent `names`
+    /// names: one another mock stores under no parent is, and so is one whose parent's
+    /// values are all among `names` (case aside, as GitHub's logins compare).
+    fn named_parent(&self, ty: &str, at: usize, names: &[String]) -> bool {
+        self.parents
+            .get(&(ty.to_string(), at))
+            .is_none_or(|values| {
+                values
+                    .iter()
+                    .all(|v| names.iter().any(|n| n.eq_ignore_ascii_case(v)))
+            })
     }
 
     /// Whether `record` refers to `parent`, or to no record of its type.

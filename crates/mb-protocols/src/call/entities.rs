@@ -161,9 +161,14 @@ pub(super) async fn seed_own_read(
         id,
         data: body.clone(),
     };
+    // A parent-scoped record is stored under the parent the path names (see
+    // [`super::scopes`]): it need not show it, only not show another.
     if (named != identity.field || !path_names_identity(identity))
         && let Some(owner) = owner_of(op, call)
-        && !shows_owner(rt, &resource, &owner)
+        && match state.parent_of(t) {
+            Some(_) => known_foreign(rt, session, &resource, &owner),
+            None => !shows_owner(rt, &resource, &owner),
+        }
     {
         return;
     }

@@ -1092,3 +1092,88 @@ type Query { project(owner: String!, name: String!): Project }
     assert_eq!(project["members"][0]["id"], "U_2", "{back}");
     assert_eq!(project["members"][0]["postalCode"], "94110", "{back}");
 }
+
+/// REST keeps issue `#1` of `a/x` and of `b/x` apart under their repositories; a
+/// GraphQL read of `repository(owner:, name:) { issue(number:) }` maps to the
+/// repository's own, whichever was stored last.
+#[tokio::test]
+async fn a_nested_graphql_read_finds_the_issue_of_its_repository() {
+    const ISSUES: &str = r##"
+openapi: 3.0.3
+info: {title: issues, version: "1"}
+paths:
+  /repos/{owner}/{repo}/issues/{issue_number}:
+    get:
+      operationId: getIssue
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+        - {name: issue_number, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+components:
+  schemas:
+    Issue:
+      type: object
+      required: [id, node_id, number, title]
+      properties:
+        id: {type: integer}
+        node_id: {type: string}
+        number: {type: integer}
+        title: {type: string}
+"##;
+    const SDL: &str = r#"
+type Issue { id: ID! number: Int! title: String! }
+type Repository { id: ID! name: String! issue(number: Int!): Issue }
+type Query { repository(owner: String!, name: String!): Repository }
+"#;
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let types = SharedTypes::default();
+    let rest_rt = joined(
+        ("github-rest", ISSUES),
+        vec![
+            // One id in both: the store keys each under its repository.
+            json!({"id": 11, "node_id": "I_a", "number": 1, "title": "In a/x"}),
+            json!({"id": 11, "node_id": "I_b", "number": 1, "title": "In b/x"}),
+        ],
+        &state,
+        &types,
+        None,
+    );
+    let rest_router = http_rest::router(rest_rt);
+    let made_up = |owner: &str| {
+        json!({"__typename": "Repository", "id": format!("R_{owner}"), "name": "x",
+               "issue": {"__typename": "Issue", "id": "I_made", "number": 1, "title": "Made up"}})
+    };
+    let gh = joined(
+        ("github-graphql", SDL),
+        vec![made_up("a"), made_up("b")],
+        &state,
+        &types,
+        None,
+    );
+    let gql_router = graphql::try_router(gh).unwrap();
+    for repo in ["a", "b"] {
+        let read = rest(
+            &rest_router,
+            "GET",
+            &format!("/repos/{repo}/x/issues/1"),
+            None,
+        )
+        .await;
+        assert_eq!(read["title"], format!("In {repo}/x"), "{read}");
+    }
+    for owner in ["a", "b"] {
+        let back = gql(
+            &gql_router,
+            &format!(r#"{{ repository(owner: "{owner}", name: "x") {{ issue(number: 1) {{ number title }} }} }}"#),
+            false,
+        )
+        .await;
+        assert_eq!(
+            back["repository"]["issue"]["title"],
+            format!("In {owner}/x"),
+            "{back}"
+        );
+    }
+}

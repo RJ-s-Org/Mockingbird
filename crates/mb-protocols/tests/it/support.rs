@@ -26,6 +26,33 @@ use mb_protocols::{RequestRecord, RequestRecorder};
 /// executed send it on their creates.
 pub const SEED: (&str, &str) = ("x-mockingbird-seed", "1");
 
+/// The record's own id of a stored id: a parent-scoped type's records are stored under
+/// their parent's values and their id, joined by U+001F (`a\u{1f}x\u{1f}5`).
+#[allow(dead_code)]
+pub fn plain_id(stored: &str) -> &str {
+    stored.rsplit_once('\u{1f}').map_or(stored, |(_, id)| id)
+}
+
+/// The record of type `t` `store` holds under `id` in `session`: under no parent, else
+/// the first under any parent (see [`plain_id`]).
+#[allow(dead_code)]
+pub async fn find_stored(
+    store: &dyn mb_state::StateStore,
+    session: &mb_state::SessionKey,
+    t: &str,
+    id: &str,
+) -> Option<mb_state::StoredResource> {
+    if let Some(r) = store.get(session, t, id).await.unwrap() {
+        return Some(r);
+    }
+    store
+        .list(session, t, 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| plain_id(&r.id) == id)
+}
+
 /// Polls `check` every `poll` until it returns `Ok`, and returns that value.
 ///
 /// Panics once `timeout` has passed, with the message of the last `Err`, so a
@@ -459,24 +486,22 @@ impl DescribedHarness {
             .await
             .unwrap()
             .into_iter()
-            .map(|r| r.id)
+            .map(|r| plain_id(&r.id).to_string())
             .collect();
         ids.sort();
         ids
     }
 
-    /// The record of type `t` stored under `id` in the default session.
+    /// The record of type `t` stored under `id` in the default session, under any
+    /// parent (see [`find_stored`]).
     pub async fn stored(&self, t: &str, id: &str) -> Option<serde_json::Value> {
         let session = mb_state::SessionKey {
             workspace: self.rt.workspace.clone(),
             mock: self.rt.name.clone(),
             session: "default".into(),
         };
-        self.rt
-            .state
-            .get(&session, t, id)
+        find_stored(self.rt.state.as_ref(), &session, t, id)
             .await
-            .unwrap()
             .map(|r| r.data)
     }
 }
