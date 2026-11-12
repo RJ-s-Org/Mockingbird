@@ -136,3 +136,49 @@ The binary and plugin were `main` at `b927dcc9`, which has #493, #505, #506 and 
 - The numbers above come from correcting the config's ports by hand.
 
 **Not measured: answer quality.** The OpenRouter key hit its spend limit during this run, so every model call got a 403 and fell back to the faker. `verify --run` reported each as a `fallback` with that reason. Quality and latency need a rerun once the limit is raised.
+
+## Run 4: fresh agent on main with the model back (2026-11-12)
+
+The binary and plugin were `main` at `e3604a9c`, which includes #557 and #559. The same prompt went to a fresh agent, and the flows ran through `mockingbird verify -c mockingbird/mockingbird.yaml --run "node mcp.mjs flows.json"`. `verify` used the agent's running server on 8080/9090 and started none; run 3's port problem didn't recur.
+
+**Agent build: 107 s, 27 turns, $0.70, no app edits.**
+- It wrote a 14-operation contract by hand, this time including `/places/v1/details/retrieve`, and served it with `hosts: [api.mapbox.com]` and the proxy.
+- It checked search, directions, reverse geocoding and a feedback write through the proxy. As in run 3, it didn't run the app's own calls.
+- It noted these gaps itself:
+  - directions ignores `steps=true`, so no legs come back;
+  - the feedback list is padded with generated records;
+  - its sort parameters don't work.
+
+**`verify --run`: passed, 0 failures, 15 requests in the window.** The app's text output is right for most steps. Its own output-schema check (an `Output validation warning` on stderr) still fails for four tools, so the contract's shapes don't match what the app reads in places (F4).
+
+| Step | Result |
+| --- | --- |
+| Search "Eiffel Tower" | ✓ "Eiffel Tower (Tour Eiffel), Champ de Mars, 5 Avenue Anatole France, 75007 Paris" |
+| Place details for that result | ✗ The mock answered from state with the same record the search served (4 ms). The app prints `Name: undefined`: it reads the Places API's flat object, and the contract declares a GeoJSON `Feature` (F4). |
+| Place details, unknown id | ✗ A 200 with an invented record (served as `state`, its `mapbox_id` not the one asked for), with the same shape problem |
+| Reverse geocoding | Text ✓ "350 5th Ave, New York, New York 10118". The app's output-schema check fails (F4). |
+| Category search, directions, isochrone, map matching, static map, ground location, tokens | ✓ |
+| Matrix, optimization | Text ✓. The app's output-schema check fails (F4). |
+| Search again | ✓ Identical, from cache |
+| Place details again | ✗ As above |
+
+| Calls | Sources | Model latency | State/cache latency | Tokens (prompt / completion) |
+| --- | --- | --- | --- | --- |
+| 15 | 9 `llm` with tokens, 1 `patched`, 3 `state`, 1 `cache`, and the static image (labelled `llm` with no tokens or body, F5) | p50 1.5 s, max 4.4 s (n = 10) | p50 5.5 ms | 26.6k / 5.0k |
+
+| # | Class | Failure | Repro: request → expected → got |
+| --- | --- | --- | --- |
+| F4 | Agent build (contract shapes) | Response shapes in the hand-written contract differ from what the app reads | `GET /places/v1/details/retrieve/{id}` → a flat object with `name`, `full_address` and so on (the app's `PlaceDetailsOutput`; only the legacy `/search/details/v1/retrieve` returns a `Feature`) → a `Feature`, so `name` is under `properties`. Reverse geocoding, matrix and optimization also fail the app's output schemas (missing members). `verify --run` can't see this: the answers are valid against the contract. The app ships an output schema for almost every tool (`src/tools/*/*.output.schema.ts`; not the static map) that the agent could have written the contract from. Open (skills). |
+| F5 | Request log (minor) | The static image is logged as `source: llm` with 0 tokens and no body | `GET /styles/v1/mapbox/streets-v12/static/…` → an image or an empty body, with its true source → `llm`, 3 ms. Open. |
+
+**Scorecard (run 4).** Measure 1 uses run 1's target: every flow passes.
+
+| # | Measure | Result |
+| --- | --- | --- |
+| 1 | App's tests and main flows | ✗ The three place-details steps print the wrong data. Three more steps print right but fail the app's own output-schema check (F4). The app's unit tests stub `fetch`. `verify --run` passes. |
+| 2 | Consistency | Partly. Details for a search result is that same record, from state, and a repeated search is identical. An unknown place id gets an invented record (no world, no unknown-id policy), as in run 1. |
+| 3 | Agent build | ✓ 107 s, 27 turns, $0.70, no app edits |
+| 4 | State/cache latency | ✓ p50 5.5 ms |
+| 5 | Model latency | ✓ p50 1.5 s, max 4.4 s (n = 10). Not rare: 10 of 15 calls reach the model. |
+| 6 | Spend | ✓ 26.6k prompt / 5.0k completion tokens, well under $0.05 at the listed `-1017` price |
+| 7 | Errors | Partly, as in run 1. An unknown place id gets an invented 200 record. |
