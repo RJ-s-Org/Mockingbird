@@ -62,6 +62,8 @@ pub const MIN_POOL_TOKENS: u64 = 5_000;
 pub(crate) const SERVED_TYPE: &str = "__mockingbird.pool";
 /// How long a fill waits before trying again when no generation slot was spare.
 const BUSY_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+/// How often a fill whose provider is backing off a rate limit looks again.
+const BACKOFF_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A mock's record pool: by type, the records the model wrote for it, with the digest
 /// of the schemas they were checked against, and the tokens spent filling it.
@@ -346,6 +348,20 @@ pub async fn fill(rt: Weak<MockRuntime>, cap: u64) {
                     count,
                 )
             };
+            // A provider marked unusable is not called: the pool stops until the
+            // runtime is next built. One backing off is waited for, off the request
+            // path, and the pool goes on after it.
+            if let Some(reason) = engine.provider_blocked() {
+                drop((engine, bundle));
+                if reason.starts_with(mb_engine::UNUSABLE_REASON) {
+                    if let Some(rt) = rt.upgrade() {
+                        tracing::info!(mock = %rt.name, %reason, "record pool stopped");
+                    }
+                    return;
+                }
+                tokio::time::sleep(BACKOFF_RETRY).await;
+                continue;
+            }
             let pooled = engine
                 .pool_records(&bundle, &op, &schema, &t, count, &taken)
                 .await;

@@ -624,6 +624,17 @@ pub struct StreamItem {
 /// with it (see [`FAKER_INVALID_REASON`]) is an offline answer too.
 pub const OFFLINE_REASON: &str = "no LLM is configured for this mock (offline)";
 
+pub use mb_llm::{BACKING_OFF_REASON, UNUSABLE_REASON};
+
+/// Whether a fallback `reason` is that the provider was not called at all: it
+/// is marked unusable for the run or backing off a rate limit (see
+/// [`mb_llm::health`]). Such a fallback is logged once, when the provider is
+/// marked, not per call.
+#[must_use]
+pub fn provider_down(reason: &str) -> bool {
+    reason.starts_with(UNUSABLE_REASON) || reason.starts_with(BACKING_OFF_REASON)
+}
+
 /// Added to a faker answer's fallback reason (after `; ` when there is one)
 /// when no faker draw validated against the schema, so the answer is not
 /// passed off as schema-valid. The faker does not generate for `not` or
@@ -938,6 +949,36 @@ impl Engine {
         self.provider.is_some()
     }
 
+    /// Why the provider must not be called now (marked unusable for the
+    /// run, or backing off a rate limit; see [`mb_llm::health`]); `None`
+    /// offline or when it may be. Counts nothing.
+    #[must_use]
+    pub fn provider_blocked(&self) -> Option<String> {
+        self.provider.as_ref()?.blocked()
+    }
+
+    /// The provider to call now, or why the answer goes without one:
+    /// [`OFFLINE_REASON`] without a provider, else the reason it is marked
+    /// unusable or backing off, that call then counted as fallen back
+    /// without contacting it. Every served LLM call asks this first, so a
+    /// marked provider costs no prompt, slot, retry, hedge or timeout.
+    pub(crate) fn live_provider(&self) -> Result<&Arc<dyn Provider>, String> {
+        let provider = self
+            .provider
+            .as_ref()
+            .ok_or_else(|| OFFLINE_REASON.to_string())?;
+        match provider.skip() {
+            Some(reason) => Err(reason),
+            None => Ok(provider),
+        }
+    }
+
+    /// The provider, unless offline or it must not be called now; counts
+    /// nothing (for calls off the request path).
+    pub(crate) fn callable_provider(&self) -> Option<&Arc<dyn Provider>> {
+        self.provider.as_ref().filter(|p| p.blocked().is_none())
+    }
+
     /// Whether a 2xx answer to `op`, with no forced status or scenario, may be offered a
     /// refusal by what the contract says alone, as the effects envelope's refusal is
     /// decided before what the prompt shows is looked at: an LLM answers, `op` is a write on an HTTP route
@@ -1018,16 +1059,25 @@ impl Engine {
             // Nothing to generate: the contract decides the answer. Offline,
             // it is labelled the faker's, like every other offline answer. A write
             // shown records besides its target is still asked what it changes there.
-            let (source, fallback_reason) = match self.provider {
-                Some(_) => (Source::Llm, None),
-                None => (Source::Fallback, Some(OFFLINE_REASON.to_string())),
+            // A provider marked unusable or backing off labels it so too.
+            let live = match self.provider_blocked() {
+                Some(_) if prompt::asks_bodyless_effects(op, status, &ctx) => self.live_provider(),
+                Some(reason) => Err(reason),
+                None => self.live_provider(),
             };
-            let (effects, usage) = match &self.provider {
-                Some(provider) if prompt::asks_bodyless_effects(op, status, &ctx) => {
+            let (source, fallback_reason) = match &live {
+                Ok(_) => (Source::Llm, None),
+                Err(reason) => (Source::Fallback, Some(reason.clone())),
+            };
+            let provider = live
+                .ok()
+                .filter(|_| prompt::asks_bodyless_effects(op, status, &ctx));
+            let (effects, usage) = match provider {
+                Some(provider) => {
                     self.bodyless_effects(provider.as_ref(), bundle, (op, status), call, &ctx)
                         .await
                 }
-                _ => Default::default(),
+                None => Default::default(),
             };
             return Ok(GeneratedResponse {
                 status,
@@ -1058,8 +1108,8 @@ impl Engine {
         };
         let mut usage = Usage::default();
         let mut draws = self.call_draws(bundle, &op.id, status, call);
-        let mut response = match &self.provider {
-            None => {
+        let mut response = match self.live_provider() {
+            Err(reason) => {
                 let mut fake = self.fake_response(
                     bundle,
                     variant,
@@ -1071,13 +1121,10 @@ impl Engine {
                         draws: &mut draws,
                     },
                 );
-                fake.fallback_reason = Some(with_faker_note(
-                    OFFLINE_REASON.to_string(),
-                    fake.fallback_reason.take(),
-                ));
+                fake.fallback_reason = Some(with_faker_note(reason, fake.fallback_reason.take()));
                 fake
             }
-            Some(provider) => {
+            Ok(provider) => {
                 let shaped = self.shaped(
                     bundle,
                     op,
@@ -1217,7 +1264,9 @@ impl Engine {
                         exec_notes: serde_json::Map::new(),
                     },
                     Err(reason) => {
-                        tracing::warn!(operation = %op.id, %reason, "LLM generation fell back to faker");
+                        if !provider_down(&reason) {
+                            tracing::warn!(operation = %op.id, %reason, "LLM generation fell back to faker");
+                        }
                         let mut fake = self.fake_response(
                             bundle,
                             variant,
@@ -1297,7 +1346,9 @@ impl Engine {
         parts: &[JointPart<'_>],
         may_be_null: &[bool],
     ) -> Option<Vec<GeneratedResponse>> {
-        let provider = self.provider.as_ref()?;
+        // A marked provider leaves each part to its own generation, which
+        // falls back at once.
+        let provider = self.callable_provider()?;
         let mut shapes = Vec::with_capacity(parts.len());
         let mut properties = Map::new();
         for part in parts {

@@ -148,6 +148,14 @@ impl Provider for MeteredProvider {
         self.inner.total_timeout(request_timeout)
     }
 
+    fn blocked(&self) -> Option<String> {
+        self.inner.blocked()
+    }
+
+    fn skip(&self) -> Option<String> {
+        self.inner.skip()
+    }
+
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, LlmError> {
         let started = Instant::now();
         let result = self.inner.complete(req).await;

@@ -43,7 +43,7 @@ impl Engine {
         taken: &[String],
     ) -> Pooled {
         let mut pooled = Pooled::default();
-        let Some(provider) = &self.provider else {
+        let Some(provider) = self.callable_provider() else {
             return pooled;
         };
         let wrapped = json!({
@@ -94,6 +94,7 @@ impl Engine {
                 }
             }
             Err(reason) if reason == crate::guards::BUSY => pooled.busy = true,
+            Err(reason) if crate::provider_down(&reason) => {}
             Err(reason) => {
                 tracing::warn!(operation = %op.id, type_name, %reason, "record pool call failed");
             }

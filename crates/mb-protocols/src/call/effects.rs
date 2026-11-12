@@ -1353,12 +1353,14 @@ pub(super) fn mended_set(
 }
 
 /// A faker answer standing in for a failed LLM call (an offline mock's
-/// answers are its real ones, and a faker answer that only notes it found no
+/// answers are its real ones, and so are those of a mock whose provider is
+/// marked unusable for the run; a faker answer that only notes it found no
 /// valid draw stands in for nothing).
 pub(crate) fn transient_fallback(generated: &GeneratedResponse) -> bool {
     generated.source == Source::Fallback
-        && generated
-            .fallback_reason
-            .as_deref()
-            .is_some_and(|r| !r.starts_with(OFFLINE_REASON) && r != FAKER_INVALID_REASON)
+        && generated.fallback_reason.as_deref().is_some_and(|r| {
+            !r.starts_with(OFFLINE_REASON)
+                && !r.starts_with(mb_engine::UNUSABLE_REASON)
+                && r != FAKER_INVALID_REASON
+        })
 }

@@ -53,7 +53,7 @@ impl Engine {
     ) -> Result<GeneratedMessage, EngineError> {
         let validator = self.channel_validator(bundle, channel)?;
         let schema = &channel.message_schema;
-        let Some(provider) = &self.provider else {
+        let Ok(provider) = self.live_provider() else {
             return Ok(GeneratedMessage {
                 payload: self.fake_value(
                     bundle,
@@ -85,7 +85,9 @@ impl Engine {
         {
             Ok(answer) => (answer.value, answer.source),
             Err(reason) => {
-                tracing::warn!(channel = %channel.id, %reason, "LLM message generation fell back to faker");
+                if !crate::provider_down(&reason) {
+                    tracing::warn!(channel = %channel.id, %reason, "LLM message generation fell back to faker");
+                }
                 (
                     self.fake_value(
                         bundle,

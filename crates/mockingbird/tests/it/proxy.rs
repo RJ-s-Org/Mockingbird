@@ -49,6 +49,7 @@ fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
         webhook_log: Default::default(),
         record_pools: Default::default(),
         shared_types: Default::default(),
+        llm_health: Default::default(),
     }
 }
 

@@ -36,6 +36,7 @@ use futures::stream::BoxStream;
 use serde_json::Value;
 
 pub mod fallback;
+pub mod health;
 pub mod http;
 pub mod openai;
 pub mod repetition;
@@ -43,6 +44,9 @@ pub mod repetition;
 pub mod scripted;
 
 pub use fallback::{FallbackProvider, HopSettings};
+pub use health::{
+    BACKING_OFF_REASON, HealthRegistry, HealthSnapshot, ProviderHealth, UNUSABLE_REASON,
+};
 pub use http::{HttpOptions, http_client};
 pub use openai::{MAX_FREE_TEXT_CHARS, OpenAiCompatible, OpenAiConfig, OutputMode};
 #[cfg(feature = "testing")]
@@ -234,6 +238,12 @@ pub enum LlmError {
         /// it did, else estimated from the bytes (4 to a token).
         usage: Usage,
     },
+    /// The provider was not contacted: its key was refused for good (marked
+    /// unusable for the rest of the run) or it is backing off a rate limit
+    /// (see [`health`]). The message says which, starting with
+    /// [`UNUSABLE_REASON`] or [`BACKING_OFF_REASON`].
+    #[error("{0}")]
+    Unavailable(String),
 }
 
 impl LlmError {
@@ -244,7 +254,10 @@ impl LlmError {
         match self {
             LlmError::Transport(_) | LlmError::Empty(_) | LlmError::Repeated { .. } => true,
             LlmError::Http { status, .. } => *status == 408 || *status == 429 || *status >= 500,
-            LlmError::Timeout | LlmError::Decode(_) | LlmError::Truncated { .. } => false,
+            LlmError::Timeout
+            | LlmError::Decode(_)
+            | LlmError::Truncated { .. }
+            | LlmError::Unavailable(_) => false,
         }
     }
 
@@ -336,6 +349,19 @@ pub trait Provider: Send + Sync {
     /// provider answers with an error, a cut-short or an empty reply.
     /// [`LlmError::is_retryable`] says whether another attempt may succeed.
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, LlmError>;
+
+    /// Why a call now would not reach the provider (see [`health`]), or
+    /// `None` when it would. Counts nothing; the default is always `None`.
+    fn blocked(&self) -> Option<String> {
+        None
+    }
+
+    /// Asked before a call is made: [`Provider::blocked`]'s reason, the call
+    /// then counted as fallen back without contacting the provider, which
+    /// the caller answers without. `None` when the call may be made.
+    fn skip(&self) -> Option<String> {
+        None
+    }
 
     /// The longest a [`Provider::complete`] call with `request_timeout` may
     /// take: the request timeout for a single provider; the sum over every

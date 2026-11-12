@@ -336,9 +336,10 @@ impl Engine {
             .collect();
         let names: Vec<&str> = asked.iter().map(|(name, _)| *name).collect();
         let restricted = json!({"type": "object", "properties": properties, "required": names});
-        if let (Some(provider), Ok(validator)) =
-            (&self.provider, self.schema_validator(bundle, &restricted))
-        {
+        if let (Ok(provider), Ok(validator)) = (
+            self.live_provider(),
+            self.schema_validator(bundle, &restricted),
+        ) {
             let prompt_schema = compact::response_prompt_schema(
                 bundle,
                 &restricted,
@@ -381,6 +382,7 @@ impl Engine {
                         }
                     }
                 }
+                Err(reason) if crate::provider_down(&reason) => {}
                 Err(reason) => {
                     tracing::warn!(operation = %op.id, %reason, "fill fell back to the faker");
                 }

@@ -5,9 +5,11 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use crate::health::{ProviderHealth, retry_after_secs};
 use crate::repetition::RepetitionGuard;
 use crate::{
     CUT_REPLIES_METRIC, Capabilities, ChatRequest, ChatResponse, HttpOptions, LlmError,
@@ -159,6 +161,9 @@ pub struct OpenAiCompatible {
     /// Whether `complete` may stream; cleared for good when the endpoint
     /// refuses `stream` itself.
     streaming: AtomicBool,
+    /// Whether the provider may be called at all (see
+    /// [`Self::with_health`]); `None` never stops a call.
+    health: Option<Arc<ProviderHealth>>,
 }
 
 impl std::fmt::Debug for OpenAiCompatible {
@@ -197,7 +202,53 @@ impl OpenAiCompatible {
             repetition_guard: true,
             repetition_span: crate::repetition::DEFAULT_SPAN,
             streaming: AtomicBool::new(true),
+            health: None,
         })
+    }
+
+    /// Calls go through `health` (see [`crate::health`]): one the provider
+    /// answers with a status that says its key is spent (`401`, `402`, a
+    /// key-limit or credit `403`) marks it unusable, a `429` backs it off,
+    /// and while either holds every call fails at once with
+    /// [`LlmError::Unavailable`] without contacting the provider, and is not
+    /// retried. Clients of one profile share one.
+    #[must_use]
+    pub fn with_health(mut self, health: Arc<ProviderHealth>) -> Self {
+        self.health = Some(health);
+        self
+    }
+
+    /// Fails with [`LlmError::Unavailable`], counting the call, while the
+    /// provider must not be called.
+    fn admit(&self) -> Result<(), LlmError> {
+        self.health.as_ref().map_or(Ok(()), |h| h.admit())
+    }
+
+    /// `error`, or [`LlmError::Unavailable`] when it is an HTTP status that
+    /// marks the provider unusable or backs it off.
+    fn observed(&self, error: LlmError, retry_after: Option<Duration>) -> LlmError {
+        match (&self.health, &error) {
+            (Some(health), LlmError::Http { status, body }) => {
+                health.observe(*status, body, retry_after).unwrap_or(error)
+            }
+            _ => error,
+        }
+    }
+
+    /// The error of a response with a non-2xx status: an [`LlmError::Http`]
+    /// carrying its body, or [`LlmError::Unavailable`] when the status marks
+    /// the provider (its `Retry-After` read for a `429`).
+    async fn status_error(&self, resp: reqwest::Response) -> LlmError {
+        let status = resp.status().as_u16();
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(retry_after_secs);
+        match resp.text().await {
+            Ok(body) => self.observed(LlmError::Http { status, body }, retry_after),
+            Err(e) => LlmError::Transport(e.to_string()),
+        }
     }
 
     /// Whether to stop a reply that has fallen into a loop (on by default):
@@ -515,16 +566,8 @@ impl OpenAiCompatible {
             }
         }
         let resp = self.post(&body).await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| LlmError::Transport(e.to_string()))?;
-            return Err(LlmError::Http {
-                status: status.as_u16(),
-                body: text,
-            });
+        if !resp.status().is_success() {
+            return Err(self.status_error(resp).await);
         }
         Ok(resp)
     }
@@ -573,17 +616,13 @@ impl OpenAiCompatible {
             return self.send_once_streamed(req, reasoning, json_only).await;
         }
         let resp = self.post(&self.body(req, reasoning, json_only)).await?;
-        let status = resp.status();
+        if !resp.status().is_success() {
+            return Err(self.status_error(resp).await);
+        }
         let text = resp
             .text()
             .await
             .map_err(|e| LlmError::Transport(e.to_string()))?;
-        if !status.is_success() {
-            return Err(LlmError::Http {
-                status: status.as_u16(),
-                body: text,
-            });
-        }
         parse_reply_text(&text, req.max_tokens)
     }
 
@@ -692,6 +731,8 @@ impl OpenAiCompatible {
         match self.send(req).await {
             Err(e) if e.is_retryable() && tokio::time::Instant::now() < deadline => {
                 tracing::debug!(error = %e, "retrying the LLM call once");
+                // Another call may have marked the provider meanwhile.
+                self.admit()?;
                 let spent = e.spent();
                 if spent != Usage::default()
                     && let Ok(mut held) = stopped.lock()
@@ -1108,7 +1149,7 @@ impl<'de> serde::de::Visitor<'de> for ProbeVisitor {
 }
 
 /// The first 300 bytes of `text`, cut at a character boundary.
-fn excerpt(text: &str) -> String {
+pub(crate) fn excerpt(text: &str) -> String {
     const LIMIT: usize = 300;
     if text.len() <= LIMIT {
         return text.to_string();
@@ -1373,9 +1414,19 @@ impl Provider for OpenAiCompatible {
         }
     }
 
+    fn blocked(&self) -> Option<String> {
+        self.health.as_ref()?.blocked()
+    }
+
+    fn skip(&self) -> Option<String> {
+        self.admit().err().map(|e| e.to_string())
+    }
+
     /// Records the model as `llm.model` on the current span (the engine's
-    /// `mb.llm` span).
+    /// `mb.llm` span). Fails at once with [`LlmError::Unavailable`] while
+    /// the provider is marked (see [`Self::with_health`]).
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, LlmError> {
+        self.admit()?;
         tracing::Span::current().record("llm.model", self.config.model.as_str());
         let deadline = tokio::time::Instant::now() + req.timeout;
         // A failed attempt that spent tokens, kept outside the timed call:
@@ -1403,6 +1454,7 @@ impl Provider for OpenAiCompatible {
     /// good when the endpoint rejects it): the usage of the final chunk is
     /// reported once the stream has ended.
     async fn stream_metered(&self, req: ChatRequest) -> Result<MeteredStream, LlmError> {
+        self.admit()?;
         tracing::Span::current().record("llm.model", self.config.model.as_str());
         let resp = match tokio::time::timeout(req.timeout, self.open_stream(&req)).await {
             Ok(r) => r?,

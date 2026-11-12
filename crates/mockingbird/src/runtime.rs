@@ -103,6 +103,11 @@ pub struct RuntimeDeps {
     /// The record types of the mocks of each `shares` group: the mounted mocks', set
     /// each time the registry publishes them (see [`mb_protocols::SharedTypes`]).
     pub shared_types: mb_protocols::SharedTypes,
+    /// Whether each profile's provider may be called (see
+    /// [`mb_llm::health`]): one whose key is refused is not called again
+    /// until a reload changes its key or base URL, and one rate limited
+    /// waits out its backoff. `/readyz` reports it.
+    pub llm_health: Arc<mb_llm::HealthRegistry>,
 }
 
 /// Each mock's [`RecordPool`], by workspace and name: a rebuilt runtime (a world or
@@ -948,6 +953,11 @@ async fn openai_provider(
         }
         headers.push((name.clone(), value));
     }
+    let health = deps.llm_health.for_profile(
+        &format!("{}/{}", profile.workspace, profile.name),
+        &profile.base_url,
+        api_key.as_deref(),
+    );
     let provider = OpenAiCompatible::new(OpenAiConfig {
         base_url: profile.base_url.clone(),
         api_key,
@@ -962,7 +972,8 @@ async fn openai_provider(
     Ok(Arc::new(
         provider
             .with_repetition_guard(guard)
-            .with_repetition_span(span),
+            .with_repetition_span(span)
+            .with_health(health),
     ))
 }
 

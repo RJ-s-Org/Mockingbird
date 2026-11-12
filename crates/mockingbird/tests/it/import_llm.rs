@@ -40,6 +40,7 @@ fn deps(store: Arc<dyn ControlStore>, offline: bool, default_profile: Option<&st
         webhook_log: Default::default(),
         record_pools: Default::default(),
         shared_types: Default::default(),
+        llm_health: Default::default(),
     }
 }
 

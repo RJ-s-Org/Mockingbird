@@ -65,12 +65,14 @@ impl Engine {
         // and a seeded stream repeats item for item.
         let draws = self.call_draws(&bundle, &op.id, status, &call);
         // Repairs happen to LLM items only: none to seed offline.
-        let repair_seed = self
-            .provider
+        // A provider marked unusable or backing off streams nothing: every
+        // item is the faker's, as offline.
+        let provider = self.live_provider().ok().cloned();
+        let repair_seed = provider
             .as_ref()
             .and_then(|_| self.repair_seed(&bundle, &op.id, [&call]));
 
-        let (upstream, repair_system) = match &self.provider {
+        let (upstream, repair_system) = match &provider {
             None => (Upstream::Closed, None),
             Some(_) => {
                 let messages = tracing::info_span!("mb.prompt").in_scope(|| {
@@ -92,7 +94,7 @@ impl Engine {
 
         let state = StreamState {
             engine: Arc::clone(self),
-            provider: self.provider.clone(),
+            provider,
             bundle,
             op_id: op.id.clone(),
             schema,
@@ -455,7 +457,9 @@ impl StreamState {
         match self.repair(provider, line, &errors).await {
             Ok(value) => (value, Source::Repaired),
             Err(reason) => {
-                tracing::warn!(operation = %self.op_id, %reason, "stream item fell back to faker");
+                if !crate::provider_down(&reason) {
+                    tracing::warn!(operation = %self.op_id, %reason, "stream item fell back to faker");
+                }
                 (self.fake(), Source::Fallback)
             }
         }
