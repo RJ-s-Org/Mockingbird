@@ -1850,7 +1850,8 @@ pub(super) const GAP_DEPTH: usize = 6;
 /// Which members below a record's top [`gaps`] takes.
 #[derive(Clone, Copy)]
 pub(super) enum Unsent<'r> {
-    /// Only those a schema requires (what a replace's reads need).
+    /// Only those a schema requires, and what an object or list the record holds
+    /// lacks (what a replace's reads need).
     Required,
     /// Every declared one nothing set (a create's), optional ones too, of an object
     /// the request sent, but a `writeOnly` member and a reference the request could
@@ -1893,7 +1894,8 @@ pub(super) fn gaps(
 
 /// An object schema of what `schema` requires that `value` does not hold, and below
 /// the top, with [`Unsent::All`], what else it declares that `value` does not hold
-/// (see [`gaps`]); `None` when it holds all of it.
+/// (see [`gaps`]); an object or list `value` holds is followed whether required or
+/// not. `None` when it holds all of it.
 fn lacking(
     (rt, t): (&crate::MockRuntime, &str),
     schema: &Value,
@@ -1923,6 +1925,22 @@ fn lacking(
                 Unsent::All(request, sent) => (request, sent),
                 Unsent::Required => (None, None),
             };
+            // An object or list it holds is answered whole, optional or not: what that
+            // lacks is taken too (a record another writer stored in part). Only a member
+            // a part of the schema itself declares, not one a union branch alone does.
+            let declared: Vec<&String> = whole_parts(bundle, &schema)
+                .iter()
+                .filter_map(|part| part.get("properties").and_then(Value::as_object))
+                .flat_map(Map::keys)
+                .collect();
+            for (name, inner) in held {
+                if (inner.is_object() || inner.is_array())
+                    && declared.contains(&name)
+                    && !names.contains(name)
+                {
+                    names.push(name.clone());
+                }
+            }
             if matches!(unsent, Unsent::All(..)) {
                 for part in whole_parts(bundle, &schema) {
                     let Some(Value::Object(declared)) = part.get("properties") else {
