@@ -346,28 +346,130 @@ pub(crate) fn member_property_schema(
 }
 
 /// The schema of the value at JSON `pointer` (RFC 6901, `""` for the instance itself) of
-/// an instance of `schema`: each step a member [`property_schema`] finds by its very name, or, by
-/// an array index, the array's `items`, through `$ref`s and a nullable `anyOf`/`oneOf`.
-/// `None` when a step names nothing the schema declares (a map's key, an undeclared
-/// member, an item of a tuple).
+/// an instance of `schema`: each step a member [`property_schema`] finds by its very
+/// name, else the object's `additionalProperties` schema (a map's value), or, by an array
+/// index, the array's `items`, through `$ref`s and a nullable `anyOf`/`oneOf`. A union
+/// is stepped into through no branch in particular; see [`schema_at_with`]. `None` when
+/// a step names nothing the schema declares (an undeclared member, an item of a tuple).
 #[must_use]
 pub fn schema_at(bundle: &Bundle, schema: &Value, pointer: &str) -> Option<Value> {
+    schema_at_with(bundle, schema, pointer, &|_, _| None)
+}
+
+/// [`schema_at`], stepping into a union (`oneOf`/`anyOf`, through `$ref`s) on the way
+/// through the branch `branch` picks: it is given the union's schema and the pointer
+/// of the value the union is the schema of, and answers the branch, or `None` to step
+/// into the union as a whole.
+pub fn schema_at_with(
+    bundle: &Bundle,
+    schema: &Value,
+    pointer: &str,
+    branch: &dyn Fn(&Value, &str) -> Option<Value>,
+) -> Option<Value> {
     if pointer.is_empty() {
         return Some(schema.clone());
     }
-    pointer
-        .strip_prefix('/')?
-        .split('/')
-        .map(|step| step.replace("~1", "/").replace("~0", "~"))
-        .try_fold(schema.clone(), |at, step| {
-            let at = deref(bundle, non_null(bundle, &at)).clone();
-            if step.parse::<usize>().is_ok()
-                && let Some(items) = at.get("items").filter(|i| i.is_object())
-            {
-                return Some(items.clone());
-            }
-            member_property_schema(bundle, &at, &step)
+    let mut at = schema.clone();
+    let mut prefix = String::new();
+    for raw in pointer.strip_prefix('/')?.split('/') {
+        let step = raw.replace("~1", "/").replace("~0", "~");
+        let mut here = deref(bundle, non_null(bundle, &at)).clone();
+        if let Some(chosen) = branch(&here, &prefix) {
+            here = deref(bundle, non_null(bundle, &chosen)).clone();
+        }
+        at = match here.get("items").filter(|i| i.is_object()) {
+            Some(items) if step.parse::<usize>().is_ok() => items.clone(),
+            _ => member_property_schema(bundle, &here, &step).or_else(|| {
+                here.get("additionalProperties")
+                    .filter(|a| a.is_object())
+                    .cloned()
+            })?,
+        };
+        prefix.push('/');
+        prefix.push_str(raw);
+    }
+    Some(at)
+}
+
+/// The branches of union `schema` (`oneOf`, else `anyOf`, through `$ref`s and a
+/// nullable union), and the member its `discriminator` names, if any. `None` when it
+/// is no union.
+pub fn union_branches<'a>(
+    bundle: &'a Bundle,
+    schema: &'a Value,
+) -> Option<(&'a Vec<Value>, Option<&'a str>)> {
+    let schema = deref(bundle, non_null(bundle, schema));
+    let branches = ["oneOf", "anyOf"]
+        .iter()
+        .find_map(|k| schema.get(*k).and_then(Value::as_array))
+        .filter(|b| !b.is_empty())?;
+    let tag = schema
+        .pointer("/discriminator/propertyName")
+        .and_then(Value::as_str);
+    Some((branches, tag))
+}
+
+/// The branch of `branches` that `tag`'s value in `value` names: the `$ref` its
+/// discriminator `mapping` gives, else one whose `$ref` is named as the value, else
+/// one whose `tag` member enumerates it.
+pub fn tagged_branch<'a>(
+    bundle: &Bundle,
+    union: &Value,
+    branches: &'a [Value],
+    tag: &str,
+    value: &Value,
+) -> Option<&'a Value> {
+    let named = value.get(tag)?;
+    let text = named.as_str();
+    let ref_name = |b: &Value| {
+        b.get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.rsplit('/').next())
+            .map(str::to_owned)
+    };
+    let mapped = text.and_then(|t| {
+        deref(bundle, non_null(bundle, union))
+            .get("discriminator")?
+            .get("mapping")?
+            .get(t)?
+            .as_str()
+            .and_then(|r| r.rsplit('/').next())
+            .map(str::to_owned)
+    });
+    if let Some(mapped) = mapped
+        && let Some(found) = branches
+            .iter()
+            .find(|b| ref_name(b).as_deref() == Some(&mapped))
+    {
+        return Some(found);
+    }
+    branches
+        .iter()
+        .find(|b| text.is_some() && ref_name(b).as_deref() == text)
+        .or_else(|| {
+            branches.iter().find(|b| {
+                member_property_schema(bundle, b, tag)
+                    .is_some_and(|m| enumerates(bundle, &m, named))
+            })
         })
+}
+
+/// How many of `value`'s members `branch` pins (a `const` or an `enum`) to another
+/// value: what tells a union's branches apart before their violations do.
+pub fn pinned_mismatches(bundle: &Bundle, branch: &Value, value: &Value) -> usize {
+    let Some(members) = value.as_object() else {
+        return 0;
+    };
+    members
+        .iter()
+        .filter(|(name, held)| {
+            member_property_schema(bundle, branch, name).is_some_and(|m| {
+                let m = deref(bundle, &m);
+                (m.get("const").is_some() || m.get("enum").is_some())
+                    && !enumerates(bundle, m, held)
+            })
+        })
+        .count()
 }
 
 /// The schema of one item of list `body` answered for `schema`.

@@ -1,9 +1,16 @@
 //! An answer built from a stored record that breaks the answer's schema, repaired in
 //! place: the members the validation errors point at are re-drawn from the schema (the
-//! faker's), at the narrowest place that can be re-drawn, and everything else the
-//! record gave is kept, its identity above all, so that a read of the id the client got
-//! agrees with what it was answered. An identity that breaks the schema is never
-//! re-drawn: the answer would name a record the session does not hold.
+//! faker's), at the narrowest place that can be re-drawn (inside the branch of a union
+//! the answer is of), and everything else the answer holds is kept, the record's
+//! identity above all, so that a read of the id the client got agrees with what it was
+//! answered. A member that names the record (its identity, a key a read or path takes,
+//! an alternate key, its parent's reference, a compound key) is never re-drawn: the
+//! answer would name a record the session does not hold.
+//!
+//! A re-drawn member is drawn from the call's seed (the request's, else the mock's,
+//! else [`mb_engine::DEFAULT_FAKER_SEED`]) mixed with the record's type and id and the
+//! member's place in the record, so every answer of one record agrees and two records
+//! differ.
 //!
 //! Each repair is counted ([`ANSWER_REPAIRS_METRIC`]) and kept on the request record
 //! (`answer_repair: {outcome, members}`).
@@ -11,13 +18,22 @@
 use serde_json::{Map, Value};
 
 /// Answers built from a stored record that broke their schema, by mock, operation and
-/// outcome ([`Repair`]'s names): `members_redrawn`, `identity_invalid`,
-/// `unrepairable`.
+/// outcome: [`MEMBERS_REDRAWN`], [`IDENTITY_INVALID`], [`UNREPAIRABLE`].
 pub(crate) const ANSWER_REPAIRS_METRIC: &str = "mb_answer_repairs_total";
+
+/// The outcome of a repair that re-drew members and kept the identity.
+pub(super) const MEMBERS_REDRAWN: &str = "members_redrawn";
+/// The outcome of an answer whose stored identity breaks its schema.
+pub(super) const IDENTITY_INVALID: &str = "identity_invalid";
+/// The outcome of an answer no repair made valid.
+pub(super) const UNREPAIRABLE: &str = "unrepairable";
 
 /// Rounds of re-drawing at most: a re-drawn member can expose a failure its old value
 /// hid (an `anyOf` decided by a sibling), or still fail where its parent decides.
 const MAX_ROUNDS: usize = 4;
+
+/// Unions a violation is followed into at most.
+const MAX_UNION_DEPTH: usize = 4;
 
 /// What became of an answer built from a stored record that broke its schema.
 #[derive(Debug, PartialEq)]
@@ -36,34 +52,114 @@ impl Repair {
     /// The outcome as counted and recorded.
     pub(super) fn outcome(&self) -> &'static str {
         match self {
-            Repair::Redrawn(..) => "members_redrawn",
-            Repair::IdentityInvalid => "identity_invalid",
-            Repair::Unrepairable => "unrepairable",
+            Repair::Redrawn(..) => MEMBERS_REDRAWN,
+            Repair::IdentityInvalid => IDENTITY_INVALID,
+            Repair::Unrepairable => UNREPAIRABLE,
         }
     }
 }
 
-/// `answer`, which breaks `op`'s answer schema (the narrowed `response_schema` when
-/// given, else `schema`, its success schema), repaired: see the module. `identities` are
-/// the JSON pointers of the record's identity in the answer.
+/// The record an answer is built from: its type, its id, and the JSON pointer of the
+/// place in the answer that holds its members (`""` at the top, `/data` in an
+/// envelope).
+pub(super) struct RecordAt<'a> {
+    pub(super) resource_type: &'a str,
+    pub(super) id: &'a str,
+    pub(super) at: &'a str,
+}
+
+/// The call's answer schema: the narrowed `response` when given, else `schema`, the
+/// success schema, which members are drawn from.
+pub(super) struct Schemas<'a> {
+    pub(super) schema: &'a Value,
+    pub(super) response: Option<&'a Value>,
+}
+
+/// The members that name a record of type `t` in the answers of `op`: its identity
+/// member and the field `op` keys it by, the keys its reads and paths take (`number`,
+/// `key`, see [`super::super::effects::identity_members`]), the described alternate
+/// keys and changed identity member, the alternate keys `op`'s path parameter offers,
+/// the member naming its parent, and the members of a compound unique key.
+pub(super) fn naming_members(
+    rt: &crate::MockRuntime,
+    op: &mb_mcm::Operation,
+    t: &str,
+) -> Vec<String> {
+    let mut names: Vec<String> = vec![super::records::identity_member(rt, op, t).to_owned()];
+    if let Some(identity) = &op.identity {
+        names.push(identity.field.clone());
+        names.extend(identity.path_field.iter().cloned());
+    }
+    names.extend(
+        super::super::effects::identity_members(rt, t)
+            .into_iter()
+            .map(str::to_owned),
+    );
+    names.extend(super::records::alternates(rt, t));
+    names.extend(super::super::lookup::alternate_members(rt, op, t));
+    let described = rt.described();
+    names.extend(described.changed_identity_member(t).map(str::to_owned));
+    if let Some(desc) = described.type_desc(t) {
+        names.extend(desc.parent.as_ref().and_then(|p| p.member.clone()));
+        for unique in desc.unique.iter().filter(|u| u.members.len() > 1) {
+            names.extend(unique.members.iter().cloned());
+        }
+    }
+    let mut seen = Vec::new();
+    names.retain(|name| {
+        let new = !seen.contains(name);
+        seen.push(name.clone());
+        new
+    });
+    names
+}
+
+/// The JSON pointers in `answer` of `members` (dotted ones nested, or as one member
+/// so named) under each of `places`: those the answer holds a value at.
+pub(super) fn pointers_of(members: &[String], places: &[&str], answer: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for place in places {
+        for member in members {
+            let nested: Vec<String> = member.split('.').map(escape).collect();
+            for at in [
+                format!("{place}/{}", escape(member)),
+                format!("{place}/{}", nested.join("/")),
+            ] {
+                if answer.pointer(&at).is_some() && !out.contains(&at) {
+                    out.push(at);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `answer`, which breaks `op`'s answer schema, repaired: see the module. `identities`
+/// are the JSON pointers of what names the record in the answer, and `seed` the
+/// call's.
 pub(super) fn repaired(
     rt: &crate::MockRuntime,
     op: &mb_mcm::Operation,
-    (schema, response_schema): (&Value, Option<&Value>),
-    answer: Map<String, Value>,
-    identities: &[String],
+    (schemas, record): (&Schemas<'_>, &RecordAt<'_>),
+    (answer, identities): (Map<String, Value>, &[String]),
+    seed: u64,
 ) -> Repair {
     let bundle = &rt.bundle;
     let engine = &rt.engine;
+    let schema = schemas.schema;
     let mut answer = Value::Object(answer);
     let mut members: Vec<String> = Vec::new();
     for _ in 0..MAX_ROUNDS {
-        let Some(mut found) = engine.stored_violations(bundle, op, &answer, response_schema) else {
+        let Some(found) = engine.stored_violations(bundle, op, &answer, schemas.response) else {
             return Repair::Unrepairable;
         };
         if found.is_empty() {
             break;
         }
+        let mut found: Vec<(String, String)> = found
+            .into_iter()
+            .flat_map(|(at, keyword)| narrowed(rt, schema, &answer, at, keyword, 0))
+            .collect();
         if found
             .iter()
             .any(|(at, _)| identities.iter().any(|id| within(at, id)))
@@ -77,9 +173,13 @@ pub(super) fn repaired(
             if round.iter().any(|done| within(&at, done)) {
                 continue;
             }
-            if keyword == "additionalProperties" {
-                let undeclared = undeclared(bundle, schema, &answer, &at);
-                if undeclared.is_empty() {
+            if keyword == "additionalProperties" || keyword == "unevaluatedProperties" {
+                let undeclared = undeclared(rt, schema, &answer, &at);
+                if undeclared.is_empty()
+                    || undeclared
+                        .iter()
+                        .any(|gone| identities.iter().any(|id| within(id, gone)))
+                {
                     return Repair::Unrepairable;
                 }
                 for gone in undeclared {
@@ -97,7 +197,10 @@ pub(super) fn repaired(
                 if at.is_empty() || identities.iter().any(|id| within(id, &at)) {
                     return Repair::Unrepairable;
                 }
-                if let Some(value) = engine.draw_at(bundle, op, schema, &at) {
+                let place = relative(&at, record.at);
+                let labels = [record.resource_type, record.id, place];
+                if let Some(value) = engine.draw_at(bundle, (schema, &answer), &at, (seed, &labels))
+                {
                     break value;
                 }
                 at = parent(&at).to_owned();
@@ -115,12 +218,51 @@ pub(super) fn repaired(
             }
         }
     }
-    match engine.stored_violations(bundle, op, &answer, response_schema) {
+    match engine.stored_violations(bundle, op, &answer, schemas.response) {
         Some(found) if found.is_empty() => match answer {
             Value::Object(answer) => Repair::Redrawn(answer, members),
             _ => Repair::Unrepairable,
         },
         _ => Repair::Unrepairable,
+    }
+}
+
+/// Violation `(at, keyword)` of `answer`, followed into the branch of a union
+/// (`oneOf`, `anyOf`) the value at `at` is of ([`mb_engine::Engine::union_branch`]):
+/// that branch's own violations of it, so that a repair re-draws what breaks the branch
+/// rather than the whole value. As it is when the branch has none (it matches several
+/// branches, or none is told).
+fn narrowed(
+    rt: &crate::MockRuntime,
+    schema: &Value,
+    answer: &Value,
+    at: String,
+    keyword: String,
+    depth: usize,
+) -> Vec<(String, String)> {
+    let (bundle, engine) = (&rt.bundle, &rt.engine);
+    if depth < MAX_UNION_DEPTH
+        && (keyword == "oneOf" || keyword == "anyOf")
+        && let Some(value) = answer.pointer(&at)
+        && let Some(union) = engine.schema_at(bundle, schema, &at, answer)
+        && let Some(branch) = engine.union_branch(bundle, &union, value)
+        && let Some(inner) = engine.schema_violations(bundle, &branch, value)
+        && !inner.is_empty()
+    {
+        return inner
+            .into_iter()
+            .flat_map(|(p, k)| narrowed(rt, schema, answer, format!("{at}{p}"), k, depth + 1))
+            .collect();
+    }
+    vec![(at, keyword)]
+}
+
+/// `at`'s place in the record held at `record` of the answer (`at` itself when the
+/// record is at the top, or `at` is not in it).
+fn relative<'a>(at: &'a str, record: &str) -> &'a str {
+    match at.strip_prefix(record) {
+        Some(rest) if !record.is_empty() && rest.starts_with('/') => rest,
+        _ => at,
     }
 }
 
@@ -147,7 +289,7 @@ fn last_step(at: &str) -> String {
 }
 
 /// One step of a JSON pointer, escaped.
-pub(super) fn escape(step: &str) -> String {
+fn escape(step: &str) -> String {
     step.replace('~', "~0").replace('/', "~1")
 }
 
@@ -181,11 +323,15 @@ fn remove_at(answer: &mut Value, at: &str) {
     }
 }
 
-/// The members an `additionalProperties` violation at `at` is about that `schema`
-/// declares nowhere: `at` itself when it names one such member, else those of the
-/// object at `at`.
-fn undeclared(bundle: &mb_mcm::Bundle, schema: &Value, answer: &Value, at: &str) -> Vec<String> {
-    let declared = |at: &str| mb_engine::consistency::schema_at(bundle, schema, at).is_some();
+/// The members an `additionalProperties` (or `unevaluatedProperties`) violation at `at`
+/// is about that `schema` declares nowhere: `at` itself when it names one such member,
+/// else those of the object at `at`.
+fn undeclared(rt: &crate::MockRuntime, schema: &Value, answer: &Value, at: &str) -> Vec<String> {
+    let declared = |member: &str| {
+        rt.engine
+            .schema_at(&rt.bundle, schema, member, answer)
+            .is_some()
+    };
     if !at.is_empty() && !declared(at) && answer.pointer(at).is_some() {
         return vec![at.to_owned()];
     }
@@ -215,6 +361,14 @@ mod tests {
     }
 
     #[test]
+    fn a_member_is_placed_relative_to_its_record() {
+        assert_eq!(relative("/data/code", "/data"), "/code");
+        assert_eq!(relative("/code", ""), "/code");
+        assert_eq!(relative("/datum/code", "/data"), "/datum/code");
+        assert_eq!(relative("/status", "/data"), "/status");
+    }
+
+    #[test]
     fn a_value_is_set_in_an_object_or_over_an_item() {
         let mut v = json!({"a": {"x~y": 1}, "l": [1, 2]});
         assert!(set_at(&mut v, "/a/x~0y", json!(2)));
@@ -224,5 +378,15 @@ mod tests {
         assert_eq!(v, json!({"a": {"x~y": 2}, "l": [1, 3]}));
         remove_at(&mut v, "/a/x~0y");
         assert_eq!(v, json!({"a": {}, "l": [1, 3]}));
+    }
+
+    #[test]
+    fn naming_members_are_found_at_the_top_and_in_the_envelope() {
+        let answer = json!({"id": "w1", "data": {"id": "w1", "meta": {"key": "k"}}});
+        let members = vec!["id".to_owned(), "meta.key".to_owned(), "gone".to_owned()];
+        assert_eq!(
+            pointers_of(&members, &["", "/data"], &answer),
+            vec!["/id", "/data/id", "/data/meta/key"]
+        );
     }
 }

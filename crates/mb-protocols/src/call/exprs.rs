@@ -83,6 +83,18 @@ struct Notes {
     /// What became of the executor's answer when the stored record did not render
     /// into it as held (`answer_repair`): the outcome, and the members re-drawn.
     repair: Option<(&'static str, Vec<String>)>,
+    /// Whether the repair is counted already.
+    repair_counted: bool,
+}
+
+impl Notes {
+    /// Forgets the answer's repair unless the call went on to generation because its
+    /// answer did not render (`render_failed`), which the repair is then about.
+    fn keep_repair_for(&mut self, reason: &str) {
+        if reason != "render_failed" {
+            self.repair = None;
+        }
+    }
 }
 
 /// How many failed expressions a request record lists at most.
@@ -102,7 +114,7 @@ impl CallExprs {
         self.with_notes(|n| {
             n.fallback = Some((reason.to_string(), on.map(str::to_string)));
             n.render_error = None;
-            n.repair = None;
+            n.keep_repair_for(reason);
         });
     }
 
@@ -112,7 +124,7 @@ impl CallExprs {
         self.with_notes(|n| {
             n.fallback = Some((reason.to_string(), None));
             n.render_error = Some(why.to_string());
-            n.repair = None;
+            n.keep_repair_for(reason);
         });
     }
 
@@ -124,10 +136,16 @@ impl CallExprs {
         self.with_notes(|n| n.repair = repair);
     }
 
-    /// The outcome [`Self::set_repair`] noted last, if any.
-    pub(super) fn repair_outcome(&self) -> Option<&'static str> {
+    /// The outcome [`Self::set_repair`] noted last, the first time it is asked for
+    /// (a call's repair is counted once), else `None`.
+    pub(super) fn repair_to_count(&self) -> Option<&'static str> {
         let mut outcome = None;
-        self.with_notes(|n| outcome = n.repair.as_ref().map(|(o, _)| *o));
+        self.with_notes(|n| {
+            if !n.repair_counted {
+                outcome = n.repair.as_ref().map(|(o, _)| *o);
+                n.repair_counted = outcome.is_some();
+            }
+        });
         outcome
     }
 

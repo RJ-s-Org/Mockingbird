@@ -131,8 +131,8 @@ struct CallLog {
     effects: Value,
     /// What the record's `request` notes of the call beside its body: what the world
     /// description leaves open about the answer's operation (`world_gap`) and what the
-    /// executor noted (`exec_fallback`, `exec_fallback_on`, `render_error`, `expr_failed`; see
-    /// [`call::RECORD_NOTES`]).
+    /// executor noted (`exec_fallback`, `exec_fallback_on`, `render_error`, `expr_failed`,
+    /// `pool`, `answer_repair`; see [`call::RECORD_NOTES`]).
     notes: serde_json::Map<String, Value>,
     /// The response is an event stream, which reports the call itself when
     /// its body is dropped and sleeps any latency before its first event.
