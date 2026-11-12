@@ -152,6 +152,213 @@ fn mark_id(t: &str, key: &str) -> String {
     format!("{PREFIX}{t}/{key}")
 }
 
+/// The items of `body`, a list answer of `op`: those at the described `answer.records`,
+/// else those [`list_items`] finds. An answer holding several arrays of records with no
+/// envelope key among them (Plaid's sync: `added`, `modified`, `removed`, `accounts`)
+/// has its records where the description says.
+pub(super) fn listed_items<'b>(
+    rt: &MockRuntime,
+    op: &Operation,
+    body: &'b Value,
+) -> Option<&'b Vec<Value>> {
+    let described = rt
+        .described()
+        .op(&op.id)
+        .and_then(|d| d.answer.as_ref())
+        .and_then(|a| a.records.as_ref())
+        .filter(|p| !p.is_root());
+    match described {
+        Some(pointer) => pointer
+            .tokens()
+            .iter()
+            .try_fold(body, |at, token| at.get(token.as_str()))?
+            .as_array(),
+        None => list_items(body),
+    }
+}
+
+/// The member identifying the [`listed_items`] of `body`: [`item_identity`] when an
+/// item holds it, else the identity member described for the items' type when one
+/// does (a sync's `transaction_id`, with no read of a transaction to name it).
+pub(super) fn listed_identity(rt: &MockRuntime, op: &Operation, body: &Value) -> String {
+    let field = item_identity(rt.bundle(), op, body);
+    let Some(first) =
+        listed_items(rt, op, body).and_then(|items| items.iter().find(|i| i.is_object()))
+    else {
+        return field;
+    };
+    if mb_mcm::member_at(first, &field).is_some() {
+        return field;
+    }
+    rt.described()
+        .op(&op.id)
+        .and_then(|d| d.r#type.as_deref())
+        .or(op.resource_type.as_deref())
+        .and_then(|t| {
+            rt.described()
+                .type_desc(t)?
+                .identity
+                .as_ref()?
+                .member
+                .clone()
+        })
+        .filter(|member| mb_mcm::member_at(first, member).is_some())
+        .unwrap_or(field)
+}
+
+/// An array of records of another described type beside a list's items.
+pub(super) struct Beside {
+    /// The answer's top member holding the array (`accounts`).
+    pub(super) member: String,
+    /// The described type of its records (`account`).
+    pub(super) t: String,
+    /// That type's described identity member (`account_id`).
+    pub(super) identity: String,
+}
+
+/// The top members of `body`, a list answer of `op` whose items are of type `t`, that
+/// hold records of another type the description identifies (a sync's `accounts` beside
+/// its `added` transactions). A member holds records of type `u` when its items'
+/// definition is one a read of `u` answers ([`BundleIndex::types_by_def`]), else when its
+/// name is `u`'s (`accounts` for `account`); and each of its items, an object, holds
+/// `u`'s identity member. The list's own member, and arrays of the list's type (a sync's
+/// `modified`), are not among them.
+pub(super) fn beside(rt: &MockRuntime, op: &Operation, t: &str, body: &Value) -> Vec<Beside> {
+    let (Some(world), Some(members), Some(schema)) = (
+        rt.described().world(),
+        body.as_object(),
+        op.success_output().and_then(|o| o.schema.as_ref()),
+    ) else {
+        return Vec::new();
+    };
+    let bundle = rt.bundle();
+    let index = rt.index();
+    let list = list_top(rt, op, body);
+    let identity_of = |u: &str| {
+        world
+            .types
+            .get(u)?
+            .identity
+            .as_ref()?
+            .member
+            .clone()
+            .filter(|m| !m.contains('/'))
+    };
+    let mut found = Vec::new();
+    for (member, value) in members {
+        if list.as_deref() == Some(member.as_str()) {
+            continue;
+        }
+        let Some(items) = value.as_array().filter(|items| !items.is_empty()) else {
+            continue;
+        };
+        let item_schema = property_schema(bundle, schema, member).and_then(|array| {
+            let (parts, _) = schema_parts(bundle, Some(&array));
+            parts.iter().find_map(|p| p.get("items")).cloned()
+        });
+        let (_, defs) = schema_parts(bundle, item_schema.as_ref());
+        let by_def = defs
+            .iter()
+            .find_map(|d| index.types_by_def.get(*d))
+            .filter(|u| world.types.contains_key(u.as_str()))
+            .cloned();
+        let stem = effects::type_stem(member);
+        let u = by_def.or_else(|| {
+            world
+                .types
+                .keys()
+                .find(|u| effects::type_stem(u) == stem)
+                .cloned()
+        });
+        let Some(u) = u.filter(|u| u != t) else {
+            continue;
+        };
+        let Some(identity) = identity_of(&u) else {
+            continue;
+        };
+        if items
+            .iter()
+            .all(|item| item.is_object() && mb_mcm::member_at(item, &identity).is_some())
+        {
+            found.push(Beside {
+                member: member.clone(),
+                t: u,
+                identity,
+            });
+        }
+    }
+    found
+}
+
+/// The top member of `body`, a list answer of `op`, holding its items: the first step of
+/// the described `answer.records`, else the member [`list_items`] takes them from.
+pub(super) fn list_top(rt: &MockRuntime, op: &Operation, body: &Value) -> Option<String> {
+    rt.described()
+        .op(&op.id)
+        .and_then(|d| d.answer.as_ref())
+        .and_then(|a| a.records.as_ref())
+        .and_then(|p| p.tokens().into_iter().next())
+        .or_else(|| mb_engine::consistency::list_member(body).map(str::to_owned))
+}
+
+/// Stores the records [`beside`] finds in `body`, a list answer of `op` whose items are
+/// of type `t`, under their own types, as mentions are: never over a held record, nor
+/// one the session deleted.
+pub(super) async fn seed_beside(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    op: &Operation,
+    t: &str,
+    body: &Value,
+) {
+    let rt = state.rt;
+    let mut records = Vec::new();
+    for found in beside(rt, op, t, body) {
+        let items = body.get(&found.member).and_then(Value::as_array);
+        for item in items.into_iter().flatten() {
+            let Some(id) = mb_mcm::member_at(item, &found.identity).and_then(id_string) else {
+                continue;
+            };
+            records.push(StoredResource {
+                resource_type: found.t.clone(),
+                id,
+                data: item.clone(),
+            });
+        }
+    }
+    if !records.is_empty() {
+        state.insert_seeded_all(session, records).await;
+    }
+}
+
+/// The ids the mark of type `u` holds under the parent `call` names by an issued value
+/// ([`issued_scope`]), when `u`'s described parent is that parent: the records of
+/// another type a list of the same parent listed (an Item's accounts, beside a sync of
+/// its transactions). Empty when there is none.
+pub(super) async fn issued_marked(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    u: &str,
+) -> Vec<String> {
+    let rt = state.rt;
+    let Some((parent, param, value)) = issued_scope(rt, plan.op, call) else {
+        return Vec::new();
+    };
+    let same_parent = rt
+        .described()
+        .type_desc(u)
+        .and_then(|d| d.parent.as_ref())
+        .is_some_and(|link| link.r#type == parent);
+    if !same_parent {
+        return Vec::new();
+    }
+    let key = format!("{parent}?{param}={value}");
+    match read_mark(state, &plan.session, &mark_id(u, &key)).await {
+        Some(mark) if !mark.over => mark.ids,
+        _ => Vec::new(),
+    }
+}
+
 async fn read_mark(state: &mut StateAccess<'_>, session: &SessionKey, id: &str) -> Option<Mark> {
     let doc = state.get(session, INTERNAL_TYPE, id).await?;
     Mark::of(&doc.data)
@@ -254,8 +461,8 @@ pub(super) async fn mark_listed(
         return;
     };
     let body = generated.body.as_ref().unwrap_or(&Value::Null);
-    let field = item_identity(rt.bundle(), op, body);
-    let page = list_items(body)
+    let field = listed_identity(rt, op, body);
+    let page = listed_items(rt, op, body)
         .into_iter()
         .flatten()
         .filter_map(|item| mb_mcm::member_at(item, &field).and_then(id_string));

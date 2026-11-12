@@ -105,14 +105,15 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
     } = w;
     let rt = state.rt;
     if origin == WriteOrigin::Seeded {
-        let Some(items) = generated.body.as_ref().and_then(list_items) else {
+        let Some(body) = generated.body.as_ref() else {
             return WriteOutcome::default();
         };
-        let field = item_identity(
-            state.rt.bundle(),
-            op,
-            generated.body.as_ref().unwrap_or(&Value::Null),
-        );
+        // The records of another described type beside the list (a sync's `accounts`).
+        state_lists::seed_beside(state, session, op, resource_type, body).await;
+        let Some(items) = state_lists::listed_items(rt, op, body) else {
+            return WriteOutcome::default();
+        };
+        let field = state_lists::listed_identity(rt, op, body);
         let mut seeded = Vec::new();
         for item in items {
             let Some(id) = mb_mcm::member_at(item, &field).and_then(id_string) else {

@@ -82,6 +82,7 @@ mod create;
 pub(super) use create::issued_aliases;
 mod embedded;
 mod fields;
+mod linked;
 mod list;
 mod patches;
 pub(crate) mod pool;
@@ -350,6 +351,18 @@ async fn read(
             stored
         }
     };
+    // A server-set reference it holds as `null` names a record, and is stored so; not
+    // for an item held in its parent's array, which is stored with the parent.
+    let own = held.target.is_some() || within.is_none();
+    let linked = match own {
+        true => {
+            linked::named(state, (plan, call), stored)
+                .instrument(state_span())
+                .await
+        }
+        false => None,
+    };
+    let stored = linked.as_ref().unwrap_or(stored);
     let read = held_read(
         state,
         plan,

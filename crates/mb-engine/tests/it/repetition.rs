@@ -102,7 +102,12 @@ fn served(
             .unwrap();
             let engine = Engine::new(
                 Some(Arc::new(provider) as Arc<dyn Provider>),
-                EngineConfig::default(),
+                // The answer cap is four times this budget (about 21 KB), below the
+                // guard's span: the loop passes the cap first.
+                EngineConfig {
+                    output_budget: 1500,
+                    ..EngineConfig::default()
+                },
             );
             let bundle = gadgets();
             let mut path_params = Map::new();
