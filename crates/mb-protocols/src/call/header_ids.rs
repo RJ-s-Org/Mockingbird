@@ -602,7 +602,7 @@ pub(super) fn draw_member_id(
         (None, Some(declared)),
         &string,
         string_identity,
-        (&checks, shape),
+        (&checks, shape, &[]),
     )
 }
 
