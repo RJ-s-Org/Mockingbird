@@ -39,6 +39,13 @@ No migration or configuration. A mock from the config file used to keep its acti
 - **Rolling upgrades**: reconcile runs on the leader, so while old and new builds share a control store, each move of leadership between them adds a version. It settles once every node runs the new build.
 - **Pinning an older version** of a file-backed mock is not possible: the file and the running build decide the active version.
 
+### Faker lists the world describes are kept like a model's
+
+No migration or configuration.
+
+- **Offline, a list the world describes is answered from state after its first answer.** The faker's first list of a collection that asks for nothing but a page (Plaid's `/accounts/get` for an Item) is seeded and marks the collection listed, as a model's always did, so later lists of it (`/auth/get`, `/accounts/balance/get`, `/accounts/get` again) come from state with the same records instead of a fresh draw each, and a later faker list of it that state cannot serve lists the same records, the faker filling only the members they lack, cut to a page size the request asks for. Before, every offline list was a new draw with new ids.
+- **The same holds when the LLM call fails for good**: offline, or a provider refusing the key (`401`, `402`, `403`). Such answers are still reported `source: fallback`, so `verify --no-fallbacks` still flags them. A failure a retry may get past (a `429`, a `5xx`, a timeout) seeds nothing, as before, and the next list goes to the model.
+
 ### Single-record read prompts show held records trimmed
 
 No migration or configuration.

@@ -52,8 +52,11 @@
 //! id: that record is still listed when its members name the parent, and otherwise
 //! leaves the list until the collection is listed and seeded again.
 //!
-//! An LLM, `consistency: on`, HTTP routes and plain calls only (no scenario or forced
-//! status), as [`deleted::applies`] and [`pages`] say.
+//! A faker list counts as a model's: offline, and one standing in for a failed LLM
+//! call (`source: fallback` all the same) is seeded and marks its collection when it
+//! is one to mark, so later lists answer from what it placed.
+//!
+//! `consistency: on`, HTTP routes and plain calls only (no scenario or forced status).
 
 use mb_state::INTERNAL_TYPE;
 
@@ -102,9 +105,11 @@ impl Mark {
     }
 }
 
-/// Whether lists of `op` may be answered from state, and marked.
+/// Whether lists of `op` may be answered from state, and marked: with `consistency: on`,
+/// offline too, where the faker's first list of a collection is its records as a
+/// model's would be.
 fn applies(rt: &MockRuntime, plan: &CallPlan<'_>) -> bool {
-    deleted::applies(rt, plan) && matches!(plan.op.binding, Binding::Http { .. }) && plain(plan)
+    rt.consistency && matches!(plan.op.binding, Binding::Http { .. }) && plain(plan)
 }
 
 /// The key of the collection `op` lists or writes in: the path with its values
@@ -434,6 +439,26 @@ fn asks_only_a_page(rt: &MockRuntime, op: &Operation, call: &OperationCall, q: &
         .all(|param| q.pages_with(param) || q.ignores(param) || paging.pages_list(param))
 }
 
+/// The key of the collection list `call` names when [`mark_listed`] marks it: a
+/// described list asking for nothing but a page.
+fn listed_key(rt: &MockRuntime, plan: &CallPlan<'_>, call: &OperationCall) -> Option<String> {
+    let op = plan.op;
+    if !applies(rt, plan) || op.identity.is_some() {
+        return None;
+    }
+    let q = list_query::of(rt, op, call).filter(ListQuery::describes_query)?;
+    if !asks_only_a_page(rt, op, call, &q) {
+        return None;
+    }
+    issued_key(rt, op, call).or_else(|| collection_key(op, collection_of(op, call).as_ref()))
+}
+
+/// Whether a seeded answer to `call` marks its collection listed ([`mark_listed`]), so
+/// later lists of it answer from state.
+pub(super) fn marks_listed(rt: &MockRuntime, plan: &CallPlan<'_>, call: &OperationCall) -> bool {
+    listed_key(rt, plan, call).is_some()
+}
+
 /// Marks the collection list `call` names as listed, with the ids of the items of
 /// `generated`, its seeded answer, and `rest`, those a kept page cut left out (see the
 /// module's doc). Only for a described list asking for nothing but a page.
@@ -446,18 +471,7 @@ pub(super) async fn mark_listed(
 ) {
     let rt = state.rt;
     let op = plan.op;
-    if !applies(rt, plan) || op.identity.is_some() {
-        return;
-    }
-    let Some(q) = list_query::of(rt, op, call).filter(ListQuery::describes_query) else {
-        return;
-    };
-    if !asks_only_a_page(rt, op, call, &q) {
-        return;
-    }
-    let Some(key) =
-        issued_key(rt, op, call).or_else(|| collection_key(op, collection_of(op, call).as_ref()))
-    else {
+    let Some(key) = listed_key(rt, plan, call) else {
         return;
     };
     let body = generated.body.as_ref().unwrap_or(&Value::Null);
@@ -767,6 +781,14 @@ impl Shape {
             .iter()
             .try_fold(body, |at, member| at.get(member))?
             .as_array()
+    }
+
+    /// [`Shape::items_in`], to change.
+    pub(super) fn items_in_mut<'b>(&self, body: &'b mut Value) -> Option<&'b mut Vec<Value>> {
+        self.path
+            .iter()
+            .try_fold(body, |at, member| at.get_mut(member))?
+            .as_array_mut()
     }
 
     /// The envelope of an empty page, its other required members filled as a held

@@ -1356,6 +1356,21 @@ pub(super) fn mended_set(
 /// answers are its real ones, and so are those of a mock whose provider is
 /// marked unusable for the run; a faker answer that only notes it found no
 /// valid draw stands in for nothing).
+/// A faker answer standing in for an LLM call that will fail again: offline, or one
+/// the provider refused for the key itself (`401`, `402`, `403`: auth or quota), not a
+/// retryable failure (a `429`, a `5xx`, a timeout) that the next call may get past.
+pub(crate) fn lasting_fallback(generated: &GeneratedResponse) -> bool {
+    /// How [`mb_llm::LlmError::Http`] reads.
+    const HTTP_ERROR: &str = "LLM returned HTTP ";
+    generated.source == Source::Fallback
+        && generated.fallback_reason.as_deref().is_some_and(|r| {
+            r.starts_with(OFFLINE_REASON)
+                || r.strip_prefix(HTTP_ERROR)
+                    .and_then(|rest| rest.get(..3))
+                    .is_some_and(|status| matches!(status, "401" | "402" | "403"))
+        })
+}
+
 pub(crate) fn transient_fallback(generated: &GeneratedResponse) -> bool {
     generated.source == Source::Fallback
         && generated.fallback_reason.as_deref().is_some_and(|r| {

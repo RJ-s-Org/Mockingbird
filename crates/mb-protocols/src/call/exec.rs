@@ -101,6 +101,7 @@ mod writes;
 
 pub(super) use create::{initial_token, unreadable};
 pub(super) use list::agree_generated as agree_generated_list;
+pub(super) use list::fallback_lists_marked;
 pub(super) use queue::forget as forget_queue;
 
 /// Whether `call` sends `op`'s described fields parameter: its answer may then be a
