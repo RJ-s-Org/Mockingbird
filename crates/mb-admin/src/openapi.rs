@@ -122,6 +122,7 @@ use crate::{
         world::WorldView,
         world::AuthorSchema,
         world::RefusalSchema,
+        world::InferredMatchSchema,
         world::RefusalCodeSchema,
         world::GapSchema,
         world::GapCodeSchema,

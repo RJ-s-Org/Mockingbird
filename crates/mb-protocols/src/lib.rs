@@ -56,7 +56,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mb_engine::{Engine, ScenarioSpec};
@@ -100,6 +100,7 @@ pub mod http_rest;
 pub mod limits;
 mod profiles;
 mod record;
+pub mod shares;
 #[cfg(feature = "soap")]
 pub mod soap;
 pub mod webhooks;
@@ -329,6 +330,9 @@ impl Default for StateHealth {
     }
 }
 
+/// Each type's matches in the other mocks of a `shares` group.
+pub(crate) type InferredSameAs = Arc<BTreeMap<String, Vec<shares::InferredMatch>>>;
+
 /// Everything an adapter needs to serve one mock.
 pub struct MockRuntime {
     /// Mock name; also used as `SessionKey::mock`.
@@ -391,6 +395,14 @@ pub struct MockRuntime {
     /// The name the mocks of one API keep their sessions under together
     /// (see `call::shared`); `None` keeps this mock's own.
     pub shares: Option<String>,
+    /// The catalogs of the `shares` groups of this process's mocks, this one's
+    /// among them once [`MockRuntime::join_shares`] registers it.
+    shares_groups: shares::SharesGroups,
+    /// This mock's own catalog, registered under `shares`.
+    shared_catalog: Option<Arc<shares::SharedCatalog>>,
+    /// The type matches last inferred from the group, and the generation of
+    /// `shares_groups` they were read at.
+    inferred: Mutex<Option<(u64, InferredSameAs)>>,
     /// Validate requests strictly: refuse a member the request schema does not
     /// declare, which is otherwise let through, and validate a contract the smart
     /// import inferred (whose request schemas are guesses, see [`mb_mcm::Bundle::inferred`]) as any other.
@@ -554,6 +566,9 @@ impl MockRuntime {
             unknown_ids: UnknownIds::default(),
             default_scenario: None,
             shares: None,
+            shares_groups: shares::SharesGroups::default(),
+            shared_catalog: None,
+            inferred: Mutex::new(None),
             strict_requests: false,
             webhooks: None,
             base_paths: Vec::new(),
@@ -720,6 +735,63 @@ impl MockRuntime {
     /// The language each record a read stored was answered in, and its variants.
     pub(crate) fn variants(&self) -> &call::Variants {
         &self.variants
+    }
+
+    /// Reads the other mocks of this one's `shares` group from `groups`,
+    /// with the catalog of its contract and world (see [`shares`]) for them to
+    /// read. It does not register the mock: the server does, once it serves it
+    /// ([`shares::SharesGroups::sync`] with [`Self::shared`]). Call it once
+    /// `shares` and the world are set.
+    pub fn share_in(&mut self, groups: &shares::SharesGroups) {
+        self.shared_catalog = self.shares.as_ref().map(|_| {
+            Arc::new(shares::SharedCatalog::new(
+                &self.bundle,
+                self.described.world().map(AsRef::as_ref),
+            ))
+        });
+        self.shares_groups = groups.clone();
+        *self.inferred.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    /// [`Self::share_in`], registering the mock in `groups` too (out of any
+    /// group it was in), for a runtime served on its own.
+    pub fn join_shares(&mut self, groups: &shares::SharesGroups) {
+        self.share_in(groups);
+        groups.join(
+            &self.workspace,
+            &self.name,
+            self.shared()
+                .as_ref()
+                .map(|(g, c)| (g.as_str(), Arc::clone(c))),
+        );
+    }
+
+    /// This mock's `shares` group and catalog, once [`Self::share_in`] made it.
+    #[must_use]
+    pub fn shared(&self) -> Option<(String, Arc<shares::SharedCatalog>)> {
+        self.shares.clone().zip(self.shared_catalog.clone())
+    }
+
+    /// The types of the other mocks of this one's `shares` group that
+    /// [`shares::inferred`] matches to each of its types; empty for a mock
+    /// that did not join one.
+    pub(crate) fn inferred_same_as(&self) -> InferredSameAs {
+        let (Some(group), Some(own)) = (&self.shares, &self.shared_catalog) else {
+            return InferredSameAs::default();
+        };
+        let (generation, peers) = self.shares_groups.peers(&self.workspace, group, &self.name);
+        let mut cached = self.inferred.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((at, found)) = cached.as_ref()
+            && *at == generation
+        {
+            return Arc::clone(found);
+        }
+        let found = Arc::new(shares::inferred(
+            own,
+            peers.iter().map(|(name, c)| (name.as_str(), c.as_ref())),
+        ));
+        *cached = Some((generation, Arc::clone(&found)));
+        found
     }
 
     /// The name this mock's sessions are kept under: its `shares` group, or

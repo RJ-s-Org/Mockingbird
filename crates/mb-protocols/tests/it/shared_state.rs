@@ -432,3 +432,120 @@ components:
     let read = rest(&router, "GET", "/repos/fernwood/trellis/issues/7", None).await;
     assert_ne!(read["title"], "Another repository's", "{read}");
 }
+
+const MERGES: &str = r##"
+openapi: 3.0.3
+info: {title: merges, version: "1"}
+paths:
+  /projects/{project}/merges/{merge_number}:
+    get:
+      operationId: getMerge
+      parameters:
+        - {name: project, in: path, required: true, schema: {type: string}}
+        - {name: merge_number, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200":
+          description: the merge
+          content: {application/json: {schema: {$ref: "#/components/schemas/Merge"}}}
+        "404": {description: missing}
+components:
+  schemas:
+    Merge:
+      type: object
+      required: [number, title, state]
+      properties:
+        id: {type: integer}
+        number: {type: integer}
+        title: {type: string}
+        state: {type: string, enum: [open, closed]}
+        created_at: {type: string}
+"##;
+
+/// A GraphQL schema whose merge requests REST calls `merges`, with `extra`
+/// types and mutations added.
+fn merge_sdl(extra_types: &str, extra_mutations: &str) -> String {
+    format!(
+        r#"
+enum MergeState {{ OPEN CLOSED }}
+type MergeRequest {{ id: ID! number: Int! title: String! state: MergeState! createdAt: String }}
+input CreateMergeRequestInput {{ projectId: ID! title: String! }}
+type CreateMergeRequestPayload {{ mergeRequest: MergeRequest }}
+{extra_types}
+type Query {{ mergeRequest(id: ID!): MergeRequest }}
+type Mutation {{ createMergeRequest(input: CreateMergeRequestInput!): CreateMergeRequestPayload {extra_mutations} }}
+"#
+    )
+}
+
+/// The REST and GraphQL mocks of `sdl` in one `shares` group, registered with
+/// each other, with `unknown_ids: 404` on REST; a merge request numbered 7007
+/// created over GraphQL, then read over REST: its status and body.
+async fn read_merge_created_over_graphql(sdl: &str) -> (u16, Value) {
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let groups = mb_protocols::shares::SharesGroups::default();
+    let joined = |rt: Arc<MockRuntime>| {
+        let mut rt = Arc::try_unwrap(rt).ok().unwrap();
+        rt.join_shares(&groups);
+        rt
+    };
+    let gh = joined(runtime(
+        "forge-graphql",
+        sdl,
+        vec![
+            json!({"__typename": "CreateMergeRequestPayload", "mergeRequest": {
+            "__typename": "MergeRequest", "id": "MR_1", "number": 7007,
+            "title": "Over GraphQL", "state": "OPEN", "createdAt": "2024-01-01T00:00:00Z"}}),
+        ],
+        Arc::clone(&state),
+    ));
+    let gql_router = graphql::try_router(Arc::new(gh)).unwrap();
+    let mut rest_rt = joined(runtime("forge-rest", MERGES, vec![], Arc::clone(&state)));
+    rest_rt.unknown_ids = mb_protocols::UnknownIds::NotFound;
+    let rest_router = http_rest::router(Arc::new(rest_rt));
+
+    gql(
+        &gql_router,
+        r#"mutation { createMergeRequest(input: {projectId: "P_1", title: "Over GraphQL"}) { mergeRequest { id number } } }"#,
+        true,
+    )
+    .await;
+    let req = Request::builder()
+        .uri("/projects/acme/merges/7007")
+        .header("x-mockingbird-session", "s1")
+        .body(Body::empty())
+        .unwrap();
+    let resp = rest_router.oneshot(req).await.unwrap();
+    let status = resp.status().as_u16();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// Types named apart (REST `merges`, GraphQL `MergeRequest`) are matched with
+/// no `same_as`: the plural leads the other's name, nothing else of either
+/// contract does, and their records share members. A merge request created
+/// over GraphQL is read over REST by its number.
+#[tokio::test]
+async fn a_type_named_apart_is_matched_by_its_leading_word_and_members() {
+    let (status, read) = read_merge_created_over_graphql(&merge_sdl("", "")).await;
+    assert_eq!(status, 200, "{read}");
+    assert_eq!(read["title"], "Over GraphQL", "{read}");
+    assert_eq!(read["state"], "open", "{read}");
+}
+
+/// A second GraphQL type the REST name leads as well (`MergeCommit`) makes the
+/// match ambiguous: none is made, and the REST read answers 404.
+#[tokio::test]
+async fn two_types_the_name_leads_match_neither() {
+    let sdl = merge_sdl(
+        "type MergeCommit { id: ID! number: Int! title: String! state: MergeState! createdAt: String }\n\
+         type CreateMergeCommitPayload { mergeCommit: MergeCommit }",
+        "createMergeCommit(title: String!): CreateMergeCommitPayload",
+    );
+    let (status, read) = read_merge_created_over_graphql(&sdl).await;
+    assert_eq!(status, 404, "{read}");
+}

@@ -40,6 +40,7 @@ use mb_mcm::world::{
     Author, ChangeDesc, OpDesc, Pointer, Refusal, RefusalCode, TypeDesc, Validation, World,
     check_size, effective_validated, tier0, validate, written_path_targets,
 };
+use mb_protocols::shares::{InferredMatch, SharedCatalog};
 use mb_protocols::world_gaps::{Gap, GapCode, gaps};
 use mb_store::{
     ContractStatus, ContractVersion, ControlStore, Mock, NewWorldRevision, StoreError,
@@ -688,6 +689,24 @@ pub struct WorldView {
     /// Absent without `called`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gaps_left_out: Option<usize>,
+    /// For a mock in a `shares` group: each of its types matched to a type of
+    /// another mock of the group by inference rather than by name (the names'
+    /// leading words, no rival type, members in common), so a record stored
+    /// through either is read through the other. A `same_as` on either type
+    /// overrides it. Absent when there is none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schema(value_type = BTreeMap<String, Vec<InferredMatchSchema>>)]
+    pub inferred_same_as: BTreeMap<String, Vec<InferredMatch>>,
+}
+
+/// The OpenAPI schema of [`InferredMatch`] (which lives in `mb-protocols`).
+#[derive(ToSchema, Debug)]
+#[schema(as = WorldInferredMatch)]
+pub struct InferredMatchSchema {
+    /// The other mock of the `shares` group.
+    pub mock: String,
+    /// Its type, as it stores it.
+    pub r#type: String,
 }
 
 impl WorldView {
@@ -701,6 +720,7 @@ impl WorldView {
             gaps: eff.gaps,
             warnings: Vec::new(),
             gaps_left_out: None,
+            inferred_same_as: BTreeMap::new(),
         }
     }
 
@@ -966,7 +986,9 @@ pub async fn get_world(
     let m = st.mock(&access.ws, &mock).await?;
     let v = resolve_version(&st, &m, &version).await?;
     let eff = effective_world(st.store.as_ref(), m.id, v.version, &v.bundle).await?;
+    let inferred = inferred_same_as(&st, &m, &v.bundle, &eff.world).await?;
     let mut view = WorldView::new(v.version, eff);
+    view.inferred_same_as = inferred;
     // Read from the whole view, before `narrow` drops the gaps whose types
     // it takes.
     let called = if filter.called {
@@ -976,10 +998,54 @@ pub async fn get_world(
         None
     };
     view.narrow(&filter);
+    if !filter.types.is_empty() {
+        view.inferred_same_as
+            .retain(|t, _| filter.types.contains(t));
+    }
     if let Some(called) = &called {
         view.keep_called(called);
+        view.inferred_same_as
+            .retain(|t, _| called.types.contains(t));
     }
     Ok(Json(view))
+}
+
+/// The types of `mock` (contract `bundle` described by `world`) matched by
+/// inference to types of the other mocks of its `shares` group, each at its
+/// active version (see [`mb_protocols::shares`]); none outside a group.
+async fn inferred_same_as(
+    st: &AdminState,
+    mock: &Mock,
+    bundle: &Bundle,
+    world: &World,
+) -> Result<BTreeMap<String, Vec<InferredMatch>>, StoreError> {
+    let Some(group) = mock.behavior.shares.as_deref() else {
+        return Ok(BTreeMap::new());
+    };
+    let own = catalog(bundle, world);
+    let mut peers: Vec<(String, SharedCatalog)> = Vec::new();
+    for peer in st.store.list_mocks(&mock.workspace).await? {
+        if peer.id == mock.id || peer.behavior.shares.as_deref() != Some(group) {
+            continue;
+        }
+        let Some(active) = st.store.active_contract(peer.id).await? else {
+            continue;
+        };
+        let eff =
+            effective_world(st.store.as_ref(), peer.id, active.version, &active.bundle).await?;
+        peers.push((peer.name.clone(), catalog(&active.bundle, &eff.world)));
+    }
+    Ok(mb_protocols::shares::inferred(
+        &own,
+        peers.iter().map(|(name, c)| (name.as_str(), c)),
+    ))
+}
+
+/// The [`SharedCatalog`] of `bundle` as the runtime serving it under `world`
+/// reads it: with `world` applied.
+fn catalog(bundle: &Bundle, world: &World) -> SharedCatalog {
+    let applied = mb_mcm::world::apply(bundle, &tier0(bundle), world);
+    SharedCatalog::new(&applied, Some(world))
 }
 
 // ---------------------------------------------------------------------------

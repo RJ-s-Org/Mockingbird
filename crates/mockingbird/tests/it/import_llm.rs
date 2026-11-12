@@ -39,6 +39,7 @@ fn deps(store: Arc<dyn ControlStore>, offline: bool, default_profile: Option<&st
         mode: mockingbird::runtime::ServeMode::Full,
         webhook_log: Default::default(),
         record_pools: Default::default(),
+        shares_groups: Default::default(),
     }
 }
 

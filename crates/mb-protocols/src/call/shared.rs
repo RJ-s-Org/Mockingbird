@@ -2,7 +2,8 @@
 //! name (GitHub's REST beside its GraphQL): they keep their sessions under
 //! it, so each finds what the others stored. A record is the same type
 //! when the names agree beyond case, punctuation and a plural `s` (`issues`,
-//! `issue`), or when the world says so (`types.<t>.same_as`). It is answered
+//! `issue`), when the world says so (`types.<t>.same_as`), or when
+//! [`crate::shares`] infers it from the contracts (`pulls`, `pullrequest`). It is answered
 //! in the reading mock's shape: members renamed between camelCase and
 //! snake_case where only that differs, enum values in the reading schema's case.
 
@@ -17,16 +18,13 @@ pub(crate) fn equivalents(rt: &MockRuntime, t: &str) -> Vec<String> {
     if rt.shares.is_none() {
         return Vec::new();
     }
-    let base: String = t
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .collect::<String>()
-        .to_lowercase();
-    let mut names = vec![base.clone(), format!("{base}s")];
-    names.extend(base.strip_suffix("es").map(str::to_string));
-    names.extend(base.strip_suffix('s').map(str::to_string));
+    let mut names = crate::shares::name_forms(t);
     if let Some(desc) = rt.described().type_desc(t) {
         names.extend(desc.same_as.iter().map(|n| n.to_lowercase()));
+    }
+    // The matches inferred from the other mocks' contracts, as they store them.
+    if let Some(found) = rt.inferred_same_as().get(t) {
+        names.extend(found.iter().map(|m| m.r#type.clone()));
     }
     let mut out: Vec<String> = Vec::new();
     for name in names {

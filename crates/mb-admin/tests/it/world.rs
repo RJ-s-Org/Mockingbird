@@ -2539,3 +2539,120 @@ async fn get_world_called_lists_only_the_gaps_of_what_the_request_log_names() {
     assert_eq!(status, 400, "{body}");
     assert_eq!(ctype, "application/problem+json");
 }
+
+/// A mock of a `shares` group lists, in `inferred_same_as`, its types matched
+/// to another mock's beyond their names (REST `merges`, GraphQL
+/// `MergeRequest`); a `same_as` on the type overrides the match, and a mock
+/// in no group lists none.
+#[tokio::test]
+async fn get_world_lists_the_types_inferred_the_same_across_a_shares_group() {
+    const REST: &str = r##"
+openapi: 3.0.3
+info: {title: merges, version: "1"}
+paths:
+  /projects/{project}/merges/{merge_number}:
+    get:
+      operationId: getMerge
+      parameters:
+        - {name: project, in: path, required: true, schema: {type: string}}
+        - {name: merge_number, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200":
+          description: the merge
+          content: {application/json: {schema: {$ref: "#/components/schemas/Merge"}}}
+components:
+  schemas:
+    Merge:
+      type: object
+      properties:
+        id: {type: integer}
+        number: {type: integer}
+        title: {type: string}
+        state: {type: string}
+"##;
+    const SDL: &str = r#"
+type MergeRequest { id: ID! number: Int! title: String! state: String! }
+type CreateMergeRequestPayload { mergeRequest: MergeRequest }
+type Query { mergeRequest(id: ID!): MergeRequest }
+type Mutation { createMergeRequest(title: String!): CreateMergeRequestPayload }
+"#;
+    let (st, app) = admin().await;
+    for (name, ctype, src) in [
+        ("forge-rest", "application/yaml", REST),
+        ("forge-graphql", "application/graphql", SDL),
+    ] {
+        send(
+            &app,
+            Method::POST,
+            BASE,
+            "application/json",
+            json!({"name": name}).to_string().into_bytes(),
+        )
+        .await;
+        send(
+            &app,
+            Method::POST,
+            &format!("{BASE}/{name}/contracts"),
+            ctype,
+            src.as_bytes().to_vec(),
+        )
+        .await;
+    }
+    let world = |name: &str| {
+        let app = app.clone();
+        let uri = format!("{BASE}/{name}/contracts/active/world");
+        async move { get_any(&app, &uri).await.2 }
+    };
+    assert!(world("forge-rest").await.get("inferred_same_as").is_none());
+
+    for name in ["forge-rest", "forge-graphql"] {
+        let mut mock = st
+            .store
+            .get_mock(DEFAULT_WORKSPACE, name)
+            .await
+            .unwrap()
+            .unwrap();
+        mock.behavior.shares = Some("forge".into());
+        st.store.update_mock(&mock).await.unwrap();
+    }
+    let rest = world("forge-rest").await;
+    assert_eq!(
+        rest["inferred_same_as"],
+        json!({"merges": [{"mock": "forge-graphql", "type": "mergerequest"}]}),
+        "{rest}"
+    );
+    let gql = world("forge-graphql").await;
+    assert_eq!(
+        gql["inferred_same_as"],
+        json!({"mergerequest": [{"mock": "forge-rest", "type": "merges"}]}),
+        "{gql}"
+    );
+
+    // Described with `same_as`, the type is matched as the world says only.
+    let mock = st
+        .store
+        .get_mock(DEFAULT_WORKSPACE, "forge-rest")
+        .await
+        .unwrap()
+        .unwrap();
+    let version = st
+        .store
+        .active_contract(mock.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .version;
+    revise(
+        st.store.as_ref(),
+        mock.id,
+        version,
+        Author::Agent,
+        json!({"version": 1, "types": {"merges": {"same_as": ["mergecommit"]}}}),
+    )
+    .await;
+    let rest = world("forge-rest").await;
+    assert!(rest.get("inferred_same_as").is_none(), "{rest}");
+    // Both sides agree: the other mock no longer lists it either.
+    let gql = world("forge-graphql").await;
+    assert!(gql.get("inferred_same_as").is_none(), "{gql}");
+}

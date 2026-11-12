@@ -44,6 +44,7 @@ The MCP tool is `get_world {mock, version?, operations?, types?, called?}`, and 
 | `gaps` | What the description leaves open. |
 | `warnings` | The `operation` and `type` filters naming nothing in the version, and with `called` a request log naming no operation of it; absent when there is none. |
 | `gaps_left_out` | With `called`, how many gaps it left out; absent without it. |
+| `inferred_same_as` | For a mock in a `shares` group: each of its types matched to a type another mock of the group stores under a name that differs beyond case and a plural `s`, as `{<type>: [{mock, type}]}`, inferred from the contracts (see [Types matched across a shares group](#types-matched-across-a-shares-group)). Absent when there is none. With `type` or `called`, only the types kept. |
 
 Gaps. The first three codes also mark the recorded calls of each operation they concern (see [Gaps in the request log](#gaps-in-the-request-log)). The last four point at behaviour the contract signals and the description does not state yet. `undescribed_param` is something the executor cannot answer from the records; the three marked `advisory: true` are checks: read the docs for each, and write an entry only when they state the behaviour, otherwise leave the gap.
 
@@ -58,6 +59,16 @@ Gaps. The first three codes also mark the recorded calls of each operation they 
 | `no_effect` (advisory) | An operation of kind `action` with no `set`, `transition` or `queue`. An update whose route only looks like an action is merged as an update and is not one. |
 | `no_unique` (advisory) | A type whose create can answer `409` and that has no `unique`. |
 | `no_soft_delete` (advisory) | A type a delete removes whose record has a member such as `deleted`, `is_trashed` or `deleted_at`, with no `lifecycle.soft_delete`. |
+
+### Types matched across a shares group
+
+Mocks of one API given the same `mocks.<name>.shares` keep their sessions together: a record one stores, the others read ([configuration](configuration.md)). A type of one is the same as a type of another when their names agree beyond case, punctuation and a plural `s` (REST `issues`, GraphQL `Issue`), when `types.<t>.same_as` says so, or when the contracts give strong evidence of it, all of:
+
+- **Name:** one name, its last word read singular, is the leading words of the other, on word boundaries (a capital after a lower-case letter or digit, the last capital of a run before a lower-case letter as in `HTTPServer`, any punctuation, or a change between letters and digits): `pulls` leads `PullRequest`; `project` does not lead `projectsV2`, nor `repos` `Repository`.
+- **No rival:** of all the other mock's types the name leads, that one is the shortest and each other one extends it (`PullRequestReview`); no other type of the first mock leads it; neither type already matches a type of the other mock by name; and neither has a `same_as`. When the shortest is left out for one of these reasons, nothing is matched.
+- **Members:** their records have at least three members in common besides `id`, compared in lower case without punctuation (`created_at` is `createdAt`).
+
+`get_world` lists these matches in `inferred_same_as`. A wrong one is overridden by giving the type a `same_as` (the name it really goes by there); a missing one is described the same way. A read by another member than the key finds the other mock's record by that member too (REST `/pulls/{pull_number}` reads `number` of a record GraphQL stored under its opaque `id`).
 
 ## Writing it
 
@@ -115,7 +126,7 @@ YAML or JSON, `version: 1`. Every key is optional; an absent key falls back to t
 | `lifecycle` | `{member, states?, initial?, soft_delete?}` | The status member and its states; `soft_delete: {state, listed_with?: {param, value}, unless?: {param, value}}` for a delete that only moves the record to a state, the list parameter that still shows it, and the delete's query parameter that removes it instead (`unless: {param: force, value: true}`). |
 | `unique` | `[{members, scope?, conflict?}]` | Member sets that must be unique, optionally within a member's scope, with the declared conflict status. |
 | `concurrency` | `{member?, header?, conflict?}` | The body member and/or header holding the version or ETag, and the declared conflict status. |
-| `same_as` | `[<type name>]` | The names this type goes by in the other mocks of a `shares` group, where they differ beyond case and a plural `s` (REST `pulls` beside GraphQL `pullrequest`). They name another contract's stored types as written (`check-runs`, not `checkruns`), so only their form is checked. |
+| `same_as` | `[<type name>]` | The names this type goes by in the other mocks of a `shares` group, where they differ beyond case and a plural `s` and the match is not inferred ([Types matched across a shares group](#types-matched-across-a-shares-group)). They name another contract's stored types as written (`check-runs`, not `checkruns`), so only their form is checked. Setting it on a type, in either mock, removes the match inferred for that type. |
 | `computed` | `{<member>: <expression>}` | Members computed whenever a record of the type is answered (a read, a list, a write's answer), each the value of an [expression](#expressions) over the record, and never stored: `line_count: "count('lines', it.order_id == record.id)"`. `derived` (`{kind: count, of}` or `{kind: sum, of, member, where?}`), which `computed` replaces, still loads ([below](#expressions)). |
 
 **Operations** (`operations.<operation id>`):

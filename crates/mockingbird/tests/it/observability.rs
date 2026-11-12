@@ -520,6 +520,7 @@ fn deps(
         mode: mockingbird::runtime::ServeMode::Full,
         webhook_log: Default::default(),
         record_pools: Default::default(),
+        shares_groups: Default::default(),
     }
 }
 

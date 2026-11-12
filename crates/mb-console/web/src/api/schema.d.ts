@@ -2408,6 +2408,13 @@ export interface components {
          * @enum {string}
          */
         WorldGapCode: "no_identity" | "no_target" | "no_record" | "skipped_route" | "refused" | "no_effect" | "undescribed_param" | "no_unique" | "no_soft_delete";
+        /** @description The OpenAPI schema of [`InferredMatch`] (which lives in `mb-protocols`). */
+        WorldInferredMatch: {
+            /** @description The other mock of the `shares` group. */
+            mock: string;
+            /** @description Its type, as it stores it. */
+            type: string;
+        };
         /**
          * @description Where a world write stands on this node's running mock when the write
          *     returns.
@@ -2511,6 +2518,16 @@ export interface components {
              *     Absent without `called`.
              */
             gaps_left_out?: number | null;
+            /**
+             * @description For a mock in a `shares` group: each of its types matched to a type of
+             *     another mock of the group by inference rather than by name (the names'
+             *     leading words, no rival type, members in common), so a record stored
+             *     through either is read through the other. A `same_as` on either type
+             *     overrides it. Absent when there is none.
+             */
+            inferred_same_as?: {
+                [key: string]: components["schemas"]["WorldInferredMatch"][];
+            };
             /**
              * @description The newest revision's entries that did not validate, and the
              *     entries of a config-file mock's `world:` file refused when the config

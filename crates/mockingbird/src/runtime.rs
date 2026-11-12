@@ -100,6 +100,9 @@ pub struct RuntimeDeps {
     pub webhook_log: SharedDeliveryLog,
     /// Every mock's record pool, kept across rebuilds of its runtime.
     pub record_pools: RecordPools,
+    /// The contracts of the mocks of each `shares` group, from which each
+    /// matches its types to the others' (`mb_protocols::shares`).
+    pub shares_groups: mb_protocols::shares::SharesGroups,
 }
 
 /// Each mock's [`RecordPool`], by workspace and name: a rebuilt runtime (a world or
@@ -660,6 +663,7 @@ pub(crate) async fn build_runtime_tracked(
     rt.default_scenario = mock.behavior.default_scenario.clone();
     rt.pool = deps.record_pools.of(&mock.workspace, &mock.name);
     rt.shares = mock.behavior.shares.clone();
+    rt.share_in(&deps.shares_groups);
     rt.strict_requests = mock.behavior.strict_requests;
     rt.base_paths = mb_import::base_paths(&contract.source);
     rt.webhooks = webhook_dispatcher(deps, mock).await?;

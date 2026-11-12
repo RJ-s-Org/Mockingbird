@@ -103,6 +103,8 @@ struct Mounted {
     world: LoadedWorld,
     /// The build that made it, from [`MockRegistry::generations`].
     generation: u64,
+    /// Its `shares` group and the catalog its peers match types against.
+    shared: Option<(String, Arc<mb_protocols::shares::SharedCatalog>)>,
 }
 
 /// How a mounted mock is reached.
@@ -549,7 +551,7 @@ impl MockRegistry {
             }
             next.push(mounted);
         }
-        self.publish(next).await;
+        self.publish(&deps.shares_groups, next).await;
         if let Ok(mut slot) = self.failed.lock() {
             *slot = failed;
         }
@@ -817,7 +819,7 @@ impl MockRegistry {
                 next.push(mounted);
             }
         }
-        self.publish(next).await;
+        self.publish(&deps.shares_groups, next).await;
         false
     }
 
@@ -1140,9 +1142,15 @@ impl MockRegistry {
         issues
     }
 
-    /// Installs `next` as the mounted set and publishes its gRPC mocks.
+    /// Installs `next` as the mounted set, registers its `shares` groups, and
+    /// publishes its gRPC mocks.
     /// Callers hold `self.reload`, so publishes do not interleave.
-    async fn publish(&self, mut next: Vec<Mounted>) {
+    async fn publish(&self, shares: &mb_protocols::shares::SharesGroups, mut next: Vec<Mounted>) {
+        // The mocks served are the ones whose peers match types against them.
+        shares.sync(next.iter().filter_map(|m| {
+            let (group, catalog) = m.shared.clone()?;
+            Some(((m.workspace.clone(), m.name.clone()), group, catalog))
+        }));
         let prefix_len = |m: &Mounted| m.prefix().map_or(0, str::len);
         // Longest prefix first; at equal length host-specific mocks first.
         next.sort_by(|a, b| {
@@ -1371,6 +1379,7 @@ async fn build_mounted(
         }
     };
     let state_health = Arc::clone(&runtime.state_health);
+    let shared = runtime.shared();
     let protocol = runtime.bundle().protocol();
     let channels = runtime.bundle().channels.clone();
     let runtime = Arc::new(runtime);
@@ -1449,6 +1458,7 @@ async fn build_mounted(
             uses_default: mock.llm_profile.is_none(),
             world,
             generation,
+            shared,
         })),
         Err(error) => {
             tracing::error!(mock = %label, %error, "cannot route mock; keeping any previous version mounted");

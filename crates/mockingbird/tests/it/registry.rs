@@ -74,6 +74,7 @@ fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
         mode: mockingbird::runtime::ServeMode::Full,
         webhook_log: Default::default(),
         record_pools: Default::default(),
+        shares_groups: Default::default(),
     }
 }
 
@@ -1604,4 +1605,107 @@ async fn profile_used_through_the_policy_rebuilds_its_mocks() {
     // The rebuilt runtime builds `r` afresh on its next call.
     call(&router, "GET", "localhost", "/a/orders", None).await;
     assert_eq!(secrets.take(), counts(&[("env:R", 1)]));
+}
+
+/// Mocks of one API served together match a type named apart (REST `merges`,
+/// GraphQL `MergeRequest`) once both are mounted: a merge request created
+/// over GraphQL is read over REST by its number. Once the GraphQL mock is
+/// deleted, the REST mock no longer reads its type through it.
+#[tokio::test]
+async fn served_mocks_of_a_shares_group_match_types_named_apart() {
+    const REST: &str = r##"
+openapi: 3.0.3
+info: {title: merges, version: "1"}
+paths:
+  /projects/{project}/merges/{merge_number}:
+    get:
+      operationId: getMerge
+      parameters:
+        - {name: project, in: path, required: true, schema: {type: string}}
+        - {name: merge_number, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200":
+          description: the merge
+          content: {application/json: {schema: {$ref: "#/components/schemas/Merge"}}}
+        "404": {description: missing}
+components:
+  schemas:
+    Merge:
+      type: object
+      required: [number, title]
+      properties:
+        id: {type: integer}
+        number: {type: integer}
+        title: {type: string}
+        state: {type: string}
+"##;
+    const SDL: &str = r#"
+type MergeRequest { id: ID! number: Int! title: String! state: String! }
+input CreateMergeRequestInput { projectId: ID! title: String! }
+type CreateMergeRequestPayload { mergeRequest: MergeRequest }
+type Query { mergeRequest(id: ID!): MergeRequest }
+type Mutation { createMergeRequest(input: CreateMergeRequestInput!): CreateMergeRequestPayload }
+"#;
+    let store = store().await;
+    for (name, prefix, src) in [
+        ("forge-rest", "/rest", REST),
+        ("forge-graphql", "/graphql", SDL),
+    ] {
+        let mut mock = create_mock(&store, name, prefix, None).await;
+        activate(&store, &mock, src).await;
+        mock.behavior = MockBehavior {
+            shares: Some("forge".into()),
+            unknown_ids: UnknownIds::NotFound,
+            ..Default::default()
+        };
+        store.update_mock(&mock).await.unwrap();
+    }
+    let deps = deps(store.clone());
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let base = serve(registry.router()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client
+        .post(format!("{base}/graphql"))
+        .header("x-mockingbird-session", "s1")
+        .json(&json!({"query": r#"mutation { createMergeRequest(input: {projectId: "P_1", title: "Over GraphQL"}) { mergeRequest { id number title } } }"#}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let number = created["data"]["createMergeRequest"]["mergeRequest"]["number"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{created}"));
+    let read = |base: String| {
+        let client = client.clone();
+        async move {
+            let r = client
+                .get(format!("{base}/rest/projects/acme/merges/{number}"))
+                .header("x-mockingbird-session", "s1")
+                .send()
+                .await
+                .unwrap();
+            (
+                r.status().as_u16(),
+                r.json::<Value>().await.unwrap_or(Value::Null),
+            )
+        }
+    };
+    let (status, body) = read(base.clone()).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["title"], "Over GraphQL", "{body}");
+
+    assert!(
+        store
+            .delete_mock(DEFAULT_WORKSPACE, "forge-graphql")
+            .await
+            .unwrap()
+    );
+    registry
+        .reload_mock(&deps, DEFAULT_WORKSPACE, "forge-graphql")
+        .await;
+    let (status, body) = read(base).await;
+    assert_eq!(status, 404, "{body}");
 }
