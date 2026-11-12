@@ -852,3 +852,70 @@ async fn an_enum_the_persona_speaks_of_is_resolved_or_asked() {
     let asked: Vec<&String> = schema["properties"].as_object().unwrap().keys().collect();
     assert_eq!(asked, vec!["tier"]);
 }
+
+const STATES: &str = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /issues:
+    post:
+      operationId: createIssue
+      responses:
+        "201":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Issue"}
+components:
+  schemas:
+    Issue:
+      type: object
+      required: [state, phase, stage, kind]
+      properties:
+        state: {type: string, enum: [CLOSED, OPEN]}
+        phase: {type: string, enum: [canceled, requires_payment_method, succeeded]}
+        stage: {type: string, enum: [done, open], default: done}
+        kind: {type: string, enum: [closed, open]}
+"##;
+
+/// A state nothing gave a start, when no model writes it, starts at the value that
+/// reads as a start (`OPEN` though `CLOSED` is listed first, a `requires_*` value), or
+/// at the contract's `default`; an enum that is no state keeps its first value.
+#[tokio::test]
+async fn a_state_no_model_wrote_starts_at_the_value_reading_as_a_start() {
+    let bundle = compile(STATES.as_bytes()).unwrap();
+    let op = bundle.operation("createIssue").unwrap();
+    let schema = op.success_output().unwrap().schema.clone().unwrap();
+    let (_provider, engine) = scripted(vec![Err(LlmError::Transport("down".into()))]);
+    let call = OperationCall {
+        credentials: Default::default(),
+        operation_id: op.id.clone(),
+        path_params: Map::new(),
+        query: Map::new(),
+        headers: Map::new(),
+        body: None,
+    };
+    let missing: Vec<String> = ["state", "phase", "stage", "kind"]
+        .map(String::from)
+        .to_vec();
+    let states: Vec<String> = ["state", "phase", "stage"].map(String::from).to_vec();
+    let filled = engine
+        .fill(
+            &bundle,
+            &schema,
+            &Map::new(),
+            &missing,
+            FillContext {
+                op,
+                call: &call,
+                sent: None,
+                caller: &[],
+                states: &states,
+            },
+        )
+        .await;
+    assert_eq!(filled.members["state"], "OPEN", "{:?}", filled.members);
+    assert_eq!(filled.members["phase"], "requires_payment_method");
+    assert_eq!(filled.members["stage"], "done");
+    assert_eq!(filled.members["kind"], "closed");
+}
