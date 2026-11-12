@@ -359,4 +359,221 @@ type Mutation { createTicket(input: CreateTicketInput!): CreateTicketPayload }
         let held = store.get(&key, "ticket", id).await.unwrap().unwrap();
         assert_eq!(held.data["url"], url.as_str(), "{}", held.data);
     }
+
+    const MERGES_SDL: &str = r#"
+"""An RFC 3986, RFC 3987, and RFC 6570 (level 4) compliant URI string."""
+scalar URI
+type Project { id: ID! name: String! url: URI }
+type MergeRequest { id: ID! number: Int! url: URI! }
+input CreateMergeRequestInput { projectId: ID! }
+type CreateMergeRequestPayload { mergeRequest: MergeRequest }
+type Query { node(id: ID!): MergeRequest }
+type Mutation { createMergeRequest(input: CreateMergeRequestInput!): CreateMergeRequestPayload }
+"#;
+
+    /// The REST mock of the same API: merges read by path, their page link laid out
+    /// under another host, with the collection in the singular.
+    const MERGES_REST: &str = r##"
+openapi: 3.1.0
+info: {title: Tracker, version: "1"}
+servers: [{url: "https://api.tracker.test"}]
+paths:
+  /projects/{owner}/{repo}/merges/{merge_number}:
+    get:
+      operationId: getMerge
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+        - {name: merge_number, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MergeRequest"}
+components:
+  schemas:
+    MergeRequest:
+      type: object
+      required: [id, number, url, html_url]
+      properties:
+        id: {type: integer}
+        node_id: {type: string}
+        number: {type: integer}
+        url: {type: string, format: uri, example: "https://api.tracker.test/projects/acme/roadmap/merges/12"}
+        html_url: {type: string, format: uri, example: "https://tracker.test/acme/roadmap/merge/12"}
+"##;
+
+    /// The GraphQL mock, holding project `P_1` (whose `url` is
+    /// `https://tracker.test/acme/roadmap`), served; in a `shares` group with the REST
+    /// mock when `twin`, which is returned.
+    struct Merges {
+        addr: std::net::SocketAddr,
+        store: Arc<dyn StateStore>,
+        key: SessionKey,
+        rest: Option<MockRuntime>,
+    }
+
+    /// The REST mock beside the GraphQL one: none, one whose type is inferred to be
+    /// the same (`merges`), or one whose world names it as the GraphQL one does.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Peer {
+        Absent,
+        Inferred,
+        SameName,
+    }
+
+    async fn merges(peer: Peer) -> Merges {
+        let doc: mb_mcm::world::World = serde_json::from_value(json!({
+            "version": 1,
+            "types": {"mergerequest": {"identity": {"member": "id"}}},
+            "operations": {
+                "Query.node": {"kind": "read", "type": "mergerequest", "target": {"member": "id"}},
+                "Mutation.createMergeRequest": {"kind": "create", "type": "mergerequest",
+                    "answer": {"record": "/mergeRequest"}}
+            }
+        }))
+        .unwrap();
+        let bundle = compile(MERGES_SDL.as_bytes()).unwrap();
+        let base = mb_mcm::world::tier0(&bundle);
+        let (world, refused) = mb_mcm::world::effective(&bundle, &base, &doc);
+        assert!(refused.is_empty(), "{refused:?}");
+        let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+        let key = SessionKey {
+            workspace: "default".into(),
+            mock: "tracker".into(),
+            session: "s1".into(),
+        };
+        store
+            .upsert(
+                &key,
+                StoredResource {
+                    resource_type: "project".into(),
+                    id: "P_1".into(),
+                    data: json!({"__typename": "Project", "id": "P_1", "name": "roadmap",
+                        "url": "https://tracker.test/acme/roadmap"}),
+                },
+            )
+            .await
+            .unwrap();
+        let types = mb_protocols::SharedTypes::default();
+        let mut rt = MockRuntime::new(
+            "tracker",
+            Arc::new(bundle),
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            Arc::clone(&store),
+        )
+        .with_world(&base, &world, 1);
+        rt.hosts = vec!["api.tracker.test".into()];
+        rt.shares = Some("tracker".into());
+        rt.shared_types = types.clone();
+        rt.shared_types.join(&rt);
+        let rest = (peer != Peer::Absent).then(|| {
+            let bundle = compile(MERGES_REST.as_bytes()).unwrap();
+            let mut rest = MockRuntime::new(
+                "tracker-rest",
+                Arc::new(bundle.clone()),
+                Arc::new(Engine::new(None, EngineConfig::default())),
+                Arc::clone(&store),
+            );
+            if peer == Peer::SameName {
+                let doc: mb_mcm::world::World = serde_json::from_value(json!({
+                    "version": 1,
+                    "types": {"mergerequest": {"identity": {"member": "number"}}},
+                    "operations": {"getMerge": {"kind": "read", "type": "mergerequest",
+                        "target": {"path_param": "merge_number"}}}
+                }))
+                .unwrap();
+                let base = mb_mcm::world::tier0(&bundle);
+                let (world, refused) = mb_mcm::world::effective(&bundle, &base, &doc);
+                assert!(refused.is_empty(), "{refused:?}");
+                rest = rest.with_world(&base, &world, 1);
+            }
+            rest.hosts = vec!["api.tracker.test".into()];
+            rest.shares = Some("tracker".into());
+            rest.shared_types = types.clone();
+            rest.shared_types.join(&rest);
+            rest
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = mb_protocols::graphql::try_router(Arc::new(rt)).unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        Merges {
+            addr,
+            store,
+            key,
+            rest,
+        }
+    }
+
+    /// Creates a merge request under `P_1`: the URL the record holds, and its number.
+    async fn create_merge_request(m: &Merges) -> (String, i64) {
+        let Merges {
+            addr, store, key, ..
+        } = m;
+        let query = r#"mutation { createMergeRequest(input: {projectId: "P_1"}) {
+            mergeRequest { id number url } } }"#;
+        let body: Value = reqwest::Client::new()
+            .post(format!("http://{addr}/graphql"))
+            .header("content-type", "application/json")
+            .header("x-mockingbird-session", "s1")
+            .body(json!({ "query": query }).to_string())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(body.get("errors").is_none(), "{body}");
+        let made = &body["data"]["createMergeRequest"]["mergeRequest"];
+        let number = made["number"].as_i64().unwrap_or_else(|| panic!("{body}"));
+        let url = made["url"].as_str().unwrap_or_else(|| panic!("{body}"));
+        let id = made["id"].as_str().unwrap();
+        let held = store.get(key, "mergerequest", id).await.unwrap().unwrap();
+        assert_eq!(held.data["url"], url, "{}", held.data);
+        (url.to_owned(), number)
+    }
+
+    /// A GraphQL type whose REST twin (one `shares` group) lays its page link out
+    /// builds its own link that way: the parent's owner and name, the twin's
+    /// collection as its example spells it, the record's number last.
+    #[tokio::test]
+    async fn a_graphql_create_s_url_follows_its_rest_twin_s_page_link() {
+        let mut m = merges(Peer::Inferred).await;
+        let (url, number) = create_merge_request(&m).await;
+        assert_eq!(
+            url,
+            format!("https://tracker.test/acme/roadmap/merge/{number}")
+        );
+        // The twin leaving the group, the plural name is back.
+        let mut rest = m.rest.take().unwrap();
+        rest.shares = None;
+        rest.shared_types.join(&rest);
+        let (url, number) = create_merge_request(&m).await;
+        assert_eq!(
+            url,
+            format!("https://tracker.test/acme/roadmap/mergerequests/{number}")
+        );
+    }
+
+    /// With no twin, the link goes under the parent's, by the type's plural name.
+    #[tokio::test]
+    async fn with_no_twin_a_graphql_create_s_url_takes_the_plural_type_name() {
+        let (url, number) = create_merge_request(&merges(Peer::Absent).await).await;
+        assert_eq!(
+            url,
+            format!("https://tracker.test/acme/roadmap/mergerequests/{number}")
+        );
+    }
+
+    /// A twin storing the type under the GraphQL mock's own name is found too.
+    #[tokio::test]
+    async fn a_twin_of_the_same_type_name_lays_the_url_out() {
+        let (url, number) = create_merge_request(&merges(Peer::SameName).await).await;
+        assert_eq!(
+            url,
+            format!("https://tracker.test/acme/roadmap/merge/{number}")
+        );
+    }
 }
