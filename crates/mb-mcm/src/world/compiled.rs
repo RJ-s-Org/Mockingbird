@@ -508,6 +508,33 @@ impl OpExpressions {
         })
     }
 
+    /// Whether a `set` entry a create applies (not a `changes` one) writes record
+    /// member `member` (or one below it), or reads the request body at `path`: at it,
+    /// below it (`request.body.input.lines.map(l, ...)`) or above it
+    /// (`request.body.input`). A list item step reads any member. The description
+    /// says how the record is built from what the request sent there.
+    #[must_use]
+    pub fn create_builds(&self, path: &[&str], member: &str) -> bool {
+        let agrees = |read: &[Segment]| {
+            read.iter().zip(path).all(|(r, p)| match r {
+                Segment::Member(n) => n == p,
+                Segment::Item => true,
+            })
+        };
+        self.set.iter().filter(|e| !e.from_changes).any(|entry| {
+            entry.member.split('.').next() == Some(member)
+                || match &entry.value {
+                    // A pointer is a `changes` entry's, which a create does not apply.
+                    SetValue::Literal(_) | SetValue::Pointer(_) => false,
+                    SetValue::Expr(p) => p
+                        .check()
+                        .members
+                        .iter()
+                        .any(|m| matches!(m.root, Root::Body) && agrees(&m.path)),
+                }
+        })
+    }
+
     /// Whether an expression of the operation calls a session function (`held`,
     /// `count`, `exists`, `seq`, `mint`).
     #[must_use]
@@ -562,6 +589,27 @@ mod tests {
         for name in ["deep", "Q", "Inner", "x", "b", "lit"] {
             assert!(!op.sets_from_body(name), "{name}");
         }
+    }
+
+    #[test]
+    fn create_builds_names_what_a_create_set_reads_or_writes() {
+        let world: World = serde_json::from_value(json!({"operations": {"op": {
+            "changes": {"c": {"from_request": "/input/notes"}},
+            "set": {"lines.nodes": "request.body.input.lines.map(l, {'quantity': l.quantity})",
+                    "note": "has(request.body.input.note) ? request.body.input.note : ''",
+                    "whole": "request.body.other",
+                    "d": "'lit'"}
+        }}}))
+        .unwrap();
+        let compiled = Expressions::compile(&world);
+        let op = compiled.op("op").unwrap();
+        assert!(op.create_builds(&["input", "lines"], "x"));
+        assert!(op.create_builds(&["input", "note"], "x"));
+        assert!(op.create_builds(&["input", "kept"], "lines"));
+        assert!(op.create_builds(&["other", "deep"], "x"));
+        assert!(!op.create_builds(&["input", "kept"], "x"));
+        // `changes` are not a create's.
+        assert!(!op.create_builds(&["input", "notes"], "c"));
     }
 
     #[test]
