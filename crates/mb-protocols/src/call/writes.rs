@@ -36,6 +36,9 @@ pub(super) struct WriteRequest<'a> {
     /// [`records::mint_created`] gave them; empty when its request's items are not
     /// the records made.
     pub(super) request_records: Vec<Value>,
+    /// The places, among the records a bulk create makes, of those it does not store
+    /// ([`records::set_each`]).
+    pub(super) bulk_unstored: Vec<usize>,
 }
 
 /// What [`write_state`] did with an answer: how many records it located and handed to
@@ -102,6 +105,7 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
         held: was_held,
         header_id,
         request_records,
+        bulk_unstored,
     } = w;
     let rt = state.rt;
     if origin == WriteOrigin::Seeded {
@@ -177,7 +181,10 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
             let field = records::identity_member(rt, op, resource_type);
             let mut outcome = WriteOutcome::default();
             let one = made.len() == 1;
-            for data in made {
+            for (at, data) in made.into_iter().enumerate() {
+                if bulk_unstored.contains(&at) {
+                    continue;
+                }
                 let Some(id) = mb_mcm::member_at(&data, field).and_then(id_string) else {
                     continue;
                 };

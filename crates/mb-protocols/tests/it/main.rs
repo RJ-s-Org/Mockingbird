@@ -20,6 +20,7 @@ mod answer_repairs;
 mod api;
 mod backends;
 mod base64_fields;
+mod bulk_root_records;
 mod call;
 mod concurrency;
 mod concurrency_evidence;

@@ -1658,6 +1658,7 @@ pub(super) async fn mint(
                 held: false,
                 header_id: None,
                 request_records: Vec::new(),
+                bulk_unstored: Vec::new(),
             },
         )
         .await;
