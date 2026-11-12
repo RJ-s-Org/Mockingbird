@@ -158,6 +158,13 @@ impl TypeLinks {
         }) {
             schemas.push(def);
         }
+        // Where the mock's own API URLs are: its hosts, under its base path.
+        let api = Api {
+            hosts: &rt.hosts,
+            base: rt.base_paths.first().map_or_else(Vec::new, |b| {
+                b.split('/').filter(|s| !s.is_empty()).collect()
+            }),
+        };
         for schema in schemas {
             let (parts, _) = schema_parts(bundle, Some(schema));
             let whole_example = parts.iter().find_map(|p| {
@@ -185,7 +192,7 @@ impl TypeLinks {
                     })
                     .or_else(|| whole_example.and_then(|e| e.get(name)))
                     .and_then(Value::as_str);
-                if let Some(example) = example.and_then(|e| links.example(e)) {
+                if let Some(example) = example.and_then(|e| links.example(e, &api)) {
                     links.examples.insert(name.clone(), example);
                 }
             }
@@ -194,9 +201,31 @@ impl TypeLinks {
         links
     }
 
-    /// What `text`, an example of a member, shows; `None` when it is no URL.
-    fn example(&mut self, text: &str) -> Option<Example> {
+    /// What `text`, an example of a member, shows; `None` when it is no URL, or when it
+    /// is one of the mock's own API URLs ([`Api`]) that reaches the record by another
+    /// route than its read (GitHub's issue `url` example
+    /// `https://api.github.com/repositories/42/issues/1` beside the read
+    /// `/repos/{owner}/{repo}/issues/{issue_number}`, its `repositories` taken for the
+    /// `{owner}`): an API URL showing the record's place by part of the read path starts
+    /// it at one of the read's literals (`/repos/{owner}/{repo}` of
+    /// `/orgs/{org}/teams/{team_slug}/repos/{owner}/{repo}`), and only a link elsewhere
+    /// (a page link, `https://github.com/octocat/Hello-World/issues/1347`) starts it at
+    /// a parameter, its leading literals left out.
+    fn example(&mut self, text: &str, api: &Api<'_>) -> Option<Example> {
         let url = Url::parse(text)?;
+        if let Some(origin) = url.origin
+            && api
+                .hosts
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case(&host_of(origin)))
+            && url.segments.starts_with(&api.base)
+            && let Some((_, j, k)) = align(&url.segments, &self.read)
+            && j > 0
+            && j + k == self.read.len()
+            && segment_param(&self.read[j]).is_some()
+        {
+            return None;
+        }
         let origin = url.origin.filter(|o| !placeholder(&host_of(o)));
         if let Some(origin) = origin {
             let host = host_of(origin);
@@ -232,6 +261,14 @@ impl TypeLinks {
     fn is_url_member(&self, name: &str) -> bool {
         url_named(name) || self.members.iter().any(|m| m == name)
     }
+}
+
+/// Where a mock's own API URLs are: on one of its hosts
+/// ([`crate::MockRuntime::hosts`]), under its base path.
+#[derive(Default)]
+struct Api<'a> {
+    hosts: &'a [String],
+    base: Vec<&'a str>,
 }
 
 /// The required arguments of the GraphQL query that reads one record of type `t` by what
@@ -1509,7 +1546,7 @@ mod tests {
             ..TypeLinks::default()
         };
         let example = links
-            .example("https://tracker.test/octo/demo/pull/1")
+            .example("https://tracker.test/octo/demo/pull/1", &Api::default())
             .unwrap();
         links.examples.insert("html_url".to_owned(), example);
         links
@@ -1706,6 +1743,45 @@ mod tests {
         );
     }
 
+    /// An example on the mock's own API host reaching the record by another route (a
+    /// word in the read's first parameter, its leading literal left out) is no example;
+    /// one starting at a later literal of the read, or on another host, is.
+    #[test]
+    fn an_api_example_reaching_the_record_by_another_route_is_passed_over() {
+        let hosts = vec!["api.tracker.test".to_owned()];
+        let api = Api {
+            hosts: &hosts,
+            base: Vec::new(),
+        };
+        let mut links = TypeLinks {
+            read: template("/repos/{owner}/{repo}/issues/{issue_number}"),
+            leading: 1,
+            ..TypeLinks::default()
+        };
+        assert!(
+            links
+                .example("https://api.tracker.test/repositories/42/issues/1", &api)
+                .is_none()
+        );
+        let page = links
+            .example("https://tracker.test/octo/demo/issues/1", &api)
+            .unwrap();
+        assert_eq!(page.start, Some(1));
+        let whole = links
+            .example("https://api.tracker.test/repos/octo/demo/issues/1", &api)
+            .unwrap();
+        assert_eq!(whole.start, Some(0));
+        let mut nested = TypeLinks {
+            read: template("/orgs/{org}/teams/{team_slug}/repos/{owner}/{repo}"),
+            leading: 1,
+            ..TypeLinks::default()
+        };
+        let shorter = nested
+            .example("https://api.tracker.test/repos/octo/demo", &api)
+            .unwrap();
+        assert_eq!(shorter.start, Some(4));
+    }
+
     /// A twin read at `/repos/{owner}/{repo}/pulls/{pull_number}`: its API link the
     /// read path, its page link (and a diff link, which is not the record's own place)
     /// under another host, the collection in the singular.
@@ -1721,7 +1797,7 @@ mod tests {
             ("diff_url", "https://pages.test/octo/demo/pull/1347.diff"),
             ("html_url", "https://pages.test/octo/demo/pull/1347"),
         ] {
-            let example = links.example(text).unwrap();
+            let example = links.example(text, &Api::default()).unwrap();
             links.examples.insert(name.to_owned(), example);
         }
         Twin::of(&links, Some("api.pages.test"), Vec::new()).unwrap()
@@ -1834,7 +1910,9 @@ mod tests {
             members: vec!["url".to_owned()],
             ..TypeLinks::default()
         };
-        let example = links.example("https://pages.test/octo/demo").unwrap();
+        let example = links
+            .example("https://pages.test/octo/demo", &Api::default())
+            .unwrap();
         links.examples.insert("html_url".to_owned(), example);
         let twin = Twin::of(&links, Some("api.pages.test"), Vec::new()).unwrap();
         assert_eq!(
