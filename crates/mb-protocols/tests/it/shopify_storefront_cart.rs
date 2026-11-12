@@ -23,7 +23,7 @@ const PRODUCT: &str = "gid://shopify/Product/8493028147510";
 
 /// The cart selection the checks read.
 const CART: &str = "id totalQuantity \
-    cost { subtotalAmount { amount currencyCode } totalAmount { amount currencyCode } } \
+    cost { subtotalAmount { amount currencyCode } totalAmount { amount currencyCode } totalTaxAmount { amount } } \
     lines(first: 10) { edges { node { id quantity cost { totalAmount { amount } } \
     merchandise { ... on ProductVariant { id title price { amount } product { handle } } } } } }";
 
@@ -190,6 +190,8 @@ async fn the_cart_merges_removes_and_totals_from_its_lines() {
     assert_eq!(cart["totalQuantity"], 0, "{data}");
     assert_eq!(amount(&cart["cost"]["subtotalAmount"]), "0.0", "{data}");
     assert_eq!(amount(&cart["cost"]["totalAmount"]), "0.0", "{data}");
+    // The deprecated tax amount a storefront still selects is null.
+    assert!(cart["cost"]["totalTaxAmount"].is_null(), "{data}");
 }
 
 /// A cart created with lines holds them, totalled, from state.
@@ -212,6 +214,7 @@ async fn a_cart_created_with_lines_holds_them() {
     assert_eq!(line["merchandise"]["id"], VARIANT, "{data}");
     assert_eq!(line["merchandise"]["title"], "Small", "{data}");
     assert_eq!(amount(&cart["cost"]["totalAmount"]), "25.98", "{data}");
+    assert!(cart["cost"]["totalTaxAmount"].is_null(), "{data}");
     let id = cart["id"].as_str().unwrap().to_string();
     let (data, source) = call(
         addr,

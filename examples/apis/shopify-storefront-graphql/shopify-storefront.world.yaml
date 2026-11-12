@@ -11,7 +11,8 @@
 #   is that variant's `price.amount`, or 0.0 for a variant the session never
 #   read (and offline, where the faker's Decimal values are words).
 # - The cart's `totalQuantity` and `cost`, and each line's `cost`, are computed
-#   from the lines whenever the cart is answered, in cents so sums never drift.
+#   from the lines whenever the cart is answered, in cents so sums never drift
+#   (the deprecated cost.totalTaxAmount is null).
 #   A line's `merchandise.product` is computed too, from the product the session
 #   holds (what the reads that showed it selected), with every member Shopify
 #   requires: its `options`, `variants` and `images` are left empty (an
@@ -34,13 +35,15 @@ types:
     computed:
       totalQuantity: >-
         record.lines.edges == null ? 0 : sum(record.lines.edges, it.node.quantity)
-      # subtotal = total = checkout charge: no taxes, shipping or discounts before checkout.
+      # subtotal = total = checkout charge: no taxes, shipping or discounts before checkout;
+      # the deprecated totalTaxAmount is null, as its deprecation notice says tax
+      # amounts are no longer available.
       cost: >-
         [record.lines.edges == null ? 0 : sum(record.lines.edges,
             (matches(string(it.node.merchandise.price.amount), '^[0-9]+([.][0-9]+)?$')
               ? int(double(it.node.merchandise.price.amount) * 100.0 + 0.5) : 0) * it.node.quantity)]
         .map(c, {'currencyCode': 'USD', 'amount': c % 100 == 0 ? string(c / 100) + '.0' : string(c / 100)})
-        .map(m, {'subtotalAmount': m, 'totalAmount': m, 'checkoutChargeAmount': m})[0]
+        .map(m, {'subtotalAmount': m, 'totalAmount': m, 'checkoutChargeAmount': m, 'totalTaxAmount': null})[0]
       lines: >-
         [(record.lines.edges == null ? [] : record.lines.edges).map(e,
           [e.node.merchandise].map(m,
