@@ -104,6 +104,8 @@ pub(crate) struct BundleIndex {
     pub(super) links: std::sync::RwLock<HashMap<String, std::sync::Arc<links::TypeLinks>>>,
     /// The types whose records are told apart by their parent (see [`super::scopes`]).
     pub(super) parent_scopes: super::scopes::ParentScopes,
+    /// The parents' members embedding records of a child type (see [`super::children`]).
+    pub(super) child_embeds: super::children::ChildEmbeds,
 }
 
 /// The schema of the record an answer of `schema` holds where `identity` says: an
@@ -580,6 +582,13 @@ impl BundleIndex {
             *counts.entry(t.clone()).or_default() += 1;
             unscoped_paths.insert(list.path, (t, list.search));
         }
+        let child_embeds = super::children::ChildEmbeds::of(
+            bundle,
+            &detail_reads,
+            &types_by_def,
+            &record_schemas,
+            &parent_scopes,
+        );
         Self {
             by_id,
             #[cfg(any(test, feature = "events"))]
@@ -622,6 +631,7 @@ impl BundleIndex {
                 .filter_map(|op| op.resource_type.clone())
                 .collect(),
             links: std::sync::RwLock::default(),
+            child_embeds,
             parent_scopes,
         }
     }
@@ -645,6 +655,11 @@ impl BundleIndex {
     /// The parent-scoped types of the contract (see [`super::scopes`]).
     pub(crate) fn parent_scopes(&self) -> &super::scopes::ParentScopes {
         &self.parent_scopes
+    }
+
+    /// The embeds of child records the contract binds (see [`super::children`]).
+    pub(crate) fn child_embeds(&self) -> &super::children::ChildEmbeds {
+        &self.child_embeds
     }
 
     pub(super) fn path_fields(&self, resource_type: &str) -> &[String] {

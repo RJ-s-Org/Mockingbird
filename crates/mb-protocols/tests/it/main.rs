@@ -48,6 +48,7 @@ mod described_runtime;
 mod described_state_lists;
 mod detail_prompt_size;
 mod effect_members;
+mod embedded_children;
 mod engine_error_bodies;
 mod envelope_parents;
 mod envelope_writes;
