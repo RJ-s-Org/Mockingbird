@@ -76,6 +76,11 @@ impl std::fmt::Debug for Faker {
 pub struct FakerHints {
     /// Field name to the value echoed into it.
     pub echoes: Map<String, Value>,
+    /// Draw a nullable object as an object, short of the depth limit: the schema is
+    /// what a client selected (a GraphQL query's fields), so each object in it is one
+    /// the client reads. Elsewhere a nullable object stays `null` on some draws, as a
+    /// REST body's `last_payment_error` or `parent` repository is.
+    pub objects: bool,
 }
 
 impl FakerHints {
@@ -98,7 +103,10 @@ impl FakerHints {
         {
             add(body);
         }
-        Self { echoes }
+        Self {
+            echoes,
+            objects: op.protocol == mb_mcm::Protocol::Graphql,
+        }
     }
 }
 
@@ -288,7 +296,9 @@ impl Faker {
         let pick = match branch {
             Some(i) => Pick::Forced(i),
             None if at_limit => Pick::Shallow,
-            None => Pick::Random,
+            None => Pick::Random {
+                objects: self.hints.objects,
+            },
         };
         let flat = flatten(ctx.root, ctx.costs, schema, 0, pick, rng);
         let Some(s) = flat.as_object() else {
@@ -1121,8 +1131,9 @@ fn infer_type(s: &Map<String, Value>) -> &'static str {
 enum Pick {
     /// This branch index (modulo the branch count).
     Forced(usize),
-    /// A uniformly random branch, but a nullable object's object branch.
-    Random,
+    /// A uniformly random branch; with `objects` ([`FakerHints::objects`]), a nullable
+    /// object's object branch.
+    Random { objects: bool },
     /// The branch with the smallest minimal-instance cost (see [`Costs`]),
     /// so that recursion past the limits converges on a finite instance.
     Shallow,
@@ -1161,13 +1172,14 @@ fn flatten<R: Rng>(
         if let Some(Value::Array(branches)) = obj.get(key)
             && !branches.is_empty()
         {
-            // A nullable list takes its list branch: lists are never null. Short of
-            // the limit (where `Shallow` takes the cheapest branch, so recursion
-            // ends), a nullable object takes its object branch when it has a finite
-            // instance: a client reading it (a GraphQL `repository { name }`, an
-            // `owner`) gets one, as the API would answer for a record that exists.
+            // A nullable list takes its list branch: lists are never null. For a
+            // client's selection (`FakerHints::objects`), short of the limit (where
+            // `Shallow` takes the cheapest branch, so recursion ends), a nullable
+            // object takes its object branch when it has a finite instance: the client
+            // reading it (a GraphQL `repository { name }`, an `owner`) gets one, as
+            // the API would answer for a record that exists.
             let has_list = branches.iter().any(|b| is_array_schema(root, b));
-            let has_object = matches!(pick, Pick::Random)
+            let has_object = matches!(pick, Pick::Random { objects: true })
                 && branches
                     .iter()
                     .any(|b| is_object_schema(root, b) && costs.of(root, b) != INFINITE);
@@ -1187,7 +1199,7 @@ fn flatten<R: Rng>(
             let index = match pick {
                 Pick::Forced(i) if eligible.len() < branches.len() => eligible[i % eligible.len()],
                 Pick::Forced(i) => i % branches.len(),
-                Pick::Random => eligible[rng.random_range(0..eligible.len())],
+                Pick::Random { .. } => eligible[rng.random_range(0..eligible.len())],
                 Pick::Shallow => eligible
                     .iter()
                     .copied()
@@ -1214,8 +1226,9 @@ fn flatten<R: Rng>(
     Value::Object(out)
 }
 
-/// Whether `schema` (through `$ref`s) is an object: `type: object`, `properties`, or a
-/// union whose every branch is one (a GraphQL interface such as `RepositoryOwner`).
+/// Whether `schema` (through `$ref`s) is an object: `type: object`, `properties`, an
+/// `allOf` with an object part, or a union whose every branch is one (a GraphQL
+/// interface such as `RepositoryOwner`).
 fn is_object_schema(root: &Value, schema: &Value) -> bool {
     fn object(root: &Value, schema: &Value, hops: usize) -> bool {
         if hops > 8 {
@@ -1229,6 +1242,14 @@ fn is_object_schema(root: &Value, schema: &Value) -> bool {
             return false;
         };
         if obj.contains_key("properties") || type_names(obj) == ["object"] {
+            return true;
+        }
+        // An `allOf` composite (OpenAPI inheritance) is one when a part is.
+        if obj
+            .get("allOf")
+            .and_then(Value::as_array)
+            .is_some_and(|parts| parts.iter().any(|p| object(root, p, hops + 1)))
+        {
             return true;
         }
         ["anyOf", "oneOf"].iter().any(|k| {

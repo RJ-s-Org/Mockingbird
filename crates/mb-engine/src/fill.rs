@@ -756,7 +756,10 @@ fn echoes<'a>(
             echoes.insert(leaf.to_string(), value.clone());
         }
     }
-    FakerHints { echoes }
+    FakerHints {
+        echoes,
+        ..FakerHints::default()
+    }
 }
 
 /// `name` with letter case and `_`/`-` separators aside (`caller_name`, `callerName`).
