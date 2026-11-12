@@ -5,6 +5,7 @@ use proptest::prelude::*;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 
 use crate::support::orders;
 
@@ -674,6 +675,170 @@ fn strings_match_their_pattern() {
         let s = v.as_str().unwrap();
         assert!(re.is_match(s) && s.len() <= 20, "{s}");
     }
+}
+
+#[test]
+fn a_pattern_with_an_example_is_drawn_in_the_examples_shape() {
+    let pattern = "^(SM|MM)[0-9a-fA-F]{32}$";
+    let re = regex::Regex::new(pattern).unwrap();
+    let example = "SMaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let shaped = |schema: Value| {
+        let drawn = draws(schema, 50);
+        for v in &drawn {
+            let s = v.as_str().unwrap();
+            assert!(re.is_match(s), "{s}");
+            assert!(s.starts_with("SM"), "{s}");
+            assert!(
+                s[2..].chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+                "{s}"
+            );
+        }
+        let distinct: HashSet<&Value> = drawn.iter().collect();
+        assert!(distinct.len() > 45, "{drawn:?}");
+    };
+    // Its own `examples` (3.0's `example` is imported as one), or a 3.1 `example`.
+    shaped(json!({"type": "string", "pattern": pattern, "examples": [example]}));
+    shaped(json!({"type": "string", "pattern": pattern, "example": example}));
+    // An example the pattern refuses says nothing.
+    for v in draws(
+        json!({"type": "string", "pattern": "^[0-9]{6}$", "examples": ["SM1"]}),
+        20,
+    ) {
+        assert!(
+            v.as_str().unwrap().bytes().all(|b| b.is_ascii_digit()),
+            "{v}"
+        );
+    }
+    // The member's value in its object's examples.
+    let object = json!({
+        "type": "object",
+        "required": ["sid"],
+        "properties": {"sid": {"type": "string", "pattern": pattern}},
+        "examples": [{"sid": example}]
+    });
+    for v in draws(object, 50) {
+        let sid = v["sid"].as_str().unwrap();
+        assert!(re.is_match(sid) && sid.starts_with("SM"), "{sid}");
+        assert!(
+            sid[2..].chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+            "{sid}"
+        );
+    }
+}
+
+#[test]
+fn a_class_is_drawn_never_pinned_to_the_examples_characters() {
+    // `[0-9]` is a class of ten: the example's leading digits are not a literal.
+    for (pattern, example) in [("^[0-9]{12}$", "123456789012"), ("^[0-9]{8}$", "12345678")] {
+        let n = example.len();
+        let drawn = draws(
+            json!({"type": "string", "pattern": pattern, "examples": [example]}),
+            50,
+        );
+        for v in &drawn {
+            let s = v.as_str().unwrap();
+            assert!(s.len() == n && s.bytes().all(|b| b.is_ascii_digit()), "{s}");
+        }
+        let heads: HashSet<&str> = drawn.iter().map(|v| &v.as_str().unwrap()[..2]).collect();
+        assert!(heads.len() > 10, "{pattern}: {heads:?}");
+    }
+}
+
+#[test]
+fn a_members_own_example_failing_the_pattern_gives_way_to_its_objects() {
+    let pattern = "^(SM|MM)[0-9a-fA-F]{32}$";
+    let object = json!({
+        "type": "object",
+        "required": ["sid"],
+        "properties": {"sid": {"type": "string", "pattern": pattern, "examples": ["string"]}},
+        "examples": [{"sid": "SMaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]
+    });
+    for v in draws(object, 50) {
+        let sid = v["sid"].as_str().unwrap();
+        assert!(sid.starts_with("SM") && sid.len() == 34, "{sid}");
+        assert!(
+            sid[2..].chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+            "{sid}"
+        );
+    }
+}
+
+#[test]
+fn an_objects_example_failing_the_pattern_is_ignored() {
+    let pattern = "^(SM|MM)[0-9a-fA-F]{32}$";
+    let re = regex::Regex::new(pattern).unwrap();
+    let object = json!({
+        "type": "object",
+        "required": ["sid"],
+        "properties": {"sid": {"type": "string", "pattern": pattern}},
+        "examples": [{"sid": "not-a-sid"}]
+    });
+    let drawn = draws(object, 200);
+    for v in &drawn {
+        assert!(re.is_match(v["sid"].as_str().unwrap()), "{v}");
+    }
+    let starts = |p: &str| {
+        drawn
+            .iter()
+            .any(|v| v["sid"].as_str().unwrap().starts_with(p))
+    };
+    assert!(starts("SM") && starts("MM"), "{drawn:?}");
+}
+
+#[test]
+fn a_variable_length_pattern_keeps_the_examples_length() {
+    let pattern = "^cus_[A-Za-z0-9]+$";
+    let re = regex::Regex::new(pattern).unwrap();
+    let example = "cus_Abc123Xyz789Qwe";
+    let drawn = draws(
+        json!({"type": "string", "pattern": pattern, "examples": [example]}),
+        50,
+    );
+    for v in &drawn {
+        let s = v.as_str().unwrap();
+        assert!(re.is_match(s) && s.len() == example.len(), "{s}");
+    }
+    let distinct: HashSet<&Value> = drawn.iter().collect();
+    assert!(distinct.len() > 45, "{drawn:?}");
+}
+
+#[test]
+fn a_pattern_with_no_example_draws_any_match() {
+    let pattern = "^(SM|MM)[0-9a-fA-F]{32}$";
+    let re = regex::Regex::new(pattern).unwrap();
+    let drawn = draws(json!({"type": "string", "pattern": pattern}), 200);
+    for v in &drawn {
+        assert!(re.is_match(v.as_str().unwrap()), "{v}");
+    }
+    let starts = |p: &str| drawn.iter().any(|v| v.as_str().unwrap().starts_with(p));
+    let upper = drawn.iter().any(|v| {
+        v.as_str().unwrap()[2..]
+            .bytes()
+            .any(|b| b.is_ascii_uppercase())
+    });
+    assert!(starts("SM") && starts("MM") && upper, "{drawn:?}");
+}
+
+#[test]
+fn an_example_too_narrow_to_tell_draws_apart_is_not_followed() {
+    // `^[0-9]+$` with `"7"`: a shape of ten draws would repeat ids.
+    for v in draws(
+        json!({"type": "string", "pattern": "^[0-9]+$", "examples": ["7"]}),
+        20,
+    ) {
+        assert!(
+            v.as_str().unwrap().bytes().all(|b| b.is_ascii_digit()),
+            "{v}"
+        );
+    }
+    let drawn = draws(
+        json!({"type": "string", "pattern": "^[0-9]+$", "examples": ["7"]}),
+        50,
+    );
+    assert!(
+        drawn.iter().any(|v| v.as_str().unwrap().len() > 1),
+        "{drawn:?}"
+    );
 }
 
 #[test]

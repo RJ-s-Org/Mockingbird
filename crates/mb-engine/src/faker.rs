@@ -377,9 +377,10 @@ impl Faker {
         let mut out = Map::new();
         for name in &required {
             let sub = props.and_then(|p| p.get(*name)).unwrap_or(&any);
+            let sub = with_member_examples(ctx.root, s, name, sub);
             out.insert(
                 (*name).to_string(),
-                self.gen_value(ctx, sub, Some(name), depth + 1, None, rng),
+                self.gen_value(ctx, &sub, Some(name), depth + 1, None, rng),
             );
         }
         if let Some(props) = props {
@@ -389,7 +390,8 @@ impl Faker {
                     break;
                 }
                 if !out.contains_key(name) && ctx.finite(sub) {
-                    let value = self.gen_value(ctx, sub, Some(name), depth + 1, None, rng);
+                    let sub = with_member_examples(ctx.root, s, name, sub);
+                    let value = self.gen_value(ctx, &sub, Some(name), depth + 1, None, rng);
                     out.insert(name.clone(), value);
                 }
             }
@@ -536,6 +538,60 @@ impl Faker {
         }
         Value::Array(out)
     }
+}
+
+/// `sub`, the schema of member `name` of the object schema `s`, with the values the
+/// object's examples (`examples`, `example`) give that member added to its own
+/// examples, after them: an id's pattern is then drawn in the shape the contract
+/// shows ([`like_example`]), from the first example that matches it. Only a member
+/// with a pattern takes a text, and only an object member an object (for its own
+/// members); `sub` stays as it is otherwise.
+fn with_member_examples<'a>(
+    root: &Value,
+    s: &Map<String, Value>,
+    name: &str,
+    sub: &'a Value,
+) -> std::borrow::Cow<'a, Value> {
+    let given: Vec<Value> = s
+        .get("examples")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .chain(s.get("example"))
+        .filter_map(|example| example.get(name))
+        .filter(|v| v.is_object() || (v.is_string() && has_pattern(root, sub, 0)))
+        .cloned()
+        .collect();
+    match given.is_empty() || !sub.is_object() {
+        true => std::borrow::Cow::Borrowed(sub),
+        false => std::borrow::Cow::Owned(json!({"allOf": [sub, {"examples": given}]})),
+    }
+}
+
+/// Whether `schema`, or a part of it (`$ref`, `allOf`, `anyOf`, `oneOf`), declares a
+/// `pattern`.
+fn has_pattern(root: &Value, schema: &Value, hops: usize) -> bool {
+    let Some(obj) = schema.as_object() else {
+        return false;
+    };
+    if obj.contains_key("pattern") {
+        return true;
+    }
+    if hops > MAX_INLINE_HOPS {
+        return false;
+    }
+    let target = obj
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|r| resolve_ref(root, r));
+    let parts = ["allOf", "anyOf", "oneOf"]
+        .iter()
+        .filter_map(|k| obj.get(*k).and_then(Value::as_array))
+        .flatten();
+    target
+        .into_iter()
+        .chain(parts)
+        .any(|part| has_pattern(root, part, hops + 1))
 }
 
 /// `(minContains, minItems)` of a list schema: the items a minimal instance
@@ -1217,6 +1273,15 @@ fn merge_keyword(out: &mut Map<String, Value>, key: String, value: Value) {
                 *existing = merged;
             }
         }
+        // Examples add up: the first part's first (a member's own, then those its
+        // object's examples give it).
+        ("examples", Some(Value::Array(existing)), Value::Array(incoming)) => {
+            for v in incoming {
+                if !existing.contains(v) {
+                    existing.push(v.clone());
+                }
+            }
+        }
         ("required", Some(Value::Array(existing)), Value::Array(incoming)) => {
             for v in incoming {
                 if !existing.contains(v) {
@@ -1310,6 +1375,9 @@ fn fake_string<R: Rng>(s: &Map<String, Value>, now: i64, rng: &mut R) -> String 
             .get("maxLength")
             .and_then(Value::as_u64)
             .map(|m| m as usize);
+        if let Some(out) = example_string(s, pattern, min, declared_max, rng) {
+            return out;
+        }
         if let Some(out) = pattern_string(pattern, min, declared_max, rng) {
             return out;
         }
@@ -1401,6 +1469,145 @@ fn pattern_string<R: Rng>(
 
 /// Draws tried for a string matching its pattern.
 const PATTERN_DRAWS: usize = 8;
+
+/// A string matching `pattern` in the shape of the first example `s` gives of itself
+/// (`example`, then `examples`: a member's own, then those its object's examples give
+/// it, [`with_member_examples`]) that matches it with `min..=max` characters: see
+/// [`like_example`]. `None` when it gives no such example, or no draw of its shape is.
+fn example_string<R: Rng>(
+    s: &Map<String, Value>,
+    pattern: &str,
+    min: usize,
+    max: Option<usize>,
+    rng: &mut R,
+) -> Option<String> {
+    if !s.contains_key("examples") && !s.contains_key("example") {
+        return None;
+    }
+    let check = check_regex(pattern)?;
+    s.get("example")
+        .into_iter()
+        .chain(
+            s.get("examples")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
+        .filter_map(Value::as_str)
+        .find(|e| {
+            let n = e.chars().count();
+            n >= min && max.is_none_or(|m| n <= m) && check.is_match(e)
+        })
+        .and_then(|example| like_example(pattern, example, rng))
+}
+
+/// A string matching `pattern` drawn in the shape of `example` (which matches it):
+/// the literal the pattern starts it with is kept (of an alternation, the alternative
+/// the example takes: `SM` of `^(SM|MM)[0-9a-f]{32}$` for `SM0a…`), and so is every
+/// character the pattern holds fixed where it stands; each other letter or digit is
+/// drawn among the digits and letters of its own case (a digit among the digits and
+/// the one letter case the example's drawn part shows, if just one) that the pattern
+/// takes in its place. So lowercase hex stays lowercase hex, at the example's length.
+/// `None` when the example does not match, the shape leaves under a billion draws
+/// (too few to tell apart, as [`EXAMPLE_MIN_DRAWS`] says), or no draw matches the
+/// whole pattern.
+fn like_example<R: Rng>(pattern: &str, example: &str, rng: &mut R) -> Option<String> {
+    let check = check_regex(pattern)?;
+    let slots = example_slots(pattern, example)?;
+    (0..PATTERN_DRAWS).find_map(|_| {
+        let drawn: String = slots
+            .iter()
+            .filter_map(|slot| slot.get(rng.random_range(0..slot.len())).copied())
+            .collect();
+        check.is_match(&drawn).then_some(drawn)
+    })
+}
+
+/// The characters each position of a draw in `example`'s shape takes (see
+/// [`like_example`]), cached by pattern and example; `None` when the example does not
+/// match or the shape is too narrow.
+fn example_slots(pattern: &str, example: &str) -> Option<Arc<Vec<Vec<char>>>> {
+    cached(
+        &EXAMPLE_SLOTS,
+        (pattern.to_string(), example.to_string()),
+        || compute_slots(pattern, example).map(Arc::new),
+    )
+}
+
+/// Draws an example's shape must leave, at least, for it to be taken: a billion, so a
+/// session's minted ids stay its own (as an id shape's, in mb-protocols).
+const EXAMPLE_MIN_DRAWS: f64 = 1e9;
+
+/// Longest example whose shape is drawn.
+const EXAMPLE_MAX_CHARS: usize = 256;
+
+/// Each position's characters for drawing in `example`'s shape, by source text of
+/// the pattern and the example.
+static EXAMPLE_SLOTS: LazyLock<SlotCache> = LazyLock::new(DashMap::new);
+
+/// Each position's characters of an example's shape, by (pattern, example).
+type SlotCache = DashMap<(String, String), Option<Arc<Vec<Vec<char>>>>>;
+
+fn compute_slots(pattern: &str, example: &str) -> Option<Vec<Vec<char>>> {
+    let check = check_regex(pattern)?;
+    let chars: Vec<char> = example.chars().collect();
+    if chars.len() > EXAMPLE_MAX_CHARS || !check.is_match(example) {
+        return None;
+    }
+    // The literal the pattern starts with: of its alternatives, the longest the
+    // example starts with. A class is never expanded into literals (`[0-9]` is drawn,
+    // not taken from the example); an alternation of literals is.
+    let kept = regex_syntax::ParserBuilder::new()
+        .build()
+        .parse(pattern)
+        .ok()
+        .and_then(|hir| {
+            let seq = regex_syntax::hir::literal::Extractor::new()
+                .limit_class(1)
+                .extract(&hir);
+            seq.literals().map(|lits| {
+                lits.iter()
+                    .filter_map(|l| std::str::from_utf8(l.as_bytes()).ok())
+                    .filter(|l| example.starts_with(l))
+                    .map(|l| l.chars().count())
+                    .max()
+                    .unwrap_or(0)
+            })
+        })
+        .unwrap_or(0);
+    let rest = chars.get(kept..)?;
+    let lower = rest.iter().any(char::is_ascii_lowercase);
+    let upper = rest.iter().any(char::is_ascii_uppercase);
+    let digits = || '0'..='9';
+    let mut slots = Vec::with_capacity(chars.len());
+    let mut draws = 1.0_f64;
+    for (i, &c) in chars.iter().enumerate() {
+        let candidates: Vec<char> = match c {
+            _ if i < kept => Vec::new(),
+            'a'..='z' => digits().chain('a'..='z').collect(),
+            'A'..='Z' => digits().chain('A'..='Z').collect(),
+            '0'..='9' if lower && !upper => digits().chain('a'..='z').collect(),
+            '0'..='9' if upper && !lower => digits().chain('A'..='Z').collect(),
+            '0'..='9' => digits().collect(),
+            _ => Vec::new(),
+        };
+        // A character stands where the pattern takes it in the example's place.
+        let mut probe = chars.clone();
+        let mut slot: Vec<char> = candidates
+            .into_iter()
+            .filter(|&o| {
+                probe[i] = o;
+                o == c || check.is_match(&probe.iter().collect::<String>())
+            })
+            .collect();
+        if slot.is_empty() {
+            slot.push(c);
+        }
+        draws *= slot.len() as f64;
+        slots.push(slot);
+    }
+    (draws >= EXAMPLE_MIN_DRAWS).then_some(slots)
+}
 
 fn compile_pattern(pattern: &str, max_repeat: u32) -> Option<Pattern> {
     let check = check_regex(pattern)?;
