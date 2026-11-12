@@ -16,7 +16,7 @@ mockingbird server stop
 ```
 
 - [Deterministic CI: record once, replay everywhere](#deterministic-ci-record-once-replay-everywhere)
-- [Report and verify](#report-and-verify)
+- [Report and verify](#report-and-verify) · [Run the app's tests: `verify --run`](#run-the-apps-tests-verify---run)
 - [GitHub Actions](#github-actions) · [GitLab CI](#gitlab-ci) · [CircleCI](#circleci) · [Jenkins](#jenkins) · [Buildkite](#buildkite) · [Azure Pipelines](#azure-pipelines)
 
 ## Starting the server
@@ -169,12 +169,98 @@ carries the whole report with every reason in full, and `markdown` or
 | `--exact-replay` | a replay used an operation-level match |
 | `--called OP[=N]` | operation `OP` (contract operation id; `mock/OP` for one mock) was called fewer than N times (default 1); repeatable |
 | `--no-unclaimed-hosts` | the project can call a host no mock lists that a bundled description or catalog example serves ([below](#hosts-the-project-can-call)); scans the project of `-c/--config` (default `./mockingbird.yaml`) and prints the summary as a `Next:` line |
+| `--run "<command>"` | the command fails, or the requests it made point at the mock ([below](#run-the-apps-tests-verify---run)) |
 
 Both see what the request log keeps: the last
 `observability.request_log_retention` requests per mock (1000 by default;
 raise it for long suites). Unmapped hosts are counted by the proxy that
 `serve --proxy` runs; a standalone `mockingbird proxy` process keeps its
 own counts.
+
+## Run the app's tests: `verify --run`
+
+`mockingbird verify --run "<command>"` runs the app's own command (its
+tests, an end-to-end suite) against the mocks and fails on what, in the
+requests that command made, points at the mock. The MCP tool `verify_run`
+does the same (`command`, `config`, `timeout_secs`, `offline`) and answers
+the JSON below.
+
+```sh
+mockingbird verify -c mockingbird.yaml --run "npm test"
+```
+
+- **How it runs.** As `mockingbird run` does: the config's server is used
+  when it answers, else one is started for the run (`--offline`,
+  `--state-dir`) and stopped after it; the command gets the proxy
+  environment and the CA preloads for every runtime. It runs with `sh -c`
+  (`cmd /C` on Windows) from the project root of the config (as
+  [below](#hosts-the-project-can-call)), with no stdin; the CLI echoes its output on stderr as it
+  comes and passes Ctrl-C on to it. Only the command the user or agent
+  passed is run.
+- **The window.** Before the command starts, the newest request-log id of
+  every mock (in every workspace the token sees) and the proxy's
+  unmapped-host counts are read. Afterwards, once the request log has
+  settled (at most 3 s), only newer entries and the growth of those counts
+  are examined, so earlier traffic does not count. Requests other clients
+  send to the same server while the command runs do count.
+- **What fails**, each with a `next_step`:
+
+  | `kind` | When |
+  |---|---|
+  | `unmatched_route` | a request reached a mock but matched no operation of its contract (404 or 405) |
+  | `error_status` | a mock answered 4xx or 5xx: the `operation`, `status`, the problem's detail read from the recorded response, and the `request_id`; the next step names `get_world` and `get_request` |
+  | `fallback` | an answer fell back to the faker because the LLM call or a replay failed, with the reason (an offline mock's faker answers are not fallbacks) |
+  | `blocked_host` | the proxy blocked a host no mock claims (the same step as [`report`](#report-and-verify)'s) |
+  | `unclaimed_hosts` | the project can call a host that a bundled description or catalog example serves and no mock lists ([below](#hosts-the-project-can-call)) |
+  | `check` | an assertion given beside `--run` (`--called`, `--no-unmapped`, `--exact-replay`) fails on the window |
+
+  Hosts the proxy passed to the real API (`proxy.unmapped: pass`) are
+  listed under `notes`.
+- **Exit code** 1 when the command exits non-zero, is stopped at the
+  timeout, or any failure is found; 0 otherwise.
+- **Caps.** `--timeout` (default `10m`; the command's process group is
+  then stopped), the last 60 lines of output (each cut to 400
+  characters), 5,000 request-log entries examined (newest first;
+  `window.truncated` says when the cap stopped the reading), 20 recorded
+  responses read for problem details, and 50 failures listed
+  (`more_failures` counts the rest).
+
+`--format text` (the default) prints a status line, each failure with a
+`Next:` line, and the output's last lines when the command failed;
+`--format json` prints:
+
+```json
+{
+  "ok": false,
+  "command": {"command": "npm test", "cwd": "/app", "exit_code": 0, "timed_out": false,
+              "duration_ms": 4210, "output_tail": "...", "output_truncated": false},
+  "window": {"requests": 2, "truncated": false, "server_started": true, "admin": "http://127.0.0.1:9090"},
+  "failures": [
+    {"kind": "unmatched_route", "mock": "orders", "status": 404, "count": 1, "request_id": 1,
+     "detail": "orders: GET /nope matched no operation of its contract (answered 404, once)",
+     "next_step": "Mock `orders` has no operation for GET /nope: ..."},
+    {"kind": "error_status", "mock": "orders", "operation": "listOrders", "status": 400, "count": 1, "request_id": 2,
+     "detail": "orders: listOrders answered 400 (once): Invalid request: query/status: enum: ...",
+     "next_step": "Mock `orders` answered 400 to operation listOrders. If the app's call is right, the mock is wrong: check its world (get_world {mock: orders}) and this request (get_request {mock: orders, id: 2}; ...) ..."}
+  ]
+}
+```
+
+`markdown` and `junit` are not available with `--run`.
+
+The MCP `start_server` and `server_status` answers name the app's test
+commands in one `next_steps` line, found from the project root and its
+folders up to two levels down (dependencies, build outputs and hidden
+folders skipped; at most 4,000 directory entries looked at and 8
+commands listed): `package.json` `scripts.test` (`npm test`, or `pnpm` /
+`yarn` beside their lock file; npm's placeholder script is left out) and
+end-to-end scripts (`test:e2e`, `e2e`, ...: `npm run <name>`); a Makefile
+`test` target (else a `test-*` or `e2e` one); pytest (`pytest.ini`,
+`[tool.pytest…]` in `pyproject.toml`, `[tool:pytest]` in `setup.cfg`,
+`conftest.py`, or `tests/test_*.py`); RSpec (`spec/` with `.rspec` or a
+Gemfile naming rspec: `bundle exec rspec`, else `rspec`); `go test ./...`
+(`go.mod` with a `*_test.go` file); `cargo test` (`Cargo.toml`). A command
+of a subfolder reads `cd <dir> && <command>`.
 
 ## Hosts the project can call
 

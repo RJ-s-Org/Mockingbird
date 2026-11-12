@@ -307,6 +307,9 @@ async fn verify(
     args: mockingbird::report::VerifyArgs,
 ) -> Result<(), Failure> {
     use mockingbird::report;
+    if let Some(command) = args.run.clone() {
+        return verify_run(command, token, args).await;
+    }
     let config = report::unclaimed_hosts_config(&args).map_err(Failure::Usage)?;
     let mut collected = report::collect(admin_url, token, workspace).await?;
     if let Some(config) = config {
@@ -324,6 +327,53 @@ async fn verify(
         for f in &failures {
             eprintln!("verify failed: {}: {}", f.check, f.detail);
         }
+    }
+    Err(Failure::Silent)
+}
+
+/// `verify --run`: runs the command against the mocks and reports what in
+/// its requests points at the mock; exit 1 when the command fails or
+/// anything does.
+async fn verify_run(
+    command: String,
+    token: Option<&str>,
+    args: mockingbird::report::VerifyArgs,
+) -> Result<(), Failure> {
+    use mockingbird::{report, verify_run};
+    if !matches!(args.format, report::Format::Text | report::Format::Json) {
+        return Err(Failure::Usage(
+            "verify --run prints --format text or json".into(),
+        ));
+    }
+    let opts = verify_run::Options {
+        command,
+        config: args.config.clone(),
+        offline: args.offline,
+        state_dir: args.state_dir.clone(),
+        timeout: args.timeout.into(),
+        token: token.map(str::to_owned),
+        interactive: true,
+    };
+    let outcome = verify_run::run(&opts, Some(&args)).await?;
+    let text = match args.format {
+        report::Format::Json => {
+            serde_json::to_string_pretty(&outcome).map_err(anyhow::Error::from)?
+        }
+        _ => verify_run::text(&outcome),
+    };
+    report::emit(&text, args.output.as_deref())?;
+    if outcome.ok {
+        return Ok(());
+    }
+    if args.format != report::Format::Text || args.output.is_some() {
+        eprintln!(
+            "verify --run failed: exit code {}, {} failures pointing at the mock",
+            outcome
+                .command
+                .exit_code
+                .map_or_else(|| "none (timed out)".to_owned(), |c| c.to_string()),
+            outcome.failures.len() + outcome.more_failures
+        );
     }
     Err(Failure::Silent)
 }

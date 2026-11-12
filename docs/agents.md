@@ -2,7 +2,7 @@
 
 Every Mockingbird capability is available to coding agents: installing it, connecting an LLM, running a server, and the whole Admin API. Agents reach it three ways, all from the same binary:
 
-- **MCP server**: `mockingbird mcp` exposes 52 tools (stdio, or streamable HTTP for remote agents such as ChatGPT).
+- **MCP server**: `mockingbird mcp` exposes 53 tools (stdio, or streamable HTTP for remote agents such as ChatGPT).
 - **Skills**: six `SKILL.md` guides in [`plugins/mockingbird/skills`](../plugins/mockingbird/skills) tell an agent when and how to use them.
 - **CLI**: every onboarding and lifecycle command prints JSON (`init`, `llm`, `server`, `doctor`, `agent`), and the Admin API client commands already do.
 
@@ -61,7 +61,7 @@ Ask in plain words: "mock the API in openapi.yaml", "use OpenRouter for Mockingb
 | Area | Tools | CLI |
 | --- | --- | --- |
 | Setup | `doctor`, `list_examples`, `init_example`, `list_llm_providers`, `init_config`, `configure_llm`, `test_llm`, `validate_contract` | `doctor`, `examples list`, `examples init`, `llm providers`, `init`, `llm configure`, `llm test`, `validate` |
-| Server | `start_server` (`proxy: true` also starts the HTTP(S) proxy), `server_status`, `server_logs`, `stop_server`, `proxy_env`, `project_hosts` ([hosts the project can call](ci.md#hosts-the-project-can-call)) | `server start/status/logs/stop`, `proxy env`, `run -- <command>`, `hosts` |
+| Server | `start_server` (`proxy: true` also starts the HTTP(S) proxy), `server_status`, `server_logs`, `stop_server`, `proxy_env`, `project_hosts` ([hosts the project can call](ci.md#hosts-the-project-can-call)), `verify_run` ([the app's tests against the mocks](ci.md#run-the-apps-tests-verify---run)) | `server start/status/logs/stop`, `proxy env`, `run -- <command>`, `hosts`, `verify --run "<command>"` |
 | Mocks | `list_mocks`, `get_mock`, `create_mock`, `update_mock`, `delete_mock`, `import_contract`, `list_contract_versions`, `activate_contract_version` | `mocks list/get/create/update/delete`, `import`, `contracts list/activate` |
 | Drafts | `get_draft`, `edit_draft`, `approve_draft` | `import --approve`, `drafts approve` |
 | Contract fixes | `edit_contract` (merge-patch the active OpenAPI contract, activated as a new version) | `import <edited file> --as <mock> --activate` |
