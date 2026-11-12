@@ -3665,3 +3665,124 @@ fn a_lone_list_of_summaries_takes_the_type_whose_record_they_summarize() {
     assert_eq!(lone("MovieItem").as_deref(), Some("movie"));
     assert_eq!(lone("Hit").as_deref(), Some("popular"));
 }
+
+/// A success response's examples keep their links beside the bundle: of a media
+/// type's `examples` entry (its `value` a `$ref` to a `components/examples` entry,
+/// followed) and of its
+/// `example` (a list's first record), the record's string members holding an absolute
+/// URL or a path, and those one object down; nothing else, and no example served.
+/// The bundle is otherwise what the contract compiles to without the examples.
+#[test]
+fn response_example_links_are_kept_beside_the_served_schema() {
+    let contract = r##"
+openapi: 3.1.0
+info: {title: Tracker, version: "1"}
+paths:
+  /projects/{owner}/{project}/merges/{merge_number}:
+    get:
+      operationId: getMerge
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: project, in: path, required: true, schema: {type: string}}
+        - {name: merge_number, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MergeRequest"}
+              examples:
+                default: {summary: A merge, value: {$ref: "#/components/examples/merge"}}
+        "404": {description: missing}
+  /projects/{owner}/{project}/merges:
+    get:
+      operationId: listMerges
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: project, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/MergeRequest"}}
+              example:
+                - {number: 3, title: Fix, html_url: "https://tracker.test/acme/roadmap/merge/3"}
+components:
+  schemas:
+    MergeRequest:
+      type: object
+      properties:
+        number: {type: integer}
+        title: {type: string}
+        url: {type: string, format: uri}
+        html_url: {type: string, format: uri}
+        path: {type: string}
+        author: {type: object, properties: {login: {type: string}, html_url: {type: string}}}
+  examples:
+    merge:
+      value:
+        number: 12
+        title: "Fix the router"
+        url: "https://api.tracker.test/projects/acme/roadmap/merges/12"
+        html_url: "https://tracker.test/acme/roadmap/merge/12"
+        path: "/acme/roadmap/merge/12"
+        author: {login: octo, html_url: "https://tracker.test/octo", repo: {html_url: "https://tracker.test/x"}}
+"##;
+    let bundle = compile(contract.as_bytes()).unwrap();
+    type Links<'a> = Vec<(&'a str, Option<&'a str>, Vec<(&'a str, &'a str)>)>;
+    let links: Links<'_> = bundle
+        .example_links
+        .iter()
+        .map(|e| {
+            (
+                e.operation.as_str(),
+                e.record.as_deref(),
+                e.members
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        links,
+        [
+            (
+                "listMerges",
+                Some("MergeRequest"),
+                vec![("html_url", "https://tracker.test/acme/roadmap/merge/3")]
+            ),
+            (
+                "getMerge",
+                Some("MergeRequest"),
+                vec![
+                    ("author.html_url", "https://tracker.test/octo"),
+                    ("html_url", "https://tracker.test/acme/roadmap/merge/12"),
+                    ("path", "/acme/roadmap/merge/12"),
+                    (
+                        "url",
+                        "https://api.tracker.test/projects/acme/roadmap/merges/12"
+                    ),
+                ]
+            ),
+        ]
+    );
+    // What is served is what the contract compiles to with no examples.
+    let bare = contract
+        .replace(
+            "              examples:\n                default: {summary: A merge, value: {$ref: \"#/components/examples/merge\"}}\n",
+            "",
+        )
+        .replace(
+            "              example:\n                - {number: 3, title: Fix, html_url: \"https://tracker.test/acme/roadmap/merge/3\"}\n",
+            "",
+        );
+    assert_ne!(bare, contract);
+    let without = compile(bare.as_bytes()).unwrap();
+    assert!(without.example_links.is_empty());
+    assert_eq!(bundle.operations, without.operations);
+    assert_eq!(bundle.defs, without.defs);
+    let served = serde_json::to_string(&bundle.operations).unwrap();
+    assert!(!served.contains("merge/12"), "{served}");
+}

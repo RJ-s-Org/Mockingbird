@@ -84,6 +84,30 @@ pub struct Bundle {
     /// leniently unless the mock asks for strict validation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inferred: bool,
+    /// The links of the response examples the contract gives (OpenAPI 3 `example` and
+    /// `examples` of a success response's media type, Swagger 2 `examples`; an
+    /// operation repeating an earlier one's links of the same record left out): what the
+    /// mock reads the layout of a record's URL members from when the member's schema
+    /// gives no example of its own. Kept beside the schemas, never served; empty for
+    /// other contracts and in bundles compiled before they were kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub example_links: Vec<ExampleLinks>,
+}
+
+/// The link members of the record one operation's success response example shows.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ExampleLinks {
+    /// The operation whose response the example is.
+    pub operation: String,
+    /// The definition the example's record is (`pull-request`), when the response's
+    /// schema names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<String>,
+    /// The record's string members holding an absolute URL or a path, by name, and
+    /// those one object down by `<member>.<name>` (`user.html_url`); a list example's
+    /// first record.
+    pub members: std::collections::BTreeMap<String, String>,
 }
 
 /// A name an API-key security scheme carries a key under.
@@ -1538,6 +1562,7 @@ mod resolve_tests {
             webhooks: vec![],
             api_key_names: None,
             inferred: false,
+            example_links: Vec::new(),
         }
     }
 

@@ -359,6 +359,7 @@ fn bundle(compiled: &Compiled, source_digest: String) -> Bundle {
         webhooks: Vec::new(),
         api_key_names: None,
         inferred: false,
+        example_links: Vec::new(),
     }
 }
 

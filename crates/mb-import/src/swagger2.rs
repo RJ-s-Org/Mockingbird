@@ -5,14 +5,16 @@ use crate::heuristics::{
 };
 use crate::openapi3::{
     CONTENT_TYPE_EXT, EVENT_STREAM, FORM_CONTENT_TYPE, METHODS, MULTIPART_CONTENT_TYPE,
-    OperationIds, check_defs_refs, check_operation_refs, deref, escape, info_description, invalid,
-    is_event_stream, is_json_media, non_json_schema, response_description, slug,
-    stream_item_schema, stream_kind,
+    OperationIds, check_defs_refs, check_operation_refs, deref, escape, example_links,
+    info_description, invalid, is_event_stream, is_json_media, keep_example_links, non_json_schema,
+    response_description, slug, stream_item_schema, stream_kind, success_responses,
 };
 use crate::schema::normalize_schema;
 use crate::security::compile_security;
 use crate::{Ctx, ImportError};
-use mb_mcm::{Binding, Bundle, InputSchemas, Operation, OutputVariant, Protocol, StatusSelector};
+use mb_mcm::{
+    Binding, Bundle, ExampleLinks, InputSchemas, Operation, OutputVariant, Protocol, StatusSelector,
+};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -229,6 +231,21 @@ fn compile_outputs(doc: &Value, op: &Value, at: &str) -> Result<Vec<OutputVarian
     Ok(outputs)
 }
 
+/// The links of operation `op`'s success response example, for
+/// [`Bundle::example_links`]: of its first 2xx response, its `examples` entry for a
+/// JSON media type.
+fn response_example_links(doc: &Value, op: &Value, op_id: &str) -> Option<ExampleLinks> {
+    success_responses(op).find_map(|(status, resp)| {
+        let resp = deref(doc, resp, &format!("/responses/{status}")).ok()?;
+        let (_, example) = resp
+            .get("examples")?
+            .as_object()?
+            .iter()
+            .find(|(media, _)| is_json_media(media))?;
+        example_links(doc, (op_id, resp.get("schema"), REF_PREFIX), example)
+    })
+}
+
 pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle, ImportError> {
     let info = doc.get("info");
     let title = info
@@ -252,6 +269,7 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
     let mut ids = OperationIds::new(doc)?;
     let mut operations = Vec::new();
     let mut hints = Vec::new();
+    let mut example_links = Vec::new();
     let empty = Map::new();
     let paths = doc
         .get("paths")
@@ -316,6 +334,10 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
 
             check_operation_refs(&op_out, &mut defs, REF_PREFIX, ctx)?;
             hints.push(resource_hint(op, &op_out.id, ctx));
+            keep_example_links(
+                &mut example_links,
+                response_example_links(doc, op, &op_out.id),
+            );
             operations.push(op_out);
         }
     }
@@ -337,5 +359,6 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
         webhooks: Vec::new(),
         api_key_names: Some(crate::security::api_key_names(doc, "/securityDefinitions")),
         inferred: false,
+        example_links,
     })
 }

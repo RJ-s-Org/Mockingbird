@@ -284,6 +284,7 @@ mod tests {
             webhooks: vec![],
             api_key_names: None,
             inferred: false,
+            example_links: Vec::new(),
         }
     }
 

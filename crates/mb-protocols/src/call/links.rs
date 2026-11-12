@@ -33,10 +33,13 @@
 //!   and the record's numeric identity (`…/owner/repo/issues/7`), else its first. When
 //!   the type has a twin, the same type in another mock of its `shares` group read by
 //!   path ([`Twin`]), its own link (a drawn word, or a value on a placeholder or known
-//!   host not pointing at the parent's place) follows the twin's link on the host the
-//!   parent's URL is on (a GraphQL `url` under a parent on the page host is the twin's
-//!   `html_url`), the one of the same name first, else with no parent URL the twin's
-//!   link of the same name: laid out as its example shows the record's place, the
+//!   host not pointing at the parent's place) follows the twin's page link (`html_url`)
+//!   when it is named as it, or is a bare `url` described as the HTML page's or of a
+//!   type declaring no page link of its own while the twin has both an API `url` and a
+//!   page link ([`Known::page_of`]); else the twin's link on the host the parent's URL
+//!   is on (a GraphQL `url` under a parent on the page host is the twin's `html_url`),
+//!   the one of the same name first, else with no parent URL the twin's link of the
+//!   same name: laid out as its example shows the record's place, the
 //!   parameters before the collection from the parent's URL or members, the record's
 //!   number last. A parent holding no link has its own built first
 //!   ([`parent_place`]): its twin's or read path's layout, else the mock's host and its
@@ -44,6 +47,10 @@
 //!   `https://tracker.test/acme/roadmap`). With no parent link at all, the record's own
 //!   link is the mock's host, the plural type name and its identity
 //!   (`https://tracker.test/tickets/82`).
+//! - **Examples**: a member's example is its schema's, else the record's whole
+//!   example's, else its value in the type's success response examples the import
+//!   keeps beside the bundle ([`mb_mcm::Bundle::example_links`]), those of its read
+//!   first.
 //! - **The host**: a value rebuilt along the read path takes the contract's example host
 //!   for its member, when it has one. Otherwise a placeholder (`example.com`,
 //!   `example.org`, `example.net`, `.invalid`, `.example`) is replaced by the example
@@ -96,6 +103,11 @@ pub(crate) struct TypeLinks {
     /// what names it (`project(owner:, name:)` → `[owner, name]`), in order; empty when
     /// it has none, or only one by id.
     lookup: Vec<String>,
+    /// Whether the type declares a URL member named as a page link (`html_url`,
+    /// `htmlUrl`).
+    html_member: bool,
+    /// The URL members whose description says they hold the HTML page's URL.
+    html_described: Vec<String>,
 }
 
 /// What a contract's example of a URL member shows.
@@ -124,7 +136,8 @@ impl TypeLinks {
         let bundle = rt.bundle();
         let mut links = TypeLinks::default();
         let mut schemas: Vec<&Value> = Vec::new();
-        if let Some((read, shape)) = type_check(rt, t) {
+        let checked = type_check(rt, t);
+        if let Some((read, shape)) = checked {
             if let Some(schema) = shape.or_else(|| read.success_output()?.schema.as_ref()) {
                 schemas.push(schema);
             }
@@ -165,6 +178,48 @@ impl TypeLinks {
                 b.split('/').filter(|s| !s.is_empty()).collect()
             }),
         };
+        // The links of the type's response examples, for a member with no example of
+        // its own: those of its operations' answers or of its record's definition (the
+        // type's, or the one its read answers), the read's first.
+        let read_id = checked.map(|(read, _)| read.id.as_str());
+        let mut records = vec![t];
+        if let Some((read, shape)) = checked {
+            let answered = read.success_output().and_then(|o| o.schema.as_ref());
+            for schema in shape.into_iter().chain(answered) {
+                let named = schema
+                    .get("$ref")
+                    .or_else(|| schema.get("items")?.get("$ref"))
+                    .and_then(Value::as_str)
+                    .and_then(|r| r.rsplit('/').next());
+                records.extend(named);
+            }
+        }
+        let of_type = |op: &str| {
+            Some(op) == read_id
+                || bundle.operations.iter().any(|o| {
+                    o.id == op
+                        && o.resource_type
+                            .as_deref()
+                            .is_some_and(|r| r.eq_ignore_ascii_case(t))
+                })
+        };
+        let mut responded: Vec<&mb_mcm::ExampleLinks> = bundle
+            .example_links
+            .iter()
+            .filter(|e| match e.record.as_deref() {
+                // An answer of the type's operation showing another record (a status)
+                // shows none of its links.
+                Some(r) => records.iter().any(|x| r.eq_ignore_ascii_case(x)),
+                None => of_type(&e.operation),
+            })
+            .collect();
+        responded.sort_by_key(|e| Some(e.operation.as_str()) != read_id);
+        let responded = |name: &str| {
+            responded
+                .iter()
+                .find_map(|e| e.members.get(name))
+                .map(String::as_str)
+        };
         for schema in schemas {
             let (parts, _) = schema_parts(bundle, Some(schema));
             let whole_example = parts.iter().find_map(|p| {
@@ -180,10 +235,26 @@ impl TypeLinks {
                 if declared && !links.members.contains(name) {
                     links.members.push(name.clone());
                 }
-                if !(declared || url_named(name)) || links.examples.contains_key(name) {
+                if !(declared || url_named(name)) {
                     continue;
                 }
+                // A link named as a page link (`html_url`, `htmlUrl`, `htmlLink`); not
+                // `bodyHTML`, which is no link.
+                if squash(name).contains("html") {
+                    links.html_member = true;
+                }
                 let (member_parts, _) = schema_parts(bundle, Some(member));
+                let says_html = member_parts.iter().any(|p| {
+                    p.get("description")
+                        .and_then(Value::as_str)
+                        .is_some_and(|d| d.to_ascii_lowercase().contains("html"))
+                });
+                if says_html && !links.html_described.contains(name) {
+                    links.html_described.push(name.clone());
+                }
+                if links.examples.contains_key(name) {
+                    continue;
+                }
                 let example = member_parts
                     .iter()
                     .find_map(|p| {
@@ -191,7 +262,7 @@ impl TypeLinks {
                             .or_else(|| p.get("examples")?.as_array()?.first())
                     })
                     .or_else(|| whole_example.and_then(|e| e.get(name)))
-                    .and_then(Value::as_str);
+                    .map_or_else(|| responded(name), Value::as_str);
                 if let Some(example) = example.and_then(|e| links.example(e, &api)) {
                     links.examples.insert(name.clone(), example);
                 }
@@ -936,8 +1007,9 @@ impl Known<'_> {
             .and_then(|p| p.origin)
             .filter(|o| !placeholder(&host_of(o)));
         let same = |l: &&Layout| squash(&l.member) == squash(name);
-        let layout = match parent_origin.map(host_of) {
-            Some(host) => {
+        let layout = match (self.page_of(name, twin), parent_origin.map(host_of)) {
+            (Some(page), _) => page,
+            (None, Some(host)) => {
                 let on_host: Vec<&Layout> = twin
                     .layouts
                     .iter()
@@ -949,7 +1021,7 @@ impl Known<'_> {
                         .flatten()
                 })?
             }
-            None => twin.layouts.iter().find(same)?,
+            (None, None) => twin.layouts.iter().find(same)?,
         };
         let slots = &layout.slots;
         let (Some(Slot::Param(_)), Some(before)) = (slots.last(), slots.len().checked_sub(1))
@@ -995,6 +1067,29 @@ impl Known<'_> {
             .or_else(|| parent_origin.map(str::to_owned))
             .or_else(|| self.host.map(|h| format!("https://{h}")));
         Some((origin, path))
+    }
+
+    /// The twin's page link (`html_url`) that member `name` maps to whatever host the
+    /// parent's URL is on: a member named as it (`htmlUrl`); a bare `url` whose
+    /// description says it is the HTML page's, or when the type declares no page link
+    /// of its own while the twin has both an API `url` and a page link (a GraphQL
+    /// API's `url` is the record's page). `None` otherwise, or when the twin has no
+    /// page link.
+    fn page_of<'t>(&self, name: &str, twin: &'t Twin) -> Option<&'t Layout> {
+        let page = twin
+            .layouts
+            .iter()
+            .find(|l| squash(&l.member) == "htmlurl")?;
+        let maps = match squash(name).as_str() {
+            "htmlurl" => true,
+            "url" => {
+                self.links.html_described.iter().any(|m| m == name)
+                    || (!self.links.html_member
+                        && twin.layouts.iter().any(|l| squash(&l.member) == "url"))
+            }
+            _ => false,
+        };
+        maps.then_some(page)
     }
 
     /// For a type with no read by path, the record's own link (member `name` being one
@@ -1832,8 +1927,12 @@ mod tests {
         // The number is the link's last segment, as a client reading it back takes it.
         let settled = known.settle("url", "sable").unwrap();
         assert_eq!(settled.rsplit('/').next(), Some("128"));
-        // A parent on the API host: the twin's read path, its parameters from the
-        // parent's URL.
+        // A type declaring a page link of its own (`htmlUrl`), under a parent on the API
+        // host: its `url` is the twin's read path, its parameters from the parent's URL.
+        let paged = TypeLinks {
+            html_member: true,
+            ..TypeLinks::default()
+        };
         let api = [StoredResource {
             data: serde_json::json!({"url": "https://api.pages.test/repos/fernwood-labs/trellis"}),
             ..parents[0].clone()
@@ -1845,12 +1944,34 @@ mod tests {
             owns: vec!["128".to_owned()],
             twin: Some(&twin),
             twin_owns: vec!["128".to_owned()],
-            ..known_of(&links)
+            ..known_of(&paged)
         };
-        assert_eq!(
-            on_api.settle("url", "sable").as_deref(),
-            Some("https://api.pages.test/repos/fernwood-labs/trellis/pulls/128")
-        );
+        let api_link = "https://api.pages.test/repos/fernwood-labs/trellis/pulls/128";
+        assert_eq!(on_api.settle("url", "sable").as_deref(), Some(api_link));
+        // With no page link of its own, its `url` is the twin's page link whatever host
+        // the parent's URL is on, its parameters from the parent's members.
+        let api_named = [StoredResource {
+            data: serde_json::json!({"url": "https://api.pages.test/repos/fernwood-labs/trellis",
+                "name": "trellis", "owner": {"login": "fernwood-labs"}}),
+            ..parents[0].clone()
+        }];
+        let unpaged = Known {
+            links: &links,
+            parents: &api_named,
+            ..on_api
+        };
+        assert_eq!(unpaged.settle("url", "sable").as_deref(), Some(page));
+        // As it is when its description says it holds the HTML page's URL.
+        let described = TypeLinks {
+            html_member: true,
+            html_described: vec!["url".to_owned()],
+            ..TypeLinks::default()
+        };
+        let by_description = Known {
+            links: &described,
+            ..unpaged
+        };
+        assert_eq!(by_description.settle("url", "sable").as_deref(), Some(page));
         // A link on a host the mock does not know stays.
         assert_eq!(known.settle("url", "https://elsewhere.test/harbor"), None);
         // With no parent link, the twin's link of the same name, its parameters from
@@ -1861,12 +1982,10 @@ mod tests {
         }];
         let by_name = Known {
             parents: &bare,
+            links: &paged,
             ..known
         };
-        assert_eq!(
-            by_name.settle("url", "sable").as_deref(),
-            Some("https://api.pages.test/repos/fernwood-labs/trellis/pulls/128")
-        );
+        assert_eq!(by_name.settle("url", "sable").as_deref(), Some(api_link));
         assert_eq!(
             by_name.settle("htmlUrl", "sable").as_deref(),
             Some("https://pages.test/fernwood-labs/trellis/pull/128")
