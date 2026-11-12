@@ -234,3 +234,28 @@ The real-install-path agent's mock (no `unknown_ids`; the run above that gave 13
 | `/v1/checkout/sessions/cs_test_neverissued000000` | 404 `resource_missing` | creatable, and the session created one |
 | `/v1/payment_intents/pi_neverissued000000` | 404 `resource_missing` | the same, through the `{intent}` parameter |
 | `/v1/customers/cus_neverissued000000` | 200, generated | the app never wrote a customer |
+
+## Fresh-agent rerun on main with `verify --run` (2026-11-12)
+
+A fresh Claude Code in a clean copy of the sample, with the plugin from the marketplace and `main` at `7449c5e8`, which includes #546 and #548. It got the same one-line prompt as the real-install-path run: mock Stripe so the app runs locally. The prompt doesn't mention the specs.
+
+**Build.** 316 s, 50 turns, $2.56 of Claude Code usage. The agent used `init_example stripe --full`, called `project_hosts`, wrote a world description (Stripe ids, session status and `url`, client secrets, PaymentIntent amount and status), ran all four Node servers through the mock, passed `verify --no-unmapped --no-unmatched`, and stopped the server.
+
+**`verify --run`.** `start_server` named the app's tests in its next steps: "The app's tests: `bundle exec rspec` (spec/), `cd playwright && npm test` (playwright/package.json scripts.test). Run each with verify_run …". The agent did not run them. It named why in its hand-back: the RSpec gems aren't installed (`bundle install`), and the Playwright suite runs in Docker against browser-side Stripe. That is the hand-back rule's second branch (a remaining failure named as out of scope), so it complied. It's still a gap: `bundle exec rspec` alone can't pass here anyway, because each spec needs its integration's Node server on port 4242.
+
+The trial ran it instead: `verify --run` with a script that starts custom-payment-flow's server and runs its spec. Result: exit 1, "7 requests logged while it ran; no failures point at the mock". The one spec failure (below) shows in the output tail. A relative command path resolves from the project root, not the current folder.
+
+**Scorecard.**
+
+| # | Measure | Result |
+| --- | --- | --- |
+| 1 | Spec examples | **14/16**: custom-payment-flow 5/6, payment-element 3/3, prebuilt-checkout-page 1/2, elements-with-checkout-sessions 5/5 |
+| 1 | Flows | 8/8 PaymentIntent creates, 4/4 `/payment/next`, checkout create and read |
+| 2 | Consistency | every read of a created PaymentIntent, Checkout Session or Customer from `state` |
+| 7 | Errors | unknown `cs_`/`pi_`/`cus_` ids answer 404 `resource_missing` (the app created a customer this time); the configured price id generates |
+
+The specs now run with Mockingbird's own Ruby preload (`RUBYLIB`/`RUBYOPT` from `mockingbird run`), with no harness preload: stripe-ruby's proxy and CA (failure 3 above) are handled by the product.
+
+**The two failures, both out of scope:**
+- **No refusal for `au_becs_debit` in USD.** custom-payment-flow expects a 400. That's a validation rule the agent wasn't asked to model, and nothing in the contract says it. Left as is.
+- **Checkout's hosted page.** The prebuilt spec follows the 303 to `https://checkout.stripe.com/c/pay/cs_test…`. That's a sibling of the mocked `api.stripe.com`, so the proxy blocks it with a 502. The hosted page is a third-party web page, not an API, so the block is correct. The spec also wants a `#fragment` in the URL.
