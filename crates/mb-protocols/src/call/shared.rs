@@ -8,7 +8,8 @@
 //! a GraphQL type (`PullRequest`, `Repository`) declaring the same identity. It is
 //! answered in the reading mock's shape: members renamed between camelCase and
 //! snake_case where only that differs, enum values in the reading schema's
-//! spelling where only case and separators differ (`CLOSED` as `closed`), REST's
+//! spelling where only case and separators differ (`CLOSED` as `closed`; a symbol
+//! only, not text the storing mock declares a plain string), REST's
 //! `node_id` as GraphQL's `id` (and back), in the objects it nests and their lists
 //! too (a number where a plain string is declared as that string),
 //! and a scalar one shape holds flattened, named for the object the other holds
@@ -93,6 +94,7 @@ pub(super) async fn by_shared(
         .and_then(|o| o.schema.as_ref())
         .and_then(|s| record_props(&rt.bundle, s));
     for other in equivalents(rt, t) {
+        let writer = props.and_then(|_| rt.shared_types.writer(rt, &other));
         for record in state.list(session, &other, MAX_SHARED).await {
             let named = record.id == id
                 || members.iter().any(|m| {
@@ -104,7 +106,7 @@ pub(super) async fn by_shared(
                 continue;
             }
             let data = match props {
-                Some(props) => reshape(props, &rt.bundle.defs, &record.data),
+                Some(props) => reshape(props, &rt.bundle.defs, &record.data, writer.as_ref()),
                 None => record.data.clone(),
             };
             // A `number` is unique only under its owner (a repository): another
@@ -318,14 +320,100 @@ pub(crate) fn record_props<'a>(
 }
 
 /// `data`'s members `props` declares, under the name `props` uses (as is, in
-/// snake_case or in camelCase), each enum value as `props` spells it ([`fit_enum`]).
+/// snake_case or in camelCase), each enum value as `props` spells it ([`fit_enum`]):
+/// a value `writer` (the mock that stored `data`, see [`SharedTypes::writer`]) holds
+/// as a symbol ([`Wrote::symbol`]), or any value when no writer is known.
 pub(crate) fn reshape(
     props: &Map<String, Value>,
     defs: &Map<String, Value>,
     data: &Value,
+    writer: Option<&Writer>,
 ) -> Value {
     let mut budget = RESHAPE_OBJECTS;
-    reshape_at(props, defs, data, (0, &mut budget))
+    let wrote = writer.map(|w| Wrote {
+        schema: Some(&w.schema),
+        defs: &w.bundle.defs,
+    });
+    reshape_at(props, defs, data, wrote, (0, &mut budget))
+}
+
+/// The mock of a `shares` group that stores records of a type, as [`reshape`] reads
+/// what it declared of them: its contract, and the schema of its records of the type.
+#[derive(Debug, Clone)]
+pub(crate) struct Writer {
+    bundle: Arc<mb_mcm::Bundle>,
+    schema: Value,
+}
+
+/// What the mock that stored a record declared of one value of it (`schema`, `None`
+/// where it declares none there), among its `defs`; `None` in place of one where no
+/// writer is known.
+#[derive(Clone, Copy)]
+struct Wrote<'a> {
+    schema: Option<&'a Value>,
+    defs: &'a Map<String, Value>,
+}
+
+impl<'a> Wrote<'a> {
+    /// Whether `value`, which it wrote, is a symbol that [`fit_enum`] may respell
+    /// rather than text kept as written: the writer declares an `enum` there (GraphQL's
+    /// `IssueState`), or a string whose description lists `value` itself (REST's
+    /// `state`, "either 'open' or 'closed'", see [`crate::world_gaps::prose_list`]);
+    /// any value when no writer is known, or it declares no member there (the record
+    /// holds more than the schema it is judged by shows).
+    fn symbol(wrote: Option<Self>, value: &Value) -> bool {
+        let Some((schema, defs)) = wrote.map(|w| (w.schema, w.defs)) else {
+            return true;
+        };
+        let Some(schema) = schema else {
+            return true;
+        };
+        let plain = unwrapped(defs, schema);
+        if plain.get("enum").is_some() {
+            return true;
+        }
+        let described = [schema, plain]
+            .into_iter()
+            .find_map(|s| s.get("description").and_then(Value::as_str));
+        match (value, described) {
+            (Value::String(v), Some(text)) => crate::world_gaps::prose_list(text).contains(v),
+            _ => false,
+        }
+    }
+
+    /// What it declared of member `key` of `value`, an object it holds here.
+    fn member(wrote: Option<Self>, value: &Value, key: &str) -> Option<Self> {
+        wrote.map(|w| Self {
+            schema: w
+                .schema
+                .and_then(|s| props_for(w.defs, s, value))
+                .and_then(|p| p.get(key)),
+            ..w
+        })
+    }
+
+    /// What it declared of the items of a list it holds here.
+    fn items(wrote: Option<Self>) -> Option<Self> {
+        wrote.map(|w| Self {
+            schema: w.schema.and_then(|s| unwrapped(w.defs, s).get("items")),
+            ..w
+        })
+    }
+}
+
+/// `value` as [`fit_enum`] spells it for `schema`, when it is a symbol
+/// ([`Wrote::symbol`]); else as it is.
+fn fit_written(
+    schema: &Value,
+    defs: &Map<String, Value>,
+    value: &Value,
+    wrote: Option<Wrote<'_>>,
+) -> Value {
+    if Wrote::symbol(wrote, value) {
+        fit_enum(schema, defs, value)
+    } else {
+        value.clone()
+    }
 }
 
 /// The properties of the object `schema` is, through `$ref`s and a nullable
@@ -477,6 +565,7 @@ fn reshape_at(
     props: &Map<String, Value>,
     defs: &Map<String, Value>,
     data: &Value,
+    wrote: Option<Wrote<'_>>,
     (depth, budget): (usize, &mut usize),
 ) -> Value {
     let mut out = Map::new();
@@ -487,7 +576,8 @@ fn reshape_at(
         else {
             continue;
         };
-        let mut value = fit_enum(schema, defs, value);
+        let member = Wrote::member(wrote, data, key);
+        let mut value = fit_written(schema, defs, value, member);
         // A value of another JSON type than the member holds (GraphQL's `"I_1"` id
         // where REST's is a number) is left out for what the shape maps to it (REST's
         // `node_id` as GraphQL's `id`) or fill to write; a number where a plain string
@@ -499,7 +589,7 @@ fn reshape_at(
             }
         }
         if depth < RESHAPE_DEPTH {
-            value = reshape_inner(schema, defs, value, (depth, &mut *budget));
+            value = reshape_inner(schema, defs, value, member, (depth, &mut *budget));
         }
         out.insert(name, value);
     }
@@ -516,8 +606,8 @@ fn reshape_at(
             out.insert(to.to_string(), value.clone());
         }
     }
-    unflattened(props, defs, data, &mut out);
-    flattened(props, defs, data, &mut out);
+    unflattened(props, defs, (data, wrote), &mut out);
+    flattened(props, defs, (data, wrote), &mut out);
     Value::Object(out)
 }
 
@@ -527,6 +617,7 @@ fn reshape_inner(
     schema: &Value,
     defs: &Map<String, Value>,
     value: Value,
+    wrote: Option<Wrote<'_>>,
     (depth, budget): (usize, &mut usize),
 ) -> Value {
     match value {
@@ -538,19 +629,22 @@ fn reshape_inner(
                 return value;
             }
             *budget -= 1;
-            reshape_at(inner, defs, &value, (depth + 1, budget))
+            reshape_at(inner, defs, &value, wrote, (depth + 1, budget))
         }
         Value::Array(items) => {
             let Some(item_schema) = unwrapped(defs, schema).get("items") else {
                 return Value::Array(items);
             };
+            let wrote = Wrote::items(wrote);
             Value::Array(
                 items
                     .into_iter()
                     .map(|item| match item {
                         // An enum value of the list.
-                        Value::String(_) => fit_enum(item_schema, defs, &item),
-                        item => reshape_inner(item_schema, defs, item, (depth, &mut *budget)),
+                        Value::String(_) => fit_written(item_schema, defs, &item, wrote),
+                        item => {
+                            reshape_inner(item_schema, defs, item, wrote, (depth, &mut *budget))
+                        }
                     })
                     .collect(),
             )
@@ -592,7 +686,7 @@ fn scalar(value: &Value) -> bool {
 fn unflattened(
     props: &Map<String, Value>,
     defs: &Map<String, Value>,
-    data: &Value,
+    (data, wrote): (&Value, Option<Wrote<'_>>),
     out: &mut Map<String, Value>,
 ) {
     let mut found: Vec<(String, String, Value)> = Vec::new();
@@ -606,13 +700,14 @@ fn unflattened(
             continue;
         }
         let named = words(key);
+        let member = Wrote::member(wrote, data, key);
         let place = flat_forms(&named).into_iter().find_map(|form| {
             (1..form.len()).find_map(|split| {
                 spellings(&form[..split]).into_iter().find_map(|outer| {
                     let inner_props = object_props(defs, props.get(&outer)?)?;
                     spellings(&form[split..]).into_iter().find_map(|inner| {
                         let schema = inner_props.get(&inner)?;
-                        let value = fit_enum(schema, defs, value);
+                        let value = fit_written(schema, defs, value, member);
                         of_type(schema, defs, &value).then(|| (outer.clone(), inner, value))
                     })
                 })
@@ -648,7 +743,7 @@ fn unflattened(
 fn flattened(
     props: &Map<String, Value>,
     defs: &Map<String, Value>,
-    data: &Value,
+    (data, wrote): (&Value, Option<Wrote<'_>>),
     out: &mut Map<String, Value>,
 ) {
     let mut found: Vec<(String, Value)> = Vec::new();
@@ -663,7 +758,9 @@ fn flattened(
         {
             continue;
         }
+        let (object, held) = (value, Wrote::member(wrote, data, key));
         for (member, value) in inner.iter().filter(|(_, v)| scalar(v)) {
+            let wrote = Wrote::member(held, object, member);
             let mut path = words(key);
             path.extend(words(member));
             let named: Vec<String> = path.iter().cloned().chain(["name".to_string()]).collect();
@@ -672,7 +769,7 @@ fn flattened(
                 .find_map(|form| {
                     spellings(form).into_iter().find_map(|name| {
                         let schema = props.get(&name)?;
-                        let value = fit_enum(schema, defs, value);
+                        let value = fit_written(schema, defs, value, wrote);
                         of_type(schema, defs, &value).then_some((name, value))
                     })
                 });
@@ -832,6 +929,9 @@ pub struct SharedEntry {
     twins: Arc<HashMap<String, Arc<Twin>>>,
     /// Its parent-scoped types ([`scopes`]), by type.
     scopes: Arc<HashMap<String, scopes::ParentScope>>,
+    /// What it declared of the records of each of its types, by type in lower case
+    /// ([`SharedTypes::writer`]).
+    writers: Arc<HashMap<String, Writer>>,
 }
 
 impl SharedEntry {
@@ -853,6 +953,16 @@ impl SharedEntry {
             .collect();
         let mut entry = Self::with(group, types, twins);
         entry.scopes = Arc::new(scopes);
+        let bundle = rt.bundle();
+        entry.writers = Arc::new(
+            record_schemas(bundle)
+                .into_iter()
+                .map(|(t, schema)| {
+                    let bundle = Arc::clone(bundle);
+                    (t, Writer { bundle, schema })
+                })
+                .collect(),
+        );
         Some(entry)
     }
 
@@ -869,6 +979,7 @@ impl SharedEntry {
             by_form: Arc::new(by_form),
             twins: Arc::new(twins),
             scopes: Arc::default(),
+            writers: Arc::default(),
         }
     }
 
@@ -1079,6 +1190,29 @@ impl SharedTypes {
         }
         found
     }
+
+    /// The mock of `rt`'s group that stores records under `stored` (another mock's
+    /// first, by name, then `rt`'s own), with the schema it declares them by; `None`
+    /// when no mock of the group declares that type.
+    pub(crate) fn writer(&self, rt: &MockRuntime, stored: &str) -> Option<Writer> {
+        rt.shares.as_ref()?;
+        let registry = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        let group = &registry
+            .mocks
+            .get(&(rt.workspace.clone(), rt.name.clone()))?
+            .group;
+        let mut mocks: Vec<(bool, &String, &SharedEntry)> = registry
+            .mocks
+            .iter()
+            .filter(|((workspace, _), entry)| *workspace == rt.workspace && entry.group == *group)
+            .map(|((_, mock), entry)| (*mock == rt.name, mock, entry))
+            .collect();
+        mocks.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        let stored = stored.to_lowercase();
+        mocks
+            .iter()
+            .find_map(|(_, _, entry)| entry.writers.get(&stored).cloned())
+    }
 }
 
 impl Registry {
@@ -1207,6 +1341,58 @@ fn record_types(bundle: &mb_mcm::Bundle) -> Vec<RecordType> {
                     id: true,
                     node_id,
                 }),
+            }
+        }
+    }
+    out
+}
+
+/// The schema of the records of each type `bundle` stores records under (as
+/// [`record_types`] finds them), by type in lower case: a reference to its definition
+/// where it has one, else the properties the first operation of the type answers, one
+/// answering a single record before a list (whose items may be a summary of it).
+fn record_schemas(bundle: &mb_mcm::Bundle) -> HashMap<String, Value> {
+    let mut out: HashMap<String, Value> = HashMap::new();
+    let mut of_lists: HashSet<String> = HashSet::new();
+    let mut graphql = false;
+    for op in &bundle.operations {
+        graphql |= matches!(op.binding, Binding::Graphql { .. });
+        let Some(key) = op.resource_type.as_deref().map(str::to_lowercase) else {
+            continue;
+        };
+        let Some(answer) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+            continue;
+        };
+        let list = unwrapped(&bundle.defs, answer).get("items").is_some();
+        if out.contains_key(&key) && (list || !of_lists.contains(&key)) {
+            continue;
+        }
+        let Some((name, props)) = record_schema(bundle, answer) else {
+            continue;
+        };
+        if list {
+            of_lists.insert(key.clone());
+        } else {
+            of_lists.remove(&key);
+        }
+        let schema = match name {
+            Some(name) => serde_json::json!({"$ref": format!("#/$defs/{name}")}),
+            None => serde_json::json!({"type": "object", "properties": props}),
+        };
+        out.insert(key, schema);
+    }
+    // A GraphQL type is answered in its definition, not a mutation's payload.
+    if graphql {
+        for (name, def) in &bundle.defs {
+            if def
+                .get("properties")
+                .and_then(Value::as_object)
+                .is_some_and(|p| p.contains_key("id"))
+            {
+                out.insert(
+                    name.to_lowercase(),
+                    serde_json::json!({"$ref": format!("#/$defs/{name}")}),
+                );
             }
         }
     }
@@ -1573,7 +1759,7 @@ type Mutation { createPullRequest(input: CreatePullRequestInput!): CreatePullReq
         });
         let data = json!({"number": 7, "createdAt": "2024-01-01T00:00:00Z", "state": "CLOSED", "author": {}});
         assert_eq!(
-            reshape(props.as_object().unwrap(), &Map::new(), &data),
+            reshape(props.as_object().unwrap(), &Map::new(), &data, None),
             json!({"number": 7, "created_at": "2024-01-01T00:00:00Z", "state": "closed"})
         );
     }
@@ -1631,6 +1817,81 @@ type Mutation { createPullRequest(input: CreatePullRequestInput!): CreatePullReq
     }
 
     #[test]
+    fn only_what_the_writer_holds_as_a_symbol_takes_the_reading_spelling() {
+        let symbol = |values: &[&str]| json!({"type": "string", "enum": values});
+        let object = |props: Value| json!({"type": "object", "properties": props});
+        let reading = json!({
+            "state": symbol(&["OPEN", "CLOSED"]),
+            "label": symbol(&["LOGIN", "NAME"]),
+            "closing": object(json!({"reason": symbol(&["NOT_PLANNED"]),
+                                     "label": symbol(&["NAME"])})),
+            "reasons": {"type": "array", "items": symbol(&["NOT_PLANNED"])},
+            "labels": {"type": "array", "items": symbol(&["NAME"])},
+            "headState": symbol(&["OPEN"]),
+            "headLabel": symbol(&["NAME"]),
+            "base": object(json!({"state": symbol(&["OPEN"]), "label": symbol(&["NAME"])})),
+            "extra": symbol(&["NAME"]),
+        });
+        let text = json!({"type": "string"});
+        let reason = json!({"$ref": "#/$defs/Reason"});
+        let written = object(json!({
+            "state": {"type": "string", "description": "Either 'open' or 'closed'."},
+            "label": text,
+            "closing": object(json!({"reason": reason, "label": text})),
+            "reasons": {"type": "array", "items": reason},
+            "labels": {"type": "array", "items": text},
+            "head": object(json!({"state": symbol(&["open"]), "label": text})),
+            "baseState": symbol(&["open"]),
+            "baseLabel": text,
+        }));
+        let writer_defs = json!({"Reason": symbol(&["not_planned"])});
+        let wrote = Wrote {
+            schema: Some(&written),
+            defs: writer_defs.as_object().unwrap(),
+        };
+        let data = json!({
+            "state": "closed", "label": "Name",
+            "closing": {"reason": "not_planned", "label": "Name"},
+            "reasons": ["not_planned"], "labels": ["Name"],
+            "head": {"state": "open", "label": "Name"},
+            "baseState": "open", "baseLabel": "Name",
+            // A member the writer's schema does not show: respelled, as with no writer.
+            "extra": "name",
+        });
+        let mut budget = RESHAPE_OBJECTS;
+        let read = reshape_at(
+            reading.as_object().unwrap(),
+            &Map::new(),
+            &data,
+            Some(wrote),
+            (0, &mut budget),
+        );
+        assert_eq!(
+            read,
+            json!({
+                "state": "CLOSED", "label": "Name",
+                "closing": {"reason": "NOT_PLANNED", "label": "Name"},
+                "reasons": ["NOT_PLANNED"], "labels": ["Name"],
+                "headState": "OPEN", "headLabel": "Name",
+                "base": {"state": "OPEN", "label": "Name"},
+                "extra": "NAME",
+            })
+        );
+        // With no writer known, every value takes the reading spelling.
+        let mut budget = RESHAPE_OBJECTS;
+        let read = reshape_at(
+            reading.as_object().unwrap(),
+            &Map::new(),
+            &data,
+            None,
+            (0, &mut budget),
+        );
+        assert_eq!(read["label"], "NAME");
+        assert_eq!(read["closing"]["label"], "NAME");
+        assert_eq!(read["labels"], json!(["NAME"]));
+    }
+
+    #[test]
     fn reshape_nests_and_flattens_a_member_named_for_its_object() {
         // REST's `head.ref` from GraphQL's `headRefName`; `headRefOid` names nothing
         // REST's head declares, so it is left out.
@@ -1643,7 +1904,7 @@ type Mutation { createPullRequest(input: CreatePullRequestInput!): CreatePullReq
         let graphql = json!({"number": 7, "headRefName": "fix-empty-path",
                              "headRefOid": "4b7e", "baseRefName": "main"});
         assert_eq!(
-            reshape(rest.as_object().unwrap(), &Map::new(), &graphql),
+            reshape(rest.as_object().unwrap(), &Map::new(), &graphql, None),
             json!({"number": 7, "head": {"ref": "fix-empty-path"}, "base": {"ref": "main"}})
         );
         // And back: REST's `head.ref` as GraphQL's `headRefName`; a member of
@@ -1657,13 +1918,13 @@ type Mutation { createPullRequest(input: CreatePullRequestInput!): CreatePullReq
         let stored = json!({"number": 7, "head": {"ref": "fix-empty-path", "sha": "4b7e"},
                             "base": {"ref": "main"}});
         assert_eq!(
-            reshape(gql.as_object().unwrap(), &Map::new(), &stored),
+            reshape(gql.as_object().unwrap(), &Map::new(), &stored, None),
             json!({"number": 7, "headRefName": "fix-empty-path", "baseRefName": "main"})
         );
         // A place two members would both fill is left alone.
         let both = json!({"number": 7, "headRef": "a", "headRefName": "b"});
         assert_eq!(
-            reshape(rest.as_object().unwrap(), &Map::new(), &both),
+            reshape(rest.as_object().unwrap(), &Map::new(), &both, None),
             json!({"number": 7})
         );
     }

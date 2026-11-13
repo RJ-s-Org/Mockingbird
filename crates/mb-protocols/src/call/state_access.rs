@@ -1171,12 +1171,13 @@ pub(crate) async fn delete_shared(
     let mut state = StateAccess::new(rt);
     async {
         for other in shared::equivalents(rt, t) {
+            let writer = rt.shared_types.writer(rt, &other);
             let held = state
                 .list_with_parents(session, &other, MAX_SCOPED_SCAN)
                 .await;
             let mut found = held.into_iter().filter(|(parent, record)| {
                 let shaped = parent.as_ref().and_then(|_| {
-                    shared::reshape(props, &rt.bundle.defs, &record.data)
+                    shared::reshape(props, &rt.bundle.defs, &record.data, writer.as_ref())
                         .get("id")
                         .and_then(Value::as_str)
                         .map(str::to_string)

@@ -270,10 +270,16 @@ pub(crate) async fn from_state(
             .and_then(Value::as_object);
         if let Some(props) = props {
             for other in call::shared::equivalents(rt, &own) {
+                let writer = rt.shared_types.writer(rt, &other);
                 for (parent, record) in
                     call::stored_with_parents(rt, session, &other, MAX_HELD).await
                 {
-                    let data = call::shared::reshape(props, &rt.bundle.defs, &record.data);
+                    let data = call::shared::reshape(
+                        props,
+                        &rt.bundle.defs,
+                        &record.data,
+                        writer.as_ref(),
+                    );
                     // Two parents' records may share their id (issue `11` of `a/x` and
                     // of `b/x`): such a record goes by the id its shape here gives it
                     // (REST's `node_id` as `id`) where it has one, and its parent is

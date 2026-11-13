@@ -1393,12 +1393,14 @@ pub(crate) async fn unknown_lookup(
         .and_then(Value::as_object);
     if let Some(props) = props {
         for other in call::shared::equivalents(rt, &t) {
+            let writer = rt.shared_types.writer(rt, &other);
             let theirs = call::stored_with_parents(rt, session, &other, MAX_RECORDS + 1).await;
             if theirs.len() > MAX_RECORDS {
                 return None;
             }
             for (_, record) in theirs {
-                let data = call::shared::reshape(props, &rt.bundle.defs, &record.data);
+                let data =
+                    call::shared::reshape(props, &rt.bundle.defs, &record.data, writer.as_ref());
                 let id = data
                     .get(&member)
                     .and_then(id_text)

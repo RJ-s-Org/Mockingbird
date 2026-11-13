@@ -1512,3 +1512,86 @@ type Mutation {
     assert_eq!(read["title"], "Router panics", "{read}");
     assert_eq!(read["state"], "closed", "{read}");
 }
+
+/// A value the mock that stored it declared as text is read as it was written, though
+/// the reading member's description lists a value spelled alike (`'login' or 'name'`):
+/// only a symbol takes the reading spelling, a value of a member the writer declares an
+/// `enum` or describes as one of a list naming it (REST's `closed` as GraphQL's `CLOSED`).
+#[tokio::test]
+async fn a_text_value_keeps_its_spelling_where_only_a_symbol_is_respelled() {
+    const ISSUES: &str = r##"
+openapi: 3.0.3
+info: {title: issues, version: "1"}
+paths:
+  /issues/{number}:
+    get:
+      operationId: getIssue
+      parameters: [{name: number, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+        "404": {description: missing}
+components:
+  schemas:
+    Issue:
+      type: object
+      required: [number, title, state]
+      properties:
+        number: {type: integer}
+        title: {type: string}
+        state: {type: string, description: "State of the issue; either 'open' or 'closed'"}
+        author_label: {type: string, description: "Who opened it, as the app shows them."}
+"##;
+    const SDL: &str = r#"
+enum IssueState { OPEN CLOSED }
+type Issue { id: ID! number: Int! title: String! state: IssueState!
+  "Shown as either 'login' or 'name'."
+  authorLabel: String }
+type Query { issueByNumber(number: Int!): Issue }
+"#;
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let types = SharedTypes::default();
+    let offline = |name: &str, contract: &str| {
+        let mut rt = MockRuntime::new(
+            name,
+            Arc::new(compile(contract.as_bytes()).unwrap()),
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            Arc::clone(&state),
+        );
+        rt.shares = Some("gh".into());
+        rt.shared_types = types.clone();
+        rt.shared_types.join(&rt);
+        Arc::new(rt)
+    };
+    let gql_router = graphql::try_router(offline("github-graphql", SDL)).unwrap();
+    let _rest = offline("github-rest", ISSUES);
+
+    // As REST stores an issue it creates.
+    let session = mb_state::SessionKey {
+        workspace: "default".into(),
+        mock: "gh".into(),
+        session: "s1".into(),
+    };
+    let issue = json!({"number": 8, "title": "Over REST", "state": "closed",
+                       "author_label": "Name"});
+    state
+        .upsert(
+            &session,
+            mb_state::StoredResource {
+                resource_type: "issues".into(),
+                id: "8".into(),
+                data: issue,
+            },
+        )
+        .await
+        .unwrap();
+    let back = gql(
+        &gql_router,
+        "{ issueByNumber(number: 8) { title state authorLabel } }",
+        false,
+    )
+    .await;
+    let issue = &back["issueByNumber"];
+    assert_eq!(issue["title"], "Over REST", "{back}");
+    assert_eq!(issue["state"], "CLOSED", "{back}");
+    assert_eq!(issue["authorLabel"], "Name", "{back}");
+}
