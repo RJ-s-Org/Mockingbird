@@ -94,7 +94,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<ExitCode> {
     let session = open(&args).await?;
     if !args.keep
         && session.started_server()
-        && let Some(warning) = in_memory_warning(&session.config)
+        && let Some(warning) = in_memory_warning(&session.config, &args.state_dir)
     {
         eprintln!("{warning}");
     }
@@ -116,16 +116,20 @@ pub async fn run(args: RunArgs) -> anyhow::Result<ExitCode> {
 /// reads back what an earlier one wrote. `None` for a server with a file or database
 /// store, or a config that does not load.
 #[must_use]
-pub fn in_memory_warning(config: &std::path::Path) -> Option<String> {
+pub fn in_memory_warning(config: &std::path::Path, state_dir: &std::path::Path) -> Option<String> {
     let mut cfg = file_config::load(config).ok()?;
     file_config::apply_env(&mut cfg).ok()?;
-    let memory = |url: &str| url == "memory" || url.starts_with("sqlite::memory:");
-    if !memory(&cfg.storage.url) && !memory(cfg.storage.effective_state_url()) {
+    let state = cfg.storage.effective_state_url();
+    if state != "memory" && !state.starts_with("sqlite::memory:") {
         return None;
     }
-    let config = config.display();
+    let dir = match state_dir == std::path::Path::new(daemon::DEFAULT_STATE_DIR) {
+        true => String::new(),
+        false => format!(" --state-dir {}", state_dir.display()),
+    };
     Some(format!(
-        "mockingbird: warning: this run started its own server, which keeps state in memory: the records this command creates are gone when it exits, and the next `mockingbird run` starts empty. To keep state across commands (a CLI run once per command), start the server once with `mockingbird server start -c {config} --proxy`, run each command with `mockingbird run -c {config} -- <command>` (it reuses that server), and stop it with `mockingbird server stop`; or pass --keep to leave this one running."
+        "mockingbird: warning: this run's own server keeps state in memory: what the command creates is gone when it exits. To keep state across commands, start it once with `mockingbird server start -c {}{dir} --proxy` (`run` reuses it; `mockingbird server stop{dir}` stops it).",
+        config.display()
     ))
 }
 

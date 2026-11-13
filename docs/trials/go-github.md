@@ -21,6 +21,8 @@ A fresh Claude Code (`claude -p`, Sonnet 5.5) had only the Mockingbird plugin an
 
 > This Go package posts a triage digest to GitHub with go-github. Mock the GitHub API with Mockingbird so I can run it locally without a GitHub account or token, and write a Go test that runs Run against the mock, including how the app handles GitHub's rate limit. When done, tell me how to run it.
 
+It asks for more than the first prompt (a Go test and the rate-limit path), so rerun times and costs are not comparable with the figures below.
+
 It finished in **78 s and 13 turns** ($0.36). Its steps:
 1. It read the README, `digest.go` and the test, then ran `doctor` and `list_examples`.
 2. It ran `init_example github-rest` into a scratch folder, then copied in the `mockingbird.yaml` and the contract, without the example's README. It dropped the example's webhook block, which posts to a local receiver this app doesn't have.
