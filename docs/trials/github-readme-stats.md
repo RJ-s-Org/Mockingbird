@@ -174,3 +174,13 @@ The same app at `54a7985`, on this PR's branch with #473 (the nested-lookup hint
 - **A type with no `id`** is keyed by its lookup member, but a mutation does not update that record, and a delete is checked against the member, not the key.
 - **A list item whose `id` is aliased** pairs with the generated item by position, not by id.
 - **Model latency** with full contracts is over target; the timeout, not the engine, cost the one card.
+
+## Prompt for later runs (from 2026-11-12)
+
+Model-off runs 3–9 (main `95979a49` to `404d8240`) scored 12/14 every time. Each agent saw guidance on not-found paths (the skill's "Not-found paths" step, then a `next_steps` line naming the lookups, then a line citing the app's own not-found handling) and chose not to act on it, because the prompt asked only for the cards to render. The two remaining positive failures are pins the offline faker drew as private; the model settles those.
+
+Not-found handling is part of what this app does, so later runs ask for it in the prompt:
+
+> I want to run this app (github-readme-stats) locally and render its cards without a GitHub token. Mock the GitHub API it calls (GraphQL and REST) with Mockingbird. Don't edit the app's source. Unknown users and repositories should get the app's not-found cards, as they would against the real API. When it works, tell me the exact command to run the app against the mock.
+
+Add the model sentence (`Use OpenRouter with the model …; my key is in OPENROUTER_API_KEY.`) for runs with the model. In-scope flows are the 12 positive cards plus the unknown-user and unknown-repository cards.
