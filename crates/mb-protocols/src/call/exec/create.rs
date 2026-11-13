@@ -567,6 +567,16 @@ pub(super) async fn run(
         }
         settle_filled(rt, (field, &shape.schemas), (&missing, &required), known);
     }
+    // The members named for the state it starts in and the others (`closed`,
+    // `closedAt`) follow it, over what fill or the pool wrote, but what the request
+    // sent and the description sets.
+    let mut kept: Vec<String> = sent
+        .as_object()
+        .into_iter()
+        .flat_map(|s| s.keys().cloned())
+        .collect();
+    kept.extend(set.iter().chain(&nulled).cloned());
+    super::verbs::initial_companions(rt, call, t, &mut data, &kept);
     // Issued values name their record as alternate keys do: unique among the type's.
     let drawn: Vec<(String, Value)> = filled_keys.into_iter().chain(issued).collect();
     unique_keys(state, (seed, t), &drawn, &mut data)

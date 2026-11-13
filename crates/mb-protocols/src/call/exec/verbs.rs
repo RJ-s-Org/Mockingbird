@@ -79,7 +79,6 @@ pub(super) fn companions(
     (before, record): (&Value, &mut Value),
     set: &[String],
 ) {
-    let bundle = rt.bundle();
     let lifecycle = rt
         .described()
         .type_desc(t)
@@ -104,9 +103,82 @@ pub(super) fn companions(
             states.extend(left.map(|l| (l, false)));
         }
     }
+    fill(rt, call, t, &states, set, record);
+}
+
+/// Sets on `record`, a record of type `t` just created, the members named for the
+/// states its state members (as [`companions`] reads them) start in and the others they
+/// may take: its lifecycle's `states` and the values its schema lists (its `enum`, or
+/// its description's list), or, with none known, only those of the state it starts in.
+/// The ones it starts in are entered and each other left, as [`companions`] sets them;
+/// never a member in `kept`.
+pub(super) fn initial_companions(
+    rt: &crate::MockRuntime,
+    call: &crate::call::OperationCall,
+    t: &str,
+    record: &mut Value,
+    kept: &[String],
+) {
+    let bundle = rt.bundle();
+    let lifecycle = rt
+        .described()
+        .type_desc(t)
+        .and_then(|d| d.lifecycle.as_ref());
+    let Some(fields) = record.as_object() else {
+        return;
+    };
+    // The states it starts in come first: what they fill stays.
+    let mut states: Vec<(String, bool)> = Vec::new();
+    let mut left: Vec<String> = Vec::new();
+    for (member, value) in fields {
+        let of_lifecycle = lifecycle.filter(|l| l.member == *member);
+        if of_lifecycle.is_none() && !state_named(member) {
+            continue;
+        }
+        let Some(entered) = value.as_str().map(squeeze).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let mut others: Vec<String> = of_lifecycle.map(|l| l.states.clone()).unwrap_or_default();
+        for schema in super::read_schemas(rt, t) {
+            for part in whole_parts(bundle, &schema) {
+                let Some(member) = part.get("properties").and_then(|p| p.get(member)) else {
+                    continue;
+                };
+                for part in whole_parts(bundle, member) {
+                    others.extend(
+                        crate::world_gaps::listed_values(bundle, part)
+                            .map(|(v, _)| v)
+                            .unwrap_or_default(),
+                    );
+                }
+            }
+        }
+        left.extend(others.iter().map(|o| squeeze(o)).filter(|o| *o != entered));
+        states.push((entered, true));
+    }
+    for other in left {
+        if !other.is_empty() && !states.iter().any(|(s, _)| *s == other) {
+            states.push((other, false));
+        }
+    }
+    fill(rt, call, t, &states, kept, record);
+}
+
+/// Sets on `record`, of type `t`, the members named for `states`, each with whether it
+/// was entered (see [`companions`]); never a member in `kept`. A member two states name
+/// takes what the first sets.
+fn fill(
+    rt: &crate::MockRuntime,
+    call: &crate::call::OperationCall,
+    t: &str,
+    states: &[(String, bool)],
+    kept: &[String],
+    record: &mut Value,
+) {
     if states.is_empty() {
         return;
     }
+    let bundle = rt.bundle();
     let now = crate::call::exprs::now_value(rt, call);
     let mut fills: Vec<(String, Value)> = Vec::new();
     for schema in super::read_schemas(rt, t) {
@@ -114,7 +186,7 @@ pub(super) fn companions(
             let Some(props) = part.get("properties").and_then(Value::as_object) else {
                 continue;
             };
-            for (name, member) in props.iter().filter(|(n, _)| !set.contains(n)) {
+            for (name, member) in props.iter().filter(|(n, _)| !kept.contains(n)) {
                 let parts = whole_parts(bundle, member);
                 let typed = |kind: &str| {
                     parts.iter().any(|p| match p.get("type") {
@@ -129,7 +201,7 @@ pub(super) fn companions(
                         .any(|p| p.get("format").and_then(Value::as_str) == Some("date-time"));
                 let unix = typed("integer");
                 let n = squeeze(name);
-                for (state, entering) in &states {
+                for (state, entering) in states {
                     let value = if typed("boolean") && (n == *state || n == format!("is{state}")) {
                         Value::Bool(*entering)
                     } else if n == format!("{state}at") && (date_time || unix) {
