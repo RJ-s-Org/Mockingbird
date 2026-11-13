@@ -82,13 +82,14 @@ curl -s localhost:8080/graphql -H 'Host: api.github.com' -H 'content-type: appli
 
 curl -s localhost:8080/graphql -H 'Host: api.github.com' -H 'content-type: application/json' \
   -H 'X-Mockingbird-Scenario: outage' -d '{"query":"{ viewer { login } }"}'
-# HTTP 200 {"data":null,"errors":[{"message":"Bad Gateway (forced status 502)","extensions":{"code":"INTERNAL_SERVER_ERROR","status":502},...}]}
+# HTTP 200 {"data":null,"errors":[{"message":"Bad Gateway (forced status 502)","type":"INTERNAL_SERVER_ERROR","extensions":{"code":"INTERNAL_SERVER_ERROR","status":502},...}]}
 ```
 
 `@octokit/graphql` throws a `GraphqlResponseError` for `outage`. `slow` adds 4 s to
 every root field, for client timeouts.
 
 A GraphQL contract declares no HTTP statuses, so scenarios may only force a 5xx; the
-real exhausted-limit answer (`errors[].type: "RATE_LIMITED"`) is closest with the
-per-request header `X-Mockingbird-Status: 429`, which yields
-`errors[].extensions.code: "RATE_LIMITED"`.
+real exhausted-limit answer (`errors[].type: "RATE_LIMITED"`) is produced with the
+per-request header `X-Mockingbird-Status: 429`: every GraphQL error carries its
+`extensions.code` as a top-level `type` too, so it answers
+`errors[].type: "RATE_LIMITED"` (and `extensions.code: "RATE_LIMITED"`).

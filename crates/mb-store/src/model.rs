@@ -330,6 +330,12 @@ pub enum UnknownIds {
     Generate,
     /// Answer the operation's 404, whatever the type.
     NotFound,
+    /// As [`UnknownIds::NotFound`], except that in GraphQL what that answers with a
+    /// `NOT_FOUND` error (a lookup by an argument other than the identity, nested ones
+    /// too, and a read of a record the session deleted) answers its field `null` with
+    /// no error when the field is nullable, as Shopify's Storefront API does. A root
+    /// lookup by an unknown id still generates.
+    Null,
 }
 
 impl Serialize for UnknownIds {
@@ -338,20 +344,25 @@ impl Serialize for UnknownIds {
             UnknownIds::Inferred => "inferred",
             UnknownIds::Generate => "generate",
             UnknownIds::NotFound => "404",
+            UnknownIds::Null => "null",
         })
     }
 }
 
 impl<'de> Deserialize<'de> for UnknownIds {
-    /// `"inferred"`, `"generate"`, `"404"` or the number `404` (YAML `unknown_ids: 404`).
+    /// `"inferred"`, `"generate"`, `"404"` or the number `404` (YAML `unknown_ids: 404`),
+    /// `"null"` or `null` (YAML `unknown_ids: null`: a key set to null, not an unset one,
+    /// which keeps the default).
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         match Value::deserialize(d)? {
             Value::String(s) if s == "inferred" => Ok(UnknownIds::Inferred),
             Value::String(s) if s == "generate" => Ok(UnknownIds::Generate),
             Value::String(s) if s == "404" => Ok(UnknownIds::NotFound),
             Value::Number(n) if n.as_u64() == Some(404) => Ok(UnknownIds::NotFound),
+            Value::String(s) if s == "null" => Ok(UnknownIds::Null),
+            Value::Null => Ok(UnknownIds::Null),
             other => Err(serde::de::Error::custom(format!(
-                "unknown_ids must be \"inferred\", \"generate\" or 404, not {other}"
+                "unknown_ids must be \"inferred\", \"generate\", 404 or null, not {other}"
             ))),
         }
     }

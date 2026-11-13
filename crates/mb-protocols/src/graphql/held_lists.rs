@@ -72,6 +72,7 @@
 //! world's target member; one of the type's described `alternates`, such as `handle`),
 //! answers `null` and a `NOT_FOUND` error when `unknown_ids` resolves to 404 for the
 //! type and the session holds no record of it with that value ([`unknown_lookup`]).
+//! Under `unknown_ids: null` a nullable field answers `null` without the error.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
@@ -1558,7 +1559,7 @@ fn nested_lookups(
 }
 
 /// Whether a member's schema allows `null` (a nullable GraphQL field).
-fn nullable(schema: &Value) -> bool {
+pub(crate) fn nullable(schema: &Value) -> bool {
     schema
         .get("anyOf")
         .and_then(Value::as_array)
@@ -1573,7 +1574,8 @@ fn nullable(schema: &Value) -> bool {
 /// answer keyed by response key, answers with a record the session does not hold
 /// ([`unknown_lookup`]: `user(login: "a") { repository(name: "nope") }` under
 /// `unknown_ids: 404`): each is set to `null` in `body` and returned with its
-/// `NOT_FOUND`, by its path below the root field (`repository`, `items.0.owner`). A
+/// `NOT_FOUND`, by its path below the root field (`repository`, `items.0.owner`);
+/// under `unknown_ids: null` none is returned (the fields are nullable). A
 /// lookup inside one already missing is not looked at. Nothing for a query a
 /// scenario, seed header or forced status answers.
 pub(crate) async fn nested_missing(
@@ -1630,6 +1632,10 @@ pub(crate) async fn nested_missing(
         if let Some(member) = body.pointer_mut(&pointer) {
             *member = Value::Null;
         }
+    }
+    // Each is a nullable field: `unknown_ids: null` answers it `null` alone.
+    if rt.unknown_ids == crate::UnknownIds::Null {
+        return Vec::new();
     }
     missing
         .into_iter()

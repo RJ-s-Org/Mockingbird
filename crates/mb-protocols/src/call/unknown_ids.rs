@@ -4,7 +4,8 @@
 use super::*;
 
 /// Whether a read of type `t` answers an id the session does not hold with its 404.
-/// `404` and `generate` decide for every type. Left unset ([`UnknownIds::Inferred`]),
+/// `404` and `generate` decide for every type; `null` is `404` (only a GraphQL lookup
+/// answers it differently, `null` without an error). Left unset ([`UnknownIds::Inferred`]),
 /// a type the contract can create ([`BundleIndex::creatable`]) answers 404 once the
 /// session works with its own records of it ([`owns`]): the app makes them, so an id it
 /// never made is missing. A type it cannot create, or has not written yet, is reference
@@ -12,7 +13,7 @@ use super::*;
 pub(super) async fn not_found(state: &mut StateAccess<'_>, session: &SessionKey, t: &str) -> bool {
     let rt = state.rt;
     match rt.unknown_ids {
-        UnknownIds::NotFound => true,
+        UnknownIds::NotFound | UnknownIds::Null => true,
         UnknownIds::Generate => false,
         UnknownIds::Inferred => rt.index().creatable(t) && owns(state, session, t).await,
     }

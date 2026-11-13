@@ -344,9 +344,9 @@ pub struct MockView {
     /// listed items are served by id; `off` generates every answer anew.
     #[schema(value_type = String, example = "on")]
     pub consistency: Consistency,
-    /// `inferred` (default), `generate` or `404`: how a read of an id the session
-    /// does not hold is answered. `inferred` decides per resource type (the world
-    /// view's `unknown_ids` says how); the others decide for every type.
+    /// `inferred` (default), `generate`, `404` or `null`: how a read of an id the
+    /// session does not hold is answered. `inferred` decides per resource type (the
+    /// world view's `unknown_ids` says how); the others decide for every type.
     #[schema(value_type = String, example = "inferred")]
     pub unknown_ids: UnknownIds,
     /// The scenario applied when a call names none; absent when unset.
@@ -432,8 +432,9 @@ pub struct CreateMock {
     #[serde(default)]
     #[schema(value_type = Option<String>)]
     pub consistency: Consistency,
-    /// `inferred` (default), `generate` or `404`.
-    #[serde(default)]
+    /// `inferred` (default), `generate`, `404` or `"null"` (the string: JSON `null`
+    /// is refused here, as it would read as unset).
+    #[serde(default, deserialize_with = "unknown_ids_given")]
     #[schema(value_type = Option<String>)]
     pub unknown_ids: UnknownIds,
     /// Host names the mock answers for (lowercase, no port); none by
@@ -485,7 +486,9 @@ pub struct PatchMock {
     /// `on` or `off`.
     #[schema(value_type = Option<String>)]
     pub consistency: Option<Consistency>,
-    /// `inferred`, `generate` or `404`.
+    /// `inferred`, `generate`, `404` or `null`. Here `null` sets the value `null`
+    /// (as `"null"` does) rather than clearing it; `inferred` restores the default.
+    #[serde(default, deserialize_with = "unknown_ids_set")]
     #[schema(value_type = Option<String>)]
     pub unknown_ids: Option<UnknownIds>,
     /// A scenario of the mock; `null` clears it.
@@ -514,6 +517,21 @@ where
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(d).map(Some)
+}
+
+/// A sent `unknown_ids`, an explicit `null` included (the value `null`, not a clear).
+fn unknown_ids_set<'de, D: Deserializer<'de>>(d: D) -> Result<Option<UnknownIds>, D::Error> {
+    UnknownIds::deserialize(d).map(Some)
+}
+
+/// A created mock's `unknown_ids`: JSON `null` is refused (the string `"null"` sets it).
+fn unknown_ids_given<'de, D: Deserializer<'de>>(d: D) -> Result<UnknownIds, D::Error> {
+    match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Null => Err(serde::de::Error::custom(
+            "unknown_ids must be \"inferred\", \"generate\", 404 or \"null\" (a string), not null",
+        )),
+        value => UnknownIds::deserialize(value).map_err(serde::de::Error::custom),
+    }
 }
 
 /// Title of the 409 for a mock name already taken in the workspace.

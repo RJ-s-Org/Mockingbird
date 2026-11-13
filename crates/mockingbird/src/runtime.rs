@@ -665,6 +665,7 @@ pub(crate) async fn build_runtime_tracked(
         StoredUnknownIds::Inferred => UnknownIds::Inferred,
         StoredUnknownIds::Generate => UnknownIds::Generate,
         StoredUnknownIds::NotFound => UnknownIds::NotFound,
+        StoredUnknownIds::Null => UnknownIds::Null,
     };
     rt.default_scenario = mock.behavior.default_scenario.clone();
     rt.pool = deps.record_pools.of(&mock.workspace, &mock.name);

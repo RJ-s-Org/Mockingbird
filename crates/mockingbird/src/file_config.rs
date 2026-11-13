@@ -1236,9 +1236,18 @@ pub struct FileMock {
     /// How a read of an id the session does not hold is answered. Unset
     /// (`inferred`): per resource type, the operation's 404 for a type the
     /// contract can create once the session has written a record of it, else
-    /// generated. `generate` or `404` decides for every type of the mock.
+    /// generated. `generate` or `404` decides for every type of the mock;
+    /// `null` is `404` except that a GraphQL lookup by an argument other than
+    /// the id, or a read of a record the session deleted, answers its
+    /// (nullable) field `null` without an error. A key set to
+    /// YAML `null` is that value, not unset.
     #[serde(default)]
     pub unknown_ids: UnknownIds,
+    /// Set by [`load`]: `unknown_ids` is a YAML null (`null`, `~` or empty),
+    /// which selects the `null` value; the reconcile warns of it, as an empty
+    /// key may not mean to.
+    #[serde(skip)]
+    pub unknown_ids_yaml_null: bool,
     /// A scenario of this mock applied when a call names none.
     #[serde(default)]
     pub default_scenario: Option<String>,
@@ -1452,6 +1461,7 @@ impl FileMock {
             limits: FileMockLimits::default(),
             consistency: Consistency::default(),
             unknown_ids: UnknownIds::default(),
+            unknown_ids_yaml_null: false,
             default_scenario: None,
             shares: None,
             strict_requests: false,
@@ -1967,6 +1977,11 @@ pub fn load(path: &Path) -> anyhow::Result<FileConfig> {
             .map_err(|e| anyhow!("{e}"))
             .with_context(|| format!("cannot parse config file {}", path.display()))?
     };
+    for name in unknown_ids_yaml_nulls(&text) {
+        if let Some(mock) = cfg.mocks.get_mut(&name) {
+            mock.unknown_ids_yaml_null = true;
+        }
+    }
     let explicit = explicit_ports(&text);
     cfg.server.admin_port_explicit = explicit.admin_port;
     cfg.server.grpc_port_explicit = explicit.grpc_port;
@@ -2066,6 +2081,31 @@ pub(crate) struct ExplicitPorts {
     pub grpc_port: bool,
     /// `proxy.port`.
     pub proxy_port: bool,
+}
+
+/// The mocks of a config document whose `unknown_ids` is a YAML null (`null`, `~`
+/// or an empty value), not the string `"null"`.
+fn unknown_ids_yaml_nulls(text: &str) -> Vec<String> {
+    #[derive(Deserialize, Default)]
+    struct Probe {
+        #[serde(default)]
+        mocks: BTreeMap<String, ProbeMock>,
+    }
+    #[derive(Deserialize)]
+    struct ProbeMock {
+        #[serde(default, deserialize_with = "yaml_null")]
+        unknown_ids: bool,
+    }
+    fn yaml_null<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+        Option::<serde::de::IgnoredAny>::deserialize(d).map(|v| v.is_none())
+    }
+    serde_saphyr::from_str::<Probe>(text)
+        .unwrap_or_default()
+        .mocks
+        .into_iter()
+        .filter(|(_, m)| m.unknown_ids)
+        .map(|(name, _)| name)
+        .collect()
 }
 
 /// Which of `server.port`, `server.admin_port`, `server.grpc_port` and

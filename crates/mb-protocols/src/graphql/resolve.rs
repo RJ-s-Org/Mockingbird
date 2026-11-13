@@ -175,6 +175,17 @@ enum Route<'a, 'b> {
     Alone,
 }
 
+/// Whether root field `op` answers a record the session does not hold `null` without
+/// an error: under `unknown_ids: null`, when the field is nullable (a non-null one
+/// keeps its error: `null` there would null the whole `data`).
+fn null_for_unknown(rt: &MockRuntime, op: &mb_mcm::Operation) -> bool {
+    rt.unknown_ids == crate::UnknownIds::Null
+        && op
+            .success_output()
+            .and_then(|o| o.schema.as_ref())
+            .is_some_and(super::held_lists::nullable)
+}
+
 /// A root field failure: the HTTP status it stands for and the field error.
 pub(crate) struct Failure {
     pub(crate) status: u16,
@@ -517,6 +528,10 @@ async fn generate_in(
                             _ => call::read_state(rt, &plan, &call).await.0.map(|t| t.data),
                         };
                     }
+                    // The answer names no record the session holds (a lookup's
+                    // NOT_FOUND, or a read state answers 404): `unknown_ids: null`
+                    // answers a nullable field `null` instead.
+                    let mut unknown = false;
                     let generated = match route {
                         Route::Join(b, pending) => {
                             let pending = *pending;
@@ -553,7 +568,10 @@ async fn generate_in(
                             }
                         }
                         Route::Answered(answer) => Ok(*answer),
-                        Route::Missing(failure) => Err(failure),
+                        Route::Missing(failure) => {
+                            unknown = true;
+                            Err(failure)
+                        }
                         Route::Alone => {
                             call::generate_narrowed(rt, &plan, &call, narrowed.as_deref())
                                 .await
@@ -563,6 +581,7 @@ async fn generate_in(
                     let generated = match generated {
                         // A read of what the session deleted: no record, but an error.
                         Ok(gone) if gone.status == 404 && gone.source == Source::State => {
+                            unknown = true;
                             let detail = gone
                                 .body
                                 .as_ref()
@@ -649,7 +668,7 @@ async fn generate_in(
                         }
                         Err(e) => Err(e),
                     };
-                    generated.map(|generated| {
+                    let answered = generated.map(|generated| {
                         call::record_effects(&mut report.request, &generated);
                         report.usage = generated.usage;
                         report.source = Some(generated.source);
@@ -665,7 +684,14 @@ async fn generate_in(
                         } else {
                             super::select::rekey(body, selection)
                         }
-                    })
+                    });
+                    match answered {
+                        Err(_) if unknown && null_for_unknown(rt, op) => {
+                            report.source = Some(Source::State);
+                            Ok(Value::Null)
+                        }
+                        answered => answered,
+                    }
                 }
             }
         }
@@ -686,10 +712,12 @@ async fn generate_in(
         Err(failure) => {
             report.status = failure.status;
             if rt.recorder.is_some() {
-                report.response = Some(json!({
+                let mut logged = json!({
                     "message": failure.error.message,
                     "extensions": failure.error.extensions,
-                }));
+                });
+                super::type_error(&mut logged);
+                report.response = Some(logged);
             }
         }
     }

@@ -461,6 +461,34 @@ async fn patch_consistency_settings() {
         )
         .await;
     assert!(view.get("default_scenario").is_none());
+    // An explicit `null` sets the value `null`; a patch without the field keeps it.
+    let (status, view) = h.patch("orders", json!({"unknown_ids": null})).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["unknown_ids"], "null", "{view}");
+    let (_, view) = h.patch("orders", json!({"consistency": "on"})).await;
+    assert_eq!(view["unknown_ids"], "null", "{view}");
+    let (_, view) = h.patch("orders", json!({"unknown_ids": "inferred"})).await;
+    assert_eq!(view["unknown_ids"], "inferred", "{view}");
+    // A create refuses JSON `null` as an invalid body, as before (it would read as
+    // unset); the string sets it.
+    let (status, body) = h
+        .send(
+            Method::POST,
+            "/api/v1/mocks",
+            Some(json!({"name": "nulled", "unknown_ids": null})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["title"], "Invalid request body", "{body}");
+    let (status, body) = h
+        .send(
+            Method::POST,
+            "/api/v1/mocks",
+            Some(json!({"name": "nulled", "unknown_ids": "null"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["unknown_ids"], "null", "{body}");
 }
 
 #[tokio::test]
