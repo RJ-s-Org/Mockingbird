@@ -61,6 +61,7 @@ mod minted;
 #[cfg(test)]
 mod owner_tie_tests;
 mod owners;
+pub(crate) use owners::shows_other_parent;
 mod pages;
 mod query_roles;
 mod ranges;
