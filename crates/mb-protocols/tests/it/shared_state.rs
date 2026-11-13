@@ -1293,3 +1293,126 @@ type Mutation { deleteIssue(id: ID!): Issue }
         "nothing generated back"
     );
 }
+
+/// An enum value one mock of the group stored is read in the other's spelling of it,
+/// case and separators aside (GraphQL's `CLOSED` and `NOT_PLANNED` as REST's `closed`
+/// and `not-planned`, and back), in the objects and lists the record nests too.
+#[tokio::test]
+async fn enum_values_cross_the_group_in_the_reading_spelling() {
+    const ISSUES: &str = r##"
+openapi: 3.0.3
+info: {title: issues, version: "1"}
+paths:
+  /issues:
+    post:
+      operationId: createIssue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [title], properties: {title: {type: string}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+  /issues/{number}:
+    get:
+      operationId: getIssue
+      parameters: [{name: number, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+        "404": {description: missing}
+components:
+  schemas:
+    Reason:
+      type: string
+      enum: [completed, not-planned]
+    Issue:
+      type: object
+      required: [number, title, state]
+      properties:
+        number: {type: integer}
+        title: {type: string}
+        state: {type: string, enum: [open, closed]}
+        state_reason: {$ref: "#/components/schemas/Reason"}
+        closing: {type: object, properties: {reason: {$ref: "#/components/schemas/Reason"}}}
+        past_reasons: {type: array, items: {$ref: "#/components/schemas/Reason"}}
+"##;
+    const SDL: &str = r#"
+enum IssueState { OPEN CLOSED }
+enum IssueStateReason { COMPLETED NOT_PLANNED }
+type Closing { reason: IssueStateReason }
+type Issue { id: ID! number: Int! title: String! state: IssueState!
+  stateReason: IssueStateReason closing: Closing
+  pastReasons: [IssueStateReason!] }
+type Query { issueByNumber(number: Int!): Issue }
+type Mutation { createIssue(title: String!): Issue }
+"#;
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let rest_rt = runtime("github-rest", ISSUES, vec![], Arc::clone(&state));
+    let rest_router = http_rest::router(rest_rt);
+    let gh = runtime(
+        "github-graphql",
+        SDL,
+        vec![
+            json!({"__typename": "Issue", "id": "I_7007", "number": 7007,
+                    "title": "Over GraphQL", "state": "CLOSED", "stateReason": "NOT_PLANNED",
+                    "closing": {"__typename": "Closing", "reason": "NOT_PLANNED"},
+                    "pastReasons": ["COMPLETED", "NOT_PLANNED"]}),
+        ],
+        Arc::clone(&state),
+    );
+    let gql_router = graphql::try_router(gh).unwrap();
+
+    gql(
+        &gql_router,
+        r#"mutation { createIssue(title: "Over GraphQL") { id } }"#,
+        true,
+    )
+    .await;
+    let read = rest(&rest_router, "GET", "/issues/7007", None).await;
+    assert_eq!(read["title"], "Over GraphQL", "{read}");
+    assert_eq!(read["state"], "closed", "{read}");
+    assert_eq!(read["state_reason"], "not-planned", "{read}");
+    assert_eq!(read["closing"]["reason"], "not-planned", "{read}");
+    assert_eq!(
+        read["past_reasons"],
+        json!(["completed", "not-planned"]),
+        "{read}"
+    );
+
+    // As REST stores an issue it creates.
+    let session = mb_state::SessionKey {
+        workspace: "default".into(),
+        mock: "gh".into(),
+        session: "s1".into(),
+    };
+    let issue = json!({"number": 8, "title": "Over REST", "state": "closed",
+                       "state_reason": "not-planned", "closing": {"reason": "not-planned"},
+                       "past_reasons": ["completed", "not-planned"]});
+    state
+        .upsert(
+            &session,
+            mb_state::StoredResource {
+                resource_type: "issues".into(),
+                id: "8".into(),
+                data: issue,
+            },
+        )
+        .await
+        .unwrap();
+    let back = gql(
+        &gql_router,
+        "{ issueByNumber(number: 8) { title state stateReason closing { reason } pastReasons } }",
+        false,
+    )
+    .await;
+    let issue = &back["issueByNumber"];
+    assert_eq!(issue["title"], "Over REST", "{back}");
+    assert_eq!(issue["state"], "CLOSED", "{back}");
+    assert_eq!(issue["stateReason"], "NOT_PLANNED", "{back}");
+    assert_eq!(issue["closing"]["reason"], "NOT_PLANNED", "{back}");
+    assert_eq!(
+        issue["pastReasons"],
+        json!(["COMPLETED", "NOT_PLANNED"]),
+        "{back}"
+    );
+}
