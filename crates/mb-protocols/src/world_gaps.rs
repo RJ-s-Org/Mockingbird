@@ -484,7 +484,7 @@ fn read_only(b: &Bundle, schema: &Value) -> bool {
 
 /// The values a string member's schema lists, and whether they are its `enum`:
 /// its `enum` of at least two strings, unless its description lists more of
-/// them ([`code_span_list`]) with all of the enum's among them; else its
+/// them ([`prose_list`]) with all of the enum's among them; else its
 /// description's list of at least two.
 fn listed_values(b: &Bundle, schema: &Value) -> Option<(Vec<String>, bool)> {
     let s = b.resolve(schema);
@@ -500,7 +500,7 @@ fn listed_values(b: &Bundle, schema: &Value) -> Option<(Vec<String>, bool)> {
     let prose = s
         .get("description")
         .and_then(Value::as_str)
-        .map(code_span_list)
+        .map(prose_list)
         .unwrap_or_default();
     if let Some(e) = s.get("enum").and_then(Value::as_array) {
         let values: Vec<String> = e
@@ -516,20 +516,119 @@ fn listed_values(b: &Bundle, schema: &Value) -> Option<(Vec<String>, bool)> {
     (prose.len() >= 2).then_some((prose, false))
 }
 
-/// The longest run of code spans in `text` joined only by commas, `or` and
-/// `and` (`` `a`, `b` or `c` ``), each a short token with no space. A run
-/// right after `e.g.`, `for example` or `such as` lists examples, not the
-/// values, and counts for none; a text with an unpaired backtick lists none.
-fn code_span_list(text: &str) -> Vec<String> {
-    let parts: Vec<&str> = text.split('`').collect();
-    if parts.len().is_multiple_of(2) {
-        return Vec::new();
+/// The values `text` (a member's description) lists, at least two, else none: the
+/// longest run of values in backticks, single or double quotes joined only by commas,
+/// `or` and `and` (`` `a`, `b` or `c` ``, `either 'open' or 'closed'`), each a short
+/// token with no space; else, unquoted, the two words of `either X or Y` or the
+/// comma-joined words of `one of X, Y or Z`. A run right after `e.g.`, `for example` or
+/// `such as` lists examples, not the values, and counts for none; a text with an
+/// unpaired backtick lists none in backticks. A single quoted word is no list.
+pub(crate) fn prose_list(text: &str) -> Vec<String> {
+    let mut best: Vec<String> = Vec::new();
+    for quote in ['`', '\'', '"'] {
+        let run = quoted_run(text, quote);
+        if run.len() > best.len() {
+            best = run;
+        }
     }
-    let token = |v: &str| {
-        !v.is_empty()
-            && v.len() <= 64
-            && v.chars()
-                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+    if best.len() < 2 {
+        best = worded_list(text);
+    }
+    if best.len() < 2 {
+        best.clear();
+    }
+    best
+}
+
+/// Whether `v` is a value a description may list: short, with no space.
+fn list_token(v: &str) -> bool {
+    !v.is_empty()
+        && v.len() <= 64
+        && v.chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+}
+
+/// `text` cut at `quote`: the text outside, then inside, then outside a pair, and so on.
+/// A backtick pairs with the next; a quote opens only where no letter or digit is right
+/// before it and closes only where none is right after it, so an apostrophe (`issue's`)
+/// is neither. `None` for an unpaired backtick.
+fn quoted_parts(text: &str, quote: char) -> Option<Vec<&str>> {
+    if quote == '`' {
+        let parts: Vec<&str> = text.split('`').collect();
+        return (!parts.len().is_multiple_of(2)).then_some(parts);
+    }
+    let alnum = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+    let width = quote.len_utf8();
+    let mut parts = Vec::new();
+    let mut outside = 0;
+    while let Some(open) = text[outside..]
+        .match_indices(quote)
+        .map(|(i, _)| outside + i)
+        .find(|&i| !alnum(text[..i].chars().next_back()))
+    {
+        let inner = open + width;
+        let Some(close) = text[inner..]
+            .match_indices(quote)
+            .map(|(i, _)| inner + i)
+            .find(|&i| !alnum(text[i + width..].chars().next()))
+        else {
+            break;
+        };
+        parts.push(&text[outside..open]);
+        parts.push(&text[inner..close]);
+        outside = close + width;
+    }
+    parts.push(&text[outside..]);
+    Some(parts)
+}
+
+/// The unquoted values of `either X or Y` (`X` and `Y`, `Y` ending its clause), else of `one of X, Y or Z`
+/// to the end of its sentence, each value but the last followed by a comma, `or` or
+/// `and`; none when a word there is no value (`one of the following`).
+fn worded_list(text: &str) -> Vec<String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let bare = |w: &str| w.trim_end_matches(['.', ';', ')', ',']).to_string();
+    for (i, w) in words.iter().enumerate() {
+        if w.eq_ignore_ascii_case("either")
+            && let [x, or, y, rest @ ..] = &words[i + 1..]
+        {
+            // `Y` ends its clause: `either null or a timestamp` lists nothing.
+            let ends = rest.is_empty() || y.ends_with(['.', ';', ')', ',']);
+            let (x, y) = (bare(x), bare(y));
+            if ends && or.eq_ignore_ascii_case("or") && list_token(&x) && list_token(&y) {
+                return vec![x, y];
+            }
+        }
+        let of = words.get(i + 1).map(|o| o.trim_end_matches(':'));
+        if !(w.eq_ignore_ascii_case("one") && of.is_some_and(|o| o.eq_ignore_ascii_case("of"))) {
+            continue;
+        }
+        let mut values = Vec::new();
+        let mut joined = true;
+        for word in &words[i + 2..] {
+            if word.eq_ignore_ascii_case("or") || word.eq_ignore_ascii_case("and") {
+                joined = true;
+                continue;
+            }
+            let value = bare(word);
+            if !joined || !list_token(&value) {
+                return Vec::new();
+            }
+            values.push(value);
+            joined = word.ends_with(',');
+            if word.ends_with(['.', ';', ')']) {
+                break;
+            }
+        }
+        return values;
+    }
+    Vec::new()
+}
+
+/// The longest run of values in `quote`s, as [`prose_list`] reads them.
+fn quoted_run(text: &str, quote: char) -> Vec<String> {
+    let Some(parts) = quoted_parts(text, quote) else {
+        return Vec::new();
     };
     let joiner = |between: &str| {
         between
@@ -546,14 +645,14 @@ fn code_span_list(text: &str) -> Vec<String> {
     let mut best: Vec<String> = Vec::new();
     let mut run: Vec<String> = Vec::new();
     let mut skipping = false;
-    // Odd parts are inside backticks.
+    // Odd parts are inside the quotes.
     let mut i = 1;
     while i + 1 < parts.len() {
         let (before, span, after) = (parts[i - 1], parts[i], parts[i + 1]);
         if run.is_empty() && !skipping {
             skipping = examples(before);
         }
-        if token(span) && !skipping {
+        if list_token(span) && !skipping {
             run.push(span.to_owned());
         } else {
             run.clear();
@@ -814,4 +913,51 @@ fn normalize(name: &str) -> String {
         n.pop();
     }
     n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prose_list;
+
+    #[test]
+    fn a_description_lists_values_quoted_backticked_or_worded() {
+        let list = |text: &str| prose_list(text);
+        assert_eq!(
+            list("State of the issue; either 'open' or 'closed'"),
+            ["open", "closed"]
+        );
+        assert_eq!(
+            list(r#"The issue's state: "open", "closed" or "all"."#),
+            ["open", "closed", "all"]
+        );
+        assert_eq!(
+            list("Can be: `pending`, `approved` or `failed`."),
+            ["pending", "approved", "failed"]
+        );
+        assert_eq!(list("Either open or closed."), ["open", "closed"]);
+        assert_eq!(
+            list("The state, one of: draft, live or archived."),
+            ["draft", "live", "archived"]
+        );
+    }
+
+    #[test]
+    fn a_word_mentioned_or_an_example_is_no_list() {
+        for text in [
+            "Set to 'true' to include the issue's comments.",
+            "The `login` of the user who opened it.",
+            "Labels, e.g. `bug` or `docs`.",
+            "One of the following values.",
+            "Either way, it's the owner's 'login' that counts.",
+            "The close time; either null or a timestamp.",
+            "Either open or closed issues are listed.",
+            "An unpaired `quote, with 'a' only.",
+        ] {
+            assert!(
+                prose_list(text).is_empty(),
+                "{text}: {:?}",
+                prose_list(text)
+            );
+        }
+    }
 }

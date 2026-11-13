@@ -1416,3 +1416,99 @@ type Mutation { createIssue(title: String!): Issue }
         "{back}"
     );
 }
+
+/// With no model, an issue GraphQL creates and closes (its verb moving `state` to
+/// `CLOSED`) reads on REST under its repository as `closed`: REST's `state` lists no
+/// `enum`, only its description names its values.
+#[tokio::test]
+async fn a_graphql_closed_issue_reads_closed_on_rest_with_no_model() {
+    const ISSUES: &str = r##"
+openapi: 3.0.3
+info: {title: issues, version: "1"}
+paths:
+  /repos/{owner}/{repo}/issues/{issue_number}:
+    get:
+      operationId: getIssue
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+        - {name: issue_number, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/issue"}}}}
+        "404": {description: missing}
+components:
+  schemas:
+    issue:
+      type: object
+      required: [id, node_id, number, title, state]
+      properties:
+        id: {type: integer}
+        node_id: {type: string}
+        number: {type: integer}
+        title: {type: string}
+        body: {type: [string, "null"]}
+        state: {type: string, description: "State of the issue; either 'open' or 'closed'", example: open}
+"##;
+    const SDL: &str = r#"
+interface Node { id: ID! }
+enum IssueState { CLOSED OPEN }
+type Repository implements Node { id: ID! name: String! issue(number: Int!): Issue }
+type Issue implements Node { id: ID! number: Int! title: String! body: String state: IssueState! repository: Repository! }
+input CreateIssueInput { repositoryId: ID! title: String! body: String }
+input CloseIssueInput { issueId: ID! }
+type CreateIssuePayload { issue: Issue }
+type CloseIssuePayload { issue: Issue }
+type Query { repository(owner: String!, name: String!): Repository node(id: ID!): Node }
+type Mutation {
+  createIssue(input: CreateIssueInput!): CreateIssuePayload
+  closeIssue(input: CloseIssueInput!): CloseIssuePayload
+}
+"#;
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let types = SharedTypes::default();
+    let offline = |name: &str, contract: &str| {
+        let mut rt = MockRuntime::new(
+            name,
+            Arc::new(compile(contract.as_bytes()).unwrap()),
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            Arc::clone(&state),
+        );
+        rt.shares = Some("gh".into());
+        rt.shared_types = types.clone();
+        rt.shared_types.join(&rt);
+        Arc::new(rt)
+    };
+    let gql_router = graphql::try_router(offline("github-graphql", SDL)).unwrap();
+    let rest_router = http_rest::router(offline("github-rest", ISSUES));
+
+    let created = gql(
+        &gql_router,
+        r#"mutation { createIssue(input: {repositoryId: "R_1", title: "Router panics", body: "On /"}) {
+              issue { id number state } } }"#,
+        false,
+    )
+    .await;
+    let issue = &created["createIssue"]["issue"];
+    let (id, number) = (
+        issue["id"].as_str().unwrap(),
+        issue["number"].as_u64().unwrap(),
+    );
+    let closed = gql(
+        &gql_router,
+        &format!(
+            r#"mutation {{ closeIssue(input: {{issueId: "{id}"}}) {{ issue {{ state }} }} }}"#
+        ),
+        false,
+    )
+    .await;
+    assert_eq!(closed["closeIssue"]["issue"]["state"], "CLOSED", "{closed}");
+    let read = rest(
+        &rest_router,
+        "GET",
+        &format!("/repos/fernwood-labs/trellis/issues/{number}"),
+        None,
+    )
+    .await;
+    assert_eq!(read["title"], "Router panics", "{read}");
+    assert_eq!(read["state"], "closed", "{read}");
+}

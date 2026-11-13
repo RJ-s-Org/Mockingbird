@@ -856,6 +856,27 @@ fn a_body_naming_more_than_half_the_record_sets_no_state() {
 }
 
 #[test]
+fn quoted_values_list_a_state_and_one_quoted_word_does_not() {
+    for (description, gaps) in [
+        ("State of the issue; either 'open' or 'closed'", 1),
+        ("Set it to 'archived' to hide the thing.", 0),
+    ] {
+        let members = format!(
+            "{{id: {{type: string}}, name: {{type: string}}, owner: {{type: string}}, state: {{type: string, description: {description:?}}}}}"
+        );
+        let src = things(
+            &members,
+            "{name: {type: string}}",
+            Some("{state: {type: string}}"),
+            None,
+            None,
+            "",
+        );
+        assert_eq!(lifecycle_gaps(&src).len(), gaps, "{description}");
+    }
+}
+
+#[test]
 fn example_spans_and_unpaired_backticks_list_no_values() {
     for description in [
         "A label, e.g. `alpha`, `beta` or `gamma`.",
