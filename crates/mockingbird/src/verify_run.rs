@@ -48,7 +48,7 @@
 //! ([`MAX_REQUESTS`]), the problem bodies fetched ([`MAX_DETAILS`]) and
 //! the failures listed ([`MAX_FAILURES`]).
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -427,6 +427,9 @@ async fn with_session(
     let command_ok = command.exit_code == Some(0);
     let (mut failures, expected) = request_failures(&entries, command_ok);
     outcome.notes.extend(expected);
+    outcome
+        .notes
+        .extend(world_review_notes(admin, token, &entries).await);
     let serve_failed = serve_failure.is_some();
     if let Some(f) = serve_failure {
         failures.insert(0, f);
@@ -670,6 +673,93 @@ fn times(n: u64) -> String {
         1 => "once".into(),
         n => format!("{n} times"),
     }
+}
+
+/// Where the request logs stood before a command `mockingbird run` runs, to say after
+/// it ([`world_review_after`]) which called operations leave world gaps open.
+#[derive(Debug)]
+pub struct ReviewWindow {
+    mocks: Vec<MockRef>,
+    baseline: Baseline,
+}
+
+/// The request logs of the server at `admin` before a command runs; `None` when its
+/// mocks cannot be listed.
+pub async fn world_review_before(admin: &str) -> Option<ReviewWindow> {
+    let mocks = list_mocks(admin, None).await.ok()?;
+    let baseline = newest_ids(admin, None, &mocks).await;
+    Some(ReviewWindow { mocks, baseline })
+}
+
+/// The `verify --run` world notes for the requests logged since `window` was taken.
+pub async fn world_review_after(admin: &str, window: &ReviewWindow) -> Vec<String> {
+    settle(admin, None).await;
+    match window_entries(admin, None, &window.mocks, &window.baseline).await {
+        Ok(read) => world_review_notes(admin, None, &read.entries).await,
+        Err(_) => Vec::new(),
+    }
+}
+
+/// One note per mock the command called whose world, for the operations its log shows
+/// called, leaves gaps open (not advisory ones): what they are about, and how to review
+/// them. The gaps are the ones `get_world {mock, called: true}` lists, so the note goes
+/// once that answer lists none. A mock whose world cannot be read is noted so.
+async fn world_review_notes(
+    admin: &str,
+    token: Option<&str>,
+    entries: &[(MockRef, Value)],
+) -> Vec<String> {
+    let called: BTreeSet<&MockRef> = entries
+        .iter()
+        .filter(|(_, e)| e["operation_id"].is_string())
+        .map(|(m, _)| m)
+        .collect();
+    let mut notes = Vec::new();
+    for m in called {
+        let name = &m.name;
+        let Ok(view) = get(
+            admin,
+            token,
+            Some(&m.workspace),
+            &["mocks", name, "contracts", "active", "world"],
+            &[("called", "true".to_string())],
+        )
+        .await
+        else {
+            notes.push(format!(
+                "the world of {name} could not be read, so whether the called operations leave gaps open was not checked"
+            ));
+            continue;
+        };
+        let mut gaps = 0;
+        let mut about = Vec::new();
+        for gap in view["gaps"].as_array().into_iter().flatten() {
+            if gap["advisory"].as_bool() == Some(true) {
+                continue;
+            }
+            gaps += 1;
+            let what = match (gap["operation"].as_str(), gap["type"].as_str()) {
+                (Some(op), _) => op.to_owned(),
+                (None, Some(t)) => format!("type {t}"),
+                (None, None) => continue,
+            };
+            if !about.contains(&what) {
+                about.push(what);
+            }
+        }
+        if gaps == 0 {
+            continue;
+        }
+        let on = match about.is_empty() {
+            true => String::new(),
+            false => format!(" (on {})", name_some(&about)),
+        };
+        notes.push(format!(
+            "World not reviewed for the called operations of {name}: {} open{on}. Read get_world {{mock: {name:?}, called: true}} (CLI: mockingbird world show {name} --called) and work through them as the mockingbird-world skill says before handing the mock back.",
+            plural(gaps, "gap"),
+        ));
+    }
+    notes
 }
 
 /// The first three of `items`, and how many more.

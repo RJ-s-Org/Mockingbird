@@ -189,6 +189,91 @@ fn verify_run_stops_what_the_command_left_running() {
     );
 }
 
+/// A shelf's top item: an operation of a type no member names, so calling it
+/// leaves a `no_identity` gap on a called operation's type.
+const SHELVES: &str = r##"
+openapi: 3.0.0
+info: {title: shop, version: "1"}
+paths:
+  /shelves/{shelf}/top:
+    get:
+      operationId: topItem
+      parameters: [{name: shelf, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {label: {type: string}}}}}}}
+"##;
+
+/// A config serving `shop` (SHELVES) for `api.shop.test` on free ports; returns the
+/// admin port.
+fn write_shop_config(dir: &Path) -> u16 {
+    std::fs::write(dir.join("shop.yaml"), SHELVES).unwrap();
+    let admin = free_port();
+    std::fs::write(
+        dir.join("mockingbird.yaml"),
+        format!(
+            "storage:\n  url: \"sqlite::memory:\"\nserver:\n  port: {}\n  admin_port: {admin}\n  grpc_port: {}\nproxy:\n  port: {}\n  unmapped: block\nmocks:\n  shop:\n    contract: shop.yaml\n    route_prefix: /\n    hosts: [api.shop.test]\n",
+            free_port(),
+            free_port(),
+            free_port(),
+        ),
+    )
+    .unwrap();
+    admin
+}
+
+/// The command called an operation whose world leaves a gap open: verify passes and
+/// notes the world is not reviewed for it, as `mockingbird run` does on stderr; a
+/// command that calls nothing gets no such note.
+#[test]
+fn verify_run_and_run_note_the_called_operations_whose_world_is_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let line = "World not reviewed for the called operations of shop: 1 gap open (on type top).";
+    let json = on_free_ports(|| {
+        let admin = write_shop_config(dir.path());
+        let out = verify_run(
+            dir.path(),
+            "curl -sSf -o /dev/null https://api.shop.test/shelves/s1/top",
+            &[],
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if port_was_busy(&stderr) {
+            return Err(stderr.into_owned());
+        }
+        logged_admin(&dir.path().join("state/server.log"), admin)?;
+        Ok(serde_json::from_slice::<Value>(&out.stdout).unwrap())
+    });
+    assert_eq!(json["ok"], true, "{json:#}");
+    let notes = json["notes"].as_array().cloned().unwrap_or_default();
+    assert!(
+        notes.iter().any(|n| n.as_str().is_some_and(
+            |n| n.starts_with(line) && n.contains("mockingbird world show shop --called")
+        )),
+        "{json:#}"
+    );
+
+    // Nothing called in the window: no note (the earlier call is not this run's).
+    let out = verify_run(dir.path(), "true", &[]);
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(!json.to_string().contains("World not reviewed"), "{json:#}");
+
+    let out = mockingbird(dir.path())
+        .args(["run", "--offline", "--state-dir"])
+        .arg(dir.path().join("state"))
+        .args([
+            "--",
+            "curl",
+            "-sSf",
+            "-o",
+            "/dev/null",
+            "https://api.shop.test/shelves/s2/top",
+        ])
+        .timeout(std::time::Duration::from_secs(120))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(&format!("mockingbird: {line}")), "{stderr}");
+}
+
 #[test]
 fn verify_run_passes_a_clean_command() {
     let dir = tempfile::tempdir().unwrap();
