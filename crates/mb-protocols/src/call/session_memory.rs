@@ -154,7 +154,7 @@ pub(super) async fn next_numbers(
         };
         // Under the record's parent, with the types numbering with it there.
         let stored = state
-            .numbered_with(session, resource_type, field, MAX_SCAN)
+            .numbered_with(session, (resource_type, None), field, MAX_SCAN)
             .await;
         let highest = stored
             .iter()

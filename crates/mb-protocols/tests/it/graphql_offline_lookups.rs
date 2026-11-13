@@ -87,12 +87,18 @@ async fn an_owner_argument_names_the_owner_and_one_record() {
 const ISSUES_SDL: &str = r#"
 interface Node { id: ID! }
 enum IssueState { CLOSED OPEN }
-type Repository implements Node { id: ID! name: String! issue(number: Int!): Issue }
-type Issue implements Node { id: ID! number: Int! title: String! state: IssueState! }
+type Repository implements Node { id: ID! name: String! issue(number: Int!): Issue label(name: String!): Label }
+type Issue implements Node { id: ID! number: Int! title: String! state: IssueState! repository: Repository! }
+type Label implements Node { id: ID! name: String! repository: Repository! }
 input CreateIssueInput { repositoryId: ID! title: String! }
 type CreateIssuePayload { issue: Issue }
+input CreateLabelInput { repositoryId: ID! name: String! }
+type CreateLabelPayload { label: Label }
 type Query { repository(owner: String!, name: String!): Repository node(id: ID!): Node }
-type Mutation { createIssue(input: CreateIssueInput!): CreateIssuePayload }
+type Mutation {
+  createIssue(input: CreateIssueInput!): CreateIssuePayload
+  createLabel(input: CreateLabelInput!): CreateLabelPayload
+}
 "#;
 
 /// With no model, an issue created with no state named starts open, not in its enum's
@@ -126,4 +132,97 @@ async fn a_created_issue_starts_open_with_no_model() {
         created["data"]["createIssue"]["issue"]["state"], "OPEN",
         "{created}"
     );
+}
+
+/// With no model, GraphQL creates number their records within the record their input
+/// names (`repositoryId`), one past the highest that repository holds, as a REST
+/// create under its parent's path does: 1, 2 under one repository, 1 under another.
+#[tokio::test]
+async fn created_issues_number_within_their_repository() {
+    let rt = MockRuntime::new(
+        "gh",
+        Arc::new(compile(ISSUES_SDL.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = graphql::try_router(Arc::new(rt)).unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let base = format!("http://{addr}");
+    let mut numbers = Vec::new();
+    for repo in ["r", "r", "s"] {
+        let read = gql(
+            &base,
+            &format!(r#"{{ repository(owner: "o", name: "{repo}") {{ id }} }}"#),
+        )
+        .await;
+        let id = read["data"]["repository"]["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let created = gql(
+            &base,
+            &format!(
+                r#"mutation {{ createIssue(input: {{repositoryId: "{id}", title: "T"}}) {{ issue {{ number }} }} }}"#
+            ),
+        )
+        .await;
+        numbers.push(created["data"]["createIssue"]["issue"]["number"].clone());
+    }
+    assert_eq!(numbers, [json!(1), json!(2), json!(1)]);
+}
+
+/// A GraphQL create numbers within the repository its input names even when that
+/// repository was never read and the answer selects no number; a lookup argument that
+/// is no number (a label's `name`) is unique within nothing: two repositories' labels
+/// of one name are both created.
+#[tokio::test]
+async fn unread_parents_number_apart_and_names_are_not_keys() {
+    let rt = MockRuntime::new(
+        "gh",
+        Arc::new(compile(ISSUES_SDL.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = graphql::try_router(Arc::new(rt)).unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let base = format!("http://{addr}");
+    // The first create selects no number; the next ones show it counted.
+    let quiet = gql(
+        &base,
+        r#"mutation { createIssue(input: {repositoryId: "R_x", title: "T"}) { issue { id } } }"#,
+    )
+    .await;
+    assert!(
+        quiet["data"]["createIssue"]["issue"]["id"].is_string(),
+        "{quiet}"
+    );
+    let mut numbers = Vec::new();
+    for repo in ["R_x", "R_y"] {
+        let created = gql(
+            &base,
+            &format!(
+                r#"mutation {{ createIssue(input: {{repositoryId: "{repo}", title: "T"}}) {{ issue {{ number }} }} }}"#
+            ),
+        )
+        .await;
+        numbers.push(created["data"]["createIssue"]["issue"]["number"].clone());
+    }
+    assert_eq!(numbers, [json!(2), json!(1)]);
+    for repo in ["R_x", "R_y"] {
+        let label = gql(
+            &base,
+            &format!(
+                r#"mutation {{ createLabel(input: {{repositoryId: "{repo}", name: "bug"}}) {{ label {{ name }} }} }}"#
+            ),
+        )
+        .await;
+        assert_eq!(
+            label["data"]["createLabel"]["label"]["name"], "bug",
+            "{label}"
+        );
+    }
 }
