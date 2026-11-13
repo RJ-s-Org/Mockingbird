@@ -74,7 +74,7 @@ Fields: `instructions`, `status` (a 4xx or 5xx applies to every covered operatio
 
 **Chaos** (fault injection) on the whole mock: `update_mock {name, patch: {chaos: {error_rate: 0.1, latency_jitter: {min_ms: 50, max_ms: 400}, drop_stream_rate: 0.05}}}`; `null` clears it.
 
-**Fixtures**: `seed_session {mock, session, fixtures: [{resource_type, id, data}]}` loads known records; `export_session` returns them in the same form; `reset_session` clears a session.
+**Fixtures**: `seed_session {mock, session, fixtures: [{resource_type, id, data}]}` loads known records, each on its own (a child names its parent in its own members, as GitHub's `owner: {login}`; one nested inside its parent's record is not found by a lookup). A seed replaces the session of every mock in the shares group, so seed the group's records from one file; `export_session` returns them in the same form; `reset_session` clears a session.
 Seeded records live in the server's session state, not in the config: with the default in-memory state, a restart (and a `verify --run` or `mockingbird run` that starts its own server) starts empty. Save seeds to a file (`mock/fixtures/<mock>.json`) and load them in the command the tests run under, `mockingbird verify --run "mockingbird seed-fixtures --mock <mock> --session default mock/fixtures/<mock>.json && <tests>"` (the session the app sends; paths are relative to where `verify` runs), so the hand-back works from a fresh start.
 
 **Which LLM**: `update_mock {name, patch: {llm_profile: "openrouter"}}`; profiles are managed with `list_llm_profiles`/`put_llm_profile` or the `mockingbird-setup` skill.

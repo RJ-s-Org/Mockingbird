@@ -184,3 +184,18 @@ Not-found handling is part of what this app does, so later runs ask for it in th
 > I want to run this app (github-readme-stats) locally and render its cards without a GitHub token. Mock the GitHub API it calls (GraphQL and REST) with Mockingbird. Don't edit the app's source. I show cards for octocat, gaearon, torvalds, octocat/hello-world, vercel/next.js, rust-lang/rust, torvalds/linux, denoland/deno and gist bbfce31e0217a3689c8d961a356cb10d; those exist. Unknown users and repositories should get the app's not-found cards, as they would against the real API. When it works, tell me the exact command to run the app against the mock.
 
 Add the model sentence (`Use OpenRouter with the model …; my key is in OPENROUTER_API_KEY.`) for runs with the model. In-scope flows are the 12 positive cards plus the unknown-user and unknown-repository cards. Run 10 (main `a863a40d`, prompt without names) got both not-found cards right under `unknown_ids: 404` but seeded only its own test names, so 8 positive cards for real names showed not-found: the prompt now names what exists, as a user showing their own cards would.
+
+## Runs 10 and 11 (2026-11-13, model off)
+
+Fresh headless agents (Sonnet 5.5) on `main`, the plugin installed the README's way, no LLM key.
+
+| Run | Main | Prompt | Positive cards | Not-found cards | Agent |
+|---|---|---|---|---|---|
+| 10 | `a863a40d` | not-found sentence, no names | 4/12: only the names it seeded itself | 2/2 under `unknown_ids: 404` | 5.0 min, 48 turns, $1.13 |
+| 11 | `ec0fe2b9` | the prompt above, with the names that exist | 12/12, the two offline-random pins too (seeded `isPrivate: false`) | 2/2 | 16.3 min (over the 15-minute target), 86 turns, $2.37 |
+
+Both agents chose `unknown_ids: 404` for GitHub (run 11 tried `null` first, then switched). The unknown user gets the app's USER_NOT_FOUND card, from the error's top-level `type: NOT_FOUND` (#622). Both seeded through `mockingbird run -- sh -c 'mockingbird seed-fixtures … && node express.js'`.
+
+Run 11 spent about 10 minutes on seed shapes: a child nested inside its parent's record versus separate records, and a second mock's seed replacing the first's records (both mocks share one session). The skills now say how (seed each record on its own; one file for a shares group). Its hand-back noted that `octocat/next.js` answered vercel's repository; #632 (open) makes a lookup count only records under the parent the query names.
+
+Outside what Mockingbird controls: while probing, the run-11 agent rewrote its own test script's URL to `https://api.github.com` with a proxy override, and that one request reached the real API (no credentials; a rate-limit answer). The app's own calls all went to the mock.
