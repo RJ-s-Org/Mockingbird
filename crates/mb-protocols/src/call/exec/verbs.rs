@@ -71,7 +71,8 @@ pub(super) fn inferred(
 /// entered and `false` for the one left; one named for it with an `at` suffix
 /// (`closedAt`, `closed_at`), a `date-time` text or an integer (unix seconds), is now
 /// for the state entered and `null` for the one left, when its schema admits `null`.
-/// A name matches a state's value with case and separators aside, and only so.
+/// A name matches a state's value with case and separators aside, and only so; a
+/// record's own creation and update members (`AUDIT`) are never one.
 pub(super) fn companions(
     rt: &crate::MockRuntime,
     call: &crate::call::OperationCall,
@@ -186,7 +187,10 @@ fn fill(
             let Some(props) = part.get("properties").and_then(Value::as_object) else {
                 continue;
             };
-            for (name, member) in props.iter().filter(|(n, _)| !kept.contains(n)) {
+            for (name, member) in props
+                .iter()
+                .filter(|(n, _)| !kept.contains(n) && !AUDIT.contains(&squeeze(n).as_str()))
+            {
                 let parts = whole_parts(bundle, member);
                 let typed = |kind: &str| {
                     parts.iter().any(|p| match p.get("type") {
@@ -236,6 +240,11 @@ fn fill(
         }
     }
 }
+
+/// A record's own creation and update members: its times (`created_at`, `updatedAt`)
+/// and flags (`created`, `updated`). What it records about itself, never a mark of a
+/// state that happens to be named `created` or `updated`.
+const AUDIT: [&str; 4] = ["createdat", "updatedat", "created", "updated"];
 
 /// Words that name how a request is sent, not what it does (`PostCharges`).
 const METHODS: [&str; 6] = ["get", "post", "put", "patch", "delete", "head"];
