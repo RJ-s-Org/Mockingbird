@@ -1837,8 +1837,8 @@ components:
 "##;
 
 /// `server_status` says the world is not reviewed for the called operations once the
-/// app's flows called one with gaps open, until `get_world {called: true}` is read, and
-/// again after a later flow.
+/// app's flows called one with gaps open, until `get_world {called: true}` is read
+/// whole; again after a later flow, and after the server restarts.
 #[test]
 fn server_status_says_the_world_is_not_reviewed_until_the_called_gaps_are_read() {
     let dir = tempdir();
@@ -1897,8 +1897,29 @@ fn server_status_says_the_world_is_not_reviewed_until_the_called_gaps_are_read()
         let status = mcp.tool("server_status", json!({}));
         assert_eq!(flagged(&status), None, "{status}");
         assert!(!step(&status), "{status}");
-        // A later flow is not reviewed yet.
+        // A later flow is not reviewed yet, and reading part of the world (some
+        // operations only) does not review it.
         call(&mut mcp, 2);
+        let status = mcp.tool("server_status", json!({}));
+        assert_eq!(flagged(&status), Some(json!(["shop"])), "{status}");
+        mcp.tool(
+            "get_world",
+            json!({ "mock": "shop", "called": true, "operations": ["listItems"] }),
+        );
+        let status = mcp.tool("server_status", json!({}));
+        assert_eq!(flagged(&status), Some(json!(["shop"])), "{status}");
+        mcp.tool("get_world", json!({ "mock": "shop", "called": true }));
+        let status = mcp.tool("server_status", json!({}));
+        assert_eq!(flagged(&status), None, "{status}");
+        // A restarted server's log starts again: its flows are not reviewed.
+        let stopped = mcp.tool("stop_server", json!({}));
+        assert_eq!(stopped["stopped"], true, "{stopped}");
+        let restarted = mcp.tool(
+            "start_server",
+            json!({ "config": "mockingbird.yaml", "offline": true }),
+        );
+        assert_eq!(restarted["ready"], true, "{restarted}");
+        call(&mut mcp, 1);
         let status = mcp.tool("server_status", json!({}));
         assert_eq!(flagged(&status), Some(json!(["shop"])), "{status}");
     }));

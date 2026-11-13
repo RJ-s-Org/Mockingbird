@@ -145,7 +145,7 @@ pub struct McpServer {
     /// Per mock, the newest request of its log when `get_world {called: true}` last
     /// answered it: the review of what the app's flows had called by then
     /// ([`McpServer::add_review_steps`]).
-    reviewed: std::sync::Mutex<HashMap<String, u64>>,
+    reviewed: std::sync::Mutex<HashMap<(String, String), u64>>,
 }
 
 impl std::fmt::Debug for McpServer {
@@ -1759,6 +1759,8 @@ impl McpServer {
                         Err(error) => started["proxy_env_error"] = json!(error.0),
                     }
                 }
+                // A new server's request log starts again: no flow of it is reviewed.
+                self.forget_reviews();
                 if let Some(config) = &args.config {
                     self.add_start_review(&mut started, config).await;
                     self.add_review_steps(&mut started, config).await;
@@ -1860,7 +1862,10 @@ impl McpServer {
                     daemon::logs(&self.server_state(a), usize::try_from(lines).unwrap_or(100))?;
                 Ok(json!({ "log": text }))
             }
-            "stop_server" => Ok(daemon::stop(&self.server_state(a)).await?),
+            "stop_server" => {
+                self.forget_reviews();
+                Ok(daemon::stop(&self.server_state(a)).await?)
+            }
             "list_mocks" => self.ws(Method::GET, &["mocks"], &[], None).await,
             "get_mock" => {
                 self.ws(Method::GET, &["mocks", str_arg(a, "name")?], &[], None)
@@ -1945,9 +1950,14 @@ impl McpServer {
                     Some(_) => return Err(ToolError("called must be a boolean".into())),
                 };
                 let mock = str_arg(a, "mock")?;
-                // The flows up to now are reviewed once their called gaps were read.
-                let newest = match called {
-                    true => self.newest_request(mock).await,
+                // The flows up to now are reviewed once the called gaps of the active
+                // version were read whole (not filtered to some operations or types).
+                let whole = query.iter().all(|(key, _)| *key == "called");
+                let newest = match called && whole && version == "active" {
+                    true => {
+                        self.newest_request(&self.admin_url(), &self.workspace, mock)
+                            .await
+                    }
                     false => None,
                 };
                 let answer = self
@@ -1959,7 +1969,7 @@ impl McpServer {
                     )
                     .await?;
                 if let (Some(newest), Ok(mut reviewed)) = (newest, self.reviewed.lock()) {
-                    reviewed.insert(mock.to_owned(), newest);
+                    reviewed.insert((self.workspace.clone(), mock.to_owned()), newest);
                 }
                 Ok(answer)
             }
@@ -2697,22 +2707,23 @@ impl McpServer {
         }
     }
 
-    /// Adds `next_steps` to a `server_status` answer for each host the
-    /// server's proxy blocked so far ([`crate::report::blocked_host_steps`]): the
-    /// app called a host no mock serves, and the step names the catalog
-    /// contract for it, if any.
-    /// Returns the blocked hosts it added a step for.
-    /// The id of the newest request in `mock`'s log, when it has one.
-    async fn newest_request(&self, mock: &str) -> Option<u64> {
-        let listed = self
-            .ws(
-                Method::GET,
-                &["mocks", mock, "requests"],
-                &[("limit", "1".to_string())],
-                None,
-            )
-            .await
-            .ok()?;
+    /// The id of the newest request in `mock`'s log (of `workspace`, on the server
+    /// at `admin`), when it has one.
+    async fn newest_request(&self, admin: &str, workspace: &str, mock: &str) -> Option<u64> {
+        let listed = client::api(
+            admin,
+            self.token.as_deref(),
+            Some(workspace),
+            Method::GET,
+            &["mocks", mock, "requests"],
+            &[
+                ("limit", "1".to_string()),
+                ("fields", "summary".to_string()),
+            ],
+            None,
+        )
+        .await
+        .ok()??;
         let first = match &listed {
             Value::Array(items) => items.first(),
             other => other
@@ -2724,6 +2735,14 @@ impl McpServer {
         first.get("id").and_then(Value::as_u64)
     }
 
+    /// Forgets every review of the called gaps: the server (re)starts or stops, and
+    /// its request log with it.
+    fn forget_reviews(&self) {
+        if let Ok(mut reviewed) = self.reviewed.lock() {
+            reviewed.clear();
+        }
+    }
+
     /// Adds to `answer` (`server_status`'s or `start_server`'s), for each mock of
     /// `config` whose log holds requests newer than its last review (`get_world
     /// {called: true}`, [`McpServer::reviewed`]) and whose called operations leave
@@ -2733,23 +2752,40 @@ impl McpServer {
         let Ok(cfg) = crate::file_config::load(config) else {
             return;
         };
+        // Only a server that answers: `server_status`'s with its admin reachable,
+        // `start_server`'s once ready; asked at the admin URL that answer names.
+        if answer.get("admin_reachable") == Some(&Value::Bool(false))
+            || answer.get("ready") == Some(&Value::Bool(false))
+        {
+            return;
+        }
+        let admin = answer
+            .pointer("/server/admin")
+            .or_else(|| answer.get("admin"))
+            .and_then(Value::as_str)
+            .map_or_else(|| self.admin_url(), str::to_owned);
         let mut unreviewed = Vec::new();
-        for name in cfg.mocks.keys() {
-            let Some(newest) = self.newest_request(name).await else {
+        for (name, m) in &cfg.mocks {
+            let Some(newest) = self.newest_request(&admin, &m.workspace, name).await else {
                 continue;
             };
-            let seen = self.reviewed.lock().ok().and_then(|r| r.get(name).copied());
-            if seen.is_some_and(|seen| seen >= newest) {
+            let key = (m.workspace.clone(), name.clone());
+            let seen = self.reviewed.lock().ok().and_then(|r| r.get(&key).copied());
+            // Reviewed when no request came since; an id below the one reviewed is a
+            // log that started again (a server restarted outside this session).
+            if seen == Some(newest) {
                 continue;
             }
-            let Ok(world) = self
-                .ws(
-                    Method::GET,
-                    &["mocks", name, "contracts", "active", "world"],
-                    &[("called", "true".to_string())],
-                    None,
-                )
-                .await
+            let Ok(Some(world)) = client::api(
+                &admin,
+                self.token.as_deref(),
+                Some(&m.workspace),
+                Method::GET,
+                &["mocks", name, "contracts", "active", "world"],
+                &[("called", "true".to_string())],
+                None,
+            )
+            .await
             else {
                 continue;
             };
@@ -2779,6 +2815,11 @@ impl McpServer {
         }
     }
 
+    /// Adds `next_steps` to a `server_status` answer for each host the
+    /// server's proxy blocked so far ([`crate::report::blocked_host_steps`]): the
+    /// app called a host no mock serves, and the step names the catalog
+    /// contract for it, if any.
+    /// Returns the blocked hosts it added a step for.
     async fn add_blocked_steps(&self, status: &mut Value) -> HashSet<String> {
         if status.get("admin_reachable").and_then(Value::as_bool) != Some(true) {
             return HashSet::new();
