@@ -1371,17 +1371,192 @@ async fn lookup(
     // record the session deleted.
     let member = identity_member(rt, &t);
     names.retain(|n| *n != member);
-    let by: Vec<(&str, &Value)> = args
+    let given = |value: &Value| {
+        matches!(value, Value::String(s) if !s.is_empty()) || matches!(value, Value::Number(_))
+    };
+    let mut by: Vec<(&str, &Value)> = args
         .iter()
         .filter(|(name, value)| {
-            names.iter().any(|n| n == *name)
-                && props.contains_key(name.as_str())
-                && (matches!(value, Value::String(s) if !s.is_empty())
-                    || matches!(value, Value::Number(_)))
+            names.iter().any(|n| n == *name) && props.contains_key(name.as_str()) && given(value)
         })
         .map(|(name, value)| (name.as_str(), value))
         .collect();
+    // No described key: the arguments naming a scalar member of the type, as below the
+    // root (`repository(owner:, name:)` → `name`; `owner` is an object).
+    if by.is_empty() && !args.get(&member).is_some_and(given) {
+        let defs = &rt.bundle.defs;
+        by = args
+            .iter()
+            .filter(|(name, value)| {
+                **name != member
+                    && given(value)
+                    && props
+                        .get(name.as_str())
+                        .is_some_and(|p| is_scalar(p, defs) && !super::select::is_enum(p, defs))
+            })
+            .map(|(name, value)| (name.as_str(), value))
+            .collect();
+    }
     unknown_lookup(rt, session, def, &by).await
+}
+
+/// A lookup below the root field, keyed by value (a [`super::select::lookup_arguments`]
+/// field returning one nullable object: `user(login:) { repository(name: "nope") }`).
+struct NestedLookup {
+    /// Response keys and list indexes from the root field's answer to the field.
+    path: Vec<String>,
+    /// The definition name of the object it returns.
+    def: String,
+    by: Vec<(String, Value)>,
+}
+
+/// Bounds [`nested_lookups`] (recursive types).
+const MAX_NESTED_DEPTH: usize = 12;
+
+/// The nested lookups `value`, an answer to `sel` for an object of `schema` keyed by
+/// response key, answers with an object, outermost first.
+fn nested_lookups(
+    bundle: &Bundle,
+    schema: &Value,
+    sel: &Selection,
+    value: &Value,
+    path: &mut Vec<String>,
+    out: &mut Vec<NestedLookup>,
+    depth: usize,
+) {
+    if depth > MAX_NESTED_DEPTH || sel.fields.is_empty() {
+        return;
+    }
+    match value {
+        Value::Array(items) => {
+            if let Some(item) = list_item(schema) {
+                for (i, v) in items.iter().enumerate() {
+                    path.push(i.to_string());
+                    nested_lookups(bundle, item, sel, v, path, out, depth + 1);
+                    path.pop();
+                }
+            }
+        }
+        Value::Object(obj) => {
+            let Some((_, def)) = super::state::object_type(bundle, schema, obj) else {
+                return;
+            };
+            let Some(props) = def.get("properties").and_then(Value::as_object) else {
+                return;
+            };
+            for (key, child) in &sel.fields {
+                let (Some(member), Some(field)) = (obj.get(key), props.get(&child.name)) else {
+                    continue;
+                };
+                path.push(key.clone());
+                if member.is_object()
+                    && nullable(field)
+                    && let Some(def) = def_ref(field)
+                {
+                    let by: Vec<(String, Value)> =
+                        super::select::lookup_arguments(field, &bundle.defs, child)
+                            .into_iter()
+                            .filter_map(|arg| {
+                                let value = child.args.get(arg)?;
+                                (matches!(value, Value::String(s) if !s.is_empty())
+                                    || value.is_number())
+                                .then(|| (arg.to_string(), value.clone()))
+                            })
+                            .collect();
+                    if !by.is_empty() {
+                        out.push(NestedLookup {
+                            path: path.clone(),
+                            def: def.to_string(),
+                            by,
+                        });
+                    }
+                }
+                nested_lookups(bundle, field, child, member, path, out, depth + 1);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether a member's schema allows `null` (a nullable GraphQL field).
+fn nullable(schema: &Value) -> bool {
+    schema
+        .get("anyOf")
+        .and_then(Value::as_array)
+        .is_some_and(|branches| {
+            branches
+                .iter()
+                .any(|b| b.get("type").and_then(Value::as_str) == Some("null"))
+        })
+}
+
+/// The lookups below `plan`'s root field (`call`, selected by `sel`) that `body`, its
+/// answer keyed by response key, answers with a record the session does not hold
+/// ([`unknown_lookup`]: `user(login: "a") { repository(name: "nope") }` under
+/// `unknown_ids: 404`): each is set to `null` in `body` and returned with its
+/// `NOT_FOUND`, by its path below the root field (`repository`, `items.0.owner`). A
+/// lookup inside one already missing is not looked at. Nothing for a query a
+/// scenario, seed header or forced status answers.
+pub(crate) async fn nested_missing(
+    rt: &MockRuntime,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    sel: &Selection,
+    body: &mut Value,
+) -> Vec<(String, Failure)> {
+    if !plain_query(rt, plan, call) {
+        return Vec::new();
+    }
+    let Some(schema) = plan.op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    nested_lookups(
+        &rt.bundle,
+        schema,
+        sel,
+        body,
+        &mut Vec::new(),
+        &mut found,
+        0,
+    );
+    let mut missing: Vec<(Vec<String>, Failure)> = Vec::new();
+    // Every item of a list asks the same lookup: decided once.
+    let mut decided: HashMap<(String, String), bool> = HashMap::new();
+    for lookup in found {
+        if missing.iter().any(|(p, _)| lookup.path.starts_with(p)) {
+            continue;
+        }
+        let by: Vec<(&str, &Value)> = lookup.by.iter().map(|(a, v)| (a.as_str(), v)).collect();
+        let asked = (lookup.def.clone(), json!(lookup.by).to_string());
+        let unknown = match decided.get(&asked) {
+            Some(unknown) => *unknown,
+            None => {
+                let unknown = unknown_lookup(rt, &plan.session, &lookup.def, &by)
+                    .await
+                    .is_some();
+                decided.insert(asked, unknown);
+                unknown
+            }
+        };
+        if unknown {
+            let (arg, value) = by[0];
+            missing.push((lookup.path, not_found(&lookup.def, arg, value)));
+        }
+    }
+    for (path, _) in &missing {
+        let pointer: String = path
+            .iter()
+            .map(|s| format!("/{}", s.replace('~', "~0").replace('/', "~1")))
+            .collect();
+        if let Some(member) = body.pointer_mut(&pointer) {
+            *member = Value::Null;
+        }
+    }
+    missing
+        .into_iter()
+        .map(|(path, failure)| (path.join("."), failure))
+        .collect()
 }
 
 #[cfg(test)]

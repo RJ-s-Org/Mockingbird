@@ -633,3 +633,138 @@ async fn inferred_answers_not_found_once_the_session_writes_the_type() {
     assert!(made.get("errors").is_none(), "{made}");
     assert_eq!(made["data"]["widget"]["title"], "Made", "{made}");
 }
+
+const GITHUB_REPOS: &str = r"
+type Query {
+  user(login: String!): User
+  users(first: Int): [User!]!
+  repository(owner: String!, name: String!): Repository
+  repositoryById(id: ID!, name: String): Repository
+}
+type User { id: ID! login: String! name: String repository(name: String!): Repository }
+type Repository { id: ID! name: String! stargazerCount: Int! }
+";
+
+fn github_records() -> Vec<StoredResource> {
+    vec![
+        StoredResource {
+            resource_type: "user".into(),
+            id: "U_1".into(),
+            data: json!({"__typename": "User", "id": "U_1", "login": "octocat", "name": "Mona"}),
+        },
+        StoredResource {
+            resource_type: "repository".into(),
+            id: "R_1".into(),
+            data: json!({"__typename": "Repository", "id": "R_1", "name": "hello",
+                "stargazerCount": 3}),
+        },
+    ]
+}
+
+#[tokio::test]
+async fn an_unknown_nested_lookup_is_null_and_not_found_at_its_path() {
+    let base = serve(GITHUB_REPOS, None, github_records(), UnknownIds::NotFound).await;
+    let missing = gql(
+        &base,
+        "/graphql",
+        r#"{ user(login: "octocat") { login repo: repository(name: "nope") { name } } }"#,
+    )
+    .await;
+    assert_eq!(missing["data"]["user"]["login"], "octocat", "{missing}");
+    assert_eq!(missing["data"]["user"]["repo"], Value::Null, "{missing}");
+    assert_eq!(
+        missing["errors"][0]["extensions"]["code"], "NOT_FOUND",
+        "{missing}"
+    );
+    assert_eq!(
+        missing["errors"][0]["path"],
+        json!(["user", "repo"]),
+        "{missing}"
+    );
+    assert_eq!(
+        missing["errors"].as_array().map(Vec::len),
+        Some(1),
+        "{missing}"
+    );
+
+    let held = gql(
+        &base,
+        "/graphql",
+        r#"{ user(login: "octocat") { repository(name: "hello") { name } } }"#,
+    )
+    .await;
+    assert!(held.get("errors").is_none(), "{held}");
+    assert_eq!(
+        held["data"]["user"]["repository"]["name"], "hello",
+        "{held}"
+    );
+
+    // The root lookup by owner and name, too.
+    let root = gql(
+        &base,
+        "/graphql",
+        r#"{ repository(owner: "octocat", name: "nope") { name } }"#,
+    )
+    .await;
+    assert_eq!(root["data"]["repository"], Value::Null, "{root}");
+    assert_eq!(
+        root["errors"][0]["extensions"]["code"], "NOT_FOUND",
+        "{root}"
+    );
+}
+
+#[tokio::test]
+async fn a_nested_lookup_generates_unless_unknown_ids_answers_404() {
+    let base = serve(GITHUB_REPOS, None, github_records(), UnknownIds::Generate).await;
+    let answer = gql(
+        &base,
+        "/graphql",
+        r#"{ user(login: "octocat") { repository(name: "nope") { name } } }"#,
+    )
+    .await;
+    assert!(answer.get("errors").is_none(), "{answer}");
+    assert_eq!(
+        answer["data"]["user"]["repository"]["name"], "nope",
+        "{answer}"
+    );
+}
+
+#[tokio::test]
+async fn a_nested_lookup_in_a_list_is_not_found_at_each_items_path() {
+    let base = serve(GITHUB_REPOS, None, github_records(), UnknownIds::NotFound).await;
+    let answer = gql(
+        &base,
+        "/graphql",
+        r#"{ users(first: 2) { login repository(name: "nope") { name } } }"#,
+    )
+    .await;
+    let users = answer["data"]["users"].as_array().expect("users");
+    let errors = answer["errors"].as_array().expect("errors");
+    assert_eq!(errors.len(), users.len(), "{answer}");
+    for (i, user) in users.iter().enumerate() {
+        assert_eq!(user["repository"], Value::Null, "{answer}");
+        assert_eq!(
+            errors[i]["path"],
+            json!(["users", i, "repository"]),
+            "{answer}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_root_lookup_by_id_keeps_its_answer_beside_a_member_argument() {
+    let base = serve(GITHUB_REPOS, None, github_records(), UnknownIds::NotFound).await;
+    let answer = gql(
+        &base,
+        "/graphql",
+        r#"{ repositoryById(id: "R_9", name: "other") { name } }"#,
+    )
+    .await;
+    assert_ne!(
+        answer["errors"][0]["message"]
+            .as_str()
+            .map(|m| m.contains("name of")),
+        Some(true),
+        "{answer}"
+    );
+}
