@@ -2104,6 +2104,29 @@ async fn a_scenarios_undeclared_client_error_is_answered_natively() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert_eq!(body_json(resp).await["title"], "Undeclared status override");
 
+    // The borrowed body's status member says the status it is answered with, and a
+    // forced 5xx takes the shape of a declared 5xx the same way.
+    let h = harness(
+        &THROTTLED
+            .replace(
+                "properties: {error: {type: string}}",
+                "properties: {status: {type: integer}, error: {type: string}}",
+            )
+            .replace(
+                "        \"429\":",
+                "        \"500\":\n          description: failed\n          content: {application/json: {schema: {type: object, required: [fault], properties: {fault: {type: string}}}}}\n        \"429\":",
+            ),
+    );
+    let resp = send(&h, forbidden()).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = body_json(resp).await;
+    assert_eq!(body["status"], 403, "{body}");
+    let resp = send(&h, with_status("/things", "502")).await;
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(header_str(&resp, "content-type"), "application/json");
+    let body = body_json(resp).await;
+    assert!(body["fault"].is_string(), "{body}");
+
     // No error body declared: problem+json.
     let h = harness(&THROTTLED.replace(
         "content: {application/json: {schema: {type: object, properties: {error: {type: string}}}}}",

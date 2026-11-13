@@ -175,7 +175,7 @@ mocks:
     scenarios:
       out-of-stock:
         instructions: Every product is out of stock.
-        status: 400                                    # declared by an operation listed (any if none), or a 5xx
+        status: 400                                    # declared by an operation listed (any if none), or a 4xx or 5xx
         latency: 250ms
         set:                                           # forced into the body of that status too
           message: Out of stock

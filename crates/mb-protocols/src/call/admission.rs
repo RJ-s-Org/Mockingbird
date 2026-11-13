@@ -350,7 +350,7 @@ impl PlanFailure {
 /// limit, unless [`Presented::admitted`]), then data-plane auth
 /// (spec §11.2), then override headers, then the scenario, then chaos.
 /// Header status and latency beat the scenario's; a scenario status
-/// applies only where `op` declares it, or when it is a 5xx. Chaos comes from the applying
+/// applies only where `op` declares it, or when it is a 4xx or 5xx. Chaos comes from the applying
 /// scenario, else the mock, unless `X-Mockingbird-Chaos: off`; it injects
 /// no error when a status is already forced. Records the session on the
 /// current span. Admission and auth run in an `mb.admission` span.

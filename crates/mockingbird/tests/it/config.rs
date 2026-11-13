@@ -1407,31 +1407,32 @@ async fn scenario_status_must_be_declared_like_the_admin_api() {
         format!("mocks:\n  orders:\n    contract: orders.yaml\n    scenarios:\n      s: {rules}\n")
     };
 
-    // createOrder declares 201 and 400: a 409 could never apply.
+    // createOrder declares 201 and 400: a 304 could never apply.
     let err = reconcile(
         store.as_ref(),
         no_state().as_ref(),
-        &ws.load(&scenario("{status: 409, operations: [createOrder]}")),
+        &ws.load(&scenario("{status: 304, operations: [createOrder]}")),
     )
     .await
     .unwrap_err();
     assert_eq!(
         format!("{err:#}"),
-        "mock \"orders\", scenario \"s\": status 409 is not declared by operation \
+        "mock \"orders\", scenario \"s\": status 304 is not declared by operation \
          createOrder of the active contract, so the scenario could never answer it; declare a \
-         409 response, or use a status it declares (201, 400) or a 5xx"
+         304 response, or use a status it declares (201, 400), a 4xx or a 5xx"
     );
-    // Without operations, no operation declares 409 either.
+    // Without operations, no operation declares 304 either.
     reconcile(
         store.as_ref(),
         no_state().as_ref(),
-        &ws.load(&scenario("{status: 409}")),
+        &ws.load(&scenario("{status: 304}")),
     )
     .await
     .unwrap_err();
 
-    // A declared status, one declared by any operation, or a 5xx is fine.
+    // A declared status, one declared by any operation, a 4xx or a 5xx is fine.
     for rules in [
+        "{status: 409, operations: [createOrder]}",
         "{status: 400, operations: [createOrder]}",
         "{status: 404}",
         "{status: 503, operations: [createOrder]}",

@@ -593,7 +593,9 @@ async fn serve(
         // fail whatever its contract declares. The header override's undeclared
         // 4xx stays a client mistake (below).
         Err(EngineError::UndeclaredStatus(code))
-            if (500..600).contains(&code) || plan.scenario.and_then(|s| s.status) == Some(code) =>
+            if (500..600).contains(&code)
+                || ((400..500).contains(&code)
+                    && plan.scenario.and_then(|s| s.status) == Some(code)) =>
         {
             log.delay = plan.delay;
             let title = axum::http::StatusCode::from_u16(code)
@@ -611,6 +613,9 @@ async fn serve(
                     let message = format!("{title}: {detail}");
                     let mut filled = filled_error(rt, op, variant, declared, &message);
                     filled.status = code;
+                    let filled = rt
+                        .engine
+                        .with_own_status_in(&rt.bundle, op, declared, filled);
                     log.answered(rt, op, filled)
                 }
                 None => log.problem(code, title, detail),
