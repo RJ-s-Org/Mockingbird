@@ -139,6 +139,7 @@ fn exit_code(result: Result<(), Failure>) -> ExitCode {
             ExitCode::from(2)
         }
         Err(Failure::Silent) => ExitCode::from(1),
+        Err(Failure::Exit(code)) => ExitCode::from(code),
         Err(Failure::Other(e)) => {
             eprintln!("error: {e:#}");
             ExitCode::from(1)
@@ -150,6 +151,8 @@ enum Failure {
     Usage(String),
     /// Already reported on stderr; exit 1.
     Silent,
+    /// Already reported (on stdout); exit with this code.
+    Exit(u8),
     Other(anyhow::Error),
 }
 
@@ -294,7 +297,18 @@ async fn server_cmd(cmd: ServerCommand) -> Result<(), Failure> {
             Err(Failure::Silent)
         }
         ServerCommand::Stop(args) => print_json(daemon::stop(&args).await),
-        ServerCommand::Status(args) => print_json(daemon::status(&args).await),
+        ServerCommand::Status(args) => {
+            let out = daemon::status(&args).await?;
+            let up = out["running"] == true && out["ready"] == true;
+            print_json(Ok(out))?;
+            // Scripts start the server when this fails (`status || start`): not
+            // running, or not ready, exits 3, as `systemctl is-active` and
+            // `pg_ctl status` do.
+            match up {
+                true => Ok(()),
+                false => Err(Failure::Exit(daemon::STATUS_NOT_READY)),
+            }
+        }
         ServerCommand::Logs { state, lines } => {
             println!("{}", daemon::logs(&state, lines)?);
             Ok(())
