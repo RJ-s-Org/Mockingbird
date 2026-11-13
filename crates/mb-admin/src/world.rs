@@ -707,6 +707,25 @@ pub struct UnknownIdsView {
     pub setting: UnknownIds,
     /// Per resource type with a read by path parameter: its answer and why.
     pub types: BTreeMap<String, UnknownIdAnswer>,
+    /// Per GraphQL root lookup by an argument other than the identity (`Query.user`,
+    /// looked up by `login`): the type it answers, those arguments, and the answer to
+    /// a value no record the session holds has, and why.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lookups: BTreeMap<String, UnknownLookup>,
+}
+
+/// A GraphQL root lookup by a value other than the identity.
+#[derive(Serialize, ToSchema, Debug, PartialEq)]
+pub struct UnknownLookup {
+    /// The type it answers (lowercased).
+    #[serde(rename = "type")]
+    pub resource_type: String,
+    /// The arguments naming its record.
+    pub by: Vec<String>,
+    /// How an unknown value is answered: `404` (`null` and a `NOT_FOUND` error) or
+    /// `generate` (a made-up record), and why, as for [`UnknownIdAnswer`].
+    #[serde(flatten)]
+    pub answer: UnknownIdAnswer,
 }
 
 /// One type's answer to a read of an id the session does not hold.
@@ -726,36 +745,54 @@ impl UnknownIdsView {
     /// Left unset, a creatable type answers 404 once the session wrote a record of it; any
     /// other generates (reference data the app reads).
     fn new(types: &UnknownIdTypes, setting: UnknownIds) -> Self {
-        let types = types
-            .read
+        let lookups = types
+            .lookups
             .iter()
-            .map(|t| {
-                let (answer, why) = match (setting, types.creatable.get(t)) {
-                    (UnknownIds::NotFound, _) => ("404", "the mock sets unknown_ids: 404".to_owned()),
-                    (UnknownIds::Generate, _) => {
-                        ("generate", "the mock sets unknown_ids: generate".to_owned())
-                    }
-                    (UnknownIds::Inferred, Some(create)) => (
-                        "404",
-                        format!(
-                            "creatable ({create}): 404 once the session has written a record of this type (created, changed, deleted or seeded one); generated before that"
-                        ),
-                    ),
-                    (UnknownIds::Inferred, None) => (
-                        "generate",
-                        "not creatable: no operation of kind create makes it, so its ids are reference data the app reads".to_owned(),
-                    ),
-                };
+            .map(|(op, (t, by))| {
                 (
-                    t.clone(),
-                    UnknownIdAnswer {
-                        answer: answer.to_owned(),
-                        why,
+                    op.clone(),
+                    UnknownLookup {
+                        resource_type: t.clone(),
+                        by: by.clone(),
+                        answer: Self::answer(types, setting, t),
                     },
                 )
             })
             .collect();
-        Self { setting, types }
+        let types_read = types
+            .read
+            .iter()
+            .map(|t| (t.clone(), Self::answer(types, setting, t)))
+            .collect();
+        Self {
+            setting,
+            types: types_read,
+            lookups,
+        }
+    }
+
+    /// Type `t`'s answer to a value the session does not hold under `setting`.
+    fn answer(types: &UnknownIdTypes, setting: UnknownIds, t: &str) -> UnknownIdAnswer {
+        let (answer, why) = match (setting, types.creatable.get(t)) {
+            (UnknownIds::NotFound, _) => ("404", "the mock sets unknown_ids: 404".to_owned()),
+            (UnknownIds::Generate, _) => {
+                ("generate", "the mock sets unknown_ids: generate".to_owned())
+            }
+            (UnknownIds::Inferred, Some(create)) => (
+                "404",
+                format!(
+                    "creatable ({create}): 404 once the session has written a record of this type (created, changed, deleted or seeded one); generated before that"
+                ),
+            ),
+            (UnknownIds::Inferred, None) => (
+                "generate",
+                "not creatable: no operation of kind create makes it, so its ids are reference data the app reads".to_owned(),
+            ),
+        };
+        UnknownIdAnswer {
+            answer: answer.to_owned(),
+            why,
+        }
     }
 }
 
@@ -851,6 +888,9 @@ impl WorldView {
             .retain(|id, _| operations.contains(id));
         self.world.types.retain(|t, _| types.contains(t));
         self.unknown_ids.types.retain(|t, _| types.contains(t));
+        self.unknown_ids
+            .lookups
+            .retain(|_, l| types.contains(&l.resource_type));
         let keeps = |pointer: &str| keeps_pointer(pointer, operations, types).unwrap_or(true);
         self.refused.retain(|r| keeps(&r.path));
         self.authors.retain(|p, _| keeps(p));
@@ -916,6 +956,9 @@ impl WorldView {
         self.world.operations.retain(|id, _| ops.contains(id));
         self.world.types.retain(|t, _| types.contains(t));
         self.unknown_ids.types.retain(|t, _| types.contains(t));
+        self.unknown_ids
+            .lookups
+            .retain(|_, l| types.contains(&l.resource_type));
         self.gaps.retain(|g| match (&g.operation, &g.r#type) {
             (None, None) => true,
             (op, ty) => {
@@ -1028,7 +1071,7 @@ pub(crate) async fn resolve_version(
         ("called" = Option<bool>, Query, description = "Answer only what the mock's request log (any session) names: the operations called, the types they touch, the gaps naming one of those operations, or naming no operation and one of those types, or skipping a route of one of those types, and their refused entries and authors; gaps about the description as a whole are kept. `gaps_left_out` counts the gaps left out. Combines with `operation` and `type`"),
     ),
     responses(
-        (status = 200, description = "The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. `unknown_ids` gives each type read by a path parameter its answer to an id the session does not hold (`404` or `generate`) and why. `shares` names the group the mock keeps its sessions under and whether it is the default one of its domain.", body = WorldView),
+        (status = 200, description = "The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. `unknown_ids` gives each type read by a path parameter its answer to an id the session does not hold (`404` or `generate`) and why, and `lookups` each GraphQL root lookup by a value other than the identity with its type, arguments and answer. `shares` names the group the mock keeps its sessions under and whether it is the default one of its domain.", body = WorldView),
         (status = 400, description = "The version is neither a number nor `active`, or `called` is not a boolean", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such mock or version, or no active version", body = Problem, content_type = "application/problem+json"),
     )
