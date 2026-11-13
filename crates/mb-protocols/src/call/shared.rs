@@ -738,22 +738,43 @@ fn of_type(schema: &Value, defs: &Map<String, Value>, value: &Value) -> bool {
 /// `value` as the enum `schema` lists spells it, when only its case and separators
 /// differ (GraphQL's `CLOSED` as REST's `closed`, `REQUIRES_ACTION` as
 /// `requires-action` or `RequiresAction`): kept as it is when the enum lists it, or
-/// lists no value, or more than one, spelled so.
+/// lists no value, or more than one, spelled so. A plain string with no `enum` takes
+/// the values its description lists instead (REST's `state`, "either 'open' or
+/// 'closed'", see [`crate::world_gaps::prose_list`]), as the spelling to answer in
+/// only: a value they do not list is kept, never refused.
 fn fit_enum(schema: &Value, defs: &Map<String, Value>, value: &Value) -> Value {
     let Value::String(s) = value else {
         return value.clone();
     };
+    let spelled_as = |listed: Vec<&str>| {
+        if listed.contains(&s.as_str()) {
+            return value.clone();
+        }
+        let spelled = enum_spelling(s);
+        let mut alike = listed.into_iter().filter(|v| enum_spelling(v) == spelled);
+        match (alike.next(), alike.next()) {
+            (Some(v), None) => Value::String(v.to_string()),
+            _ => value.clone(),
+        }
+    };
+    let mut described: Option<&str> = None;
     let mut schema = schema;
     for _ in 0..4 {
         if let Some(values) = schema.get("enum").and_then(Value::as_array) {
-            let listed: Vec<&str> = values.iter().filter_map(Value::as_str).collect();
-            if listed.contains(&s.as_str()) {
-                return value.clone();
-            }
-            let spelled = enum_spelling(s);
-            let mut alike = listed.into_iter().filter(|v| enum_spelling(v) == spelled);
-            return match (alike.next(), alike.next()) {
-                (Some(v), None) => Value::String(v.to_string()),
+            return spelled_as(values.iter().filter_map(Value::as_str).collect());
+        }
+        described = described.or_else(|| schema.get("description").and_then(Value::as_str));
+        let string = match schema.get("type") {
+            Some(Value::String(t)) => t == "string",
+            Some(Value::Array(ts)) => ts.iter().any(|t| t == "string"),
+            _ => false,
+        };
+        if string {
+            let listed = described.map(crate::world_gaps::prose_list);
+            return match listed {
+                Some(listed) if !listed.is_empty() => {
+                    spelled_as(listed.iter().map(String::as_str).collect())
+                }
                 _ => value.clone(),
             };
         }
@@ -1571,6 +1592,42 @@ type Mutation { createPullRequest(input: CreatePullRequestInput!): CreatePullReq
         assert_eq!(fit(&["on-hold", "on_hold"], "ON HOLD"), json!("ON HOLD"));
         // One the enum lists stays, though another is spelled alike.
         assert_eq!(fit(&["on-hold", "on_hold"], "on_hold"), json!("on_hold"));
+    }
+
+    #[test]
+    fn a_plain_string_takes_the_spelling_its_description_lists_only() {
+        let fit = |schema: Value, value: &str| fit_enum(&schema, &Map::new(), &json!(value));
+        let state = |extra: Value| {
+            let mut s = json!({"type": "string",
+                               "description": "State of the issue; either 'open' or 'closed'"});
+            if let (Some(s), Value::Object(extra)) = (s.as_object_mut(), extra) {
+                s.extend(extra);
+            }
+            s
+        };
+        assert_eq!(fit(state(json!({})), "CLOSED"), json!("closed"));
+        // A value it does not list is kept, never refused.
+        assert_eq!(fit(state(json!({})), "MERGED"), json!("MERGED"));
+        // An `enum` wins over the description.
+        assert_eq!(
+            fit(state(json!({"enum": ["OPEN", "CLOSED"]})), "closed"),
+            json!("CLOSED")
+        );
+        // Not a string: left alone.
+        assert_eq!(
+            fit(state(json!({"type": "integer"})), "CLOSED"),
+            json!("CLOSED")
+        );
+        // Two values spelled alike: left alone.
+        let alike = json!({"type": "string", "description": "Either 'on-hold' or 'on_hold'."});
+        assert_eq!(fit(alike, "ON HOLD"), json!("ON HOLD"));
+        // The description of the member that refers to the string type counts.
+        let defs = json!({"State": {"type": "string"}});
+        let referred = json!({"$ref": "#/$defs/State", "description": "One of: open, closed."});
+        assert_eq!(
+            fit_enum(&referred, defs.as_object().unwrap(), &json!("OPEN")),
+            json!("open")
+        );
     }
 
     #[test]
