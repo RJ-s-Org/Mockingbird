@@ -2765,7 +2765,13 @@ impl McpServer {
             .and_then(Value::as_str)
             .map_or_else(|| self.admin_url(), str::to_owned);
         let mut unreviewed = Vec::new();
-        for (name, m) in &cfg.mocks {
+        // Only mocks of this session's workspace: `get_world` reads no other, so the
+        // line could never go for one elsewhere.
+        for (name, m) in cfg
+            .mocks
+            .iter()
+            .filter(|(_, m)| m.workspace == self.workspace)
+        {
             let Some(newest) = self.newest_request(&admin, &m.workspace, name).await else {
                 continue;
             };
