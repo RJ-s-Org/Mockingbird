@@ -1651,7 +1651,8 @@ pub(super) async fn mint(
                 generated: &seeding,
                 request_body: None,
                 call_body: None,
-                called: None,
+                // The faker's left-out children are filler, as its page's are.
+                called: Some((plan, call)),
                 query: None,
                 collection: collection_of(op, call),
                 origin: WriteOrigin::Seeded,

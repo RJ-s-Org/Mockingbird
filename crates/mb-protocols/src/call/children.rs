@@ -26,10 +26,11 @@
 //!   meanwhile is never undone; a deleted one leaves it;
 //! - a plain read of the child list route for a parent (no filter or cursor but the
 //!   parent's, a `limit` at most) answers the children held under it, at most a page;
-//! - children stored from a parent's answer the faker made ([`FillerChildren`]) are
-//!   filler: once a child of that parent is held that is not (one read or written on
-//!   its own route, or stored from any other answer), the filler leaves the parent's embed and its child list,
-//!   so the parent lists the children the session read, not invented ones.
+//! - children stored from a parent's answer or a child list the faker made
+//!   ([`FillerChildren`], [`note_listed`]) are filler: once a child of that parent is
+//!   held that is not (one read or written on its own route, or stored from any other
+//!   answer), the filler leaves the parent's embed and its child list, so the parent
+//!   lists the children the session read, not invented ones.
 //!
 //! An embed binds when (all of):
 //! - it is a top-level member of the parent's own read (by path), an array or a list
@@ -73,10 +74,10 @@ const MAX_PARENTS: usize = 200;
 /// Filler children [`FillerChildren`] holds at most; it is emptied when full.
 const MAX_FILLER: usize = 4096;
 
-/// The children stored from a parent's embed that the faker made (no model wrote it,
-/// no request sent it): filler, which a held child that is not filler replaces in the
-/// parent's embed and child list. A child is no longer filler once a call on its own
-/// route reads or writes it. Only a hint: after a restart, on another node or once
+/// The children stored from a parent's embed or a child list that the faker made (no
+/// model wrote it, no request sent it): filler, which a held child that is not filler
+/// replaces in the parent's embed and child list. A child is no longer filler once a
+/// call on its own route reads or writes it. Only a hint: after a restart, on another node or once
 /// emptied, every child counts as real and is kept.
 #[derive(Debug, Default)]
 pub(crate) struct FillerChildren(std::sync::Mutex<HashSet<Filler>>);
@@ -862,6 +863,60 @@ fn parent_param(embed: &Embed, route: &str, call: &OperationCall) -> Option<Stri
     call.path_params.get(&name).and_then(id_string)
 }
 
+/// A listed parent: its id, the scope values of a scoped child, and the query
+/// parameter naming it, if one does.
+type ListParent<'e> = (String, Option<Vec<String>>, Option<&'e str>);
+
+/// The parent a call on a child list route of `embed`'s lists the children of.
+fn list_parent<'e>(
+    rt: &MockRuntime,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    embed: &'e Embed,
+) -> Option<ListParent<'e>> {
+    let (route, list_route) = (route_of(plan.op)?, embed.list_route.as_ref()?);
+    match list_route {
+        ListRoute::Query(path, param) if path == route => Some((
+            call.query.get(param).and_then(id_string)?,
+            None,
+            Some(param.as_str()),
+        )),
+        ListRoute::Path(path) if shape_of(path) == shape_of(route) => match embed.link {
+            Link::Scoped => {
+                let values = scope_values(rt, embed, plan.op, call)?;
+                Some((values.last()?.clone(), Some(values), None))
+            }
+            Link::Member(_) => Some((parent_param(embed, route, call)?, None, None)),
+        },
+        _ => None,
+    }
+}
+
+/// Children of type `t` (`stored`, their records) a child list the faker made stored:
+/// filler under the parent the list is of, as a parent's embed the faker made stores
+/// (see [`FillerChildren`]).
+pub(super) fn note_listed(
+    rt: &MockRuntime,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: &str,
+    stored: &[&Value],
+) {
+    if stored.is_empty() || !applies(rt, plan.op) {
+        return;
+    }
+    let s = &plan.session;
+    for embed in &of_child(rt, t) {
+        let Some((parent_id, values, _)) = list_parent(rt, (plan, call), embed) else {
+            continue;
+        };
+        let notes = stored
+            .iter()
+            .filter_map(|data| key_of(embed, data))
+            .map(|key| filler(s, embed, (&parent_id, values.as_deref()), key))
+            .collect();
+        rt.filler_children().note(notes);
+    }
+}
+
 /// A plain read of a child list route of `embed`'s (no cursor or filter but the
 /// parent's): `body`, its answer, holds the children held under the parent, at most a
 /// page (`limit`, else the embed's), when the session holds any. Whether it was one.
@@ -871,30 +926,7 @@ async fn listed(
     embed: &Embed,
     body: &mut Value,
 ) -> bool {
-    let rt = state.rt;
-    let (Some(route), Some(list_route)) = (route_of(plan.op), embed.list_route.as_ref()) else {
-        return false;
-    };
-    let (parent_id, values, own) = match list_route {
-        ListRoute::Query(path, param) if path == route => (
-            call.query.get(param).and_then(id_string),
-            None,
-            Some(param.as_str()),
-        ),
-        ListRoute::Path(path) if shape_of(path) == shape_of(route) => match embed.link {
-            Link::Scoped => {
-                let values = scope_values(rt, embed, plan.op, call);
-                (
-                    values.as_ref().and_then(|v| v.last().cloned()),
-                    values,
-                    None,
-                )
-            }
-            Link::Member(_) => (parent_param(embed, route, call), None, None),
-        },
-        _ => return false,
-    };
-    let Some(parent_id) = parent_id else {
+    let Some((parent_id, values, own)) = list_parent(state.rt, (plan, call), embed) else {
         return false;
     };
     let narrowed = call
@@ -1049,10 +1081,14 @@ async fn backed(
         let parent_id = match embed.link {
             Link::Scoped if values.is_none() => continue,
             Link::Scoped => String::new(),
-            Link::Member(_) => {
+            // A parent not held: the one its link names (a child list noted it so).
+            Link::Member(ref m) => {
                 match parent_of(state, (plan, call), embed, (Some(data), Some(&key))).await {
                     Some(parent) => parent.id,
-                    None => continue,
+                    None => match data.get(m).and_then(link_value) {
+                        Some(id) => id,
+                        None => continue,
+                    },
                 }
             }
         };

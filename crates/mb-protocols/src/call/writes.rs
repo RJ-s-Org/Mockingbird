@@ -146,6 +146,13 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
             ..WriteOutcome::default()
         };
         let stored = state.insert_seeded_all(session, seeded.clone()).await;
+        // Children a list the faker made stored are filler under its parent.
+        if let (Some(called), Source::Fallback) = (called, generated.source) {
+            let made: Vec<&Value> = (seeded.iter().zip(&stored))
+                .filter_map(|(r, inserted)| inserted.then_some(&r.data))
+                .collect();
+            children::note_listed(rt, called, resource_type, &made);
+        }
         for (stored, inserted) in seeded.into_iter().zip(stored) {
             let Some(collection) = collection.clone() else {
                 continue;
