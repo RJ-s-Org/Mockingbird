@@ -988,29 +988,26 @@ fn llm_test_defaults_to_the_config_default_profile() {
     assert_eq!(report["ok"], false);
 }
 
-/// A login shell that exports a key, then runs the `-c` command it was given.
+/// Points the MCP server at a real login shell (`/bin/sh`) whose `HOME` holds
+/// a `.profile` that exports a key, the way a user's own startup file does.
 ///
-/// A child `sh` writes the script, not this process: a process that other
-/// tests in this binary fork while the script is open for writing would
-/// inherit the descriptor, and executing the script then fails with
-/// ETXTBSY (the import then silently finds nothing).
+/// No stub shell script: macOS checks every newly written executable before
+/// its first run, one at a time, so under load a fresh script per test can
+/// wait past the import's timeout. `.profile` is read, not executed.
 #[cfg(unix)]
-fn fake_login_shell(dir: &Path) -> PathBuf {
-    let path = dir.join("fake-shell.sh");
-    let script = "#!/bin/sh\nexport MB_TEST_SHELL_ONLY_API_KEY=from-the-shell\n\
-         while [ \"$1\" != \"-c\" ] && [ $# -gt 0 ]; do shift; done\nshift\nexec /bin/sh -c \"$1\"\n";
-    let status = std::process::Command::new("/bin/sh")
-        .args([
-            "-c",
-            "printf '%s' \"$1\" > \"$2\" && chmod 755 \"$2\"",
-            "sh",
-        ])
-        .arg(script)
-        .arg(&path)
-        .status()
-        .unwrap();
-    assert!(status.success(), "writing {}", path.display());
-    path
+fn login_shell_with_key(dir: &Path, cmd: &mut std::process::Command) {
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join(".profile"),
+        "export MB_TEST_SHELL_ONLY_API_KEY=from-the-shell\n",
+    )
+    .unwrap();
+    // An interactive sh also sources $ENV; keep the runner's out of it.
+    cmd.env("SHELL", "/bin/sh")
+        .env("HOME", home)
+        .env_remove("ENV")
+        .env_remove("BASH_ENV");
 }
 
 #[cfg(unix)]
@@ -1031,18 +1028,21 @@ fn mcp_imports_missing_variables_from_the_login_shell() {
             "MB_TEST_SHELL_ONLY_API_KEY",
         ],
     );
-    let shell = fake_login_shell(dir.path());
     let mut mcp = McpClient::start_with(dir.path(), "http://127.0.0.1:9", |cmd| {
-        cmd.env("SHELL", &shell)
-            .env_remove("MB_TEST_SHELL_ONLY_API_KEY");
+        login_shell_with_key(dir.path(), cmd);
+        cmd.env_remove("MB_TEST_SHELL_ONLY_API_KEY");
     });
     let doctor = mcp.tool("doctor", json!({}));
     let secrets = &doctor["config"]["profiles"][0]["secrets"][0];
     assert_eq!(secrets["ref"], "env:MB_TEST_SHELL_ONLY_API_KEY");
     assert_eq!(secrets["set"], true, "{doctor}");
-    assert_eq!(
-        doctor["shell_env"]["imported"],
-        json!(["MB_TEST_SHELL_ONLY_API_KEY"])
+    // A real login shell may export more (its /etc/profile); the key is among them.
+    let imported = doctor["shell_env"]["imported"]
+        .as_array()
+        .expect("imported");
+    assert!(
+        imported.contains(&json!("MB_TEST_SHELL_ONLY_API_KEY")),
+        "{doctor}"
     );
     assert!(
         !doctor.to_string().contains("from-the-shell"),
@@ -1068,11 +1068,10 @@ fn an_empty_passed_through_variable_is_imported_from_the_login_shell() {
             "MB_TEST_SHELL_ONLY_API_KEY",
         ],
     );
-    let shell = fake_login_shell(dir.path());
     // What an agent's `${NAME:-}` passthrough hands over when it lacks the key.
     let mut mcp = McpClient::start_with(dir.path(), "http://127.0.0.1:9", |cmd| {
-        cmd.env("SHELL", &shell)
-            .env("MB_TEST_SHELL_ONLY_API_KEY", "");
+        login_shell_with_key(dir.path(), cmd);
+        cmd.env("MB_TEST_SHELL_ONLY_API_KEY", "");
     });
     let doctor = mcp.tool("doctor", json!({}));
     assert_eq!(
