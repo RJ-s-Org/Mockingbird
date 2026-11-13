@@ -700,61 +700,63 @@ pub async fn world_review_after(admin: &str, window: &ReviewWindow) -> Vec<Strin
     }
 }
 
-/// One note per mock whose operations the command called leave world gaps open (not
-/// advisory ones): the called operations, and the types they act on, that the world
-/// description does not cover yet, and how to review them. A mock whose world cannot
-/// be read adds nothing.
+/// One note per mock the command called whose world, for the operations its log shows
+/// called, leaves gaps open (not advisory ones): what they are about, and how to review
+/// them. The gaps are the ones `get_world {mock, called: true}` lists, so the note goes
+/// once that answer lists none. A mock whose world cannot be read is noted so.
 async fn world_review_notes(
     admin: &str,
     token: Option<&str>,
     entries: &[(MockRef, Value)],
 ) -> Vec<String> {
-    let mut called: BTreeMap<&MockRef, BTreeSet<&str>> = BTreeMap::new();
-    for (m, e) in entries {
-        if let Some(op) = e["operation_id"].as_str() {
-            called.entry(m).or_default().insert(op);
-        }
-    }
+    let called: BTreeSet<&MockRef> = entries
+        .iter()
+        .filter(|(_, e)| e["operation_id"].is_string())
+        .map(|(m, _)| m)
+        .collect();
     let mut notes = Vec::new();
-    for (m, ops) in called {
+    for m in called {
+        let name = &m.name;
         let Ok(view) = get(
             admin,
             token,
             Some(&m.workspace),
-            &["mocks", &m.name, "contracts", "active", "world"],
+            &["mocks", name, "contracts", "active", "world"],
             &[("called", "true".to_string())],
         )
         .await
         else {
+            notes.push(format!(
+                "the world of {name} could not be read, so whether the called operations leave gaps open was not checked"
+            ));
             continue;
         };
-        let types: BTreeSet<&str> = ops
-            .iter()
-            .filter_map(|op| view["world"]["operations"][*op]["type"].as_str())
-            .collect();
-        let mut open = Vec::new();
+        let mut gaps = 0;
+        let mut about = Vec::new();
         for gap in view["gaps"].as_array().into_iter().flatten() {
             if gap["advisory"].as_bool() == Some(true) {
                 continue;
             }
-            let about = match (gap["operation"].as_str(), gap["type"].as_str()) {
-                (Some(op), _) if ops.contains(op) => op.to_owned(),
-                (None, Some(t)) if types.contains(t) => format!("type {t}"),
-                _ => continue,
+            gaps += 1;
+            let what = match (gap["operation"].as_str(), gap["type"].as_str()) {
+                (Some(op), _) => op.to_owned(),
+                (None, Some(t)) => format!("type {t}"),
+                (None, None) => continue,
             };
-            open.push(about);
+            if !about.contains(&what) {
+                about.push(what);
+            }
         }
-        if open.is_empty() {
+        if gaps == 0 {
             continue;
         }
-        let gaps = open.len();
-        let mut seen = HashSet::new();
-        open.retain(|about| seen.insert(about.clone()));
-        let name = &m.name;
+        let on = match about.is_empty() {
+            true => String::new(),
+            false => format!(" (on {})", name_some(&about)),
+        };
         notes.push(format!(
-            "World not reviewed for the called operations of {name}: {} open on {}. Read get_world {{mock: {name:?}, called: true}} (CLI: mockingbird world show {name} --called) and work through them as the mockingbird-world skill says before handing the mock back.",
+            "World not reviewed for the called operations of {name}: {} open{on}. Read get_world {{mock: {name:?}, called: true}} (CLI: mockingbird world show {name} --called) and work through them as the mockingbird-world skill says before handing the mock back.",
             plural(gaps, "gap"),
-            name_some(&open)
         ));
     }
     notes

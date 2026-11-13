@@ -226,7 +226,7 @@ fn write_shop_config(dir: &Path) -> u16 {
 #[test]
 fn verify_run_and_run_note_the_called_operations_whose_world_is_open() {
     let dir = tempfile::tempdir().unwrap();
-    let line = "World not reviewed for the called operations of shop: 1 gap open on type top.";
+    let line = "World not reviewed for the called operations of shop: 1 gap open (on type top).";
     let json = on_free_ports(|| {
         let admin = write_shop_config(dir.path());
         let out = verify_run(
