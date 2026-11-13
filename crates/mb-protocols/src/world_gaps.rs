@@ -486,7 +486,7 @@ fn read_only(b: &Bundle, schema: &Value) -> bool {
 /// its `enum` of at least two strings, unless its description lists more of
 /// them ([`prose_list`]) with all of the enum's among them; else its
 /// description's list of at least two.
-fn listed_values(b: &Bundle, schema: &Value) -> Option<(Vec<String>, bool)> {
+pub(crate) fn listed_values(b: &Bundle, schema: &Value) -> Option<(Vec<String>, bool)> {
     let s = b.resolve(schema);
     let string = match s.get("type") {
         Some(Value::String(t)) => t == "string",

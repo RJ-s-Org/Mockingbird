@@ -168,7 +168,7 @@ paths:
   /issues:
     post:
       operationId: createIssue
-      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}}
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}, state: {type: string}}}}}}
       responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}}
   /issues/{id}:
     get:
@@ -228,4 +228,76 @@ async fn the_members_named_for_a_state_follow_it() {
     assert_eq!(reopened["closed_at"], Value::Null, "{reopened}");
     assert_eq!(reopened["is_closed"], false, "{reopened}");
     assert_eq!(reopened["closedAt"], Value::Null, "{reopened}");
+}
+
+/// A created record's members named for its states start as its state does: false and
+/// null for the states it is not in, true and now for the one it is.
+#[tokio::test]
+async fn a_created_record_starts_with_its_state_members() {
+    let router = router_of(ISSUES, json!({}), None);
+    for _ in 0..5 {
+        let (_, open) = call(&router, "POST", "/issues", Some(json!({"title": "T"}))).await;
+        assert_eq!(open["state"], "open", "{open}");
+        assert_eq!(open["closed"], false, "{open}");
+        assert_eq!(open["is_closed"], false, "{open}");
+        assert_eq!(open["closed_at"], Value::Null, "{open}");
+        assert_eq!(open["closedAt"], Value::Null, "{open}");
+        let body = json!({"title": "T", "state": "closed"});
+        let (_, closed) = call(&router, "POST", "/issues", Some(body)).await;
+        assert_eq!(closed["state"], "closed", "{closed}");
+        assert_eq!(closed["closed"], true, "{closed}");
+        assert_eq!(closed["is_closed"], true, "{closed}");
+        let at = closed["closed_at"].as_str().unwrap_or_default();
+        assert!(chrono::DateTime::parse_from_rfc3339(at).is_ok(), "{closed}");
+        assert!(
+            closed["closedAt"].as_i64().is_some_and(|s| s > 0),
+            "{closed}"
+        );
+        let id = closed["id"].as_str().unwrap_or_default();
+        let (_, read) = call(&router, "GET", &format!("/issues/{id}"), None).await;
+        assert_eq!(read["closed"], true, "{read}");
+    }
+    // What the request sends of them stays.
+    let body = json!({"title": "T", "is_closed": true});
+    let (_, sent) = call(&router, "POST", "/issues", Some(body)).await;
+    assert_eq!(sent["state"], "open", "{sent}");
+    assert_eq!(sent["closed"], false, "{sent}");
+    assert_eq!(sent["is_closed"], true, "{sent}");
+}
+
+const TICKETS: &str = r##"
+openapi: 3.0.0
+info: {title: tickets, version: "1"}
+paths:
+  /tickets:
+    post:
+      operationId: createTicket
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}, status: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}}
+  /tickets/{id}:
+    get:
+      operationId: getTicket
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}}
+components:
+  schemas:
+    Ticket:
+      type: object
+      required: [id, title, status, closed]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        status: {type: string, description: "Either `open` or `closed`."}
+        closed: {type: boolean, default: true}
+"##;
+
+/// The states a description lists are known as an enum's are: a ticket created open is
+/// not closed, whatever its schema's default says.
+#[tokio::test]
+async fn the_states_a_description_lists_start_as_an_enum_does() {
+    let router = router_of(TICKETS, json!({}), None);
+    let body = json!({"title": "T", "status": "open"});
+    let (_, ticket) = call(&router, "POST", "/tickets", Some(body)).await;
+    assert_eq!(ticket["status"], "open", "{ticket}");
+    assert_eq!(ticket["closed"], false, "{ticket}");
 }
