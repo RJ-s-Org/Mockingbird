@@ -421,9 +421,32 @@ pub(super) async fn run(
     // A member naming the record besides its id (an alternate key) nobody set is unique
     // among the type's records, as an id is: an integer is minted, never filled; what
     // fill writes for another is drawn again where a record holds it.
-    let filled_keys = mint_keys(state, (&plan.session, t), &keys, &mut data, &mut owned)
-        .instrument(state_span())
-        .await;
+    // A GraphQL create also numbers the integer members a lookup reads its type by
+    // (`Repository.issue(number:)`), within the record its input names
+    // (`repositoryId`), which the record holds from now on.
+    #[cfg(feature = "graphql")]
+    let (numbered, parent) = match op.protocol {
+        mb_mcm::Protocol::Graphql => graphql_numbering(rt, &shape, field, request, &mut data),
+        _ => (Vec::new(), None),
+    };
+    #[cfg(not(feature = "graphql"))]
+    let (numbered, parent): (Vec<Member>, Option<(String, String)>) = (Vec::new(), None);
+    let mut minted_keys = keys.clone();
+    minted_keys.extend(
+        numbered
+            .into_iter()
+            .filter(|(name, _)| !keys.iter().any(|(k, _)| k == name)),
+    );
+    let parent = parent.as_ref().map(|(m, id)| (m.as_str(), id.as_str()));
+    let filled_keys = mint_keys(
+        state,
+        (&plan.session, t, parent),
+        &minted_keys,
+        &mut data,
+        &mut owned,
+    )
+    .instrument(state_span())
+    .await;
     // A member referring to the record a path parameter names (a comment's
     // `pullrequest` under `/pullrequests/{pull_request_id}`) is that record.
     if let Value::Object(known) = &mut data {
@@ -701,19 +724,87 @@ async fn repeated_key(
     None
 }
 
+/// For a GraphQL create of `shape`: the integer members, besides `field`, a lookup of
+/// its type reads a record by (`Repository.issue(number:)` → `number`), each with its
+/// schema from the type's definition, and the record its input names as its parent:
+/// an `<member>Id` argument (at the request's top or in its `input`) whose `<member>`
+/// is a single object of the type holding an `id` (`repositoryId` → `repository`).
+/// That parent is written on `data` as the record's reference (`repository: {id}`)
+/// unless it holds one, and is answered as `(member, id)`.
+#[cfg(feature = "graphql")]
+fn graphql_numbering(
+    rt: &crate::MockRuntime,
+    shape: &Shape,
+    field: &str,
+    request: Option<&Value>,
+    data: &mut Value,
+) -> (Vec<Member>, Option<(String, String)>) {
+    let bundle = rt.bundle();
+    let Some(typename) = shape.typename(rt) else {
+        return (Vec::new(), None);
+    };
+    let Some(props) = bundle
+        .defs
+        .get(&typename)
+        .and_then(|def| def.get("properties"))
+        .and_then(Value::as_object)
+    else {
+        return (Vec::new(), None);
+    };
+    let numbered: Vec<Member> = rt
+        .narrowed()
+        .lookup_keys(bundle, &typename)
+        .into_iter()
+        .flatten()
+        .filter(|name| name.as_str() != field && name.as_str() != "id")
+        .filter_map(|name| Some((name.clone(), props.get(name)?.clone())))
+        .filter(|(_, member)| {
+            admitted_types(bundle, member)
+                .iter()
+                .any(|a| a == "integer")
+        })
+        .collect();
+    let request = request.and_then(Value::as_object);
+    let below = request
+        .into_iter()
+        .flat_map(Map::values)
+        .filter_map(Value::as_object)
+        .flatten();
+    let parent = request
+        .into_iter()
+        .flatten()
+        .chain(below)
+        .find_map(|(arg, value)| {
+            let member = arg.strip_suffix("Id")?;
+            let id = value.as_str().filter(|id| !id.is_empty())?;
+            let schema = props.get(member)?;
+            let single =
+                bundle.resolve(schema).get("type").and_then(Value::as_str) != Some("array");
+            (single && mb_engine::consistency::property_schema(bundle, schema, "id").is_some())
+                .then(|| (member.to_owned(), id.to_owned()))
+        });
+    if let (Some((member, id)), Some(record)) = (&parent, data.as_object_mut())
+        && record.get(member).is_none_or(Value::is_null)
+    {
+        record.insert(member.clone(), serde_json::json!({ "id": id }));
+    }
+    (numbered, parent)
+}
+
 /// A member's name with its schema.
 type Member = (String, Value);
 
 /// Mints on `data`, a created record of type `t`, each of `keys` (its alternate keys,
 /// [`Shape::key_members`]) it holds no value for and that `owned` leaves to nobody: an
 /// integer member is one past the highest the type's records hold under the record's
-/// parent, those of the types numbering with it there included
-/// ([`StateAccess::numbered_with`]), added to `owned`, so
+/// parent (the one its path names, else `parent`: the record a GraphQL input names,
+/// `repository` by `repositoryId`), those of the types
+/// numbering with it there included ([`StateAccess::numbered_with`]), added to `owned`, so
 /// fill never writes it; any other is left for fill, which [`unique_keys`] keeps
 /// unique. Returns the members left for fill.
 async fn mint_keys(
     state: &mut StateAccess<'_>,
-    (session, t): (&mb_state::SessionKey, &str),
+    (session, t, parent): (&mb_state::SessionKey, &str, Option<(&str, &str)>),
     keys: &[(String, Value)],
     data: &mut Value,
     owned: &mut Vec<String>,
@@ -730,7 +821,9 @@ async fn mint_keys(
         });
     for (name, member) in integers {
         // Under the record's parent, with the types numbering with it there.
-        let listed = state.numbered_with(session, t, name, MAX_SCAN).await;
+        let listed = state
+            .numbered_with(session, (t, parent), name, MAX_SCAN)
+            .await;
         let top = listed
             .iter()
             .filter_map(|r| r.data.get(name)?.as_i64())
@@ -1376,6 +1469,20 @@ impl Shape {
             }
         }
         declared
+    }
+
+    /// The GraphQL type name the record's schemas fix (`__typename`).
+    #[cfg(feature = "graphql")]
+    fn typename(&self, rt: &crate::MockRuntime) -> Option<String> {
+        let bundle = rt.bundle();
+        self.schemas.iter().find_map(|schema| {
+            let s = bundle.resolve(schema);
+            let tag = bundle.resolve(s.get("properties")?.get("__typename")?);
+            tag.get("const")
+                .or_else(|| tag.get("enum")?.as_array()?.first())?
+                .as_str()
+                .map(str::to_owned)
+        })
     }
 
     /// The top-level members besides identity `field` that a path may name a record

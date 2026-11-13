@@ -300,18 +300,31 @@ impl<'a> StateAccess<'a> {
     /// highest they hold). Of a parent-scoped type whose key `member` is, those under
     /// the parent this call places `t`, of `t` and of the types numbering with it there
     /// ([`scopes::ParentScopes::numbering`]); any other member of such a type counts
-    /// across every parent's records; any other type's as [`Self::list`] finds them. At
-    /// most `limit` of each type.
+    /// across every parent's records; any other type's as [`Self::list`] finds them,
+    /// but where the create names its parent (`parent`: the member holding it and its
+    /// id, a GraphQL input's `repository` by `repositoryId`), only those holding that
+    /// record there. At most `limit` of each type.
     pub(super) async fn numbered_with(
         &mut self,
         s: &SessionKey,
-        t: &str,
+        (t, parent): (&str, Option<(&str, &str)>),
         member: &str,
         limit: usize,
     ) -> Vec<StoredResource> {
         let scopes = self.rt.index().parent_scopes();
         let Some(scope) = scopes.get(t) else {
-            return self.list(s, t, limit).await;
+            let listed = self.list(s, t, limit).await;
+            let Some((holder, id)) = parent else {
+                return listed;
+            };
+            let under = |r: &StoredResource| {
+                r.data
+                    .get(holder)
+                    .and_then(|v| v.get("id"))
+                    .and_then(Value::as_str)
+                    == Some(id)
+            };
+            return listed.into_iter().filter(under).collect();
         };
         match self.parent_of(t) {
             Some(parent) if scope.key_member() == member => {
