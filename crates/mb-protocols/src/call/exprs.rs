@@ -496,7 +496,7 @@ fn request_value(call: &OperationCall) -> Value {
 
 /// `now` as expressions see it: the request time as RFC 3339 text, the seeded time
 /// when the call's draws are seeded (as the engine's generated dates are).
-fn now_value(rt: &MockRuntime, call: &OperationCall) -> Value {
+pub(super) fn now_value(rt: &MockRuntime, call: &OperationCall) -> Value {
     let seeded = mb_engine::seed::request_seed(call)
         .or(rt.engine.faker_seed())
         .is_some();

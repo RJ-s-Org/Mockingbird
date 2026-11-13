@@ -90,16 +90,20 @@ pub(super) async fn run(
         return Ran::Generate(Some(earlier));
     }
     let mut changed = stored.clone();
-    match &verb_sets {
+    let set = match &verb_sets {
         Some((member, value)) => {
             if let Some(record) = changed.data.as_object_mut() {
                 record.insert(member.clone(), value.clone());
             }
+            vec![member.clone()]
         }
         None => {
-            transitions::apply(state, (plan, call), Some(&stored.data), &mut changed.data).await;
+            transitions::apply(state, (plan, call), Some(&stored.data), &mut changed.data).await
         }
-    }
+    };
+    // The members named for the state it moved (`closed`, `closedAt`) follow it.
+    let t = stored.resource_type.as_str();
+    super::verbs::companions(rt, call, t, (&stored.data, &mut changed.data), &set);
     let derived = computed::filled(state, (plan, call), &changed)
         .instrument(state_span())
         .await;
@@ -120,7 +124,6 @@ pub(super) async fn run(
         id: id.to_owned(),
         data: changed.data,
     };
-    let t = stored.resource_type.as_str();
     let held = (t, Some(stored));
     let answer = commit(state, plan, call, held, (write, Some(rendered)), answer).await;
     answered(rt, plan, kind);
