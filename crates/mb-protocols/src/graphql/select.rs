@@ -522,7 +522,7 @@ fn echo_in(
 
 /// Every argument of `child` that [`lookup_argument`] would take: a field looked up by
 /// two of its own values (`metafield(namespace:, key:)`) answers both.
-fn lookup_arguments<'a>(
+pub(crate) fn lookup_arguments<'a>(
     schema: &Value,
     defs: &Map<String, Value>,
     child: &'a Selection,
@@ -547,7 +547,7 @@ fn lookup_arguments<'a>(
 
 /// Whether a scalar property schema is an enum (through a nullable `anyOf`
 /// or a `$ref`).
-fn is_enum(schema: &Value, defs: &Map<String, Value>) -> bool {
+pub(crate) fn is_enum(schema: &Value, defs: &Map<String, Value>) -> bool {
     if schema.get("enum").is_some() {
         return true;
     }

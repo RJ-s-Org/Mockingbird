@@ -366,7 +366,7 @@ fn scalars(data: &Value) -> Map<String, Value> {
 /// The object type `schema` refers to (through a nullable `anyOf`, and
 /// for an interface or union the member `obj`'s `__typename` names),
 /// with its definition.
-pub(super) fn object_type<'a>(
+pub(crate) fn object_type<'a>(
     bundle: &'a Bundle,
     schema: &Value,
     obj: &Map<String, Value>,

@@ -70,6 +70,10 @@ pub(crate) struct HttpCall {
     collected: Mutex<Collected>,
     /// The query's shared LLM call, set up by the first root resolver.
     pub(crate) batch: std::sync::OnceLock<Option<Arc<super::batch::Batch>>>,
+    /// The `NOT_FOUND` of each lookup below a root field that answered `null` for a
+    /// record the session does not hold, by its path (`user.repository`), reported by
+    /// [`nested`] at that field.
+    missing: Mutex<HashMap<String, Error>>,
 }
 
 /// What the root resolvers learned, read once execution is done.
@@ -106,6 +110,7 @@ impl HttpCall {
             one_record: true,
             collected: Mutex::new(Collected::default()),
             batch: std::sync::OnceLock::new(),
+            missing: Mutex::new(HashMap::new()),
         }
     }
 
@@ -135,6 +140,10 @@ impl HttpCall {
     /// Takes what the root resolvers collected.
     pub(crate) fn collected(&self) -> Collected {
         std::mem::take(&mut *self.lock())
+    }
+
+    fn missing(&self) -> MutexGuard<'_, HashMap<String, Error>> {
+        self.missing.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     fn add_delay(&self, delay: Option<Duration>) {
@@ -276,6 +285,21 @@ pub(crate) async fn root(
         .await;
     if websocket && let Some(delay) = http.collected().delay {
         tokio::time::sleep(delay).await;
+    }
+    // Over a WebSocket no nested resolver finds this call: its lookups' errors are
+    // reported here, at their paths.
+    if websocket {
+        for (path, error) in http.missing().drain() {
+            let mut error = error.into_server_error(ctx.ctx.item.pos);
+            error.path = path
+                .split('.')
+                .map(|s| match s.parse::<usize>() {
+                    Ok(i) => async_graphql::PathSegment::Index(i),
+                    Err(_) => async_graphql::PathSegment::Field(s.to_string()),
+                })
+                .collect();
+            ctx.ctx.add_error(error);
+        }
     }
     match result {
         Ok(body) => Ok(span
@@ -595,6 +619,24 @@ async fn generate_in(
                                     (body, drawn),
                                 )
                                 .await;
+                            }
+                            // A lookup below it of a record the session does not hold
+                            // answers null and NOT_FOUND there, as the root's does.
+                            if was_narrowed
+                                && (200..300).contains(&generated.status)
+                                && let Some(body) = generated.body.as_mut()
+                            {
+                                let missing = super::held_lists::nested_missing(
+                                    rt,
+                                    (&plan, &call),
+                                    selection,
+                                    body,
+                                )
+                                .await;
+                                let mut marks = http.missing();
+                                for (path, failure) in missing {
+                                    marks.insert(format!("{key}.{path}"), failure.error);
+                                }
                             }
                             reconcile_money(rt, &plan, &call, &mut generated).await;
                             store_answer(rt, &plan, op, selection, &call, &generated).await;
@@ -1035,7 +1077,25 @@ pub(crate) fn nested(
 ) -> async_graphql::Result<Option<FieldValue<'static>>> {
     let parent = ctx.parent_value.try_downcast_ref::<Value>()?;
     let key = ctx.ctx.item.node.response_key().node.as_str();
-    Ok(parent.get(key).and_then(|v| project(v.clone(), ty, shapes)))
+    let value = parent.get(key).and_then(|v| project(v.clone(), ty, shapes));
+    // A lookup of a record the session does not hold: null, and its NOT_FOUND here.
+    if value.is_none()
+        && ty.nullable
+        && let Some(http) = ctx.data_opt::<Arc<HttpCall>>()
+        && let Some(path) = ctx.path_node
+        && let Some(error) = {
+            let mut marks = http.missing();
+            if marks.is_empty() {
+                None
+            } else {
+                marks.remove(&path.to_string())
+            }
+        }
+    {
+        let error = error.into_server_error(ctx.ctx.item.pos);
+        ctx.ctx.add_error(ctx.ctx.set_error_path(error));
+    }
+    Ok(value)
 }
 
 /// `value` as a field value of type `ty`: enums from strings, objects as
