@@ -105,6 +105,19 @@ The cart is answered from state either way: `cartCreate` answers a cart with an 
 faker's `Decimal` is a word), so totals stay `0.0` while quantities add up; with an LLM,
 or for a variant seeded into the session, prices are the variants'.
 
+## The catalog from state
+
+Once the session holds products (seeded through the Admin API, or shown by an earlier
+read), `products`, `collections` and `pages` list those records with no model call:
+paged by `first`/`after`, ordered by `sortKey` (`TITLE`, `PRICE` by the price range's
+minimum, `CREATED_AT`, `UPDATED_AT`; `RELEVANCE`, `BEST_SELLING` and `ID` keep the order
+they were written in) and `reverse`. A collection's `products` lists what the held
+collection's `products` holds, as the session's own product records. A search
+(`products(query: "fig")`) is still generated, since the world describes no `query`
+filter. `product(handle:)` and `collection(handle:)` of a handle the session never saw
+answer `null` with a `NOT_FOUND` error under `unknown_ids: 404`; by default they are
+generated.
+
 ## The cart
 
 The world description makes the cart one stored object:

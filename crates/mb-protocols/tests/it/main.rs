@@ -70,6 +70,7 @@ mod graphql;
 mod graphql_creates;
 mod graphql_def_effects;
 mod graphql_held_gaps;
+mod graphql_held_lists;
 mod graphql_links;
 mod graphql_nested;
 mod graphql_offline_lookups;

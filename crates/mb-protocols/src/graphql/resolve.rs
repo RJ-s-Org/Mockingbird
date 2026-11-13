@@ -160,6 +160,8 @@ enum Route<'a, 'b> {
     Join(&'b super::batch::Batch, Box<call::Pending<'a>>),
     /// Without generating: an unknown id, a stored resource, a cached answer.
     Answered(Box<mb_engine::GeneratedResponse>),
+    /// A lookup of a record the session does not hold (see [`super::held_lists`]).
+    Missing(Failure),
     /// On its own.
     Alone,
 }
@@ -455,18 +457,32 @@ async fn generate_in(
                     // stored resource like any call; only what is left to
                     // generate joins the shared LLM call, and its answer
                     // is seeded and cached per field.
-                    let route = match batch.take() {
-                        Some(b) => match call::prepare(rt, &plan, &call, narrowed.as_deref()).await
-                        {
-                            call::Prepared::Answered(mut answer) => {
-                                // Not generating: give up the batch place.
-                                *batch = Some(b);
-                                call::seed_world_gaps(rt, op, &mut answer);
-                                Route::Answered(answer)
+                    // A connection the session's records answer, or a lookup of one
+                    // it does not hold, generates nothing.
+                    let held =
+                        super::held_lists::answer(rt, &plan, &call, selection, narrowed.as_deref())
+                            .await;
+                    let route = match (held, batch.take()) {
+                        (Some(super::held_lists::Held::Served(answer)), b) => {
+                            *batch = b;
+                            Route::Answered(answer)
+                        }
+                        (Some(super::held_lists::Held::Missing(failure)), b) => {
+                            *batch = b;
+                            Route::Missing(failure)
+                        }
+                        (None, Some(b)) => {
+                            match call::prepare(rt, &plan, &call, narrowed.as_deref()).await {
+                                call::Prepared::Answered(mut answer) => {
+                                    // Not generating: give up the batch place.
+                                    *batch = Some(b);
+                                    call::seed_world_gaps(rt, op, &mut answer);
+                                    Route::Answered(answer)
+                                }
+                                call::Prepared::Pending(pending) => Route::Join(b, pending),
                             }
-                            call::Prepared::Pending(pending) => Route::Join(b, pending),
-                        },
-                        None => Route::Alone,
+                        }
+                        (None, None) => Route::Alone,
                     };
                     if rekeys_target {
                         stored = match &route {
@@ -512,6 +528,7 @@ async fn generate_in(
                             }
                         }
                         Route::Answered(answer) => Ok(*answer),
+                        Route::Missing(failure) => Err(failure),
                         Route::Alone => {
                             call::generate_narrowed(rt, &plan, &call, narrowed.as_deref())
                                 .await
@@ -562,6 +579,20 @@ async fn generate_in(
                                     selection,
                                     args,
                                     body,
+                                )
+                                .await;
+                            }
+                            // A connection below a held record answers from its items.
+                            if was_narrowed
+                                && (200..300).contains(&generated.status)
+                                && let Some(body) = generated.body.as_mut()
+                            {
+                                let drawn = generated.source != Source::State;
+                                super::held_lists::below_held(
+                                    rt,
+                                    (&plan, &call),
+                                    selection,
+                                    (body, drawn),
                                 )
                                 .await;
                             }

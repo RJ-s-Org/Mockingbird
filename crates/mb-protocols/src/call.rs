@@ -47,6 +47,8 @@ mod envelopes;
 mod exec;
 mod expansions;
 mod exprs;
+#[cfg(feature = "graphql")]
+pub(crate) mod graphql_reads;
 mod header_ids;
 mod lifecycle;
 mod links;
