@@ -691,7 +691,7 @@ pub async fn world_review_before(admin: &str) -> Option<ReviewWindow> {
     Some(ReviewWindow { mocks, baseline })
 }
 
-/// [`world_review_notes`] for the requests logged since `window` was taken.
+/// The `verify --run` world notes for the requests logged since `window` was taken.
 pub async fn world_review_after(admin: &str, window: &ReviewWindow) -> Vec<String> {
     settle(admin, None).await;
     match window_entries(admin, None, &window.mocks, &window.baseline).await {

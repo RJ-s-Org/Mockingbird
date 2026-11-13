@@ -268,10 +268,10 @@ mockingbird verify -c mockingbird.yaml --run "bundle exec rspec spec/checkout_sp
   missing record, a refused action): it is listed under `notes`, not
   failed on. Also under `notes`: hosts the proxy passed to the real API
   (`proxy.unmapped: pass`), the project's unclaimed hosts when the
-  command called none of them, and, per mock, the operations the command
-  called (and their types) whose world description leaves gaps open
-  ("World not reviewed for the called operations of <mock>: …"; review them
-  with `mockingbird world show <mock> --called`). `mockingbird run` prints
+  command called none of them, and, for each mock the command called, the
+  gaps its world description leaves open for the operations its request
+  log shows called ("World not reviewed for the called operations of
+  <mock>: …": the gaps `mockingbird world show <mock> --called` lists). `mockingbird run` prints
   that line on stderr after its command exits.
 - <a id="missing-dependencies"></a>**Missing dependencies.** When the
   command exits non-zero, or the serve command fails before it is ready
