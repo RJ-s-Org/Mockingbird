@@ -52,6 +52,21 @@ pub(crate) fn objects(
     body: &Value,
     args: &Map<String, Value>,
 ) -> Vec<StoredResource> {
+    placed_objects(bundle, op, sel, body, args)
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect()
+}
+
+/// [`objects`], each with whether it was found inside a list (an item of a list, a
+/// connection's `nodes` or `edges`, at any depth).
+pub(crate) fn placed_objects(
+    bundle: &Bundle,
+    op: &Operation,
+    sel: &Selection,
+    body: &Value,
+    args: &Map<String, Value>,
+) -> Vec<(StoredResource, bool)> {
     let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
         return Vec::new();
     };
@@ -64,6 +79,8 @@ pub(crate) fn objects(
             .filter(|i| i.input_field.as_deref() == Some(i.field.as_str()))
             .map(|i| i.field.as_str()),
         found: Vec::new(),
+        listed: Vec::new(),
+        in_list: false,
     };
     walk.value(schema, sel, body, 0, None);
     if mode(op) == Some(Store::Merge) {
@@ -76,7 +93,11 @@ pub(crate) fn objects(
             }
         }
     }
-    walk.found.into_iter().map(|(r, _)| r).collect()
+    walk.found
+        .into_iter()
+        .zip(walk.listed)
+        .map(|((r, _), listed)| (r, listed))
+        .collect()
 }
 
 /// The scalar arguments a query's own object was read by that its type
@@ -226,6 +247,10 @@ struct Walk<'a> {
     root_key: Option<&'a str>,
     /// With the depth each was found at.
     found: Vec<(StoredResource, usize)>,
+    /// Whether each of `found` sits inside a list.
+    listed: Vec<bool>,
+    /// Whether the walk is inside a list now.
+    in_list: bool,
 }
 
 impl Walk<'_> {
@@ -247,9 +272,11 @@ impl Walk<'_> {
                 let Some(item) = list_item(schema) else {
                     return;
                 };
+                let was = std::mem::replace(&mut self.in_list, true);
                 for v in items {
                     self.value(item, sel, v, depth, parent);
                 }
+                self.in_list = was;
             }
             Value::Object(obj) => {
                 let Some((name, def)) = object_type(self.bundle, schema, obj) else {
@@ -292,6 +319,7 @@ impl Walk<'_> {
                         link_parent(props, parent, fields);
                     }
                     own = Some((name.to_string(), scalars(&data)));
+                    self.listed.push(self.in_list);
                     self.found.push((
                         StoredResource {
                             resource_type: name.to_lowercase(),
