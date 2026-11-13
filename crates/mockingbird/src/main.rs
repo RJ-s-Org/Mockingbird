@@ -299,11 +299,12 @@ async fn server_cmd(cmd: ServerCommand) -> Result<(), Failure> {
         ServerCommand::Stop(args) => print_json(daemon::stop(&args).await),
         ServerCommand::Status(args) => {
             let out = daemon::status(&args).await?;
-            print_json(Ok(out.clone()))?;
+            let up = out["running"] == true && out["ready"] == true;
+            print_json(Ok(out))?;
             // Scripts start the server when this fails (`status || start`): not
             // running, or not ready, exits 3, as `systemctl is-active` and
             // `pg_ctl status` do.
-            match out["running"] == true && out["ready"] == true {
+            match up {
                 true => Ok(()),
                 false => Err(Failure::Exit(daemon::STATUS_NOT_READY)),
             }

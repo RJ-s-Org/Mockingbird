@@ -27,8 +27,18 @@ It prints the URLs as JSON and **exits 1 when the server is not ready
 within `--wait`** (default `60s`), printing the end of the log, so a bad
 config fails the job at once. `mockingbird server status` prints the
 same state as JSON and **exits 3 when the server is not running or not
-ready** (0 when it is), so a script can start it only when needed:
-`mockingbird server status >/dev/null || mockingbird server start -c mockingbird.yaml --proxy`. Use `--no-watch` in CI. `--offline`,
+ready** (0 when it is; a `degraded` server is ready), so a script can
+start it only when needed:
+
+```sh
+mockingbird server status >/dev/null || mockingbird server start -c mockingbird.yaml --proxy
+```
+
+It reads the server `server start` recorded in `--state-dir`: a `serve`
+run in the foreground is not known to it (exit 3), and `server start`
+then refuses the busy ports. A server that runs but is not ready also
+exits 3, and `server start` refuses it as already running: read its
+log (`mockingbird server logs`). Use `--no-watch` in CI. `--offline`,
 `--replay DIR` and `--record DIR` pick where answers come from; without
 them the config's LLM profile is used, with its key from the environment.
 
