@@ -91,6 +91,7 @@ mod writes;
 pub(crate) use admission::*;
 pub(crate) use bundle_index::*;
 pub(crate) use canonical::*;
+pub(crate) use children::FillerChildren;
 pub(crate) use collections::*;
 use creates::*;
 pub(crate) use described::Described;
@@ -862,11 +863,13 @@ async fn prepare_state<'a>(
                         && target.is_some()
                         && children::is_parent(rt, op))
                 {
+                    let filler = served.source == Source::Fallback;
                     children::after_answer(
                         &mut state,
                         (plan, call),
                         target_id.as_deref().filter(|_| !foreign_key),
                         served.body.as_mut(),
+                        filler,
                     )
                     .instrument(state_span())
                     .await;
@@ -883,7 +886,7 @@ async fn prepare_state<'a>(
             .instrument(state_span())
             .await
     {
-        children::after_answer(&mut state, (plan, call), None, served.body.as_mut())
+        children::after_answer(&mut state, (plan, call), None, served.body.as_mut(), false)
             .instrument(state_span())
             .await;
         state.touch(session).instrument(state_span()).await;
@@ -909,7 +912,7 @@ async fn prepare_state<'a>(
             .instrument(state_span())
             .await
     {
-        children::after_answer(&mut state, (plan, call), None, served.body.as_mut())
+        children::after_answer(&mut state, (plan, call), None, served.body.as_mut(), false)
             .instrument(state_span())
             .await;
         cursors::after_answer(&mut state, plan, &served)
@@ -2207,6 +2210,7 @@ pub(crate) async fn complete(
                 (plan, call),
                 target_id.as_deref(),
                 generated.body.as_mut(),
+                generated.source == Source::Fallback,
             )
             .await;
         }
