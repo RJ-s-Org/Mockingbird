@@ -573,3 +573,79 @@ async fn a_season_with_episodes_joins_its_show() {
     assert_eq!(status, StatusCode::OK, "{episode}");
     assert_eq!(episode["id"], 62092, "{episode}");
 }
+
+/// With no model, a show read before its seasons lists a season the faker made; the
+/// seasons read after replace it: the show lists exactly them, by their ids.
+#[tokio::test]
+async fn seasons_read_after_the_show_replace_its_filler() {
+    let h = support::harness(
+        TMDB,
+        Vec::new(),
+        &HarnessOptions {
+            offline: true,
+            cached: true,
+            ..HarnessOptions::default()
+        },
+        |rt| rt,
+    );
+    let (status, _, show) = h.send("GET", "/3/tv/1396", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{show}");
+    let filler = seasons_of(&show);
+    assert!(!filler.is_empty(), "{show}");
+    let mut read = Vec::new();
+    for n in [1, 2] {
+        let (status, _, season) = h
+            .send("GET", &format!("/3/tv/1396/season/{n}"), None, &[])
+            .await;
+        assert_eq!(status, StatusCode::OK, "{season}");
+        assert_eq!(season["season_number"], n, "{season}");
+        read.push((n, season["id"].as_u64().unwrap()));
+    }
+    let (_, _, again) = h.send("GET", "/3/tv/1396", None, &[]).await;
+    assert_eq!(seasons_of(&again), read, "{again}");
+    for (n, id) in read {
+        let (_, _, season) = h
+            .send("GET", &format!("/3/tv/1396/season/{n}"), None, &[])
+            .await;
+        assert_eq!(season["id"], id, "{season}");
+    }
+}
+
+/// With no model, a subscription read first lists items the faker made; an item created
+/// for it replaces them, in its `items` and in its item list.
+#[tokio::test]
+async fn an_item_created_replaces_the_filler_items() {
+    let h = support::harness(
+        STRIPE,
+        Vec::new(),
+        &HarnessOptions {
+            offline: true,
+            ..HarnessOptions::default()
+        },
+        |rt| rt,
+    );
+    let (status, _, sub) = h.send("GET", "/v1/subscriptions/sub_1", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{sub}");
+    assert!(!ids(&sub["items"]).is_empty(), "{sub}");
+    let (status, _, created) = h
+        .send(
+            "POST",
+            "/v1/subscription_items",
+            Some(json!({"subscription": "sub_1", "quantity": 7})),
+            &[],
+        )
+        .await;
+    assert!(status.is_success(), "{status} {created}");
+    let new_id = created["id"].as_str().unwrap_or_default().to_string();
+    let (_, _, sub) = h.send("GET", "/v1/subscriptions/sub_1", None, &[]).await;
+    assert_eq!(ids(&sub["items"]), [new_id.as_str()], "{sub}");
+    let (_, _, list) = h
+        .send(
+            "GET",
+            "/v1/subscription_items?subscription=sub_1",
+            None,
+            &[],
+        )
+        .await;
+    assert_eq!(ids(&list), [new_id.as_str()], "{list}");
+}
