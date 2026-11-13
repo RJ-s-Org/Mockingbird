@@ -23,7 +23,8 @@
 //!   advances ([`tokens::advance`]).
 //!
 //! Either generates instead, as today, when it cannot tell what the write does: on an
-//! action's route (`action_route`); for a request holding no object (`unmerged_body`),
+//! action's route (`action_route`), but for one whose verb names a state of the held
+//! record when no model answers ([`super::verbs`], run as an action); for a request holding no object (`unmerged_body`),
 //! a member the record does not declare that no described `set` reads
 //! (`undeclared_member`) or a new value of a
 //! read-only one (`read_only_member`); for a patch or instruction that does not apply
@@ -90,6 +91,17 @@ async fn update(
     // A route acting on a record named earlier in its path (`POST /orders/{id}/confirm`)
     // is an action whatever its method, which an update's merge does not tell.
     if op.is_action() {
+        // With no model to answer it, one whose verb names a state of the held
+        // record's type sets it as an action does ([`super::verbs`]).
+        let no_model = !plan.engine.has_provider() || plan.engine.provider_blocked().is_some();
+        let verb_names_state = no_model
+            && !transitions::sets_members(rt, op)
+            && held
+                .target
+                .is_some_and(|t| super::verbs::inferred(rt, op, &t.resource_type).is_some());
+        if verb_names_state {
+            return super::action::run(state, plan, call, held, response_schema).await;
+        }
         fell_back(rt, plan, kind, "action_route");
         return Ran::Generate(None);
     }

@@ -97,6 +97,7 @@ mod patches;
 pub(crate) mod pool;
 mod queue;
 mod redraw;
+mod verbs;
 mod writes;
 
 pub(super) use create::{initial_token, unreadable};

@@ -226,3 +226,80 @@ async fn unread_parents_number_apart_and_names_are_not_keys() {
         );
     }
 }
+
+const CLOSING_SDL: &str = r#"
+interface Node { id: ID! }
+enum IssueState { CLOSED OPEN }
+type Repository implements Node { id: ID! name: String! issue(number: Int!): Issue }
+type Issue implements Node { id: ID! number: Int! title: String! state: IssueState! }
+input CreateIssueInput { repositoryId: ID! title: String! }
+input CloseIssueInput { issueId: ID! }
+input ReopenIssueInput { issueId: ID! }
+type CreateIssuePayload { issue: Issue }
+type CloseIssuePayload { issue: Issue }
+type ReopenIssuePayload { issue: Issue }
+type Query { repository(owner: String!, name: String!): Repository node(id: ID!): Node }
+type Mutation {
+  createIssue(input: CreateIssueInput!): CreateIssuePayload
+  closeIssue(input: CloseIssueInput!): CloseIssuePayload
+  reopenIssue(input: ReopenIssueInput!): ReopenIssuePayload
+}
+"#;
+
+/// With no model and nothing described, an action's verb moves its target's state:
+/// `closeIssue` closes the issue and `reopenIssue` opens it again, as later reads show.
+#[tokio::test]
+async fn an_action_s_verb_moves_the_state_with_no_model() {
+    let rt = MockRuntime::new(
+        "gh",
+        Arc::new(compile(CLOSING_SDL.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = graphql::try_router(Arc::new(rt)).unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let base = format!("http://{addr}");
+    let created = gql(
+        &base,
+        r#"mutation { createIssue(input: {repositoryId: "R_x", title: "T"}) { issue { id state } } }"#,
+    )
+    .await;
+    let issue = &created["data"]["createIssue"]["issue"];
+    assert_eq!(issue["state"], "OPEN", "{created}");
+    let id = issue["id"].as_str().unwrap_or_default().to_string();
+    let read = |base: String, id: String| async move {
+        gql(
+            &base,
+            &format!(r#"{{ node(id: "{id}") {{ ... on Issue {{ state }} }} }}"#),
+        )
+        .await
+    };
+    let closed = gql(
+        &base,
+        &format!(
+            r#"mutation {{ closeIssue(input: {{issueId: "{id}"}}) {{ issue {{ state }} }} }}"#
+        ),
+    )
+    .await;
+    assert_eq!(
+        closed["data"]["closeIssue"]["issue"]["state"], "CLOSED",
+        "{closed}"
+    );
+    let now = read(base.clone(), id.clone()).await;
+    assert_eq!(now["data"]["node"]["state"], "CLOSED", "{now}");
+    let reopened = gql(
+        &base,
+        &format!(
+            r#"mutation {{ reopenIssue(input: {{issueId: "{id}"}}) {{ issue {{ state }} }} }}"#
+        ),
+    )
+    .await;
+    assert_eq!(
+        reopened["data"]["reopenIssue"]["issue"]["state"], "OPEN",
+        "{reopened}"
+    );
+    let now = read(base.clone(), id.clone()).await;
+    assert_eq!(now["data"]["node"]["state"], "OPEN", "{now}");
+}

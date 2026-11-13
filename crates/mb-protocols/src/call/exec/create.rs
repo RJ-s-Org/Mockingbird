@@ -67,7 +67,7 @@
 //! the contract says is unique that the generated path refuses (`repeated_value`), go on
 //! to generation too.
 
-mod fresh;
+pub(super) mod fresh;
 
 use mb_engine::consistency::{property_schema, required_members};
 use mb_engine::error_body::{ErrorCause, RefusalFacts};
@@ -3068,7 +3068,7 @@ fn decided(bundle: &mb_mcm::Bundle, schema: &Value) -> Option<Value> {
 /// The parts every value of `schema` meets: itself, what its `$ref`s and `allOf`s name,
 /// and the one branch of an `anyOf` or `oneOf` whose others are `null`; never one of
 /// several branches a value may take.
-fn whole_parts<'a>(bundle: &'a mb_mcm::Bundle, schema: &'a Value) -> Vec<&'a Value> {
+pub(super) fn whole_parts<'a>(bundle: &'a mb_mcm::Bundle, schema: &'a Value) -> Vec<&'a Value> {
     fn visit<'a>(
         bundle: &'a mb_mcm::Bundle,
         schema: &'a Value,
