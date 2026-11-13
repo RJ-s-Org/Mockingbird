@@ -91,6 +91,7 @@ mod writes;
 pub(crate) use admission::*;
 pub(crate) use bundle_index::*;
 pub(crate) use canonical::*;
+pub(crate) use children::FillerChildren;
 pub(crate) use collections::*;
 use creates::*;
 pub(crate) use described::Described;
@@ -862,11 +863,13 @@ async fn prepare_state<'a>(
                         && target.is_some()
                         && children::is_parent(rt, op))
                 {
+                    let filler = served.source == Source::Fallback;
                     children::after_answer(
                         &mut state,
                         (plan, call),
                         target_id.as_deref().filter(|_| !foreign_key),
                         served.body.as_mut(),
+                        filler,
                     )
                     .instrument(state_span())
                     .await;
@@ -883,7 +886,7 @@ async fn prepare_state<'a>(
             .instrument(state_span())
             .await
     {
-        children::after_answer(&mut state, (plan, call), None, served.body.as_mut())
+        children::after_answer(&mut state, (plan, call), None, served.body.as_mut(), false)
             .instrument(state_span())
             .await;
         state.touch(session).instrument(state_span()).await;
@@ -909,7 +912,7 @@ async fn prepare_state<'a>(
             .instrument(state_span())
             .await
     {
-        children::after_answer(&mut state, (plan, call), None, served.body.as_mut())
+        children::after_answer(&mut state, (plan, call), None, served.body.as_mut(), false)
             .instrument(state_span())
             .await;
         cursors::after_answer(&mut state, plan, &served)
@@ -1731,9 +1734,19 @@ pub(crate) async fn complete(
             // later lists answer from what it seeds, as after a model's. One a retry
             // may get past (a `429`, a `5xx`, a timeout) leaves the next list to the
             // model.
+            // A GraphQL list the faker drew with no model seeds nothing either once the
+            // session holds records of its type: its items are invented, and would
+            // join every later list from state.
+            #[cfg(feature = "graphql")]
+            let invented = graphql_reads::invented_list(&mut state, session, op, &generated)
+                .instrument(state_span())
+                .await;
+            #[cfg(not(feature = "graphql"))]
+            let invented = false;
             let seeding = is_query
                 && rt.consistency
                 && target_id.is_none()
+                && !invented
                 && (!transient_fallback(&generated)
                     || lasting_fallback(&generated) && state_lists::marks_listed(rt, plan, call));
             // A single answer with an identity of its own is one record, not a list of
@@ -2207,6 +2220,7 @@ pub(crate) async fn complete(
                 (plan, call),
                 target_id.as_deref(),
                 generated.body.as_mut(),
+                generated.source == Source::Fallback,
             )
             .await;
         }

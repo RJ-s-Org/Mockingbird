@@ -573,3 +573,196 @@ async fn a_season_with_episodes_joins_its_show() {
     assert_eq!(status, StatusCode::OK, "{episode}");
     assert_eq!(episode["id"], 62092, "{episode}");
 }
+
+/// With no model, a show read before its seasons lists a season the faker made; the
+/// seasons read after replace it: the show lists exactly them, by their ids.
+#[tokio::test]
+async fn seasons_read_after_the_show_replace_its_filler() {
+    let h = support::harness(
+        TMDB,
+        Vec::new(),
+        &HarnessOptions {
+            offline: true,
+            cached: true,
+            ..HarnessOptions::default()
+        },
+        |rt| rt,
+    );
+    let (status, _, show) = h.send("GET", "/3/tv/1396", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{show}");
+    let filler = seasons_of(&show);
+    assert!(!filler.is_empty(), "{show}");
+    let mut read = Vec::new();
+    for n in [1, 2] {
+        let (status, _, season) = h
+            .send("GET", &format!("/3/tv/1396/season/{n}"), None, &[])
+            .await;
+        assert_eq!(status, StatusCode::OK, "{season}");
+        assert_eq!(season["season_number"], n, "{season}");
+        read.push((n, season["id"].as_u64().unwrap()));
+    }
+    let (_, _, again) = h.send("GET", "/3/tv/1396", None, &[]).await;
+    assert_eq!(seasons_of(&again), read, "{again}");
+    for (n, id) in read {
+        let (_, _, season) = h
+            .send("GET", &format!("/3/tv/1396/season/{n}"), None, &[])
+            .await;
+        assert_eq!(season["id"], id, "{season}");
+    }
+}
+
+/// With no model, a subscription read first lists items the faker made; an item created
+/// for it replaces them, in its `items` and in its item list.
+#[tokio::test]
+async fn an_item_created_replaces_the_filler_items() {
+    let h = support::harness(
+        STRIPE,
+        Vec::new(),
+        &HarnessOptions {
+            offline: true,
+            ..HarnessOptions::default()
+        },
+        |rt| rt,
+    );
+    let (status, _, sub) = h.send("GET", "/v1/subscriptions/sub_1", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{sub}");
+    assert!(!ids(&sub["items"]).is_empty(), "{sub}");
+    let (status, _, created) = h
+        .send(
+            "POST",
+            "/v1/subscription_items",
+            Some(json!({"subscription": "sub_1", "quantity": 7})),
+            &[],
+        )
+        .await;
+    assert!(status.is_success(), "{status} {created}");
+    let new_id = created["id"].as_str().unwrap_or_default().to_string();
+    let (_, _, sub) = h.send("GET", "/v1/subscriptions/sub_1", None, &[]).await;
+    assert_eq!(ids(&sub["items"]), [new_id.as_str()], "{sub}");
+    let (_, _, list) = h
+        .send(
+            "GET",
+            "/v1/subscription_items?subscription=sub_1",
+            None,
+            &[],
+        )
+        .await;
+    assert_eq!(ids(&list), [new_id.as_str()], "{list}");
+}
+
+const BOARDS: &str = r##"
+openapi: 3.0.3
+info: {title: Boards, version: "1"}
+paths:
+  /boards/{board_id}:
+    parameters:
+      - {name: board_id, in: path, required: true, schema: {type: integer}}
+    get:
+      operationId: getBoard
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/board"}}}}
+        "404": {description: missing}
+  /boards/{board_id}/cards:
+    parameters:
+      - {name: board_id, in: path, required: true, schema: {type: integer}}
+    get:
+      operationId: listCards
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/card"}}}}}
+    post:
+      operationId: createCard
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [title], properties: {title: {type: string}}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/card"}}}}
+  /boards/{board_id}/cards/{card_id}:
+    parameters:
+      - {name: board_id, in: path, required: true, schema: {type: integer}}
+      - {name: card_id, in: path, required: true, schema: {type: integer}}
+    get:
+      operationId: getCard
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/card"}}}}
+        "404": {description: missing}
+components:
+  schemas:
+    card:
+      type: object
+      required: [id, title]
+      properties:
+        id: {type: integer}
+        title: {type: string}
+    board:
+      type: object
+      required: [id, name, cards]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        cards: {type: array, items: {$ref: "#/components/schemas/card"}}
+"##;
+
+/// The ids of a plain array of records.
+fn array_ids(list: &Value) -> Vec<u64> {
+    list.as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(|c| c["id"].as_u64())
+        .collect()
+}
+
+/// With no model, a board's card list read first lists cards the faker made; a card
+/// created on the board replaces them in its card list.
+#[tokio::test]
+async fn a_card_created_replaces_the_filler_of_the_card_list() {
+    let h = support::harness(
+        BOARDS,
+        Vec::new(),
+        &HarnessOptions {
+            offline: true,
+            ..HarnessOptions::default()
+        },
+        |rt| rt,
+    );
+    let (status, _, list) = h.send("GET", "/boards/7/cards", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert!(!array_ids(&list).is_empty(), "{list}");
+    let (status, _, created) = h
+        .send(
+            "POST",
+            "/boards/7/cards",
+            Some(json!({"title": "Real"})),
+            &[],
+        )
+        .await;
+    assert!(status.is_success(), "{status} {created}");
+    let new_id = created["id"].as_u64().unwrap_or_default();
+    let (_, _, list) = h.send("GET", "/boards/7/cards", None, &[]).await;
+    assert_eq!(array_ids(&list), [new_id], "{list}");
+}
+
+/// A card list the model answered is no filler: a card created after it joins its cards.
+#[tokio::test]
+async fn a_card_created_joins_the_cards_the_model_listed() {
+    let h = support::harness(
+        BOARDS,
+        vec![json!([{"id": 1, "title": "Listed"}])],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let (status, _, list) = h.send("GET", "/boards/7/cards", None, &[]).await;
+    assert_eq!(array_ids(&list), [1], "{status} {list}");
+    let (status, _, created) = h
+        .send(
+            "POST",
+            "/boards/7/cards",
+            Some(json!({"title": "Real"})),
+            &[],
+        )
+        .await;
+    assert!(status.is_success(), "{status} {created}");
+    let new_id = created["id"].as_u64().unwrap_or_default();
+    let (_, _, list) = h.send("GET", "/boards/7/cards", None, &[]).await;
+    let ids = array_ids(&list);
+    assert!(ids.contains(&1) && ids.contains(&new_id), "{list}");
+}

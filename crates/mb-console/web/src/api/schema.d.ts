@@ -2117,8 +2117,8 @@ export interface components {
             /**
              * Format: int32
              * @description 100–599. When the mock has an active contract, an operation the
-             *     scenario applies to must declare it, unless it is a 5xx (answered
-             *     natively where undeclared).
+             *     scenario applies to must declare it, unless it is a 4xx or 5xx
+             *     (answered natively where undeclared).
              */
             status?: number | null;
             /**

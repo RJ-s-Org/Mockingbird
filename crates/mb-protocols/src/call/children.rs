@@ -25,7 +25,12 @@
 //!   [`super::exec`]'s server-set references are), so a write another call made
 //!   meanwhile is never undone; a deleted one leaves it;
 //! - a plain read of the child list route for a parent (no filter or cursor but the
-//!   parent's, a `limit` at most) answers the children held under it, at most a page.
+//!   parent's, a `limit` at most) answers the children held under it, at most a page;
+//! - children stored from a parent's answer or a child list the faker made
+//!   ([`FillerChildren`], [`note_listed`]) are filler: once a child of that parent is
+//!   held that is not (one read or written on its own route, or stored from any other
+//!   answer), the filler leaves the parent's embed and its child list, so the parent
+//!   lists the children the session read, not invented ones.
 //!
 //! An embed binds when (all of):
 //! - it is a top-level member of the parent's own read (by path), an array or a list
@@ -65,6 +70,79 @@ const MAX_CHILDREN: usize = 1_000;
 
 /// Held parents scanned for the one embedding a child, when nothing names it.
 const MAX_PARENTS: usize = 200;
+
+/// Filler children [`FillerChildren`] holds at most; it is emptied when full.
+const MAX_FILLER: usize = 4096;
+
+/// The children stored from a parent's embed or a child list that the faker made (no
+/// model wrote it, no request sent it): filler, which a held child that is not filler
+/// replaces in the parent's embed and child list. A child is no longer filler once a
+/// call on its own route reads or writes it. Only a hint: after a restart, on another node or once
+/// emptied, every child counts as real and is kept.
+#[derive(Debug, Default)]
+pub(crate) struct FillerChildren(std::sync::Mutex<HashSet<Filler>>);
+
+/// A filler child: its type, its parent (the scope values of a scoped child, else the
+/// parent's id) and its key there.
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct Filler {
+    session: SessionKey,
+    child: String,
+    parent: String,
+    key: String,
+}
+
+impl FillerChildren {
+    fn note(&self, fillers: Vec<Filler>) {
+        let Ok(mut all) = self.0.lock() else {
+            return;
+        };
+        if all.len() + fillers.len() > MAX_FILLER {
+            all.clear();
+        }
+        all.extend(fillers);
+    }
+
+    fn backed(&self, filler: &Filler) {
+        if let Ok(mut all) = self.0.lock() {
+            all.remove(filler);
+        }
+    }
+
+    fn holds(&self, filler: &Filler) -> bool {
+        self.0.lock().is_ok_and(|all| all.contains(filler))
+    }
+
+    fn any_of(&self, s: &SessionKey, child: &str) -> bool {
+        self.0
+            .lock()
+            .is_ok_and(|all| all.iter().any(|f| f.child == child && &f.session == s))
+    }
+}
+
+/// The parent a filler child of `embed` is noted under: the scope values of a scoped
+/// child, else the parent's id.
+fn filler_parent(embed: &Embed, parent_id: &str, values: Option<&[String]>) -> String {
+    match (&embed.link, values) {
+        (Link::Scoped, Some(values)) => values.join(&super::scopes::SEP.to_string()),
+        _ => parent_id.to_string(),
+    }
+}
+
+/// The note of `embed`'s child of key `key` under `parent`, as filler.
+fn filler(
+    s: &SessionKey,
+    embed: &Embed,
+    (parent_id, values): (&str, Option<&[String]>),
+    key: String,
+) -> Filler {
+    Filler {
+        session: s.clone(),
+        child: embed.child.clone(),
+        parent: filler_parent(embed, parent_id, values),
+        key,
+    }
+}
 
 /// How a child's records name their parent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -507,7 +585,7 @@ async fn held_children(
     parent: &StoredResource,
     values: Option<&[String]>,
 ) -> Vec<StoredResource> {
-    match &embed.link {
+    let mut held = match &embed.link {
         Link::Scoped => match values {
             Some(values) => state.list_in(s, &embed.child, values, MAX_CHILDREN).await,
             None => Vec::new(),
@@ -518,7 +596,23 @@ async fn held_children(
             .into_iter()
             .filter(|r| r.data.get(m).and_then(link_value).as_deref() == Some(parent.id.as_str()))
             .collect(),
+    };
+    // Filler leaves once a child that is not filler is held.
+    let fillers = state.rt.filler_children();
+    if fillers.any_of(s, &embed.child) {
+        let is_filler: Vec<bool> = held
+            .iter()
+            .map(|c| {
+                key_of(embed, &c.data)
+                    .is_some_and(|key| fillers.holds(&filler(s, embed, (&parent.id, values), key)))
+            })
+            .collect();
+        if is_filler.iter().any(|f| !f) {
+            let mut at = is_filler.into_iter();
+            held.retain(|_| !at.next().unwrap_or(false));
+        }
     }
+    held
 }
 
 /// `child` as an item of `embed`: the members its items declare, from the child, else
@@ -574,12 +668,16 @@ fn drawn(
     let mut used: HashSet<usize> = HashSet::new();
     let mut items: Vec<Value> = Vec::new();
     for item in &before {
-        let Some(key) = key_of(embed, item) else {
-            continue;
+        let key = key_of(embed, item);
+        let id = mb_mcm::member_at(item, &embed.id_field).and_then(id_string);
+        // By the key the child's route reads it by, else by its identity.
+        let same = |c: &StoredResource, member: &str, want: &Option<String>| {
+            want.is_some() && mb_mcm::member_at(&c.data, member).and_then(id_string) == *want
         };
         if let Some(at) = children
             .iter()
-            .position(|c| key_of(embed, &c.data).as_deref() == Some(key.as_str()))
+            .position(|c| same(c, &embed.key, &key))
+            .or_else(|| children.iter().position(|c| same(c, &embed.id_field, &id)))
             && used.insert(at)
         {
             items.push(projected(embed, &children[at].data, Some(item)));
@@ -623,13 +721,14 @@ fn drawn(
 }
 
 /// Stores the children `parent`'s embeds list that the session does not hold yet
-/// (unless `stores` is false), draws each embed from the held children, and stores the
-/// parent so drawn when it changed and is still as read. The parent as it is now.
+/// (unless `stores` is false; noted as filler when the faker made the parent's
+/// answer, `filler_made`), draws each embed from the held children, and stores the parent
+/// so drawn when it changed and is still as read. The parent as it is now.
 pub(super) async fn sync(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
     parent: StoredResource,
-    stores: bool,
+    (stores, filler_made): (bool, bool),
 ) -> StoredResource {
     let rt = state.rt;
     let embeds = of_parent(rt, &parent.resource_type);
@@ -683,7 +782,22 @@ pub(super) async fn sync(
                 });
             }
             if !fresh.is_empty() {
+                let keys: Vec<Option<String>> =
+                    fresh.iter().map(|f| key_of(embed, &f.data)).collect();
                 let stored = state.insert_seeded_all(s, fresh).await;
+                // Stored from a faker-made answer: filler; from any other, not (a note
+                // left from an earlier record of that key goes).
+                let mut notes = Vec::new();
+                for (key, took) in keys.into_iter().zip(&stored) {
+                    if let (Some(key), true) = (key, *took) {
+                        let note = filler(s, embed, (&parent.id, values), key);
+                        match filler_made {
+                            true => notes.push(note),
+                            false => rt.filler_children().backed(&note),
+                        }
+                    }
+                }
+                rt.filler_children().note(notes);
                 if stored.iter().any(|took| *took) {
                     // A seeded record does not clear the cached answers of its type.
                     if let Some(cache) = rt.state.response_cache() {
@@ -749,6 +863,60 @@ fn parent_param(embed: &Embed, route: &str, call: &OperationCall) -> Option<Stri
     call.path_params.get(&name).and_then(id_string)
 }
 
+/// A listed parent: its id, the scope values of a scoped child, and the query
+/// parameter naming it, if one does.
+type ListParent<'e> = (String, Option<Vec<String>>, Option<&'e str>);
+
+/// The parent a call on a child list route of `embed`'s lists the children of.
+fn list_parent<'e>(
+    rt: &MockRuntime,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    embed: &'e Embed,
+) -> Option<ListParent<'e>> {
+    let (route, list_route) = (route_of(plan.op)?, embed.list_route.as_ref()?);
+    match list_route {
+        ListRoute::Query(path, param) if path == route => Some((
+            call.query.get(param).and_then(id_string)?,
+            None,
+            Some(param.as_str()),
+        )),
+        ListRoute::Path(path) if shape_of(path) == shape_of(route) => match embed.link {
+            Link::Scoped => {
+                let values = scope_values(rt, embed, plan.op, call)?;
+                Some((values.last()?.clone(), Some(values), None))
+            }
+            Link::Member(_) => Some((parent_param(embed, route, call)?, None, None)),
+        },
+        _ => None,
+    }
+}
+
+/// Children of type `t` (`stored`, their records) a child list the faker made stored:
+/// filler under the parent the list is of, as a parent's embed the faker made stores
+/// (see [`FillerChildren`]).
+pub(super) fn note_listed(
+    rt: &MockRuntime,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: &str,
+    stored: &[&Value],
+) {
+    if stored.is_empty() || !applies(rt, plan.op) {
+        return;
+    }
+    let s = &plan.session;
+    for embed in &of_child(rt, t) {
+        let Some((parent_id, values, _)) = list_parent(rt, (plan, call), embed) else {
+            continue;
+        };
+        let notes = stored
+            .iter()
+            .filter_map(|data| key_of(embed, data))
+            .map(|key| filler(s, embed, (&parent_id, values.as_deref()), key))
+            .collect();
+        rt.filler_children().note(notes);
+    }
+}
+
 /// A plain read of a child list route of `embed`'s (no cursor or filter but the
 /// parent's): `body`, its answer, holds the children held under the parent, at most a
 /// page (`limit`, else the embed's), when the session holds any. Whether it was one.
@@ -758,30 +926,7 @@ async fn listed(
     embed: &Embed,
     body: &mut Value,
 ) -> bool {
-    let rt = state.rt;
-    let (Some(route), Some(list_route)) = (route_of(plan.op), embed.list_route.as_ref()) else {
-        return false;
-    };
-    let (parent_id, values, own) = match list_route {
-        ListRoute::Query(path, param) if path == route => (
-            call.query.get(param).and_then(id_string),
-            None,
-            Some(param.as_str()),
-        ),
-        ListRoute::Path(path) if shape_of(path) == shape_of(route) => match embed.link {
-            Link::Scoped => {
-                let values = scope_values(rt, embed, plan.op, call);
-                (
-                    values.as_ref().and_then(|v| v.last().cloned()),
-                    values,
-                    None,
-                )
-            }
-            Link::Member(_) => (parent_param(embed, route, call), None, None),
-        },
-        _ => return false,
-    };
-    let Some(parent_id) = parent_id else {
+    let Some((parent_id, values, own)) = list_parent(state.rt, (plan, call), embed) else {
         return false;
     };
     let narrowed = call
@@ -898,8 +1043,62 @@ async fn parent_of(
 
 /// The call's target, settled with its embeds (see the module's doc): a read of a held
 /// parent answers its embeds drawn from its held children; a call naming a child the
-/// session does not hold, which its held parent embeds, takes that child, stored.
+/// session does not hold, which its held parent embeds, takes that child, stored. A
+/// child so read or written on its own route is no longer filler.
 pub(super) async fn settle_target(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    target_id: Option<&str>,
+    target: Option<StoredResource>,
+) -> Option<StoredResource> {
+    let target = settled(state, (plan, call), target_id, target).await;
+    if let (Some(t), Some(child)) = (plan.op.resource_type.as_deref(), target.as_ref())
+        && applies(state.rt, plan.op)
+    {
+        backed(state, (plan, call), t, &child.data).await;
+    }
+    target
+}
+
+/// A child of type `t` (its record `data`) a call on its own route read or wrote: not
+/// filler any more.
+async fn backed(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: &str,
+    data: &Value,
+) {
+    let rt = state.rt;
+    let s = &plan.session;
+    for embed in &of_child(rt, t) {
+        if !rt.filler_children().any_of(s, t) {
+            return;
+        }
+        let Some(key) = key_of(embed, data) else {
+            continue;
+        };
+        let values = scope_values(rt, embed, plan.op, call);
+        let parent_id = match embed.link {
+            Link::Scoped if values.is_none() => continue,
+            Link::Scoped => String::new(),
+            // A parent not held: the one its link names (a child list noted it so).
+            Link::Member(ref m) => {
+                match parent_of(state, (plan, call), embed, (Some(data), Some(&key))).await {
+                    Some(parent) => parent.id,
+                    None => match data.get(m).and_then(link_value) {
+                        Some(id) => id,
+                        None => continue,
+                    },
+                }
+            }
+        };
+        let note = filler(s, embed, (&parent_id, values.as_deref()), key);
+        rt.filler_children().backed(&note);
+    }
+}
+
+/// [`settle_target`] before the target counts as read on its own route.
+async fn settled(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
     target_id: Option<&str>,
@@ -917,7 +1116,7 @@ pub(super) async fn settle_target(
     }
     match target {
         Some(parent) if op.kind == OperationKind::Query && !of_parent(rt, t).is_empty() => {
-            Some(sync(state, (plan, call), parent, true).await)
+            Some(sync(state, (plan, call), parent, (true, false)).await)
         }
         Some(held) => Some(held),
         None => {
@@ -947,7 +1146,7 @@ pub(super) async fn settle_target(
                 else {
                     continue;
                 };
-                sync(state, (plan, call), parent, true).await;
+                sync(state, (plan, call), parent, (true, false)).await;
                 if let Some(child) = state.get(&plan.session, t, &child_id).await {
                     return Some(child);
                 }
@@ -960,12 +1159,15 @@ pub(super) async fn settle_target(
 /// After a call answered (2xx): a parent written or generated stores its embedded
 /// children, and `body` (its answer's record, when it is the record) draws its embeds
 /// from the held children; a child written, generated or completed is added to its held
-/// parent's embed (a deleted one leaves it).
+/// parent's embed (a deleted one leaves it). `filler_made`: the faker made the answer,
+/// so the children a read's embeds list are filler (not a write's: its request's are
+/// real).
 pub(super) async fn after_answer(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
     target_id: Option<&str>,
     body: Option<&mut Value>,
+    filler_made: bool,
 ) {
     let rt = state.rt;
     let op = plan.op;
@@ -1001,7 +1203,8 @@ pub(super) async fn after_answer(
             None => None,
         };
         if let (Some(id), Some(held)) = (id, held) {
-            let synced = sync(state, (plan, call), held, true).await;
+            let filler_made = filler_made && op.kind == OperationKind::Query;
+            let synced = sync(state, (plan, call), held, (true, filler_made)).await;
             // What the answer stored of its children (its nested records, seeded) does
             // not clear their type's cached answers: a list of them cached before.
             if let Some(cache) = rt.state.response_cache() {
@@ -1038,7 +1241,12 @@ pub(super) async fn after_answer(
         else {
             continue;
         };
-        sync(state, (plan, call), parent, !delete).await;
+        if let Some(key) = key {
+            let values = scope_values(rt, embed, plan.op, call);
+            let note = filler(&plan.session, embed, (&parent.id, values.as_deref()), key);
+            rt.filler_children().backed(&note);
+        }
+        sync(state, (plan, call), parent, (!delete, false)).await;
     }
 }
 
@@ -1220,6 +1428,42 @@ components:
         assert_eq!(e.link, Link::Scoped);
         assert!(!e.list && !e.by_def);
         assert_eq!(e.page, 6);
+    }
+
+    /// An embedded item is matched to a held child by its key, else by its identity; an
+    /// item neither matches leaves the embed.
+    #[test]
+    fn an_item_is_drawn_from_the_child_of_its_key_else_its_id() {
+        let index = index(SHOWS);
+        let e = index.child_embeds().all()[0].clone();
+        let season = |id: u64, n: u64, name: &str| StoredResource {
+            resource_type: "season".into(),
+            id: id.to_string(),
+            data: serde_json::json!({"id": id, "season_number": n, "name": name}),
+        };
+        let parent = StoredResource {
+            resource_type: "tv".into(),
+            id: "1".into(),
+            data: serde_json::json!({"id": 1, "seasons": [
+                {"id": 20, "season_number": 9, "name": "by id"},
+                {"id": 99, "season_number": 1, "name": "by key"},
+                {"id": 77, "season_number": 7, "name": "neither"},
+            ]}),
+        };
+        let held = [season(10, 1, "one"), season(20, 2, "two")];
+        let drawn = drawn(&e, &parent, Some(&["1".to_string()]), &held);
+        let got: Vec<(u64, u64)> = drawn["seasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                (
+                    s["id"].as_u64().unwrap(),
+                    s["season_number"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(got, [(20, 2), (10, 1)], "{drawn}");
     }
 
     #[test]

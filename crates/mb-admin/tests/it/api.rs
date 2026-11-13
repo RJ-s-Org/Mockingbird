@@ -836,21 +836,24 @@ async fn scenario_status_must_be_declared_by_its_operations() {
         .await;
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
 
-    // createOrder declares only 201: a 409 could never apply.
-    let body = put(json!({ "status": 409, "operations": ["createOrder"] }))
+    // createOrder declares only 201: a 304 could never apply.
+    let body = put(json!({ "status": 304, "operations": ["createOrder"] }))
         .await
         .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["title"], "Scenario status not declared", "{body}");
     assert_eq!(
         body["detail"],
-        "status 409 is not declared by operation createOrder of the active contract, so the \
-         scenario could never answer it; declare a 409 response, or use a status it declares \
-         (201) or a 5xx",
+        "status 304 is not declared by operation createOrder of the active contract, so the \
+         scenario could never answer it; declare a 304 response, or use a status it declares \
+         (201), a 4xx or a 5xx",
         "{body}"
     );
     // Without operations, any operation declaring it is enough.
-    let r = put(json!({ "status": 409 })).await;
+    let r = put(json!({ "status": 304 })).await;
     assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.text);
+    // A 4xx is answered natively where it is not declared.
+    let r = put(json!({ "status": 409, "operations": ["createOrder"] })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
     let r = put(json!({ "status": 201 })).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text);
     let r = put(json!({ "status": 201, "operations": ["createOrder"] })).await;

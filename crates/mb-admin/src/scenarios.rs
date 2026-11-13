@@ -85,8 +85,8 @@ impl From<Scenario> for ScenarioView {
 pub struct PutScenario {
     pub instructions: Option<String>,
     /// 100–599. When the mock has an active contract, an operation the
-    /// scenario applies to must declare it, unless it is a 5xx (answered
-    /// natively where undeclared).
+    /// scenario applies to must declare it, unless it is a 4xx or 5xx
+    /// (answered natively where undeclared).
     pub status: Option<u16>,
     pub latency_ms: Option<u64>,
     /// A JSON object of fields merged (JSON merge patch) into the response
@@ -124,7 +124,7 @@ pub struct PutScenario {
 }
 
 /// A scenario status applies only where an operation it covers declares it
-/// (any 5xx is answered natively), so a status none of them declares could
+/// (any 4xx or 5xx is answered natively), so a status none of them declares could
 /// never take effect: reject it rather than store a silent no-op.
 fn check_status_declared(bundle: &Bundle, operations: &[String], status: u16) -> ApiResult<()> {
     match undeclared_scenario_status(bundle, operations, status) {
@@ -139,7 +139,7 @@ fn check_status_declared(bundle: &Bundle, operations: &[String], status: u16) ->
 
 /// Why a scenario forcing `status` on `operations` (all operations when
 /// empty) could never take effect in `bundle`, or `None` when it can: a
-/// non-5xx status applies only where one of the operations declares it (or a
+/// status below 400 applies only where one of the operations declares it (or a
 /// `default` response). Shared by the Admin API (a 422) and config-file
 /// validation, so both refuse the same scenarios with the same words.
 pub fn undeclared_scenario_status(
@@ -147,7 +147,7 @@ pub fn undeclared_scenario_status(
     operations: &[String],
     status: u16,
 ) -> Option<String> {
-    if (500..600).contains(&status) {
+    if (400..600).contains(&status) {
         return None;
     }
     let ops = scenario_operations(bundle, operations);
@@ -170,10 +170,13 @@ pub fn undeclared_scenario_status(
         many => format!("operations {} of the active contract", many.join(", ")),
     };
     let alternatives = if declared.is_empty() {
-        "a 5xx".to_string()
+        "a 4xx or 5xx".to_string()
     } else {
         let codes: Vec<String> = declared.iter().map(u16::to_string).collect();
-        format!("a status it declares ({}) or a 5xx", codes.join(", "))
+        format!(
+            "a status it declares ({}), a 4xx or a 5xx",
+            codes.join(", ")
+        )
     };
     Some(format!(
         "status {status} is not declared by {whom}, so the scenario could never answer it; \

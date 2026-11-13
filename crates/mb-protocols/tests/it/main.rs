@@ -75,6 +75,7 @@ mod graphql_held_lists;
 mod graphql_links;
 mod graphql_nested;
 mod graphql_offline_lookups;
+mod graphql_plain_lists;
 mod graphql_references;
 mod graphql_relay_edges;
 mod graphql_relay_inputs;

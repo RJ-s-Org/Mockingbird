@@ -216,7 +216,7 @@ pub struct ScenarioRuntime {
     /// Instructions and `set` patch handed to the engine.
     pub spec: ScenarioSpec,
     /// Status to answer with unless `X-Mockingbird-Status` overrides it;
-    /// ignored for operations that do not declare it, unless it is a 5xx.
+    /// ignored for operations that do not declare it, unless it is a 4xx or 5xx.
     pub status: Option<u16>,
     /// Delay before responding unless `X-Mockingbird-Latency` overrides it.
     pub latency: Option<Duration>,
@@ -431,6 +431,8 @@ pub struct MockRuntime {
     /// Which stored resource a path field value names, from this
     /// runtime's writes (see [`call::PathAliases`]).
     path_aliases: call::PathAliases,
+    /// The embedded children the faker made (see [`call::FillerChildren`]).
+    filler_children: call::FillerChildren,
     /// The identities and member values of this runtime's writes (see
     /// [`call::ValueIndex`]).
     value_index: Arc<call::ValueIndex>,
@@ -590,6 +592,7 @@ impl MockRuntime {
             credential_names,
             index,
             path_aliases: call::PathAliases::default(),
+            filler_children: call::FillerChildren::default(),
             value_index,
             _value_feed: value_feed,
             written_types: call::WrittenTypes::default(),
@@ -720,6 +723,11 @@ impl MockRuntime {
     /// [`call::PathAliases`]).
     pub(crate) fn path_aliases(&self) -> &call::PathAliases {
         &self.path_aliases
+    }
+
+    /// The embedded children the faker made (see [`call::FillerChildren`]).
+    pub(crate) fn filler_children(&self) -> &call::FillerChildren {
+        &self.filler_children
     }
 
     /// Identities and member values of this runtime's writes (see
