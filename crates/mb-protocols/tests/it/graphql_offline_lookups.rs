@@ -230,8 +230,11 @@ async fn unread_parents_number_apart_and_names_are_not_keys() {
 const CLOSING_SDL: &str = r#"
 interface Node { id: ID! }
 enum IssueState { CLOSED OPEN }
+scalar DateTime
 type Repository implements Node { id: ID! name: String! issue(number: Int!): Issue }
-type Issue implements Node { id: ID! number: Int! title: String! state: IssueState! }
+type Issue implements Node {
+  id: ID! number: Int! title: String! state: IssueState! closed: Boolean! closedAt: DateTime
+}
 input CreateIssueInput { repositoryId: ID! title: String! }
 input CloseIssueInput { issueId: ID! }
 input ReopenIssueInput { issueId: ID! }
@@ -272,7 +275,7 @@ async fn an_action_s_verb_moves_the_state_with_no_model() {
     let read = |base: String, id: String| async move {
         gql(
             &base,
-            &format!(r#"{{ node(id: "{id}") {{ ... on Issue {{ state }} }} }}"#),
+            &format!(r#"{{ node(id: "{id}") {{ ... on Issue {{ state closed closedAt }} }} }}"#),
         )
         .await
     };
@@ -289,6 +292,10 @@ async fn an_action_s_verb_moves_the_state_with_no_model() {
     );
     let now = read(base.clone(), id.clone()).await;
     assert_eq!(now["data"]["node"]["state"], "CLOSED", "{now}");
+    // The members named for the state follow it.
+    assert_eq!(now["data"]["node"]["closed"], true, "{now}");
+    let at = now["data"]["node"]["closedAt"].as_str().unwrap_or_default();
+    assert!(chrono::DateTime::parse_from_rfc3339(at).is_ok(), "{now}");
     let reopened = gql(
         &base,
         &format!(
@@ -302,4 +309,47 @@ async fn an_action_s_verb_moves_the_state_with_no_model() {
     );
     let now = read(base.clone(), id.clone()).await;
     assert_eq!(now["data"]["node"]["state"], "OPEN", "{now}");
+    assert_eq!(now["data"]["node"]["closed"], false, "{now}");
+    assert_eq!(now["data"]["node"]["closedAt"], Value::Null, "{now}");
+}
+
+/// A described `closedAt` stays as the description sets it; the member named for the
+/// state that it leaves (`closed`) still follows the state.
+#[tokio::test]
+async fn a_described_member_named_for_a_state_wins() {
+    let rt = MockRuntime::new(
+        "gh",
+        Arc::new(compile(CLOSING_SDL.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    let world = json!({"operations": {"Mutation.closeIssue": {
+        "set": {"state": "'CLOSED'", "closedAt": "'2020-01-02T03:04:05Z'"}
+    }}});
+    let rt = crate::support::with_effective(rt, world, false);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = graphql::try_router(Arc::new(rt)).unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let base = format!("http://{addr}");
+    let created = gql(
+        &base,
+        r#"mutation { createIssue(input: {repositoryId: "R_x", title: "T"}) { issue { id } } }"#,
+    )
+    .await;
+    let id = created["data"]["createIssue"]["issue"]["id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let closed = gql(
+        &base,
+        &format!(
+            r#"mutation {{ closeIssue(input: {{issueId: "{id}"}}) {{ issue {{ state closed closedAt }} }} }}"#
+        ),
+    )
+    .await;
+    let issue = &closed["data"]["closeIssue"]["issue"];
+    assert_eq!(issue["state"], "CLOSED", "{closed}");
+    assert_eq!(issue["closedAt"], "2020-01-02T03:04:05Z", "{closed}");
+    assert_eq!(issue["closed"], true, "{closed}");
 }

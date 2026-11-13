@@ -64,6 +64,107 @@ pub(super) fn inferred(
     None
 }
 
+/// Sets on `record`, a record of type `t`, the members named for the states its state
+/// members among `set` (the members the call set) entered and left, when they moved
+/// from what `before` holds; never a member in `set`. A boolean member named for a
+/// state (`closed`, `is_closed`, `isClosed` of `CLOSED`) is `true` for the state
+/// entered and `false` for the one left; one named for it with an `at` suffix
+/// (`closedAt`, `closed_at`), a `date-time` text or an integer (unix seconds), is now
+/// for the state entered and `null` for the one left, when its schema admits `null`.
+/// A name matches a state's value with case and separators aside, and only so.
+pub(super) fn companions(
+    rt: &crate::MockRuntime,
+    call: &crate::call::OperationCall,
+    t: &str,
+    (before, record): (&Value, &mut Value),
+    set: &[String],
+) {
+    let bundle = rt.bundle();
+    let lifecycle = rt
+        .described()
+        .type_desc(t)
+        .and_then(|d| d.lifecycle.as_ref())
+        .map(|l| l.member.clone());
+    // Each state entered or left, with whether it was entered.
+    let mut states: Vec<(String, bool)> = Vec::new();
+    for member in set {
+        if lifecycle.as_deref() != Some(member.as_str()) && !state_named(member) {
+            continue;
+        }
+        // A value with no letters or digits names no member (`is`, `at`).
+        let named = |r: &Value| {
+            r.get(member)
+                .and_then(Value::as_str)
+                .map(squeeze)
+                .filter(|s| !s.is_empty())
+        };
+        let (entered, left) = (named(record), named(before));
+        if let Some(entered) = entered.filter(|e| left.as_ref() != Some(e)) {
+            states.push((entered, true));
+            states.extend(left.map(|l| (l, false)));
+        }
+    }
+    if states.is_empty() {
+        return;
+    }
+    let now = crate::call::exprs::now_value(rt, call);
+    let mut fills: Vec<(String, Value)> = Vec::new();
+    for schema in super::read_schemas(rt, t) {
+        for part in whole_parts(bundle, &schema) {
+            let Some(props) = part.get("properties").and_then(Value::as_object) else {
+                continue;
+            };
+            for (name, member) in props.iter().filter(|(n, _)| !set.contains(n)) {
+                let parts = whole_parts(bundle, member);
+                let typed = |kind: &str| {
+                    parts.iter().any(|p| match p.get("type") {
+                        Some(Value::String(t)) => t == kind,
+                        Some(Value::Array(ts)) => ts.iter().any(|t| t.as_str() == Some(kind)),
+                        _ => false,
+                    })
+                };
+                let date_time = typed("string")
+                    && parts
+                        .iter()
+                        .any(|p| p.get("format").and_then(Value::as_str) == Some("date-time"));
+                let unix = typed("integer");
+                let n = squeeze(name);
+                for (state, entering) in &states {
+                    let value = if typed("boolean") && (n == *state || n == format!("is{state}")) {
+                        Value::Bool(*entering)
+                    } else if n == format!("{state}at") && (date_time || unix) {
+                        if !*entering {
+                            if !crate::call::effects::admits_null(rt, member) {
+                                continue;
+                            }
+                            Value::Null
+                        } else if unix {
+                            match now
+                                .as_str()
+                                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                            {
+                                Some(at) => Value::from(at.timestamp()),
+                                None => continue,
+                            }
+                        } else {
+                            now.clone()
+                        }
+                    } else {
+                        continue;
+                    };
+                    fills.push((name.clone(), value));
+                }
+            }
+        }
+    }
+    if let Some(object) = record.as_object_mut() {
+        // The state entered comes first: what it fills stays.
+        for (name, value) in fills.into_iter().rev() {
+            object.insert(name, value);
+        }
+    }
+}
+
 /// Words that name how a request is sent, not what it does (`PostCharges`).
 const METHODS: [&str; 6] = ["get", "post", "put", "patch", "delete", "head"];
 
