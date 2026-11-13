@@ -1466,7 +1466,10 @@ export interface components {
             persona?: string | null;
             /** @description Defaults to `/<name>`, or `/` when `hosts` is given. */
             route_prefix?: string | null;
-            /** @description `inferred` (default), `generate` or `404`. */
+            /**
+             * @description `inferred` (default), `generate`, `404` or `"null"` (the string: JSON `null`
+             *     is refused here, as it would read as unset).
+             */
             unknown_ids?: string | null;
             /** @description Webhook targets; none by default. */
             webhooks?: components["schemas"]["WebhookTarget"][] | null;
@@ -1826,9 +1829,9 @@ export interface components {
             route_prefix: string;
             source: components["schemas"]["Source"];
             /**
-             * @description `inferred` (default), `generate` or `404`: how a read of an id the session
-             *     does not hold is answered. `inferred` decides per resource type (the world
-             *     view's `unknown_ids` says how); the others decide for every type.
+             * @description `inferred` (default), `generate`, `404` or `null`: how a read of an id the
+             *     session does not hold is answered. `inferred` decides per resource type (the
+             *     world view's `unknown_ids` says how); the others decide for every type.
              * @example inferred
              */
             unknown_ids: string;
@@ -1889,7 +1892,10 @@ export interface components {
             path_rewrite?: components["schemas"]["PathRewrite"] | null;
             persona?: string | null;
             route_prefix?: string | null;
-            /** @description `inferred`, `generate` or `404`. */
+            /**
+             * @description `inferred`, `generate`, `404` or `null`. Here `null` sets the value `null`
+             *     (as `"null"` does) rather than clearing it; `inferred` restores the default.
+             */
             unknown_ids?: string | null;
             /** @description Replaces the webhook targets; `[]` clears them. */
             webhooks?: components["schemas"]["WebhookTarget"][] | null;
@@ -2322,8 +2328,8 @@ export interface components {
                 [key: string]: components["schemas"]["UnknownLookup"];
             };
             /**
-             * @description The mock's `unknown_ids`: `inferred` (unset: decided per type), `generate` or
-             *     `404` (decided for every type).
+             * @description The mock's `unknown_ids`: `inferred` (unset: decided per type), `generate`, `404`
+             *     or `null` (decided for every type).
              * @example inferred
              */
             setting: string;

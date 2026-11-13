@@ -1630,29 +1630,32 @@ paths:
         rt.unknown_ids = unknown_ids;
         Arc::new(rt)
     };
-    let rt = users(UnknownIds::NotFound);
-    let held = SessionKey {
-        workspace: "default".into(),
-        mock: "users".into(),
-        session: "default".into(),
-    };
-    rt.state
-        .upsert(
-            &held,
-            StoredResource {
-                resource_type: "users".into(),
-                id: "1".into(),
-                data: json!({"id": 1, "login": "octocat"}),
-            },
-        )
-        .await
-        .unwrap();
-    let router = http_rest::router(Arc::clone(&rt));
-    let resp = router.clone().oneshot(get("/users/ghost")).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let resp = router.oneshot(get("/users/octocat")).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(header_str(&resp, "x-mockingbird-source"), "state");
+    // `null` answers REST as `404` does (only a GraphQL lookup answers it null).
+    for unknown_ids in [UnknownIds::NotFound, UnknownIds::Null] {
+        let rt = users(unknown_ids);
+        let held = SessionKey {
+            workspace: "default".into(),
+            mock: "users".into(),
+            session: "default".into(),
+        };
+        rt.state
+            .upsert(
+                &held,
+                StoredResource {
+                    resource_type: "users".into(),
+                    id: "1".into(),
+                    data: json!({"id": 1, "login": "octocat"}),
+                },
+            )
+            .await
+            .unwrap();
+        let router = http_rest::router(Arc::clone(&rt));
+        let resp = router.clone().oneshot(get("/users/ghost")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{unknown_ids:?}");
+        let resp = router.oneshot(get("/users/octocat")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(header_str(&resp, "x-mockingbird-source"), "state");
+    }
 
     let router = http_rest::router(users(UnknownIds::default()));
     let resp = router.oneshot(get("/users/ghost")).await.unwrap();

@@ -359,6 +359,14 @@ async fn an_unknown_login_is_not_found_under_404() {
         missing["errors"][0]["extensions"]["code"], "NOT_FOUND",
         "{missing}"
     );
+    // GitHub's form: the code is the top-level `type` too, which clients test for.
+    let error = &missing["errors"][0];
+    assert_eq!(error["type"], "NOT_FOUND", "{missing}");
+    assert_eq!(
+        error["message"], "Could not resolve to a User with the login of 'nobody-here'.",
+        "{missing}"
+    );
+    assert_eq!(error["path"], json!(["user"]), "{missing}");
     let held = gql(
         &base,
         "/graphql",
@@ -797,4 +805,99 @@ fn the_lookups_by_a_key_other_than_the_identity_are_listed() {
     // With consistency off no lookup is answered from state, so none is listed.
     let off = mb_protocols::unknown_id_types(&applied, &world, &Default::default(), false);
     assert!(off.lookups.is_empty());
+}
+
+#[tokio::test]
+async fn a_batch_entrys_errors_carry_their_type() {
+    let base = serve(GITHUB, None, vec![], UnknownIds::NotFound).await;
+    let answer: Value = reqwest::Client::new()
+        .post(format!("{base}/graphql"))
+        .header("x-mockingbird-session", "s1")
+        .json(&json!([
+            {"query": r#"{ user(login: "nobody-here") { id } }"#},
+            {"query": "{ nope }"},
+        ]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entries = answer.as_array().expect("a batch answer");
+    assert_eq!(entries[0]["data"]["user"], Value::Null, "{answer}");
+    assert_eq!(entries[0]["errors"][0]["type"], "NOT_FOUND", "{answer}");
+    // A validation error has no `extensions.code`, so no `type`.
+    let invalid = &entries[1]["errors"][0];
+    assert!(invalid["message"].is_string(), "{answer}");
+    assert!(invalid["extensions"].get("code").is_none(), "{answer}");
+    assert!(invalid.get("type").is_none(), "{answer}");
+}
+
+#[tokio::test]
+async fn under_null_an_unknown_lookup_answers_null_without_an_error() {
+    let fig = product(1, "fiddle-leaf-fig", "Fiddle Leaf Fig", "34.0");
+    let base = serve(
+        STOREFRONT,
+        Some(STOREFRONT_WORLD),
+        vec![fig],
+        UnknownIds::Null,
+    )
+    .await;
+    let missing = gql(
+        &base,
+        "/graphql",
+        r#"{ product(handle: "no-such") { id title } }"#,
+    )
+    .await;
+    assert_eq!(missing["data"]["product"], Value::Null, "{missing}");
+    assert!(missing.get("errors").is_none(), "{missing}");
+    let held = gql(
+        &base,
+        "/graphql",
+        r#"{ product(handle: "fiddle-leaf-fig") { id title } }"#,
+    )
+    .await;
+    assert!(held.get("errors").is_none(), "{held}");
+    assert_eq!(
+        held["data"]["product"]["title"], "Fiddle Leaf Fig",
+        "{held}"
+    );
+
+    // Below the root too.
+    let base = serve(GITHUB_REPOS, None, github_records(), UnknownIds::Null).await;
+    let nested = gql(
+        &base,
+        "/graphql",
+        r#"{ user(login: "octocat") { login repository(name: "nope") { name } } }"#,
+    )
+    .await;
+    assert!(nested.get("errors").is_none(), "{nested}");
+    assert_eq!(nested["data"]["user"]["login"], "octocat", "{nested}");
+    assert_eq!(
+        nested["data"]["user"]["repository"],
+        Value::Null,
+        "{nested}"
+    );
+}
+
+#[tokio::test]
+async fn under_null_a_non_null_lookup_keeps_its_error() {
+    const STRICT: &str = r"
+type Query { user(login: String!): User! }
+type User { id: ID! login: String! }
+";
+    let octo = StoredResource {
+        resource_type: "user".into(),
+        id: "U_1".into(),
+        data: json!({"__typename": "User", "id": "U_1", "login": "octocat"}),
+    };
+    let base = serve(STRICT, None, vec![octo], UnknownIds::Null).await;
+    let missing = gql(
+        &base,
+        "/graphql",
+        r#"{ user(login: "nobody-here") { id } }"#,
+    )
+    .await;
+    assert_eq!(missing["data"], Value::Null, "{missing}");
+    assert_eq!(missing["errors"][0]["type"], "NOT_FOUND", "{missing}");
 }

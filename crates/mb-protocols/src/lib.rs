@@ -515,6 +515,13 @@ pub enum UnknownIds {
     Generate,
     /// Answer the operation's `404`, whatever the type.
     NotFound,
+    /// As [`UnknownIds::NotFound`], except that in GraphQL what that answers with a
+    /// `NOT_FOUND` error (a lookup by an argument other than the identity, nested ones
+    /// too, and a read of a record the session deleted) answers its field `null` with
+    /// no error, when the field is nullable (Shopify's Storefront API). A non-null
+    /// field keeps the error: `null` there would null its parent. A root lookup by an
+    /// unknown id still generates.
+    Null,
 }
 
 /// A process stop signal that open-ended streams end on, so a graceful

@@ -176,7 +176,7 @@ mocks:
     llm_profile: openrouter
     header_overrides: true
     consistency: on
-    unknown_ids: inferred
+    unknown_ids: inferred  # generate | 404 | null (404, but a GraphQL lookup by a non-id argument, or of a deleted record, answers null with no error)
     default_scenario: friendly
     shares: shop          # mocks of one API keep their sessions together (unset: the default group of mocks sharing a registrable domain; none: no group)
     strict_requests: false  # true: refuse undeclared request members, and validate an inferred contract strictly

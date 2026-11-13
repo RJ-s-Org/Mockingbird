@@ -704,8 +704,8 @@ pub struct WorldView {
 /// How a mock answers a read by path of an id the session does not hold.
 #[derive(Serialize, ToSchema, Debug)]
 pub struct UnknownIdsView {
-    /// The mock's `unknown_ids`: `inferred` (unset: decided per type), `generate` or
-    /// `404` (decided for every type).
+    /// The mock's `unknown_ids`: `inferred` (unset: decided per type), `generate`, `404`
+    /// or `null` (decided for every type).
     #[schema(value_type = String, example = "inferred")]
     pub setting: UnknownIds,
     /// Per resource type with a read by path parameter: its answer and why.
@@ -778,6 +778,11 @@ impl UnknownIdsView {
     fn answer(types: &UnknownIdTypes, setting: UnknownIds, t: &str) -> UnknownIdAnswer {
         let (answer, why) = match (setting, types.creatable.get(t)) {
             (UnknownIds::NotFound, _) => ("404", "the mock sets unknown_ids: 404".to_owned()),
+            (UnknownIds::Null, _) => (
+                "404",
+                "the mock sets unknown_ids: null (a GraphQL lookup answers null without an error)"
+                    .to_owned(),
+            ),
             (UnknownIds::Generate, _) => {
                 ("generate", "the mock sets unknown_ids: generate".to_owned())
             }

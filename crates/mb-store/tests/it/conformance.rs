@@ -19,7 +19,7 @@ use mb_store::{
     OidcPendingLogin, RETENTION_PRUNE_INTERVAL, RateLimit, RequestKind, RequestLogFilter,
     ResourceSource, Scenario, ScenarioRules, StoreError, UnknownIds, WebhookSigning, WebhookTarget,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 /// Calls `$callback! { check, ... }` with every check of the suite, so each
@@ -349,11 +349,24 @@ pub(crate) async fn mock_behavior_round_trips(store: &Arc<dyn ControlStore>) {
         (json!("inferred"), UnknownIds::Inferred),
         (json!("generate"), UnknownIds::Generate),
         (json!("404"), UnknownIds::NotFound),
+        (json!("null"), UnknownIds::Null),
+        // A key set to null is the value `null`; an absent one keeps the default.
+        (Value::Null, UnknownIds::Null),
     ] {
         let parsed: MockBehavior =
             serde_json::from_value(json!({"unknown_ids": written})).expect("deserialize");
         assert_eq!(parsed.unknown_ids, read);
+        let again: MockBehavior =
+            serde_json::from_value(serde_json::to_value(&parsed).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(again.unknown_ids, read);
     }
+    let unset: MockBehavior = serde_json::from_value(json!({})).expect("deserialize");
+    assert_eq!(unset.unknown_ids, UnknownIds::Inferred);
+    assert_eq!(
+        serde_json::to_value(UnknownIds::Null).expect("serialize"),
+        json!("null")
+    );
     let parsed: MockBehavior =
         serde_json::from_value(json!({"consistency": false, "unknown_ids": 404}))
             .expect("deserialize");

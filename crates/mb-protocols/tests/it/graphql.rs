@@ -794,6 +794,7 @@ async fn root_field_cap_rejects_before_engine() {
         r.body,
         json!({"errors": [{
             "message": "too many root fields: 21 (maximum 20)",
+            "type": "TOO_MANY_ROOT_FIELDS",
             "extensions": {"code": "TOO_MANY_ROOT_FIELDS"},
         }]})
     );
@@ -918,6 +919,7 @@ fn nested_fragment_bomb_answers_within_a_second() {
         r.body,
         json!({"errors": [{
             "message": "query too large: more than 10000 selections once fragments are expanded",
+            "type": "QUERY_TOO_LARGE",
             "extensions": {"code": "QUERY_TOO_LARGE"},
         }]})
     );
@@ -2125,6 +2127,7 @@ async fn each_batched_operation_is_checked_on_its_own() {
         r.body[1],
         json!({"errors": [{
             "message": "too many root fields: 2 (maximum 1)",
+            "type": "TOO_MANY_ROOT_FIELDS",
             "extensions": {"code": "TOO_MANY_ROOT_FIELDS"},
         }]})
     );
@@ -2500,6 +2503,53 @@ async fn a_noun_first_delete_removes_the_stored_record() {
         other.body
     );
     assert_eq!(provider.requests().len(), 2);
+}
+
+/// A read by `id` of a record the session deleted answers `null` with no error under
+/// `unknown_ids: null`, and `null` with a `NOT_FOUND` (its `type` too) under `404`.
+#[tokio::test]
+async fn a_deleted_record_read_by_id_is_null_alone_under_null() {
+    for unknown_ids in [
+        mb_protocols::UnknownIds::Null,
+        mb_protocols::UnknownIds::NotFound,
+    ] {
+        let (_, mut rt) = noun_first(scripted(vec![json!({
+            "__typename": "CommentPayload", "success": true,
+            "comment": {"__typename": "Comment", "id": "c-1", "body": "Hi"}
+        })]));
+        rt.unknown_ids = unknown_ids;
+        let base = serve(rt).await;
+        let session = [("x-mockingbird-session", "s1")];
+        let created = seeded(
+            &base,
+            json!({"query": "mutation { commentCreate(input: {body: \"Hi\"}) { success comment { id body } } }"}),
+            &session,
+        )
+        .await;
+        assert!(created.body.get("errors").is_none(), "{}", created.body);
+        let deleted = post(
+            &base,
+            json!({"query": "mutation { commentDelete(id: \"c-1\") { success } }"}),
+            &session,
+        )
+        .await;
+        assert!(deleted.body.get("errors").is_none(), "{}", deleted.body);
+        let after = post(
+            &base,
+            json!({"query": "{ comment(id: \"c-1\") { id body } }"}),
+            &session,
+        )
+        .await;
+        assert_eq!(after.body["data"]["comment"], Value::Null, "{}", after.body);
+        if unknown_ids == mb_protocols::UnknownIds::Null {
+            assert!(after.body.get("errors").is_none(), "{}", after.body);
+        } else {
+            let error = &after.body["errors"][0];
+            assert_eq!(error["type"], "NOT_FOUND", "{}", after.body);
+            assert_eq!(error["extensions"]["code"], "NOT_FOUND", "{}", after.body);
+            assert_eq!(error["path"], json!(["comment"]), "{}", after.body);
+        }
+    }
 }
 
 /// A generated delete whose payload names another id leaves no marker: the

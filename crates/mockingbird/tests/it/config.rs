@@ -3764,6 +3764,58 @@ mocks:
           - {id: getOrder, instructions: This order is a gift.}
 "#;
 
+/// `unknown_ids: null` (YAML null) is the value `null`, as `"null"` is; an unset key
+/// keeps `inferred`.
+#[test]
+fn unknown_ids_null_in_yaml_is_the_value_not_unset() {
+    let ws = Workspace::new();
+    // The last column: a YAML null (not the string), flagged for the reconcile's warning.
+    for (line, read, yaml_null) in [
+        ("    unknown_ids: null\n", mb_store::UnknownIds::Null, true),
+        (
+            "    unknown_ids: \"null\"\n",
+            mb_store::UnknownIds::Null,
+            false,
+        ),
+        ("    unknown_ids: ~\n", mb_store::UnknownIds::Null, true),
+        ("    unknown_ids:\n", mb_store::UnknownIds::Null, true),
+        (
+            "    unknown_ids: 404\n",
+            mb_store::UnknownIds::NotFound,
+            false,
+        ),
+        ("", mb_store::UnknownIds::Inferred, false),
+    ] {
+        let cfg = ws.load(&format!(
+            "mocks:\n  orders:\n    contract: orders.yaml\n{line}"
+        ));
+        assert_eq!(cfg.mocks["orders"].unknown_ids, read, "{line:?}");
+        assert_eq!(
+            cfg.mocks["orders"].unknown_ids_yaml_null, yaml_null,
+            "{line:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn reconcile_warns_of_an_empty_unknown_ids() {
+    let ws = Workspace::new();
+    let cfg = ws.load("mocks:\n  orders:\n    contract: orders.yaml\n    unknown_ids:\n");
+    assert_eq!(cfg.mocks["orders"].unknown_ids, mb_store::UnknownIds::Null);
+    let store = store().await;
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("orders") && w.contains("unknown_ids: null")),
+        "{:?}",
+        report.warnings
+    );
+}
+
 #[tokio::test]
 async fn reconcile_applies_mock_behavior_and_operation_instructions() {
     let ws = Workspace::new();

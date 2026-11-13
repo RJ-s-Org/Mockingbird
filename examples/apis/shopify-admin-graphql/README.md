@@ -92,7 +92,7 @@ curl -s localhost:8080/admin/api/2026-10/graphql.json -H 'Host: juniper-plants.m
 ```
 
 `slow` adds 3 s per root field; `outage` answers HTTP 200 with
-`{"data":null,"errors":[{"message":"Service Unavailable (forced status 503)","extensions":{"code":"INTERNAL_SERVER_ERROR","status":503}}]}`.
+`{"data":null,"errors":[{"message":"Service Unavailable (forced status 503)","type":"INTERNAL_SERVER_ERROR","extensions":{"code":"INTERNAL_SERVER_ERROR","status":503}}]}`.
 
 Shopify's throttling answer (HTTP 200, `errors[].extensions.code: "THROTTLED"` and a
 top-level `extensions.cost.throttleStatus`) cannot be produced: a GraphQL scenario

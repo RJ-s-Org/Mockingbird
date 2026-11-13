@@ -145,6 +145,20 @@ pub async fn reconcile(
     let prepared = validate(store, cfg, &existing_mocks, &existing_profiles).await?;
 
     let mut report = ReconcileReport::default();
+    // An empty `unknown_ids:` is a YAML null, which selects the value `null`.
+    for name in cfg
+        .mocks
+        .iter()
+        .filter(|(_, m)| m.unknown_ids_yaml_null)
+        .map(|(name, _)| name)
+    {
+        let warning = format!(
+            "mock {name:?}: `unknown_ids` is null (or empty), which selects unknown_ids: null \
+             (404, but a GraphQL lookup of an unknown record answers null with no error)"
+        );
+        tracing::warn!("{warning}");
+        report.warnings.push(warning);
+    }
 
     // Workspaces first, so every mock and profile has its workspace.
     let wanted: BTreeSet<&str> = cfg

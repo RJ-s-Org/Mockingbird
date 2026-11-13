@@ -186,7 +186,10 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
             if let Some(delay) = ran.delay {
                 tokio::time::sleep(delay).await;
             }
-            match serde_json::to_vec(&ran.response) {
+            match serde_json::to_value(&ran.response).and_then(|mut response| {
+                typed_errors(&mut response);
+                serde_json::to_vec(&response)
+            }) {
                 Ok(body) => respond(body, &ran.meta),
                 Err(e) => problem(500, "Internal Server Error", e.to_string()),
             }
@@ -238,10 +241,11 @@ async fn operation(
         .and_then(|doc| oversize_doc(doc, operation_name, rt.protocols.graphql_max_root_fields));
     if let Some(oversize) = too_large {
         let (message, code) = oversize.describe();
-        let body = json!({"errors": [{
+        let mut body = json!({"errors": [{
             "message": message,
             "extensions": {"code": code},
         }]});
+        typed_errors(&mut body);
         let mut resp = (StatusCode::BAD_REQUEST, body.to_string()).into_response();
         resp.headers_mut().insert(
             header::CONTENT_TYPE,
@@ -300,8 +304,9 @@ async fn batch(
             Ok(ran) => {
                 delay = delay.max(ran.delay);
                 meta.merge(ran.meta);
-                let entry = serde_json::to_value(&ran.response)
+                let mut entry = serde_json::to_value(&ran.response)
                     .unwrap_or_else(|e| refused_entry(500, &e.to_string()));
+                typed_errors(&mut entry);
                 entries.push(entry);
             }
             Err(refusal) => entries.push(refusal.entry),
@@ -387,10 +392,39 @@ async fn admit_request(
 
 /// A batch entry for an operation refused with HTTP `status`.
 fn refused_entry(status: u16, message: &str) -> Value {
-    json!({"errors": [{
+    let mut entry = json!({"errors": [{
         "message": message,
         "extensions": {"code": error_code(status), "status": status},
-    }]})
+    }]});
+    typed_errors(&mut entry);
+    entry
+}
+
+/// Gives each error of `response` (a GraphQL response as JSON) with an
+/// `extensions.code` that code as its top-level `type` too, as GitHub's API
+/// answers (`{"type": "NOT_FOUND", ...}`, which clients test for). An error
+/// that has a `type` keeps it. Subscriptions over WebSocket are serialized by
+/// async-graphql and keep only `extensions.code`.
+fn typed_errors(response: &mut Value) {
+    let Some(errors) = response.get_mut("errors").and_then(Value::as_array_mut) else {
+        return;
+    };
+    errors.iter_mut().for_each(type_error);
+}
+
+/// [`typed_errors`] for one error object.
+pub(crate) fn type_error(error: &mut Value) {
+    let Some(code) = error
+        .get("extensions")
+        .and_then(|e| e.get("code"))
+        .filter(|c| c.is_string())
+        .cloned()
+    else {
+        return;
+    };
+    if let Some(error) = error.as_object_mut() {
+        error.entry("type").or_insert(code);
+    }
 }
 
 /// What running one operation produced, before it is answered.
@@ -462,7 +496,14 @@ async fn execute(
         })
         .map(|s| s.headers.clone())
         .unwrap_or_default();
-    if let Some(record) = resolve::merged_record(reports, || serde_json::to_value(&response).ok()) {
+    // Logged as answered: with each error's `type`.
+    let answered = || {
+        serde_json::to_value(&response).ok().map(|mut v| {
+            typed_errors(&mut v);
+            v
+        })
+    };
+    if let Some(record) = resolve::merged_record(reports, answered) {
         call::record_request(&st.rt, record);
     }
     let fallback_reason = collected
@@ -892,6 +933,22 @@ fn problem(status: u16, title: &str, detail: impl Into<String>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn errors_carry_their_code_as_type_unless_they_have_one() {
+        let mut response = json!({"data": null, "errors": [
+            {"message": "a", "extensions": {"code": "NOT_FOUND", "status": 404}},
+            {"message": "b", "type": "OWN", "extensions": {"code": "FORBIDDEN"}},
+            {"message": "c"},
+        ]});
+        typed_errors(&mut response);
+        assert_eq!(response["errors"][0]["type"], "NOT_FOUND");
+        assert_eq!(response["errors"][1]["type"], "OWN");
+        assert!(response["errors"][2].get("type").is_none());
+        let mut fine = json!({"data": {"a": 1}});
+        typed_errors(&mut fine);
+        assert_eq!(fine, json!({"data": {"a": 1}}));
+    }
 
     #[test]
     fn error_codes() {
