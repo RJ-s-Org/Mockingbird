@@ -1805,6 +1805,131 @@ fn start_server_reviews_the_worlds_and_flags_same_host_mocks_without_shares() {
     }
 }
 
+/// A list whose `color` parameter no world entry reads: calling it leaves an
+/// `undescribed_param` gap on a called operation.
+const ITEMS: &str = r##"
+openapi: 3.0.0
+info: {title: items, version: "1"}
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Item"}}}}
+    post:
+      operationId: createItem
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+  /shelves/{shelf}/top:
+    get:
+      operationId: topItem
+      parameters: [{name: shelf, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+components:
+  schemas:
+    Item:
+      type: object
+      properties:
+        label: {type: string}
+        color: {type: string}
+"##;
+
+/// `server_status` says the world is not reviewed for the called operations once the
+/// app's flows called one with gaps open, until `get_world {called: true}` is read
+/// whole; again after a later flow, and after the server restarts.
+#[test]
+fn server_status_says_the_world_is_not_reviewed_until_the_called_gaps_are_read() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("items.yaml"), ITEMS).unwrap();
+    std::fs::write(
+        dir.path().join("mockingbird.yaml"),
+        "mocks:\n  shop:\n    contract: items.yaml\n",
+    )
+    .unwrap();
+    let (mut mcp, _, started) = start_server_on_free_ports(
+        dir.path(),
+        &json!({ "config": "mockingbird.yaml", "offline": true }),
+        mcp_env,
+        || {},
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_eq!(started["ready"], true, "{started}");
+        // No flow has run: nothing to review yet.
+        assert!(started.get("world_not_reviewed").is_none(), "{started}");
+        let flagged = |status: &Value| status.get("world_not_reviewed").cloned();
+        let step = |status: &Value| {
+            status["next_steps"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|s| {
+                    s.as_str().is_some_and(|s| {
+                        s.starts_with("World not reviewed for the called operations of shop")
+                    })
+                })
+        };
+        // Calls the operation, then waits for the background log writer to hold
+        // `logged` requests.
+        let call = |mcp: &mut McpClient, logged: usize| {
+            mcp.tool("call_mock", json!({ "path": "/shop/shelves/s1/top" }));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while mcp
+                .tool("list_requests", json!({ "mock": "shop", "limit": 5 }))
+                .as_array()
+                .map_or(0, Vec::len)
+                < logged
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        call(&mut mcp, 1);
+        let status = mcp.tool("server_status", json!({}));
+        assert_eq!(flagged(&status), Some(json!(["shop"])), "{status}");
+        assert!(step(&status), "{status}");
+        let world = mcp.tool("get_world", json!({ "mock": "shop", "called": true }));
+        assert!(
+            world["gaps"].as_array().is_some_and(|g| !g.is_empty()),
+            "{world}"
+        );
+        let status = mcp.tool("server_status", json!({}));
+        assert_eq!(flagged(&status), None, "{status}");
+        assert!(!step(&status), "{status}");
+        // A later flow is not reviewed yet, and reading part of the world (some
+        // operations only) does not review it.
+        call(&mut mcp, 2);
+        let status = mcp.tool("server_status", json!({}));
+        assert_eq!(flagged(&status), Some(json!(["shop"])), "{status}");
+        mcp.tool(
+            "get_world",
+            json!({ "mock": "shop", "called": true, "operations": ["listItems"] }),
+        );
+        let status = mcp.tool("server_status", json!({}));
+        assert_eq!(flagged(&status), Some(json!(["shop"])), "{status}");
+        mcp.tool("get_world", json!({ "mock": "shop", "called": true }));
+        let status = mcp.tool("server_status", json!({}));
+        assert_eq!(flagged(&status), None, "{status}");
+        // A restarted server's log starts again: its flows are not reviewed.
+        let stopped = mcp.tool("stop_server", json!({}));
+        assert_eq!(stopped["stopped"], true, "{stopped}");
+        let restarted = mcp.tool(
+            "start_server",
+            json!({ "config": "mockingbird.yaml", "offline": true }),
+        );
+        assert_eq!(restarted["ready"], true, "{restarted}");
+        call(&mut mcp, 1);
+        let status = mcp.tool("server_status", json!({}));
+        assert_eq!(flagged(&status), Some(json!(["shop"])), "{status}");
+    }));
+    let stopped = mcp.tool("stop_server", json!({}));
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 /// The profile shapes an agent writes from the config file save in one
 /// `put_llm_profile` call each; a literal key is refused without an echo.
 #[test]
