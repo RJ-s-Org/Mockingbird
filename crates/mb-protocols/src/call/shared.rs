@@ -7,9 +7,10 @@
 //! collection named for the type (`pulls` answering `pull-request`s, `repos`) and
 //! a GraphQL type (`PullRequest`, `Repository`) declaring the same identity. It is
 //! answered in the reading mock's shape: members renamed between camelCase and
-//! snake_case where only that differs, enum values in the reading schema's case,
-//! REST's `node_id` as GraphQL's `id` (and back), in the objects it nests and
-//! their lists too (a number where a plain string is declared as that string),
+//! snake_case where only that differs, enum values in the reading schema's
+//! spelling where only case and separators differ (`CLOSED` as `closed`), REST's
+//! `node_id` as GraphQL's `id` (and back), in the objects it nests and their lists
+//! too (a number where a plain string is declared as that string),
 //! and a scalar one shape holds flattened, named for the object the other holds
 //! it in, nested there (GraphQL's `headRefName` as REST's `head.ref`, and back).
 
@@ -317,7 +318,7 @@ pub(crate) fn record_props<'a>(
 }
 
 /// `data`'s members `props` declares, under the name `props` uses (as is, in
-/// snake_case or in camelCase), each enum value in the case `props` lists it.
+/// snake_case or in camelCase), each enum value as `props` spells it ([`fit_enum`]).
 pub(crate) fn reshape(
     props: &Map<String, Value>,
     defs: &Map<String, Value>,
@@ -546,7 +547,11 @@ fn reshape_inner(
             Value::Array(
                 items
                     .into_iter()
-                    .map(|item| reshape_inner(item_schema, defs, item, (depth, &mut *budget)))
+                    .map(|item| match item {
+                        // An enum value of the list.
+                        Value::String(_) => fit_enum(item_schema, defs, &item),
+                        item => reshape_inner(item_schema, defs, item, (depth, &mut *budget)),
+                    })
                     .collect(),
             )
         }
@@ -730,7 +735,10 @@ fn of_type(schema: &Value, defs: &Map<String, Value>, value: &Value) -> bool {
     allows(schema, defs, value, 0)
 }
 
-/// `value` as the enum `schema` lists spells it, when only its case differs.
+/// `value` as the enum `schema` lists spells it, when only its case and separators
+/// differ (GraphQL's `CLOSED` as REST's `closed`, `REQUIRES_ACTION` as
+/// `requires-action` or `RequiresAction`): kept as it is when the enum lists it, or
+/// lists no value, or more than one, spelled so.
 fn fit_enum(schema: &Value, defs: &Map<String, Value>, value: &Value) -> Value {
     let Value::String(s) = value else {
         return value.clone();
@@ -738,11 +746,16 @@ fn fit_enum(schema: &Value, defs: &Map<String, Value>, value: &Value) -> Value {
     let mut schema = schema;
     for _ in 0..4 {
         if let Some(values) = schema.get("enum").and_then(Value::as_array) {
-            return values
-                .iter()
-                .filter_map(Value::as_str)
-                .find(|v| *v == s.as_str() || v.eq_ignore_ascii_case(s))
-                .map_or_else(|| value.clone(), |v| Value::String(v.to_string()));
+            let listed: Vec<&str> = values.iter().filter_map(Value::as_str).collect();
+            if listed.contains(&s.as_str()) {
+                return value.clone();
+            }
+            let spelled = enum_spelling(s);
+            let mut alike = listed.into_iter().filter(|v| enum_spelling(v) == spelled);
+            return match (alike.next(), alike.next()) {
+                (Some(v), None) => Value::String(v.to_string()),
+                _ => value.clone(),
+            };
         }
         if let Some(def) = schema
             .get("$ref")
@@ -762,6 +775,16 @@ fn fit_enum(schema: &Value, defs: &Map<String, Value>, value: &Value) -> Value {
         }
     }
     value.clone()
+}
+
+/// An enum value as [`fit_enum`] compares it: lowercased, its `_`, `-` and spaces
+/// dropped (so a camelCase boundary is no different).
+fn enum_spelling(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !matches!(c, '_' | '-' | ' '))
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// The record types of the mocks of each `shares` group, by workspace and mock: what
@@ -1532,6 +1555,22 @@ type Mutation { createPullRequest(input: CreatePullRequestInput!): CreatePullReq
             reshape(props.as_object().unwrap(), &Map::new(), &data),
             json!({"number": 7, "created_at": "2024-01-01T00:00:00Z", "state": "closed"})
         );
+    }
+
+    #[test]
+    fn an_enum_value_takes_the_one_spelling_alike_or_stays() {
+        let schema = |values: &[&str]| json!({"type": "string", "enum": values});
+        let fit =
+            |values: &[&str], value: &str| fit_enum(&schema(values), &Map::new(), &json!(value));
+        let reading = ["requires_action", "succeeded"];
+        for stored in ["REQUIRES_ACTION", "requires-action", "RequiresAction"] {
+            assert_eq!(fit(&reading, stored), json!("requires_action"), "{stored}");
+        }
+        // No value spelled alike, or two: the stored value stays.
+        assert_eq!(fit(&reading, "CANCELED"), json!("CANCELED"));
+        assert_eq!(fit(&["on-hold", "on_hold"], "ON HOLD"), json!("ON HOLD"));
+        // One the enum lists stays, though another is spelled alike.
+        assert_eq!(fit(&["on-hold", "on_hold"], "on_hold"), json!("on_hold"));
     }
 
     #[test]
