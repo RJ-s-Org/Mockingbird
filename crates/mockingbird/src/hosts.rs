@@ -1201,14 +1201,22 @@ impl Walker<'_> {
 
 /// At most this many files [`calls_in_source`] reads.
 const MAX_CALL_FILES: usize = 20_000;
+/// The extensions of the code files [`calls_in_source`] reads: a document, a page, a
+/// stylesheet or data that names a field is not a call.
+const CODE_EXTENSIONS: &[&str] = &[
+    "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts", "vue", "svelte", "py", "rb", "go",
+    "java", "kt", "kts", "scala", "rs", "php", "cs", "fs", "swift", "dart", "ex", "exs", "clj",
+    "cljs", "cljc", "elm", "astro", "graphql", "gql",
+];
 /// Files larger than this are not read by [`calls_in_source`] (a schema, a bundle).
 const MAX_CALL_FILE_BYTES: u64 = 512 * 1024;
 
 /// Which of `names` the app's own files under `root` call as a field with arguments
 /// (`user(login: $login)`): the name, not part of a longer identifier, then `(`. The
-/// walk leaves out [`SKIP_DIRS`], dependencies and build output (`node_modules`,
-/// `vendor`, `target`, `dist`, `build`), hidden directories, `skip` (the mocks'
-/// config folder and contracts, which declare every field) and files over
+/// walk reads code files only ([`CODE_EXTENSIONS`]) and leaves out [`SKIP_DIRS`],
+/// dependencies and build output (`node_modules`, `vendor`, `target`, `dist`,
+/// `build`), hidden directories, `skip` (the mocks' config folder and contracts, which
+/// declare every field; an entry holding all of `root` is ignored) and files over
 /// [`MAX_CALL_FILE_BYTES`], and stops after [`MAX_CALL_FILES`] files or once every
 /// name is found.
 pub(crate) fn calls_in_source(
@@ -1224,6 +1232,21 @@ pub(crate) fn calls_in_source(
         "build",
         "coverage",
     ];
+    // A skipped folder that holds the whole project (a config at its root, a relative
+    // empty parent) would leave nothing to read.
+    // Root and skips compared canonical (`/tmp` is `/private/tmp` on macOS; a
+    // contract may be written with `..`).
+    let root = &root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let skip: Vec<PathBuf> = skip
+        .iter()
+        .filter(|s| !s.as_os_str().is_empty())
+        .map(|s| {
+            std::path::absolute(s)
+                .and_then(|a| a.canonicalize())
+                .unwrap_or_else(|_| s.clone())
+        })
+        .filter(|s| !root.starts_with(s))
+        .collect();
     let mut found = BTreeSet::new();
     let mut stack = vec![root.to_path_buf()];
     let mut files = 0usize;
@@ -1251,6 +1274,7 @@ pub(crate) fn calls_in_source(
                 continue;
             }
             if !kind.is_file()
+                || !CODE_EXTENSIONS.contains(&extension(&name).as_str())
                 || entry
                     .metadata()
                     .map_or(true, |m| m.len() > MAX_CALL_FILE_BYTES)
@@ -1690,6 +1714,13 @@ mod tests {
         .into();
         let found = calls_in_source(root, &[root.join("mock")], &names);
         assert_eq!(found, ["repository", "user"].map(String::from).into());
+        // A config at the project root skips its folder: the root is still read.
+        let at_root = calls_in_source(root, &[root.to_path_buf(), PathBuf::new()], &names);
+        assert!(at_root.contains("user"), "{at_root:?}");
+        // A document naming a field is not a call.
+        std::fs::write(root.join("NOTES.md"), "license(key: x)").unwrap();
+        let docs = calls_in_source(root, &[root.join("mock")], &names);
+        assert!(!docs.contains("license"), "{docs:?}");
     }
 
     fn write(root: &Path, rel: &str, text: &str) {
