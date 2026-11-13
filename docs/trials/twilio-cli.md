@@ -199,6 +199,16 @@ The fifth rerun's mock, unchanged, served by main plus this PR: **21 of 21**.
 
 `VerificationCheck` has a create but no read. The id member's schema was looked up only in the type's reads, so the record's sid was minted as a plain word. The stored record itself was right: the request's `To` and the path's `ServiceSid` were both there. But that sid failed the answer's `^VE[0-9a-fA-F]{32}$` pattern, so the answer fell back to a wholly generated one. With no read, the id's schema and examples now come from what the type's creates answer. The check then answers with the sent `To`, the path's `ServiceSid`, a `VE…` sid, and `status: "approved"`, which the fill picks from the member's description (no world rule).
 
+## Prompt for later runs (from 2026-11-12)
+
+Two model-off fresh agents on main `28e09906` scored 12/21. Messaging and phone numbers passed 12/12, and the `no_lifecycle` gap (#621) led one to declare the Messages and Accounts lifecycles. Both mocked only `api`, `lookups` and `monitor.twilio.com`, so the proxy blocked all 9 Verify flows; both said so in their hand-back. twilio-cli is a generic client that reaches every Twilio product, and "Mock the Twilio API for this app" doesn't say which products the user exercises. The earlier model-on agent mocked all 44 hosts, which took 16.8 min.
+
+The products the flows test belong in the prompt, as a user would say them:
+
+> Mock the Twilio API for this app with Mockingbird so I can run it locally without a Twilio account. I use it for messaging, phone numbers and Verify. Ports 8080, 9090 and 8888 are already used by other things on this machine. When done, tell me how to run the CLI against the mock.
+
+Add the model sentence (`Serve the endpoints with OpenRouter model …; the key is in OPENROUTER_API_KEY.`) for runs with the model. In-scope flows stay the 21 in Flows.
+
 ## Files
 
 These are outside the repo, in `mockingbird-trials/twilio/`:
