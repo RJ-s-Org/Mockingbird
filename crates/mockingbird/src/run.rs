@@ -92,6 +92,12 @@ impl Started {
 /// cannot be started is exit code 127, not an error.
 pub async fn run(args: RunArgs) -> anyhow::Result<ExitCode> {
     let session = open(&args).await?;
+    if !args.keep
+        && session.started_server()
+        && let Some(warning) = in_memory_warning(&session.config)
+    {
+        eprintln!("{warning}");
+    }
     let window = crate::verify_run::world_review_before(&session.admin_url).await;
     let code = run_command(&args.command, &session.proxy).await;
     // The called operations whose world is left open, as `verify --run` notes them.
@@ -102,6 +108,25 @@ pub async fn run(args: RunArgs) -> anyhow::Result<ExitCode> {
     }
     session.close(args.keep).await;
     code
+}
+
+/// The warning `run` prints when it started the server of `config` for this command
+/// alone and that server keeps its records in memory: what the command creates is gone
+/// once it exits, so a CLI run once per command (each `mockingbird run -- gh …`) never
+/// reads back what an earlier one wrote. `None` for a server with a file or database
+/// store, or a config that does not load.
+#[must_use]
+pub fn in_memory_warning(config: &std::path::Path) -> Option<String> {
+    let mut cfg = file_config::load(config).ok()?;
+    file_config::apply_env(&mut cfg).ok()?;
+    let memory = |url: &str| url == "memory" || url.starts_with("sqlite::memory:");
+    if !memory(&cfg.storage.url) && !memory(cfg.storage.effective_state_url()) {
+        return None;
+    }
+    let config = config.display();
+    Some(format!(
+        "mockingbird: warning: this run started its own server, which keeps state in memory: the records this command creates are gone when it exits, and the next `mockingbird run` starts empty. To keep state across commands (a CLI run once per command), start the server once with `mockingbird server start -c {config} --proxy`, run each command with `mockingbird run -c {config} -- <command>` (it reuses that server), and stop it with `mockingbird server stop`; or pass --keep to leave this one running."
+    ))
 }
 
 /// The mocks a command runs against: the config's server (started by
