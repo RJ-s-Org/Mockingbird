@@ -18,7 +18,7 @@ Pick the smallest shape that fits:
 
 ```sh
 mockingbird server start -c mockingbird.yaml      # waits for /readyz; prints pid and URLs as JSON
-mockingbird server status                         # running, ready, readyz reasons
+mockingbird server status                         # running, ready, readyz reasons; exits 3 unless running and ready
 mockingbird server logs -n 200
 mockingbird server stop
 ```

@@ -20,6 +20,9 @@ use crate::providers::PRESETS;
 /// Default `--state-dir`.
 pub const DEFAULT_STATE_DIR: &str = ".mockingbird";
 
+/// `server status`'s exit code when the server is not running or not ready.
+pub const STATUS_NOT_READY: u8 = 3;
+
 #[derive(Subcommand, Debug)]
 pub enum ServerCommand {
     /// Start `mockingbird serve` in the background and wait until it is

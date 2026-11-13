@@ -384,6 +384,30 @@ async fn server_start_names_the_mockingbird_server_holding_its_port() {
     assert!(!state.join("server.pid").exists(), "no server was spawned");
 }
 
+/// `server status` prints the state as JSON and exits 3 unless the server runs and is
+/// ready, so `status || start` starts it only when needed.
+#[test]
+fn server_status_exits_3_unless_the_server_runs_and_is_ready() {
+    let state = tempfile::tempdir().unwrap();
+    let dir = state.path().to_str().unwrap();
+    let status = || mockingbird(&["server", "status", "--state-dir", dir], &[]);
+
+    let out = status();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert_eq!(json_out(&out)["running"], false);
+
+    start_on_free_ports(state.path(), &["--offline"], &[]);
+    let server = Server(state.path().to_path_buf());
+    let out = status();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(json_out(&out)["ready"], true);
+
+    drop(server);
+    let out = status();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert_eq!(json_out(&out)["running"], false);
+}
+
 #[test]
 fn server_start_fails_on_a_busy_data_port() {
     let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
