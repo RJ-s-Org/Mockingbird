@@ -81,7 +81,7 @@ use mb_engine::faker::Faker;
 use mb_engine::{GeneratedResponse, OperationCall};
 use mb_mcm::world::{FilterDesc, FilterKind, OpDesc, OpKind};
 use mb_mcm::{Bundle, Operation, OperationKind};
-use mb_state::SessionKey;
+use mb_state::{SessionKey, StoredResource};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use serde_json::{Map, Value, json};
@@ -1351,12 +1351,16 @@ pub(crate) fn not_found(def: &str, arg: &str, value: &Value) -> Failure {
 /// whose member holds any of those values (text compared without case); the identity
 /// member also matches a record's id. `None` when such a record is held, the type
 /// holds more records than are scanned, or `unknown_ids` generates. Usable for any
-/// lookup by arguments, below a root field too.
+/// lookup by arguments, below a root field too. With `parent` (the parent's names, as
+/// [`call::shows_other_parent`] reads them, and its value), a held record showing
+/// another parent does not count: `user(login: "octocat") { repository(name:
+/// "next.js") }` is not found though `vercel/next.js` is held.
 pub(crate) async fn unknown_lookup(
     rt: &MockRuntime,
     session: &SessionKey,
     def: &str,
     by: &[(&str, &Value)],
+    parent: Option<(&[&str], &[String])>,
 ) -> Option<Failure> {
     let (arg, value) = *by.first()?;
     let t = def.to_lowercase();
@@ -1364,11 +1368,21 @@ pub(crate) async fn unknown_lookup(
         return None;
     }
     let member = identity_member(rt, &t);
+    let name = text(value);
     let named = |id: &str, data: &Value| {
-        by.iter().any(|(name, value)| {
+        let found = by.iter().any(|(name, value)| {
             (*name == member && id_text(value).as_deref() == Some(id))
                 || data.get(*name).is_some_and(|held| loose_eq(held, value))
-        })
+        });
+        found
+            && parent.is_none_or(|(params, values)| {
+                let r = StoredResource {
+                    resource_type: t.clone(),
+                    id: id.to_owned(),
+                    data: data.clone(),
+                };
+                !call::shows_other_parent(rt, &r, params, values, &name)
+            })
     };
     for (name, value) in by {
         if *name == member
@@ -1461,7 +1475,8 @@ async fn lookup(
         .map(|(name, value)| (name.as_str(), value))
         .collect();
     // No described key: the arguments naming a scalar member of the type, as below the
-    // root (`repository(owner:, name:)` → `name`; `owner` is an object).
+    // root (`repository(owner:, name:)` → `name`; `owner` is an object, and names the
+    // parent the record must be under).
     if by.is_empty() && !args.get(&member).is_some_and(given) {
         let defs = &rt.bundle.defs;
         by = args
@@ -1476,7 +1491,26 @@ async fn lookup(
             .map(|(name, value)| (name.as_str(), value))
             .collect();
     }
-    unknown_lookup(rt, session, def, &by).await
+    // An argument naming an object member (`owner:`) names the parent.
+    let parent = args.iter().find_map(|(name, value)| {
+        let object = props
+            .get(name.as_str())
+            .is_some_and(|p| !is_scalar(p, &rt.bundle.defs));
+        (object && !by.iter().any(|(b, _)| *b == name.as_str()))
+            .then(|| value.as_str().filter(|s| !s.is_empty()))
+            .flatten()
+            .map(|v| (name.as_str(), v))
+    });
+    let (params, values);
+    let parent = match parent {
+        Some((name, value)) => {
+            params = [name];
+            values = [value.to_owned()];
+            Some((&params[..], &values[..]))
+        }
+        None => None,
+    };
+    unknown_lookup(rt, session, def, &by, parent).await
 }
 
 /// A lookup below the root field, keyed by value (a [`super::select::lookup_arguments`]
@@ -1487,6 +1521,10 @@ struct NestedLookup {
     /// The definition name of the object it returns.
     def: String,
     by: Vec<(String, Value)>,
+    /// The nearest lookup it is below: that record's type (lowercased) and the values
+    /// it is known by, the one it was looked up by and its id (`("user", ["octocat",
+    /// "U_1"])`).
+    parent: Option<(String, Vec<String>)>,
 }
 
 /// Bounds [`nested_lookups`] (recursive types).
@@ -1499,7 +1537,7 @@ fn nested_lookups(
     schema: &Value,
     sel: &Selection,
     value: &Value,
-    path: &mut Vec<String>,
+    (path, parent): (&mut Vec<String>, Option<&(String, Vec<String>)>),
     out: &mut Vec<NestedLookup>,
     depth: usize,
 ) {
@@ -1511,7 +1549,8 @@ fn nested_lookups(
             if let Some(item) = list_item(schema) {
                 for (i, v) in items.iter().enumerate() {
                     path.push(i.to_string());
-                    nested_lookups(bundle, item, sel, v, path, out, depth + 1);
+                    // Below a list the record's parent is the item, which no lookup named.
+                    nested_lookups(bundle, item, sel, v, (path, None), out, depth + 1);
                     path.pop();
                 }
             }
@@ -1528,6 +1567,7 @@ fn nested_lookups(
                     continue;
                 };
                 path.push(key.clone());
+                let mut below = parent.cloned();
                 if member.is_object()
                     && nullable(field)
                     && let Some(def) = def_ref(field)
@@ -1542,20 +1582,65 @@ fn nested_lookups(
                                 .then(|| (arg.to_string(), value.clone()))
                             })
                             .collect();
-                    if !by.is_empty() {
+                    if let Some((_, value)) = by.first() {
+                        let looked_up = text(value);
                         out.push(NestedLookup {
                             path: path.clone(),
                             def: def.to_string(),
                             by,
+                            parent: parent.cloned(),
                         });
+                        let mut known = vec![looked_up];
+                        known.extend(member.get("id").and_then(id_text));
+                        below = Some((def.to_lowercase(), known));
                     }
                 }
-                nested_lookups(bundle, field, child, member, path, out, depth + 1);
+                nested_lookups(
+                    bundle,
+                    field,
+                    child,
+                    member,
+                    (path, below.as_ref()),
+                    out,
+                    depth + 1,
+                );
                 path.pop();
             }
         }
         _ => {}
     }
+}
+
+/// `values` (what a parent record was looked up by, and its id when the answer showed
+/// it) and what the session's held record of type `t` holding one of them holds: its id
+/// and its top-level text (`login`, `name`, `nameWithOwner`), so a child linking it by
+/// any of those is its own.
+async fn held_names(
+    rt: &MockRuntime,
+    session: &SessionKey,
+    t: &str,
+    values: &[String],
+) -> Vec<String> {
+    let mut out = values.to_vec();
+    let held = call::stored_of_type(rt, session, t, MAX_RECORDS).await;
+    let named = |text: &str| values.iter().any(|v| v.eq_ignore_ascii_case(text));
+    if let Some(r) = held.iter().find(|r| {
+        named(&r.id)
+            || r.data
+                .as_object()
+                .is_some_and(|m| m.values().filter_map(Value::as_str).any(named))
+    }) {
+        out.push(r.id.clone());
+        if let Some(members) = r.data.as_object() {
+            out.extend(
+                members
+                    .values()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned),
+            );
+        }
+    }
+    out
 }
 
 /// Whether a member's schema allows `null` (a nullable GraphQL field).
@@ -1590,13 +1675,31 @@ pub(crate) async fn nested_missing(
     let Some(schema) = plan.op.success_output().and_then(|o| o.schema.as_ref()) else {
         return Vec::new();
     };
+    // The root field is a lookup too when an argument names a scalar member of what
+    // it answers (`user(login: "octocat")`): the parent of the lookups below it.
+    let root = def_ref(schema).and_then(|def| {
+        let props = rt.bundle.defs.get(def)?.get("properties")?.as_object()?;
+        let Some(Value::Object(args)) = &call.body else {
+            return None;
+        };
+        args.iter().find_map(|(name, value)| {
+            (props.get(name.as_str()).is_some_and(|p| {
+                is_scalar(p, &rt.bundle.defs) && !super::select::is_enum(p, &rt.bundle.defs)
+            }) && matches!(value, Value::String(s) if !s.is_empty()))
+            .then(|| {
+                let mut known = vec![text(value)];
+                known.extend(body.get("id").and_then(id_text));
+                (def.to_lowercase(), known)
+            })
+        })
+    });
     let mut found = Vec::new();
     nested_lookups(
         &rt.bundle,
         schema,
         sel,
         body,
-        &mut Vec::new(),
+        (&mut Vec::new(), root.as_ref()),
         &mut found,
         0,
     );
@@ -1608,11 +1711,29 @@ pub(crate) async fn nested_missing(
             continue;
         }
         let by: Vec<(&str, &Value)> = lookup.by.iter().map(|(a, v)| (a.as_str(), v)).collect();
-        let asked = (lookup.def.clone(), json!(lookup.by).to_string());
+        let asked = (
+            lookup.def.clone(),
+            json!([lookup.by, lookup.parent]).to_string(),
+        );
         let unknown = match decided.get(&asked) {
             Some(unknown) => *unknown,
             None => {
-                let unknown = unknown_lookup(rt, &plan.session, &lookup.def, &by)
+                // The parent's type names the member a record shows it by (`user`),
+                // as does the generic `owner`.
+                let parent = match &lookup.parent {
+                    Some((t, values)) => {
+                        Some((t.as_str(), held_names(rt, &plan.session, t, values).await))
+                    }
+                    None => None,
+                };
+                let params: Vec<&str> = parent
+                    .as_ref()
+                    .map(|(t, _)| vec![*t, "owner"])
+                    .unwrap_or_default();
+                let parent = parent
+                    .as_ref()
+                    .map(|(_, values)| (&params[..], &values[..]));
+                let unknown = unknown_lookup(rt, &plan.session, &lookup.def, &by, parent)
                     .await
                     .is_some();
                 decided.insert(asked, unknown);

@@ -411,6 +411,59 @@ pub(super) fn typed_as_own(rt: &MockRuntime, resource_type: &str, member: &str) 
         .any(|d| index.types_by_def.get(*d).map(String::as_str) == Some(resource_type))
 }
 
+/// Whether `r`, looked up by `name` below a parent known by `values` (GraphQL's
+/// `user(login: "octo") { repository(name: "x") }`, or `repository(owner: "octo",
+/// name: "x")`; the value it was looked up by, its id and what its held record holds),
+/// shows another owner and never this one, text compared without case: an
+/// `owner/name` string (`nameWithOwner: "vercel/next.js"`) whose owner is none of
+/// `values`, or a member tied to one of `params` (the parent's type, `owner`) holding
+/// none of them. Any sign of the parent wins; a record that shows none is not another's.
+pub(crate) fn shows_other_parent(
+    rt: &MockRuntime,
+    r: &StoredResource,
+    params: &[&str],
+    values: &[String],
+    name: &str,
+) -> bool {
+    let Some(members) = r.data.as_object() else {
+        return false;
+    };
+    let known = |text: &str| values.iter().any(|v| v.eq_ignore_ascii_case(text));
+    let mut other = false;
+    for (member, value) in members {
+        // `owner/name`: one segment before the name, no spaces, no scheme.
+        if let Some(text) = value.as_str()
+            && !text.contains("://")
+            && !text.contains(char::is_whitespace)
+            && let Some((owner, last)) = text.trim_end_matches('/').split_once('/')
+            && last.eq_ignore_ascii_case(name)
+            && !owner.is_empty()
+        {
+            if known(owner) {
+                return false;
+            }
+            other = true;
+            continue;
+        }
+        if mb_mcm::is_generic_id(member)
+            || typed_as_own(rt, &r.resource_type, member)
+            || !params.iter().any(|p| tied_to_param(member, p))
+        {
+            continue;
+        }
+        let texts: Vec<String> = match value {
+            Value::Object(inner) => inner.values().filter_map(id_string).collect(),
+            Value::String(text) if !text.contains("://") => vec![text.clone()],
+            _ => Vec::new(),
+        };
+        if texts.iter().any(|t| known(t)) {
+            return false;
+        }
+        other |= !texts.is_empty();
+    }
+    other
+}
+
 /// Whether `r` shows it is `owner`'s (see [`owner_evidence`]).
 pub(super) fn shows_owner(rt: &MockRuntime, r: &StoredResource, owner: &Owner) -> bool {
     owner_evidence(rt, r, owner) == Some(true)

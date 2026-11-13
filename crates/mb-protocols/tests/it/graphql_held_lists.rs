@@ -901,3 +901,90 @@ type User { id: ID! login: String! }
     assert_eq!(missing["data"], Value::Null, "{missing}");
     assert_eq!(missing["errors"][0]["type"], "NOT_FOUND", "{missing}");
 }
+
+const GITHUB_OWNED: &str = r"
+type Query {
+  user(login: String!): User
+  repository(owner: String!, name: String!, locale: String): Repository
+}
+type User { id: ID! login: String! repository(name: String!): Repository }
+type Owner { id: ID login: String }
+type Repository { id: ID! name: String! nameWithOwner: String owner: Owner }
+";
+
+fn owned_records() -> Vec<StoredResource> {
+    let repo = |id: &str, owner: &str, name: &str| StoredResource {
+        resource_type: "repository".into(),
+        id: id.into(),
+        data: json!({"__typename": "Repository", "id": id, "name": name,
+            "nameWithOwner": format!("{owner}/{name}"), "owner": {"login": owner}}),
+    };
+    vec![
+        StoredResource {
+            resource_type: "user".into(),
+            id: "U_1".into(),
+            data: json!({"__typename": "User", "id": "U_1", "login": "octocat"}),
+        },
+        repo("R_1", "vercel", "next.js"),
+        repo("R_2", "octocat", "hello-world"),
+        // Linked to its owner by id alone, and one showing no owner.
+        StoredResource {
+            resource_type: "repository".into(),
+            id: "R_3".into(),
+            data: json!({"__typename": "Repository", "id": "R_3", "name": "by-id", "owner": {"id": "U_1"}}),
+        },
+        StoredResource {
+            resource_type: "repository".into(),
+            id: "R_4".into(),
+            data: json!({"__typename": "Repository", "id": "R_4", "name": "anyones"}),
+        },
+    ]
+}
+
+#[tokio::test]
+async fn a_lookup_finds_only_a_record_under_the_parent_it_names() {
+    let base = serve(GITHUB_OWNED, None, owned_records(), UnknownIds::NotFound).await;
+    let q = |query: &'static str| {
+        let base = base.clone();
+        async move { gql(&base, "/graphql", query).await }
+    };
+    // Nested: octocat holds no next.js, though vercel's is held.
+    let other = q(r#"{ user(login: "octocat") { repository(name: "next.js") { name } } }"#).await;
+    assert_eq!(other["data"]["user"]["repository"], Value::Null, "{other}");
+    assert_eq!(
+        other["errors"][0]["path"],
+        json!(["user", "repository"]),
+        "{other}"
+    );
+    let own = q(r#"{ user(login: "octocat") { repository(name: "hello-world") { name } } }"#).await;
+    assert!(own.get("errors").is_none(), "{own}");
+    assert_eq!(
+        own["data"]["user"]["repository"]["name"], "hello-world",
+        "{own}"
+    );
+    // Root, the parent named by an argument that is no scalar member.
+    let other = q(r#"{ repository(owner: "octocat", name: "next.js") { name } }"#).await;
+    assert_eq!(other["data"]["repository"], Value::Null, "{other}");
+    assert_eq!(
+        other["errors"][0]["extensions"]["code"], "NOT_FOUND",
+        "{other}"
+    );
+    let theirs = q(r#"{ repository(owner: "vercel", name: "next.js") { name } }"#).await;
+    assert!(theirs.get("errors").is_none(), "{theirs}");
+    // Logins compare without case.
+    let cased = q(r#"{ repository(owner: "Vercel", name: "next.js") { name } }"#).await;
+    assert!(cased.get("errors").is_none(), "{cased}");
+    let cased =
+        q(r#"{ user(login: "OctoCat") { repository(name: "hello-world") { name } } }"#).await;
+    assert!(cased.get("errors").is_none(), "{cased}");
+    // The parent's held record names it by id, though the query selects no `id`.
+    let by_id = q(r#"{ user(login: "octocat") { repository(name: "by-id") { name } } }"#).await;
+    assert!(by_id.get("errors").is_none(), "{by_id}");
+    // A record showing no owner counts under any parent.
+    let anyones = q(r#"{ user(login: "octocat") { repository(name: "anyones") { name } } }"#).await;
+    assert!(anyones.get("errors").is_none(), "{anyones}");
+    // An argument that is no member names no parent.
+    let locale =
+        q(r#"{ repository(owner: "vercel", name: "next.js", locale: "en") { name } }"#).await;
+    assert!(locale.get("errors").is_none(), "{locale}");
+}
