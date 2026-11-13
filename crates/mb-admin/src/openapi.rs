@@ -122,6 +122,7 @@ use crate::{
         world::WorldView,
         world::UnknownIdsView,
         world::UnknownIdAnswer,
+        world::UnknownLookup,
         world::AuthorSchema,
         world::RefusalSchema,
         world::RefusalCodeSchema,

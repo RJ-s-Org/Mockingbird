@@ -2314,6 +2314,14 @@ export interface components {
         /** @description How a mock answers a read by path of an id the session does not hold. */
         UnknownIdsView: {
             /**
+             * @description Per GraphQL root lookup by an argument other than the identity (`Query.user`,
+             *     looked up by `login`): the type it answers, those arguments, and the answer to
+             *     a value no record the session holds has, and why.
+             */
+            lookups?: {
+                [key: string]: components["schemas"]["UnknownLookup"];
+            };
+            /**
              * @description The mock's `unknown_ids`: `inferred` (unset: decided per type), `generate` or
              *     `404` (decided for every type).
              * @example inferred
@@ -2323,6 +2331,13 @@ export interface components {
             types: {
                 [key: string]: components["schemas"]["UnknownIdAnswer"];
             };
+        };
+        /** @description A GraphQL root lookup by a value other than the identity. */
+        UnknownLookup: components["schemas"]["UnknownIdAnswer"] & {
+            /** @description The arguments naming its record. */
+            by: string[];
+            /** @description The type it answers (lowercased). */
+            type: string;
         };
         /** @description The outcome of a contract upload. */
         UploadResult: {
@@ -3946,7 +3961,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. `unknown_ids` gives each type read by a path parameter its answer to an id the session does not hold (`404` or `generate`) and why. `shares` names the group the mock keeps its sessions under and whether it is the default one of its domain. */
+            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. `unknown_ids` gives each type read by a path parameter its answer to an id the session does not hold (`404` or `generate`) and why, and `lookups` each GraphQL root lookup by a value other than the identity with its type, arguments and answer. `shares` names the group the mock keeps its sessions under and whether it is the default one of its domain. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6727,7 +6742,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. `unknown_ids` gives each type read by a path parameter its answer to an id the session does not hold (`404` or `generate`) and why. `shares` names the group the mock keeps its sessions under and whether it is the default one of its domain. */
+            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. With `operation` or `type`, only the entries they match; a name the version does not have is listed in `warnings`. With `called`, only what the request log names, and `gaps_left_out`. `unknown_ids` gives each type read by a path parameter its answer to an id the session does not hold (`404` or `generate`) and why, and `lookups` each GraphQL root lookup by a value other than the identity with its type, arguments and answer. `shares` names the group the mock keeps its sessions under and whether it is the default one of its domain. */
             200: {
                 headers: {
                     [name: string]: unknown;

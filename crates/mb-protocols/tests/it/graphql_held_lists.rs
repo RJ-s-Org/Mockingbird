@@ -768,3 +768,33 @@ async fn a_root_lookup_by_id_keeps_its_answer_beside_a_member_argument() {
         "{answer}"
     );
 }
+
+#[test]
+fn the_lookups_by_a_key_other_than_the_identity_are_listed() {
+    let bundle = compile(GITHUB_REPOS.as_bytes()).unwrap();
+    let world = mb_mcm::world::tier0(&bundle);
+    let applied = mb_mcm::world::apply(&bundle, &world, &world);
+    let types = mb_protocols::unknown_id_types(&applied, &world, &Default::default(), true);
+    let lookups: Vec<(&str, &str, Vec<&str>)> = types
+        .lookups
+        .iter()
+        .map(|(op, (t, by))| {
+            (
+                op.as_str(),
+                t.as_str(),
+                by.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        lookups,
+        vec![
+            ("Query.repository", "repository", vec!["name"]),
+            ("Query.repositoryById", "repository", vec!["name"]),
+            ("Query.user", "user", vec!["login"]),
+        ]
+    );
+    // With consistency off no lookup is answered from state, so none is listed.
+    let off = mb_protocols::unknown_id_types(&applied, &world, &Default::default(), false);
+    assert!(off.lookups.is_empty());
+}

@@ -467,7 +467,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "start_server",
             title: "Start Mockingbird in the background",
-            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env (or proxy_env_error, why this project's proxy could not be handed out). With a config, also world_review: for each mock whose world description has gaps, the next_steps and world_gaps an import answers (review them as after import_contract, the mockingbird-world skill); shares: the shares group each mock of the config keeps its sessions in (as the config's mocks group them), {group, default} (default: true when it set no shares and joined the group of the mocks whose hosts share its registrable domain, named after the domain; null when in none); and next_steps naming mocks that answer for one host in no common shares group (one sets shares: none, they name different groups, or the host has no registrable domain), one line summing up the hosts the project can call that no mock lists (project_hosts lists each with what to import), and one naming the app's test commands found in the project (package.json scripts, Makefile, pytest, rspec, go test, cargo test) to run with verify_run, led by a ready-to-run {command, serve, serve_port} when tests need the app's own server (app_tests lists every command and pair); and unknown_ids: per mock, how a read of an id the session does not hold is answered (its setting, or the types inferred to answer 404 once the session has written one of their records, and those that generate; get_world says why).",
+            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env (or proxy_env_error, why this project's proxy could not be handed out). With a config, also world_review: for each mock whose world description has gaps, the next_steps and world_gaps an import answers (review them as after import_contract, the mockingbird-world skill); shares: the shares group each mock of the config keeps its sessions in (as the config's mocks group them), {group, default} (default: true when it set no shares and joined the group of the mocks whose hosts share its registrable domain, named after the domain; null when in none); and next_steps naming mocks that answer for one host in no common shares group (one sets shares: none, they name different groups, or the host has no registrable domain), one line summing up the hosts the project can call that no mock lists (project_hosts lists each with what to import), and one naming the app's test commands found in the project (package.json scripts, Makefile, pytest, rspec, go test, cargo test) to run with verify_run, led by a ready-to-run {command, serve, serve_port} when tests need the app's own server (app_tests lists every command and pair), and one per mock whose GraphQL lookups by a value other than the identity (user(login:)) answer an unknown value with a made-up record (its unknown_ids is not 404), saying how to make the app's not-found path show; and unknown_ids: per mock, how a read of an id the session does not hold is answered (its setting, or the types inferred to answer 404 once the session has written one of their records, and those that generate; get_world says why).",
             schema: obj(
                 json!({
                     "config": s("Config file (preferred)."),
@@ -516,7 +516,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "server_status",
             title: "Background server status",
-            description: "Whether the background server runs, and its /readyz (ready, degraded reasons). next_steps: one per host the proxy blocked since the server started that no mock lists now, naming the mock of its domain to add it to and the catalog examples that list it, if any; then one line summing up the hosts the project can call that no mock lists (project_hosts lists each with what to import), and one naming the app's test commands to run with verify_run (with serve when they need the app's server; app_tests lists them all). Mock those hosts before handing back.",
+            description: "Whether the background server runs, and its /readyz (ready, degraded reasons). next_steps: one per host the proxy blocked since the server started that no mock lists now, naming the mock of its domain to add it to and the catalog examples that list it, if any; then one line summing up the hosts the project can call that no mock lists (project_hosts lists each with what to import), and one naming the app's test commands to run with verify_run (with serve when they need the app's server; app_tests lists them all), and one per mock whose GraphQL lookups by a value other than the identity answer an unknown value with a made-up record. Mock those hosts before handing back.",
             schema: obj(
                 json!({ "config": s("Config file the server was started with; default: the one start_server used.") }),
                 &[],
@@ -1784,6 +1784,7 @@ impl McpServer {
                 if let Some(config) = self.project_config(a) {
                     self.add_unclaimed_steps(&mut status, &config, &blocked)
                         .await;
+                    self.add_lookup_steps(&mut status, &config).await;
                     add_test_step(&mut status, &config).await;
                 }
                 Ok(status)
@@ -2617,6 +2618,7 @@ impl McpServer {
             .to_owned();
         let mut read = Vec::new();
         let mut unknown_ids = serde_json::Map::new();
+        let mut lookup_steps = Vec::new();
         if started.get("ready").and_then(Value::as_bool) == Some(true) {
             for (name, m) in &cfg.mocks {
                 let world = self
@@ -2625,10 +2627,20 @@ impl McpServer {
                 if let Some(summary) = world.as_ref().ok().and_then(unknown_ids_summary) {
                     unknown_ids.insert(name.clone(), summary);
                 }
+                if let Some(step) = world
+                    .as_ref()
+                    .ok()
+                    .and_then(|w| unknown_lookups_step(name, w))
+                {
+                    lookup_steps.push(step);
+                }
                 read.push((name.clone(), world.and_then(|w| gaps_of(&w))));
             }
         }
         let review = world_review(read);
+        for step in lookup_steps {
+            append_step(started, step);
+        }
         let Some(obj) = started.as_object_mut() else {
             return;
         };
@@ -2637,6 +2649,44 @@ impl McpServer {
         }
         if !review.is_empty() {
             obj.insert("world_review".into(), Value::Array(review));
+        }
+    }
+
+    /// Appends to the `next_steps` of a `server_status` answer of a ready server one line
+    /// per mock of `config` whose GraphQL lookups the app called by a value other than
+    /// the identity make up a record for an unknown value ([`unknown_lookups_step`];
+    /// `start_server` adds the same from the world it reads). A config that does not
+    /// load adds nothing.
+    async fn add_lookup_steps(&self, answer: &mut Value, config: &std::path::Path) {
+        if answer.get("ready").and_then(Value::as_bool) != Some(true) {
+            return;
+        }
+        let Ok(cfg) = crate::file_config::load(config) else {
+            return;
+        };
+        let admin = answer
+            .get("admin")
+            .and_then(Value::as_str)
+            .unwrap_or(&self.admin_url)
+            .to_owned();
+        for (name, m) in &cfg.mocks {
+            // Only what the app called: smaller, and the lookups it actually hit.
+            let Ok(Some(world)) = client::api(
+                &admin,
+                self.token.as_deref(),
+                Some(&m.workspace),
+                Method::GET,
+                &["mocks", name, "contracts", "active", "world"],
+                &[("called", "true".to_owned())],
+                None,
+            )
+            .await
+            else {
+                continue;
+            };
+            if let Some(step) = unknown_lookups_step(name, &world) {
+                append_step(answer, step);
+            }
         }
     }
 
@@ -3640,6 +3690,67 @@ fn project_folder(root: &std::path::Path, rel: &str) -> Result<PathBuf, ToolErro
     Ok(dir)
 }
 
+/// At most this many lookups [`unknown_lookups_step`] names.
+const STEP_LOOKUPS: usize = 4;
+
+/// The `next_steps` line for mock `mock` whose world view `world` lists GraphQL root
+/// lookups by a value other than the identity (`unknown_ids.lookups`) while its
+/// `unknown_ids` is left `inferred`: an unknown value of those gets a made-up record, so
+/// an app's not-found path never shows. Lookups of types that never answer 404 under
+/// `inferred` need `unknown_ids: 404` and seeded records; those of creatable types,
+/// seeded records only. `None` when there is none or the mock sets `unknown_ids`.
+fn unknown_lookups_step(mock: &str, world: &Value) -> Option<String> {
+    let view = world.get("unknown_ids")?;
+    // A setting the user chose (`404` or `generate`) is left as it is.
+    if view.get("setting").and_then(Value::as_str) != Some("inferred") {
+        return None;
+    }
+    let lookups = view.get("lookups")?.as_object()?;
+    let (generate, seeded): (Vec<_>, Vec<_>) = lookups
+        .iter()
+        .partition(|(_, l)| l.get("answer").and_then(Value::as_str) != Some("404"));
+    let names = |list: &[(&String, &Value)]| {
+        let mut named: Vec<String> = list
+            .iter()
+            .take(STEP_LOOKUPS)
+            .map(|(op, l)| {
+                let field = op.rsplit('.').next().unwrap_or(op);
+                let by: Vec<String> = l
+                    .get("by")
+                    .and_then(Value::as_array)
+                    .map(|by| {
+                        by.iter()
+                            .filter_map(Value::as_str)
+                            .map(|a| format!("{a}:"))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                format!("{field}({})", by.join(", "))
+            })
+            .collect();
+        if list.len() > STEP_LOOKUPS {
+            named.push(format!("+{} more (get_world)", list.len() - STEP_LOOKUPS));
+        }
+        named.join(", ")
+    };
+    let seed = format!(
+        "seed the records its flows read in the run command: mockingbird run -- sh -c 'mockingbird seed-fixtures --mock {mock} --session default <fixtures.json> && <app command>'"
+    );
+    if !generate.is_empty() {
+        return Some(format!(
+            "{mock}: unknown values of the lookups {} answer made-up records, not the API's not-found. If the app has a not-found path, set mocks.{mock}.unknown_ids: 404 (every type of the mock then answers not-found unless seeded) and {seed} (mockingbird skill: Not-found paths).",
+            names(&generate)
+        ));
+    }
+    if seeded.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{mock}: unknown values of the lookups {} answer made-up records until the session holds a record of their type. If the app has a not-found path, {seed}; they then answer not-found (mockingbird skill: Not-found paths).",
+        names(&seeded)
+    ))
+}
+
 /// Appends `step` to an answer's `next_steps`, creating the list.
 fn append_step(answer: &mut Value, step: String) {
     let Some(obj) = answer.as_object_mut() else {
@@ -3879,6 +3990,50 @@ mod tests {
                 .is_some_and(|s| s.contains("timed out"))
         );
         assert!(answer["next_steps"].is_array());
+    }
+
+    #[test]
+    fn unknown_lookups_name_the_lookups_unless_the_mock_answers_404() {
+        let world = |setting: &str, lookups: Value| json!({"unknown_ids": {"setting": setting, "types": {}, "lookups": lookups}});
+        let both = json!({
+            "Query.repository": {"type": "repository", "by": ["name"], "answer": "404", "why": "creatable"},
+            "Query.user": {"type": "user", "by": ["login"], "answer": "generate", "why": "not creatable"}
+        });
+        let step = unknown_lookups_step("gh", &world("inferred", both.clone())).unwrap();
+        assert!(
+            step.starts_with(
+                "gh: unknown values of the lookups user(login:) answer made-up records"
+            ),
+            "{step}"
+        );
+        assert!(step.contains("set mocks.gh.unknown_ids: 404"), "{step}");
+        assert!(
+            step.contains("mockingbird seed-fixtures --mock gh --session default"),
+            "{step}"
+        );
+        let creatable = json!({"Query.repository": {"type": "repository", "by": ["name"], "answer": "404", "why": "creatable"}});
+        let step = unknown_lookups_step("gh", &world("inferred", creatable)).unwrap();
+        assert!(
+            step.contains("repository(name:) answer made-up records until the session holds"),
+            "{step}"
+        );
+        assert!(!step.contains("unknown_ids: 404"), "{step}");
+        assert_eq!(
+            unknown_lookups_step("gh", &world("generate", both.clone())),
+            None
+        );
+        assert_eq!(unknown_lookups_step("gh", &world("404", both)), None);
+        assert_eq!(
+            unknown_lookups_step("gh", &world("inferred", json!({}))),
+            None
+        );
+        assert_eq!(
+            unknown_lookups_step(
+                "gh",
+                &json!({"unknown_ids": {"setting": "inferred", "types": {}}})
+            ),
+            None
+        );
     }
 
     #[test]

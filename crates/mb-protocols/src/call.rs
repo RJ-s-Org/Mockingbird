@@ -2434,6 +2434,10 @@ pub struct UnknownIdTypes {
     pub read: std::collections::BTreeSet<String>,
     /// The creatable types, with the id of their first create.
     pub creatable: std::collections::BTreeMap<String, String>,
+    /// The GraphQL root lookups by an argument other than the identity, by operation
+    /// id (`Query.user`): the type each answers (lowercased) and the arguments naming
+    /// its record (`login`), as the runtime takes them for a not-found answer.
+    pub lookups: std::collections::BTreeMap<String, (String, Vec<String>)>,
 }
 
 /// [`UnknownIdTypes`] of `bundle` (a bundle the world description was applied to, as a
@@ -2450,6 +2454,10 @@ pub fn unknown_id_types(
     use mb_mcm::world::OpKind;
     let mut out = UnknownIdTypes::default();
     for op in &bundle.operations {
+        // Answered from state, and so not found, only with consistency on.
+        if consistency && let Some((t, by)) = graphql_lookup(bundle, world, op) {
+            out.lookups.insert(op.id.clone(), (t, by));
+        }
         let Some(t) = op.resource_type.as_deref() else {
             continue;
         };
@@ -2474,6 +2482,120 @@ pub fn unknown_id_types(
         }
     }
     out
+}
+
+/// The type (lowercased) and the arguments of GraphQL root query `op` that look one
+/// record up by a value other than its identity: its identity's input field, the
+/// world's target member and the type's described alternates, each one the type and
+/// the field declare; with none of those, the arguments naming a string or number,
+/// non-enum member of the type (`repository(owner:, name:)` by `name`). The runtime answers an
+/// unknown value of these by `unknown_ids`.
+fn graphql_lookup(
+    bundle: &mb_mcm::Bundle,
+    world: &mb_mcm::world::World,
+    op: &Operation,
+) -> Option<(String, Vec<String>)> {
+    if !matches!(
+        op.binding,
+        Binding::Graphql {
+            operation_type: mb_mcm::GraphqlOperationType::Query,
+            ..
+        }
+    ) {
+        return None;
+    }
+    op.identity.as_ref()?;
+    let def = schema_ref(op.success_output()?.schema.as_ref()?)?;
+    let node = bundle.defs.get(def)?;
+    if node.get("oneOf").is_some() {
+        return None;
+    }
+    let props = node.get("properties")?.as_object()?;
+    let args = op.input.body.as_ref()?.get("properties")?.as_object()?;
+    let t = def.to_lowercase();
+    let desc = world.types.get(&t).and_then(|d| d.identity.as_ref());
+    let member = desc
+        .and_then(|i| i.member.clone())
+        .unwrap_or_else(|| "id".to_owned());
+    let mut names: Vec<String> = Vec::new();
+    names.extend(op.identity.as_ref().and_then(|i| i.input_field.clone()));
+    names.extend(
+        world
+            .operations
+            .get(&op.id)
+            .and_then(|d| d.target.as_ref())
+            .and_then(|target| target.member.clone()),
+    );
+    names.extend(desc.and_then(|i| i.alternates.clone()).unwrap_or_default());
+    let keyed =
+        |name: &String| *name != member && args.contains_key(name) && props.contains_key(name);
+    let mut by: Vec<String> = Vec::new();
+    for name in names {
+        if keyed(&name) && !by.contains(&name) {
+            by.push(name);
+        }
+    }
+    if by.is_empty() {
+        by = args
+            .keys()
+            .filter(|name| keyed(name) && plain_scalar(&props[name.as_str()], &bundle.defs))
+            .cloned()
+            .collect();
+    }
+    (!by.is_empty()).then_some((t, by))
+}
+
+/// The definition a schema refers to (`#/$defs/User`), through a nullable `anyOf`.
+fn schema_ref(schema: &Value) -> Option<&str> {
+    let mut schema = schema;
+    for _ in 0..4 {
+        if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
+            return r.rsplit('/').next();
+        }
+        schema = schema
+            .get("anyOf")?
+            .as_array()?
+            .iter()
+            .find(|b| b.get("type").and_then(Value::as_str) != Some("null"))?;
+    }
+    None
+}
+
+/// Whether a member's schema is a scalar that is not an enum (`String`, `Int`, a
+/// custom scalar), through a nullable `anyOf` or a `$ref`.
+fn plain_scalar(schema: &Value, defs: &serde_json::Map<String, Value>) -> bool {
+    let mut schema = schema;
+    for _ in 0..4 {
+        if schema.get("enum").is_some() {
+            return false;
+        }
+        if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
+            match r.rsplit('/').next().and_then(|n| defs.get(n)) {
+                Some(def) => schema = def,
+                None => return false,
+            }
+            continue;
+        }
+        if let Some(branches) = schema.get("anyOf").and_then(Value::as_array) {
+            match branches
+                .iter()
+                .find(|b| b.get("type").and_then(Value::as_str) != Some("null"))
+            {
+                Some(b) => schema = b,
+                None => return false,
+            }
+            continue;
+        }
+        // As the runtime keys a lookup: a string or a number, or a custom scalar (no
+        // members, no branches); not a boolean, an object, an interface or a union.
+        return matches!(
+            schema.get("type").and_then(Value::as_str),
+            Some("string" | "integer" | "number")
+        ) || (schema.get("type").is_none()
+            && schema.get("properties").is_none()
+            && schema.get("oneOf").is_none());
+    }
+    false
 }
 
 /// Whether a path parameter's name says it holds an id.
