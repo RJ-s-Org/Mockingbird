@@ -2050,6 +2050,74 @@ async fn declared_and_scenario_headers_are_sent() {
     }
 }
 
+/// A scenario's 4xx that the operation does not declare is answered natively, as an
+/// undeclared 5xx is: in the shape of an error response the operation declares (its
+/// message-like member saying why), else as problem+json. The status header's
+/// undeclared 4xx stays a client mistake (400).
+#[tokio::test]
+async fn a_scenarios_undeclared_client_error_is_answered_natively() {
+    let scenario = |status: u16| ScenarioRuntime {
+        spec: ScenarioSpec {
+            name: "forbidden".into(),
+            status: Some(status),
+            ..ScenarioSpec::default()
+        },
+        status: Some(status),
+        ..ScenarioRuntime::default()
+    };
+    let harness = |contract: &str| {
+        let mut rt = MockRuntime::new(
+            "inline",
+            Arc::new(compile(contract.as_bytes()).unwrap()),
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            memory_state(),
+        );
+        rt.header_overrides = true;
+        rt.scenarios.insert("forbidden".into(), scenario(403));
+        let rt = Arc::new(rt);
+        Harness {
+            router: http_rest::router(Arc::clone(&rt)),
+            rt,
+            provider: None,
+        }
+    };
+    let forbidden = || {
+        Request::get("/things")
+            .header("x-mockingbird-scenario", "forbidden")
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    // The declared 429's `{error}` shape answers the 403.
+    let h = harness(THROTTLED);
+    let resp = send(&h, forbidden()).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(header_str(&resp, "content-type"), "application/json");
+    let body = body_json(resp).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("declares no response for forced status 403")),
+        "{body}"
+    );
+    let resp = send(&h, with_status("/things", "403")).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(resp).await["title"], "Undeclared status override");
+
+    // No error body declared: problem+json.
+    let h = harness(&THROTTLED.replace(
+        "content: {application/json: {schema: {type: object, properties: {error: {type: string}}}}}",
+        "",
+    ));
+    let resp = send(&h, forbidden()).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        header_str(&resp, "content-type"),
+        "application/problem+json"
+    );
+    assert_eq!(body_json(resp).await["title"], "Forbidden");
+}
+
 /// Slack's `chat.postMessage` answers `{ok, ts, message: {...}}`: the
 /// message is stored where `conversations.history` lists `messages`, so the
 /// history read after it is generated knowing the message. (This contract's

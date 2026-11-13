@@ -193,20 +193,19 @@ async fn scenario_scoped_to_operations() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // listOrders is in scope but declares no 404: the scenario's status is
-    // ignored for it.
+    // listOrders is in scope and declares no 404: answered natively.
     let resp = send(
         &router,
         get_with("/orders", &[("x-mockingbird-scenario", "shipped")]),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-/// A scenario's status applies only to operations declaring it; elsewhere
-/// the call is served normally, with the scenario's latency.
+/// A scenario's 4xx applies to every operation it covers, answered natively where
+/// undeclared, with the scenario's latency.
 #[tokio::test(start_paused = true)]
-async fn scenario_status_applies_only_where_declared() {
+async fn scenario_client_error_applies_natively_where_undeclared() {
     let mut rt = offline();
     let mut scenario = shipped(&[]);
     scenario.status = Some(404);
@@ -221,10 +220,10 @@ async fn scenario_status_applies_only_where_declared() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     assert!(start.elapsed() >= Duration::from_millis(300));
 
-    // listOrders does not: normal 2xx, latency still applied.
+    // listOrders does not: answered natively, latency still applied.
     let start = tokio::time::Instant::now();
     let resp = send(&router, get_with("/orders", &headers)).await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     assert!(start.elapsed() >= Duration::from_millis(300));
 
     // The header override still rejects an undeclared status.
