@@ -10,6 +10,14 @@
 | Source edits | None. `GH_TOKEN` is a dummy; `GH_CONFIG_DIR` points at the trial directory so the user's own `gh` login is never read |
 | Result | 8 of 10 commands succeed; 15 mock calls, 2 fallbacks (`createIssue`, one `pr view`) |
 
+## Trial prompt
+
+Fresh-agent reruns give a Claude Code agent, with only the Mockingbird plugin installed, this prompt verbatim. It names Mockingbird, as every trial's prompt does: without that, a fresh agent may write its own fake server instead (gh-cli run 13's first agent wrote a Python mock).
+
+> Mock the GitHub API (REST and GraphQL) with Mockingbird for this app so I can run the gh CLI (built at bin/gh) against it locally without a GitHub account or token. When done, tell me how to run gh against the mock.
+
+Score it the way the agent's hand-back says to run `gh`, one command at a time, so that each command reads what earlier ones created.
+
 ## Config and commands
 
 ```yaml

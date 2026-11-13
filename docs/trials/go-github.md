@@ -17,7 +17,11 @@ For this run the app was copied into a fresh project without its `mockingbird.ya
 
 ## How the mock was built (as the user's agent)
 
-A fresh Claude Code (`claude -p`, Sonnet 5.5) had only the Mockingbird plugin and got one prompt: **"mock the GitHub API for this app"**.
+A fresh Claude Code (`claude -p`, Sonnet 5.5) had only the Mockingbird plugin and got one prompt: **"mock the GitHub API for this app"**. That prompt does not name Mockingbird, and an agent given it later wrote an `httptest` fake instead. Reruns use this prompt, verbatim:
+
+> This Go package posts a triage digest to GitHub with go-github. Mock the GitHub API with Mockingbird so I can run it locally without a GitHub account or token, and write a Go test that runs Run against the mock, including how the app handles GitHub's rate limit. When done, tell me how to run it.
+
+It asks for more than the first prompt (a Go test and the rate-limit path), so rerun times and costs are not comparable with the figures below.
 
 It finished in **78 s and 13 turns** ($0.36). Its steps:
 1. It read the README, `digest.go` and the test, then ran `doctor` and `list_examples`.

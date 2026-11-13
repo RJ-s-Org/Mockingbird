@@ -106,6 +106,41 @@ fn run_routes_the_command_and_propagates_its_exit_code() {
     assert_eq!(out.status.code(), Some(127));
 }
 
+/// A server `run` starts for the command alone with in-memory state: it warns that
+/// the state ends with the run and names `server start` to keep it across commands.
+/// A file store keeps it: no warning.
+#[test]
+fn run_warns_that_its_own_in_memory_server_loses_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let warning = "keeps state in memory: what the command creates is gone when it exits";
+    let (out, _) = on_fresh_config(dir.path(), || run(dir.path(), &["true"]));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains(warning), "{stderr}");
+    assert!(stderr.contains("mockingbird server start -c"), "{stderr}");
+    assert!(stderr.contains("--state-dir"), "{stderr}");
+
+    let (out, _) = on_free_ports(|| {
+        let admin = write_config(dir.path());
+        let config = dir.path().join("mockingbird.yaml");
+        let text = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(
+            &config,
+            text.replace("\"sqlite::memory:\"", "sqlite://mb.db?mode=rwc"),
+        )
+        .unwrap();
+        let out = run(dir.path(), &["true"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if port_was_busy(&stderr) {
+            return Err(stderr.into_owned());
+        }
+        logged_admin(&dir.path().join("state/server.log"), admin).map(|()| (out, admin))
+    });
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(!stderr.contains(warning), "{stderr}");
+}
+
 #[test]
 fn run_needs_a_config() {
     let dir = tempfile::tempdir().unwrap();
