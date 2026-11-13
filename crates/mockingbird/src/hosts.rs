@@ -1199,6 +1199,95 @@ impl Walker<'_> {
     }
 }
 
+/// At most this many files [`calls_in_source`] reads.
+const MAX_CALL_FILES: usize = 20_000;
+/// Files larger than this are not read by [`calls_in_source`] (a schema, a bundle).
+const MAX_CALL_FILE_BYTES: u64 = 512 * 1024;
+
+/// Which of `names` the app's own files under `root` call as a field with arguments
+/// (`user(login: $login)`): the name, not part of a longer identifier, then `(`. The
+/// walk leaves out [`SKIP_DIRS`], dependencies and build output (`node_modules`,
+/// `vendor`, `target`, `dist`, `build`), hidden directories, `skip` (the mocks'
+/// config folder and contracts, which declare every field) and files over
+/// [`MAX_CALL_FILE_BYTES`], and stops after [`MAX_CALL_FILES`] files or once every
+/// name is found.
+pub(crate) fn calls_in_source(
+    root: &Path,
+    skip: &[PathBuf],
+    names: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    const BUILD_DIRS: &[&str] = &[
+        "node_modules",
+        "vendor",
+        "target",
+        "dist",
+        "build",
+        "coverage",
+    ];
+    let mut found = BTreeSet::new();
+    let mut stack = vec![root.to_path_buf()];
+    let mut files = 0usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if skip.iter().any(|s| path.starts_with(s)) {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if kind.is_dir() {
+                if !name.starts_with('.')
+                    && !SKIP_DIRS.contains(&name.as_ref())
+                    && !BUILD_DIRS.contains(&name.as_ref())
+                {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !kind.is_file()
+                || entry
+                    .metadata()
+                    .map_or(true, |m| m.len() > MAX_CALL_FILE_BYTES)
+            {
+                continue;
+            }
+            files += 1;
+            if files > MAX_CALL_FILES {
+                return found;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&bytes);
+            for n in names {
+                if !found.contains(n) && calls(&text, n) {
+                    found.insert(n.clone());
+                }
+            }
+            if found.len() == names.len() {
+                return found;
+            }
+        }
+    }
+    found
+}
+
+/// Whether `text` has `name(`: `name` not inside a longer identifier, then optional
+/// whitespace and `(`.
+fn calls(text: &str, name: &str) -> bool {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    text.match_indices(name).any(|(at, _)| {
+        !text[..at].chars().next_back().is_some_and(ident)
+            && text[at + name.len()..].trim_start().starts_with('(')
+    })
+}
+
 fn extension(name: &str) -> String {
     name.rsplit_once('.')
         .map(|(_, ext)| ext.to_ascii_lowercase())
@@ -1566,6 +1655,42 @@ fn usable_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_field_called_with_arguments_is_found_outside_the_skipped_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("mock")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/x")).unwrap();
+        std::fs::write(
+            root.join("src/fetch.js"),
+            "query { user(login: $login) { repository (name: $repo) { id } } }",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("mock/schema.graphql"),
+            "type Query { license(key: String!): License }",
+        )
+        .unwrap();
+        std::fs::write(root.join("node_modules/x/i.js"), "enterprise(slug: s)").unwrap();
+        std::fs::write(
+            root.join("src/other.js"),
+            "superuser(1); codeOfConduct; licenses(2)",
+        )
+        .unwrap();
+        let names: BTreeSet<String> = [
+            "user",
+            "repository",
+            "license",
+            "enterprise",
+            "codeOfConduct",
+        ]
+        .map(String::from)
+        .into();
+        let found = calls_in_source(root, &[root.join("mock")], &names);
+        assert_eq!(found, ["repository", "user"].map(String::from).into());
+    }
 
     fn write(root: &Path, rel: &str, text: &str) {
         let path = root.join(rel);
