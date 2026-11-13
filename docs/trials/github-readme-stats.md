@@ -196,6 +196,6 @@ Fresh headless agents (Sonnet 5.5) on `main`, the plugin installed the README's 
 
 Both agents chose `unknown_ids: 404` for GitHub (run 11 tried `null` first, then switched). The unknown user gets the app's USER_NOT_FOUND card, from the error's top-level `type: NOT_FOUND` (#622). Both seeded through `mockingbird run -- sh -c 'mockingbird seed-fixtures … && node express.js'`.
 
-Run 11 spent about 10 minutes on seed shapes: a child nested inside its parent's record versus separate records, and a second mock's seed replacing the first's records (both mocks share one session). The skills now say how (seed each record on its own; one file for a shares group). Its hand-back noted that `octocat/next.js` answered vercel's repository; #632 (open) makes a lookup count only records under the parent the query names.
+Run 11 spent about 10 minutes on seed shapes: a child nested inside its parent's record versus separate records, and a second mock's seed replacing the first's records (both mocks share one session). The skills now say how (seed each record on its own; one file for a shares group). Its hand-back noted that `octocat/next.js` answered vercel's repository; a lookup now counts only records under the parent the query names (#632).
 
 Outside what Mockingbird controls: while probing, the run-11 agent rewrote its own test script's URL to `https://api.github.com` with a proxy override, and that one request reached the real API (no credentials; a rate-limit answer). The app's own calls all went to the mock.

@@ -555,6 +555,11 @@ impl Walk<'_> {
         }) {
             return Some(held.id.clone());
         }
+        // A held record a global key of the type names (a seeded user a gist's
+        // `owner { login }` names) is the one meant: its held members win.
+        if let Some(id) = self.held_by_global_key(ty, sel, obj) {
+            return Some(id);
+        }
         let named: Vec<String> = values
             .iter()
             .map(|(k, v)| match v {
@@ -563,6 +568,40 @@ impl Walk<'_> {
             })
             .collect();
         Some(format!("mb_{ty}_{}_{}", parent.id, named.join("_")))
+    }
+
+    /// The one held record of type `ty` that `obj` (keyed by `sel`'s response keys)
+    /// names by a global key: a member some root query looks the type up by alone
+    /// (`login` of `Query.user(login:)`; not `name` of `repository(owner:, name:)`, nor
+    /// a key below a parent, which count per parent). `None` when none or several do,
+    /// or the record lives under a parent another mock stores it by.
+    fn held_by_global_key(
+        &self,
+        ty: &str,
+        sel: &Selection,
+        obj: &Map<String, Value>,
+    ) -> Option<String> {
+        let held = self.held.get(ty)?;
+        for key in global_keys(self.bundle, ty) {
+            let Some(value) = sel
+                .fields
+                .iter()
+                .find(|(_, c)| c.name == key)
+                .and_then(|(k, _)| obj.get(k))
+                .filter(|v| v.is_string() || v.is_number())
+            else {
+                continue;
+            };
+            let mut values = Map::new();
+            values.insert(key.clone(), value.clone());
+            let mut found = held.iter().enumerate().filter(|(i, r)| {
+                !self.parents.contains_key(&(ty.to_owned(), *i)) && matches(&values, r) == (true, 1)
+            });
+            if let (Some((_, only)), None) = (found.next(), found.next()) {
+                return Some(only.id.clone());
+            }
+        }
+        None
     }
 
     /// The children of `value`, an object of `schema`.
@@ -589,6 +628,17 @@ impl Walk<'_> {
             && let Some(id) = self.id_by_keys(name, sel, obj, parent)
         {
             obj.insert("id".into(), json!(id));
+        }
+        // A generated id no held record has, on an object a global key names as held:
+        // the held one, so the answer shows its members and stores no second record.
+        if let Some(Value::String(id)) = obj.get("id")
+            && !self
+                .held
+                .get(name)
+                .is_some_and(|held| held.iter().any(|r| r.id == *id))
+            && let Some(held) = self.held_by_global_key(name, sel, obj)
+        {
+            obj.insert("id".into(), json!(held));
         }
         let own = match obj.get("id") {
             Some(Value::String(id)) if props.contains_key("id") => {
@@ -1255,6 +1305,52 @@ fn allowed(args: &Map<String, Value>, value: &Value, sel: &Selection) -> bool {
 /// Whether every argument of `args` that names a member of `record` (or,
 /// for a list argument, its singular member: `states` → `state`) agrees
 /// with it, and how many did.
+/// The members of definition `ty` some root query looks it up by alone: its only
+/// argument naming a scalar member (`login` of `Query.user(login:)`).
+fn global_keys(bundle: &Bundle, ty: &str) -> Vec<String> {
+    let Some(props) = bundle
+        .defs
+        .get(ty)
+        .and_then(|d| d.get("properties"))
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+    let mut keys: Vec<String> = Vec::new();
+    for op in &bundle.operations {
+        if !matches!(
+            op.binding,
+            mb_mcm::Binding::Graphql {
+                operation_type: mb_mcm::GraphqlOperationType::Query,
+                ..
+            }
+        ) || op
+            .success_output()
+            .and_then(|o| o.schema.as_ref())
+            .and_then(super::nested::def_ref)
+            != Some(ty)
+        {
+            continue;
+        }
+        let args: Vec<&String> = op
+            .input
+            .body
+            .as_ref()
+            .and_then(|b| b.get("properties"))
+            .and_then(Value::as_object)
+            .map(|a| a.keys().collect())
+            .unwrap_or_default();
+        if let [only] = args[..]
+            && *only != "id"
+            && props.get(only).is_some_and(|p| is_scalar(p, &bundle.defs))
+            && !keys.contains(only)
+        {
+            keys.push(only.clone());
+        }
+    }
+    keys
+}
+
 fn matches(args: &Map<String, Value>, record: &StoredResource) -> (bool, usize) {
     let mut compared = 0;
     for (name, arg) in args {

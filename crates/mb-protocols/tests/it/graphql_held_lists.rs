@@ -988,3 +988,72 @@ async fn a_lookup_finds_only_a_record_under_the_parent_it_names() {
         q(r#"{ repository(owner: "vercel", name: "next.js", locale: "en") { name } }"#).await;
     assert!(locale.get("errors").is_none(), "{locale}");
 }
+
+const GITHUB_GISTS: &str = r"
+type Query {
+  user(login: String!): User
+  viewer: User!
+}
+type User { id: ID! login: String! name: String bio: String gist(name: String!): Gist }
+type Gist { id: ID! name: String! description: String owner: User }
+";
+
+#[tokio::test]
+async fn a_gist_read_leaves_its_seeded_owner_as_seeded() {
+    let seeded = vec![
+        StoredResource {
+            resource_type: "user".into(),
+            id: "U_1".into(),
+            data: json!({"__typename": "User", "id": "U_1", "login": "octocat",
+                "name": "The Octocat", "bio": "Seeded bio"}),
+        },
+        StoredResource {
+            resource_type: "gist".into(),
+            id: "G_1".into(),
+            data: json!({"__typename": "Gist", "id": "G_1", "name": "g1",
+                "description": "Hello", "owner": {"__typename": "User", "id": "U_1", "login": "octocat"}}),
+        },
+    ];
+    for mode in [UnknownIds::Inferred, UnknownIds::NotFound] {
+        let base = serve(GITHUB_GISTS, None, seeded.clone(), mode).await;
+        let gist = gql(
+            &base,
+            "/graphql",
+            r#"{ viewer { gist(name: "g1") { description owner { login name } } } }"#,
+        )
+        .await;
+        assert_eq!(
+            gist["data"]["viewer"]["gist"]["owner"]["name"], "The Octocat",
+            "{gist}"
+        );
+        // With the owner's id selected too.
+        let gist = gql(
+            &base,
+            "/graphql",
+            r#"{ viewer { gist(name: "g1") { owner { id login name } } } }"#,
+        )
+        .await;
+        assert_eq!(
+            gist["data"]["viewer"]["gist"]["owner"]["id"], "U_1",
+            "{gist}"
+        );
+        assert_eq!(
+            gist["data"]["viewer"]["gist"]["owner"]["name"], "The Octocat",
+            "{gist}"
+        );
+        let user = gql(
+            &base,
+            "/graphql",
+            r#"{ user(login: "octocat") { id name bio } }"#,
+        )
+        .await;
+        assert_eq!(
+            user["data"]["user"]["name"], "The Octocat",
+            "{mode:?} {gist} {user}"
+        );
+        assert_eq!(
+            user["data"]["user"]["bio"], "Seeded bio",
+            "{mode:?} {gist} {user}"
+        );
+    }
+}
