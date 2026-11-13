@@ -588,22 +588,38 @@ async fn serve(
     // 4. State read, generate, state write.
     let generated = match call::generate_once(rt, &plan, &call).await {
         Ok(g) => g,
-        // An undeclared server error is answered natively, as every other
-        // protocol does: any API can fail with a 5xx whatever its contract.
-        Err(EngineError::UndeclaredStatus(code)) if (500..600).contains(&code) => {
+        // An undeclared server error, or a scenario's undeclared client error, is
+        // answered natively, as every other protocol does: any API can refuse or
+        // fail whatever its contract declares. The header override's undeclared
+        // 4xx stays a client mistake (below).
+        Err(EngineError::UndeclaredStatus(code))
+            if (500..600).contains(&code)
+                || ((400..500).contains(&code)
+                    && plan.scenario.and_then(|s| s.status) == Some(code)) =>
+        {
             log.delay = plan.delay;
             let title = axum::http::StatusCode::from_u16(code)
                 .ok()
                 .and_then(|s| s.canonical_reason())
-                .unwrap_or("Server Error");
-            let mut resp = log.problem(
-                code,
-                title,
-                format!(
-                    "operation {} declares no response for forced status {code}",
-                    op.id
-                ),
+                .unwrap_or("Error");
+            let detail = format!(
+                "operation {} declares no response for forced status {code}",
+                op.id
             );
+            let mut resp = match error_shape(op, code) {
+                // Filled as the declared error it borrows the shape of, then sent
+                // with the forced status.
+                Some((declared, variant)) => {
+                    let message = format!("{title}: {detail}");
+                    let mut filled = filled_error(rt, op, variant, declared, &message);
+                    filled.status = code;
+                    let filled = rt
+                        .engine
+                        .with_own_status_in(&rt.bundle, op, declared, filled);
+                    log.answered(rt, op, filled)
+                }
+                None => log.problem(code, title, detail),
+            };
             add_headers(&mut resp, rt, op, plan.scenario, &call);
             return resp;
         }
@@ -1112,6 +1128,16 @@ async fn invalid_input(
         resp.headers_mut().insert(VALIDATION_HEADER, v);
     }
     resp
+}
+
+/// The error response of `op` (its status and variant) whose shape answers a forced
+/// `status` of the same class (4xx, 5xx) it does not declare: the first one declared
+/// with a body schema; `None` when there is none (the answer is then problem+json).
+fn error_shape(op: &Operation, status: u16) -> Option<(u16, &OutputVariant)> {
+    op.outputs.iter().find_map(|o| match o.status {
+        StatusSelector::Code(c) if c / 100 == status / 100 && o.schema.is_some() => Some((c, o)),
+        _ => None,
+    })
 }
 
 /// The contract's error shape `variant`, faker-filled, its message-like

@@ -117,7 +117,7 @@ mocks:
     persona: Terse, realistic retail data.
     scenarios:
       out-of-stock:
-        status: 409                   # one orders.yaml declares, or a 5xx
+        status: 409                   # one orders.yaml declares, or a 4xx or 5xx
         instructions: Explain that the item is out of stock.
 ```
 

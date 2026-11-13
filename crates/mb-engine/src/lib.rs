@@ -2134,11 +2134,27 @@ impl Engine {
         op: &Operation,
         response: GeneratedResponse,
     ) -> GeneratedResponse {
+        let status = response.status;
+        self.with_own_status_in(bundle, op, status, response)
+    }
+
+    /// [`Engine::with_own_status`] for a body in the shape of the response `op`
+    /// declares for `shape` while answered with another status (an undeclared status
+    /// answered in a declared error's shape): the body's status members say the status
+    /// it is answered with.
+    #[must_use]
+    pub fn with_own_status_in(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        shape: u16,
+        response: GeneratedResponse,
+    ) -> GeneratedResponse {
         let schema = op
-            .output_for_status(response.status)
+            .output_for_status(shape)
             .filter(|variant| !media::is_non_json(op, variant))
             .and_then(|variant| variant.schema.as_ref());
-        match (schema, self.error_validator(bundle, op, response.status)) {
+        match (schema, self.error_validator(bundle, op, shape)) {
             (Some(schema), Some(validator)) => {
                 with_http_status(&validator, bundle, schema, response)
             }

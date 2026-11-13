@@ -70,7 +70,7 @@ put_scenario {"mock": "orders", "name": "out-of-stock", "scenario": {
 }}
 ```
 
-Fields: `instructions`, `status` (must be declared by the covered operations unless 5xx, else 422), `latency_ms`, `set` (fields forced into the body), `operations` (operation ids; empty = all), `stream_items`, `stream_item_interval_ms`, `chaos`.
+Fields: `instructions`, `status` (a 4xx or 5xx applies to every covered operation, answered natively where undeclared; any other status must be declared by them, else 422), `latency_ms`, `set` (fields forced into the body), `operations` (operation ids; empty = all), `stream_items`, `stream_item_interval_ms`, `chaos`.
 
 **Chaos** (fault injection) on the whole mock: `update_mock {name, patch: {chaos: {error_rate: 0.1, latency_jitter: {min_ms: 50, max_ms: 400}, drop_stream_rate: 0.05}}}`; `null` clears it.
 

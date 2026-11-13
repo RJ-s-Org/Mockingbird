@@ -187,7 +187,7 @@ A generated answer no model wrote (offline, the provider refusing the key, or un
 
 The override headers work on every protocol: gRPC reads them as lowercased metadata (`x-mockingbird-session`, `x-mockingbird-status`, …), and GraphQL reads them from the HTTP request (or from the `connection_init` payload of a subscription). A forced status is reported natively.
 
-REST answers a forced status with the operation's declared response for it (or its `default` response). A 5xx the operation does not declare is answered as a plain `application/problem+json` document with that status, since any API can fail that way; any other undeclared status is a `400 Undeclared status override`, and a value that is not a status code from 100 to 599 is a `400 Invalid override`.
+REST answers a forced status with the operation's declared response for it (or its `default` response). A 5xx the operation does not declare, or a scenario's 4xx it does not declare, is answered natively, since any API can refuse or fail that way: in the shape of an error response of the same class (4xx, 5xx) the operation declares with a body, its message-like member saying why, else as a plain `application/problem+json` document with that status. Any other undeclared status (an `X-Mockingbird-Status` 4xx, a 1xx–3xx) is a `400 Undeclared status override`, and a value that is not a status code from 100 to 599 is a `400 Invalid override`.
 
 gRPC answers with the status code standing for the HTTP status:
 

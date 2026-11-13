@@ -153,7 +153,7 @@ fn gallery_configs_load() {
 }
 
 /// Every scenario status in the config at `path` is one its operations
-/// declare (or a 5xx), and every `set` fits a response it can select, as
+/// declare (or a 4xx or 5xx), and every `set` fits a response it can select, as
 /// `serve` and the Admin API require.
 fn assert_scenario_statuses_declared(path: &Path) {
     let cfg = mockingbird::file_config::load(path)
