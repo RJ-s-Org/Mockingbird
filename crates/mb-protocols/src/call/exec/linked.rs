@@ -50,7 +50,9 @@ pub(super) async fn named(
     let rt = state.rt;
     let t = stored.resource_type.as_str();
     if !matches!(plan.op.binding, Binding::Http { .. })
-        || !rt.collections().created(&plan.session, t, &stored.id)
+        || !rt
+            .collections()
+            .created(&state.noted(&plan.session, stored).key)
     {
         return None;
     }

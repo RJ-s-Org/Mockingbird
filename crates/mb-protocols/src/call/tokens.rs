@@ -1065,8 +1065,14 @@ pub(super) async fn after_update(
         }
         if state.upsert(session, after.clone()).await {
             // The record stays in the collection the write placed it in.
-            state.rt.collections().carry(session, &written, &after);
-            state.rt.collections().refresh_scope(session, &after);
+            state.rt.collections().carry(
+                &state.noted(session, &written),
+                &state.noted(session, &after),
+            );
+            state
+                .rt
+                .collections()
+                .refresh_scope(&state.noted(session, &after));
         }
         if let Some(record) = served.filter(|r| r.is_object()) {
             for (member, new) in &minted {

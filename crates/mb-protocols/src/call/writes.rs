@@ -152,13 +152,15 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
             };
             let id = stored.id.clone();
             if inserted {
-                rt.collections().remember(session, &stored, collection);
+                rt.collections()
+                    .remember(&state.noted(session, &stored), collection);
             } else if let Some(held) = state.get(session, resource_type, &id).await
-                && rt.collections().get(session, &held).is_none()
+                && rt.collections().get(&state.noted(session, &held)).is_none()
                 && held.data == stored.data
             {
                 // A mention stored it first: this list says where it belongs.
-                rt.collections().remember(session, &held, collection);
+                rt.collections()
+                    .remember(&state.noted(session, &held), collection);
             }
         }
         return outcome;
@@ -253,7 +255,8 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
                     let stored = resource.clone();
                     let inserted = state.insert_seeded(session, resource).await;
                     if inserted && let Some(collection) = collection {
-                        rt.collections().remember(session, &stored, collection);
+                        rt.collections()
+                            .remember(&state.noted(session, &stored), collection);
                     }
                     // Its effects run on what this create stored; one held already
                     // stays as it was, and is no target this create wrote.
@@ -401,7 +404,7 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
             let gone = state.get(session, resource_type, &id).await;
             state.delete(session, resource_type, &id).await;
             if let Some(gone) = &gone {
-                rt.collections().forget(session, gone);
+                rt.collections().forget(&state.noted(session, gone));
             }
             // A queue's messages go with it.
             exec::forget_queue(state, session, resource_type, &id).await;
@@ -430,7 +433,7 @@ pub(super) async fn store_one(
     let stored = resource.clone();
     // A route naming no collection keeps the one it had.
     let held = match &collection {
-        None if rt.collections().has(session, &stored) => {
+        None if rt.collections().has(&state.noted(session, &stored)) => {
             state.get(session, resource_type, &stored.id).await
         }
         _ => None,
@@ -444,15 +447,23 @@ pub(super) async fn store_one(
         match (collection, held) {
             (Some(collection), _) => {
                 rt.collections()
-                    .record(session, &stored, collection, created);
+                    .record(&state.noted(session, &stored), collection, created);
             }
-            (None, Some(held)) => rt.collections().carry(session, &held, &stored),
-            (None, None) if created => rt.collections().place_top_level(session, &stored),
+            (None, Some(held)) => rt
+                .collections()
+                .carry(&state.noted(session, &held), &state.noted(session, &stored)),
+            (None, None) if created => rt
+                .collections()
+                .place_top_level(&state.noted(session, &stored)),
             (None, None) => {}
         }
         match query {
-            Some(query) if created => rt.collections().note_scope(session, &stored, query),
-            _ => rt.collections().refresh_scope(session, &stored),
+            Some(query) if created => rt
+                .collections()
+                .note_scope(&state.noted(session, &stored), query),
+            _ => rt
+                .collections()
+                .refresh_scope(&state.noted(session, &stored)),
         }
     }
 }

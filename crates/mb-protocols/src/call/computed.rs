@@ -88,7 +88,7 @@ impl Children {
                 parents.push(bare(rt, t, parent.pattern.as_deref(), &value));
             }
             if let Some(param) = &parent.path_param
-                && let Some(collection) = rt.collections().get(session, &child)
+                && let Some(collection) = rt.collections().get(&state.noted(session, &child))
                 && let Some(at) = *positions
                     .entry(collection.template.clone())
                     .or_insert_with(|| param_position(rt, &collection.template, param))
@@ -358,7 +358,7 @@ async fn fill_items(
                 || [value.as_str(), id.as_str()]
                     .into_iter()
                     .chain(records::in_pattern(rt, t, id).as_deref())
-                    .any(|key| rt.collections().created(session, t, key));
+                    .any(|key| rt.collections().created(&state.noted_id(session, t, key)));
             created || host.children.values().any(|g| !g.under(id).is_empty())
         });
         if only_derived && !derived_set {

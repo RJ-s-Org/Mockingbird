@@ -1156,7 +1156,14 @@ pub(super) async fn apply_effect(
         return Err("it sets only what was redacted");
     }
     let requested = if let Some((plan, call, status)) = own {
-        let own = write_memory::own_effect_members(rt, plan, call, &held, &requested, status);
+        let own = write_memory::own_effect_members(
+            rt,
+            plan,
+            call,
+            &state.noted(session, &held),
+            &requested,
+            status,
+        );
         if own.set.is_empty() {
             return Err("it sets no member an effect on this update's target may");
         }
@@ -1225,7 +1232,7 @@ pub(super) async fn apply_effect(
         return Err("the merged resource breaks its schema");
     }
     if let Some((plan, call, _)) = own
-        && !write_memory::keeps_owner(rt, plan, call, &held, &stored.data)
+        && !write_memory::keeps_owner(rt, plan, call, &state.noted(session, &held), &stored.data)
     {
         return Err("the merged resource is no longer its owner's");
     }
@@ -1238,7 +1245,10 @@ pub(super) async fn apply_effect(
     if !state.upsert(session, stored).await {
         return Err("the store took no write");
     }
-    rt.collections().carry(session, &held, &carried);
+    rt.collections().carry(
+        &state.noted(session, &held),
+        &state.noted(session, &carried),
+    );
     Ok((merged, applied))
 }
 

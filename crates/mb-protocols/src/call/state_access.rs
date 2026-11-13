@@ -31,6 +31,10 @@ pub(crate) struct StateAccess<'a> {
     /// Parent-scoped records this call found under the parent it names, by its key
     /// there: (type, id) ([`Self::found_placed`]).
     placed: HashSet<(String, String)>,
+    /// The key the store holds each parent-scoped record by that this call read or
+    /// wrote, by (type, own id); `None` where two of one id were read under two keys
+    /// and none written since ([`Self::noted`]).
+    keys: HashMap<(String, String), Option<String>>,
     /// The call's type and path parameters, for the parent of a parent-scoped record
     /// ([`scopes`]); `None` outside a call's path (a GraphQL helper), where a record's
     /// links alone name its parent.
@@ -164,6 +168,7 @@ impl<'a> StateAccess<'a> {
             marked: Vec::new(),
             unplaced: Vec::new(),
             placed: HashSet::new(),
+            keys: HashMap::new(),
             scope_call: None,
         }
     }
@@ -347,22 +352,81 @@ impl<'a> StateAccess<'a> {
             .contains(&(r.resource_type.clone(), r.id.clone()))
     }
 
-    /// Whether `r` is in the collection at `path` (`/repos/a/x/issues`) because this
-    /// call found it under its parent's key ([`Self::found_placed`]) and `path` is where
-    /// that parent's records of its type sit ([`scopes::ParentScope::read_parent`]).
-    /// What the runtime noted of the collection a write put a record in is noted by the
-    /// record's own id, which two parents' records may share.
-    pub(super) fn placed_in(&self, r: &StoredResource, path: &str) -> bool {
-        let t = r.resource_type.as_str();
-        self.found_placed(r)
+    /// `r` (under its own id) as the runtime's notes of where records sit name it
+    /// ([`Collections`]): by the key the store holds it by, so that two parents' records
+    /// of one id are noted apart. That is the key this call read or wrote it under, else
+    /// its key under the parent this call places it (as [`Self::upsert`] would store
+    /// it), else its own id; a record of a type that is not parent-scoped by its own id.
+    pub(super) fn noted<'r>(&self, s: &SessionKey, r: &'r StoredResource) -> Noted<'r> {
+        Noted {
+            key: self.noted_key(s, &r.resource_type, &r.id, Some(&r.data)),
+            r,
+        }
+    }
+
+    /// [`Self::noted`]'s key for the record of type `t` under `id`, its members unknown.
+    pub(super) fn noted_id(&self, s: &SessionKey, t: &str, id: &str) -> OwnRead {
+        self.noted_key(s, t, id, None)
+    }
+
+    fn noted_key(&self, s: &SessionKey, t: &str, id: &str, data: Option<&Value>) -> OwnRead {
+        let scoped = self.rt.index().parent_scopes().get(t).is_some();
+        let key = if !scoped || id.contains(scopes::SEP) {
+            id.to_string()
+        } else {
+            match self.keys.get(&(t.to_string(), id.to_string())) {
+                Some(Some(key)) => key.clone(),
+                Some(None) | None => match self.placement(t, data) {
+                    Placement::In(scope) => scopes::scoped_id(&scope, id),
+                    Placement::Global | Placement::Unknown => id.to_string(),
+                },
+            }
+        };
+        OwnRead {
+            session: s.clone(),
+            resource_type: t.to_string(),
+            id: key,
+        }
+    }
+
+    /// `r`, as the store holds it, under its own id, noted as read (see
+    /// [`Self::note_found`]).
+    fn found(&mut self, r: StoredResource) -> StoredResource {
+        self.note_found(&r);
+        unscoped(r)
+    }
+
+    /// Notes that this call read `r` (as the store holds it) under its key there (see
+    /// [`Self::noted`]).
+    fn note_found(&mut self, r: &StoredResource) {
+        if r.resource_type != mb_state::INTERNAL_TYPE
             && self
                 .rt
                 .index()
                 .parent_scopes()
-                .get(t)
-                .zip(self.parent_of(t))
-                .and_then(|(scope, parent)| scope.read_parent(&parent))
-                .is_some_and(|at| at == path)
+                .get(&r.resource_type)
+                .is_some()
+        {
+            let id = scopes::plain_id(&r.id).to_string();
+            let key = r.id.clone();
+            self.keys
+                .entry((r.resource_type.clone(), id))
+                .and_modify(|was| {
+                    if was.as_deref() != Some(key.as_str()) {
+                        *was = None;
+                    }
+                })
+                .or_insert(Some(key));
+        }
+    }
+
+    /// Notes that this call wrote the record of type `t` under its own id `id` to the
+    /// store under `key` (see [`Self::noted`]).
+    fn wrote_under(&mut self, t: &str, id: &str, key: &str) {
+        if self.rt.index().parent_scopes().get(t).is_some() {
+            self.keys
+                .insert((t.to_string(), id.to_string()), Some(key.to_string()));
+        }
     }
 
     /// Whether `r`, a record stored under no parent (before its type was scoped, by
@@ -411,17 +475,23 @@ impl<'a> StateAccess<'a> {
             Placement::In(scope) => {
                 if let Some(hit) = self.raw_get(s, t, &scopes::scoped_id(scope, id)).await {
                     self.placed.insert((t.to_string(), id.to_string()));
+                    self.note_found(&hit);
                     return Some(hit);
                 }
                 let unplaced = self.raw_get(s, t, id).await?;
                 let fits = self.unplaced_fits(&unplaced, scope);
                 if fits {
                     self.note_unplaced(t, id);
+                    self.note_found(&unplaced);
                 }
                 fits.then_some(unplaced)
             }
             // A record under a parent is found by naming the parent, or listed.
-            Placement::Global | Placement::Unknown => self.raw_get(s, t, id).await,
+            Placement::Global | Placement::Unknown => {
+                let hit = self.raw_get(s, t, id).await?;
+                self.note_found(&hit);
+                Some(hit)
+            }
         }
     }
 
@@ -448,12 +518,10 @@ impl<'a> StateAccess<'a> {
     ) -> Vec<StoredResource> {
         match self.placement(t, None) {
             Placement::In(scope) => self.list_in(s, t, &scope, limit).await,
-            Placement::Global | Placement::Unknown => self
-                .raw_list(s, t, limit)
-                .await
-                .into_iter()
-                .map(unscoped)
-                .collect(),
+            Placement::Global | Placement::Unknown => {
+                let held = self.raw_list(s, t, limit).await;
+                held.into_iter().map(|r| self.found(r)).collect()
+            }
         }
     }
 
@@ -481,7 +549,7 @@ impl<'a> StateAccess<'a> {
             for r in held {
                 if let Some(id) = under(&r.id) {
                     self.placed.insert((t.to_string(), id));
-                    out.push(unscoped(r));
+                    out.push(self.found(r));
                 }
             }
             return out;
@@ -510,13 +578,13 @@ impl<'a> StateAccess<'a> {
             }
             if let Some(id) = under(&r.id) {
                 self.placed.insert((t.to_string(), id));
-                out.push(unscoped(r));
+                out.push(self.found(r));
             } else if !r.id.contains(scopes::SEP)
                 && !placed.contains(&r.id)
                 && self.unplaced_fits(&r, scope)
             {
                 self.note_unplaced(t, &r.id);
-                out.push(r);
+                out.push(self.found(r));
             }
         }
         out
@@ -694,13 +762,12 @@ impl<'a> StateAccess<'a> {
         t: &str,
         limit: usize,
     ) -> Vec<(Option<Vec<String>>, StoredResource)> {
-        self.raw_list(s, t, limit)
-            .await
-            .into_iter()
+        let held = self.raw_list(s, t, limit).await;
+        held.into_iter()
             .map(|r| {
                 let parent = scopes::split_id(&r.id)
                     .map(|(scope, _)| scope.into_iter().map(str::to_string).collect());
-                (parent, unscoped(r))
+                (parent, self.found(r))
             })
             .collect()
     }
@@ -718,6 +785,7 @@ impl<'a> StateAccess<'a> {
         let plain = r.id.clone();
         let indexed = value_index::Indexed::of(rt, &r);
         let r = self.placed(r);
+        let key = r.id.clone();
         let moved = r.id != plain;
         let unplaced = !moved && rt.index().parent_scopes().get(&t).is_some();
         // Marked before it is stored: a list between the two reads the type.
@@ -734,10 +802,13 @@ impl<'a> StateAccess<'a> {
             self.unplaced_stored(s, &pending).await;
         }
         self.wrote |= ok;
+        if ok {
+            self.wrote_under(&t, &plain, &key);
+        }
         // The record found under no parent is this parent's now: it goes, so no other
         // parent finds what it was.
         if ok && moved {
-            self.retire_unplaced(s, &t, &plain).await;
+            self.retire_unplaced(s, &t, &plain, &key).await;
         }
         if ok && t != mb_state::INTERNAL_TYPE {
             rt.written_types().remember(s, &t);
@@ -775,8 +846,9 @@ impl<'a> StateAccess<'a> {
     }
 
     /// Removes `t` `id`, stored under no parent, when this call took it for its parent's
-    /// (see [`Self::note_unplaced`]) and has now stored it there.
-    async fn retire_unplaced(&mut self, s: &SessionKey, t: &str, id: &str) {
+    /// (see [`Self::note_unplaced`]) and has now stored it there, under `key`: what the
+    /// runtime noted of where it sits moves with it ([`Collections::move_key`]).
+    async fn retire_unplaced(&mut self, s: &SessionKey, t: &str, id: &str, key: &str) {
         let Some(at) = self
             .unplaced
             .iter()
@@ -785,6 +857,14 @@ impl<'a> StateAccess<'a> {
             return;
         };
         self.unplaced.swap_remove(at);
+        let own_read = |id: &str| OwnRead {
+            session: s.clone(),
+            resource_type: t.to_string(),
+            id: id.to_string(),
+        };
+        self.rt
+            .collections()
+            .move_key(&own_read(id), &own_read(key));
         if self.open() {
             let r = self.rt.state.delete(s, t, id).await;
             if self.settle(r) == Some(true) {
@@ -833,7 +913,24 @@ impl<'a> StateAccess<'a> {
         if unplaced_gone {
             self.unplaced_left(s, t).await;
         }
-        self.deleted(s, t, id, held).await
+        let ok = self.deleted(s, t, id, held).await;
+        if ok {
+            // What the runtime noted of where it sat goes by the key it was stored by,
+            // so another parent's record of that id keeps its own.
+            let collections = self.rt.collections();
+            let mut keys = vec![stored.as_str()];
+            if unplaced_gone {
+                keys.push(id);
+            }
+            for key in keys {
+                collections.forget_key(&OwnRead {
+                    session: s.clone(),
+                    resource_type: t.to_string(),
+                    id: key.to_string(),
+                });
+            }
+        }
+        ok
     }
 
     /// Whether the store took the delete of the record of parent-scoped type `t` under
@@ -849,13 +946,19 @@ impl<'a> StateAccess<'a> {
         if refused(t, id) || !self.open() {
             return false;
         }
-        let r = self
-            .rt
-            .state
-            .delete(s, t, &scopes::scoped_id(parent, id))
-            .await;
+        let stored = scopes::scoped_id(parent, id);
+        let r = self.rt.state.delete(s, t, &stored).await;
         let held = self.settle(r);
-        self.deleted(s, t, id, held).await
+        let ok = self.deleted(s, t, id, held).await;
+        if ok {
+            let key = OwnRead {
+                session: s.clone(),
+                resource_type: t.to_string(),
+                id: stored,
+            };
+            self.rt.collections().forget_key(&key);
+        }
+        ok
     }
 
     /// After a delete of the record of type `t` under `id` the store answered `held`
@@ -865,7 +968,6 @@ impl<'a> StateAccess<'a> {
         self.wrote |= ok;
         if ok {
             self.rt.value_index().forget(s, t, id);
-            self.rt.collections().forget_id(s, t, id);
         }
         // A record the store held is gone: the session wrote its type.
         if held == Some(true) && t != mb_state::INTERNAL_TYPE {
@@ -901,6 +1003,7 @@ impl<'a> StateAccess<'a> {
         let t = r.resource_type.clone();
         let indexed = value_index::Indexed::of(rt, &r);
         let r = self.placed(r);
+        let (plain, key) = (scopes::plain_id(&r.id).to_string(), r.id.clone());
         let unplaced = !r.id.contains(scopes::SEP) && rt.index().parent_scopes().get(&t).is_some();
         if !self.open() {
             return false;
@@ -920,6 +1023,7 @@ impl<'a> StateAccess<'a> {
         }
         self.wrote |= stored;
         if stored {
+            self.wrote_under(&t, &plain, &key);
             rt.written_types().remember(s, &t);
             rt.value_index().remember_indexed(s, indexed);
         }
@@ -1103,7 +1207,6 @@ pub(crate) async fn delete_shared(
                 None => state.delete(session, &other, &record.id).await,
             };
             if gone {
-                rt.collections().forget(session, &record);
                 if deleted::marks_by_id(rt, plan) {
                     // Gone for a read here, and for the other mock's read under its
                     // parent: by its key there and by its own id, as its delete marks.
@@ -1197,9 +1300,7 @@ pub(crate) async fn delete_resource(
             state.touch(session).await;
             return;
         }
-        if state.delete(session, &gone.resource_type, &gone.id).await {
-            rt.collections().forget(session, &gone);
-        }
+        state.delete(session, &gone.resource_type, &gone.id).await;
         if marks && deleted::marks_by_id(rt, plan) {
             let (t, id) = (gone.resource_type.as_str(), gone.id.as_str());
             deleted::mark(&mut state, session, (plan.op, call), t, id, Some(&gone)).await;

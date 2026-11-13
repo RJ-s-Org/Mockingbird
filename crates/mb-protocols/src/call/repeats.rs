@@ -199,7 +199,7 @@ pub(super) async fn described_conflict(
                         // Where a record is that holds no scope value, only the
                         // collection a create runs in tells, when the path scopes it.
                         (_, None) if *path_scoped => {
-                            in_create_collection(rt, &plan.session, op, call, r)
+                            in_create_collection(state, &plan.session, op, call, r)
                         }
                         // No scope value is the same scope only as no scope value; a
                         // value against none is another scope.
@@ -254,7 +254,6 @@ pub(super) async fn enforced(
     (call, answer): (&OperationCall, Option<&Value>),
     same_values: &[(String, String, String)],
 ) -> Option<Enforced> {
-    let rt: &MockRuntime = state.rt;
     let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
     let Some(Value::Object(body)) = call.body.as_ref() else {
         return None;
@@ -270,7 +269,7 @@ pub(super) async fn enforced(
             continue;
         };
         if !same_scalar(held.data.get(member), asked)
-            || !in_create_collection(rt, session, op, call, &held)
+            || !in_create_collection(state, session, op, call, &held)
         {
             continue;
         }

@@ -57,7 +57,7 @@ pub(super) async fn store_wrapped(
             }
             if took && let Some(collection) = collection {
                 rt.collections()
-                    .record(session, &stored, collection.clone(), true);
+                    .record(&state.noted(session, &stored), collection.clone(), true);
             }
         } else if rt.consistency
             && !transient_fallback(generated)
@@ -166,7 +166,7 @@ pub(super) async fn seed_own_read(
     if (named != identity.field || !path_names_identity(identity))
         && let Some(owner) = owner_of(op, call)
         && match state.parent_of(t) {
-            Some(_) => known_foreign(rt, session, &resource, &owner),
+            Some(_) => known_foreign(rt, &state.noted(session, &resource), &owner),
             None => !shows_owner(rt, &resource, &owner),
         }
     {
@@ -176,7 +176,8 @@ pub(super) async fn seed_own_read(
         rt.own_reads().remember(session, &resource);
         rt.variants().remember(session, op, call, &resource);
         if let Some(collection) = collection_of(op, call) {
-            rt.collections().remember(session, &resource, collection);
+            rt.collections()
+                .remember(&state.noted(session, &resource), collection);
         }
         return;
     }
@@ -190,7 +191,8 @@ pub(super) async fn seed_own_read(
         rt.own_reads().remember(session, &resource);
         rt.variants().remember(session, op, call, &resource);
         if let Some(collection) = collection_of(op, call) {
-            rt.collections().remember(session, &resource, collection);
+            rt.collections()
+                .remember(&state.noted(session, &resource), collection);
         }
     }
 }
@@ -230,7 +232,7 @@ pub(super) async fn seed_entities(
             && let Some((_, collection)) = created.filter(|(t, _)| *t == resource.resource_type)
         {
             rt.collections()
-                .remember(session, resource, collection.clone());
+                .remember(&state.noted(session, resource), collection.clone());
         }
     }
 }

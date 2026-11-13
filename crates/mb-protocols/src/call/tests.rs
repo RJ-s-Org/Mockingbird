@@ -49,35 +49,38 @@ fn a_create_s_scope_is_noted_and_forgotten() {
     query.insert("tag".into(), json!(["a", "b"]));
     query.insert("deep".into(), json!({"x": 1}));
     // Placed nowhere known: no scope.
-    collections.note_scope(&at, &r, &query);
+    collections.note_scope(&noted(&at, &r), &query);
     assert_eq!(
-        collections.carried(&at, &r, "organization_id"),
+        collections.carried(&noted(&at, &r), "organization_id"),
         ScopeOf::Unknown
     );
-    collections.place_top_level(&at, &r);
-    collections.note_scope(&at, &r, &query);
+    collections.place_top_level(&noted(&at, &r));
+    collections.note_scope(&noted(&at, &r), &query);
     assert_eq!(
-        collections.carried(&at, &r, "organization_id"),
+        collections.carried(&noted(&at, &r), "organization_id"),
         ScopeOf::Carried(vec!["42".to_string()])
     );
     assert_eq!(
-        collections.carried(&at, &r, "tag"),
+        collections.carried(&noted(&at, &r), "tag"),
         ScopeOf::Carried(vec!["a".to_string(), "b".to_string()])
     );
-    assert_eq!(collections.carried(&at, &r, "deep"), ScopeOf::Unknown);
+    assert_eq!(
+        collections.carried(&noted(&at, &r), "deep"),
+        ScopeOf::Unknown
+    );
     // Changed by a write this runtime did not record: noted, no longer known.
     let changed = StoredResource {
         data: json!({"id": "1", "x": 2}),
         ..r.clone()
     };
     assert_eq!(
-        collections.carried(&at, &changed, "organization_id"),
+        collections.carried(&noted(&at, &changed), "organization_id"),
         ScopeOf::Noted
     );
     // This runtime's own write keeps it, as of the record now.
-    collections.refresh_scope(&at, &changed);
+    collections.refresh_scope(&noted(&at, &changed));
     assert_eq!(
-        collections.carried(&at, &changed, "organization_id"),
+        collections.carried(&noted(&at, &changed), "organization_id"),
         ScopeOf::Carried(vec!["42".to_string()])
     );
     // So does a write placing it in a collection.
@@ -85,9 +88,9 @@ fn a_create_s_scope_is_noted_and_forgotten() {
         template: "/orgs/{org}/invoices".into(),
         path: "/orgs/o/invoices".into(),
     };
-    collections.record(&at, &r, collection.clone(), false);
+    collections.record(&noted(&at, &r), collection.clone(), false);
     assert_eq!(
-        collections.carried(&at, &r, "organization_id"),
+        collections.carried(&noted(&at, &r), "organization_id"),
         ScopeOf::Carried(vec!["42".to_string()])
     );
     // A list showing it changed behind the runtime's back leaves it noted only.
@@ -95,15 +98,15 @@ fn a_create_s_scope_is_noted_and_forgotten() {
         data: json!({"id": "1", "x": 3}),
         ..r.clone()
     };
-    collections.remember(&at, &moved, collection);
+    collections.remember(&noted(&at, &moved), collection);
     assert_eq!(
-        collections.carried(&at, &moved, "organization_id"),
+        collections.carried(&noted(&at, &moved), "organization_id"),
         ScopeOf::Noted
     );
     // A delete ends it.
-    collections.forget_id(&at, "invoices", "1");
+    collections.forget(&noted(&at, &r));
     assert_eq!(
-        collections.carried(&at, &r, "organization_id"),
+        collections.carried(&noted(&at, &r), "organization_id"),
         ScopeOf::Unknown
     );
 }
@@ -122,13 +125,16 @@ fn a_full_collections_record_drops_only_its_oldest() {
         data: json!({"id": n}),
     };
     for n in 0..=MAX_COLLECTIONS {
-        collections.place_top_level(&at(n), &r(n));
+        collections.place_top_level(&noted(&at(n), &r(n)));
     }
-    assert_eq!(collections.placement(&at(0), &r(0)), None);
+    assert_eq!(collections.placement(&noted(&at(0), &r(0))), None);
     let last = MAX_COLLECTIONS;
-    assert_eq!(collections.placement(&at(last), &r(last)), Some(None));
     assert_eq!(
-        collections.placement(&at(last - 1), &r(last - 1)),
+        collections.placement(&noted(&at(last), &r(last))),
+        Some(None)
+    );
+    assert_eq!(
+        collections.placement(&noted(&at(last - 1), &r(last - 1))),
         Some(None)
     );
 }
@@ -1839,4 +1845,45 @@ async fn change_feed_under_a_parent_skips_an_unplaced_record_linked_elsewhere() 
         got.extend(item);
     }
     assert_eq!(got, [here, unlinked]);
+}
+
+/// `r` as [`Collections`] notes a record of a type that is not parent-scoped: by its id.
+fn noted<'r>(session: &SessionKey, r: &'r StoredResource) -> Noted<'r> {
+    Noted {
+        key: OwnReads::key(session, r),
+        r,
+    }
+}
+
+/// A record a write moved from under no parent to under one: what was noted of it under
+/// its own id is noted under its new key, its create's mark kept, and not under the old.
+#[test]
+fn a_moved_key_keeps_what_was_noted_under_the_old_one() {
+    let collections = Collections::default();
+    let at = SessionKey {
+        workspace: "default".into(),
+        mock: "moves".into(),
+        session: "s".into(),
+    };
+    let r = StoredResource {
+        resource_type: "labels".into(),
+        id: "L1".into(),
+        data: json!({"id": "L1"}),
+    };
+    let collection = Collection {
+        template: "/repos/{owner}/{repo}/labels".into(),
+        path: "/repos/a/x/labels".into(),
+    };
+    collections.record(&noted(&at, &r), collection.clone(), true);
+    let under = Noted {
+        key: OwnRead {
+            id: "a\u{1f}x\u{1f}L1".into(),
+            ..OwnReads::key(&at, &r)
+        },
+        r: &r,
+    };
+    collections.move_key(&noted(&at, &r).key, &under.key);
+    assert_eq!(collections.get(&noted(&at, &r)), None);
+    assert_eq!(collections.get(&under), Some(collection));
+    assert!(collections.created(&under.key));
 }

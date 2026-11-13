@@ -125,7 +125,8 @@ pub(super) async fn by_shared(
                         ..own.clone()
                     };
                     let stored = resolved(state, session, o, &record.data, &record.data).await;
-                    key_fits(rt, session, &judged, o) && chain_fits(&chain_of(o), &stored)
+                    key_fits(rt, &state.noted(session, &judged), o)
+                        && chain_fits(&chain_of(o), &stored)
                 }
             };
             if fits {

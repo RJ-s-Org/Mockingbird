@@ -692,7 +692,7 @@ async fn repeated_key(
         let holds = |r: &mb_state::StoredResource| {
             r.data.get(name).and_then(id_string) == text
                 && gone.as_ref().is_none_or(|g| !g.excludes(&r.data))
-                && in_create_collection(rt, &plan.session, plan.op, call, r)
+                && in_create_collection(state, &plan.session, plan.op, call, r)
         };
         if listed.iter().any(holds) {
             return Some((name.clone(), value.clone()));

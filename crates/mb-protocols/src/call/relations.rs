@@ -46,7 +46,7 @@ pub(super) async fn related(
             ) else {
                 continue;
             };
-            out.retain(|r| r.id != name || key_fits(rt, session, r, &owner));
+            out.retain(|r| r.id != name || key_fits(rt, &state.noted(session, r), &owner));
         }
     }
     let named = out.len();
@@ -298,7 +298,7 @@ pub(super) async fn created_alongside(
                 && let Some(held) = state.get(session, &t, &id).await
                 && rt
                     .collections()
-                    .get(session, &held)
+                    .get(&state.noted(session, &held))
                     .is_some_and(|c| fits(&c))
             {
                 marked.push((t.clone(), id.clone()));
@@ -310,7 +310,7 @@ pub(super) async fn created_alongside(
         };
         if !rt
             .collections()
-            .get(session, &held)
+            .get(&state.noted(session, &held))
             .is_some_and(|c| fits(&c))
         {
             continue;
