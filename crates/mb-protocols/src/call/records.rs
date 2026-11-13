@@ -326,7 +326,7 @@ pub(super) async fn set_each(
                     id = %log_capped(&id),
                     "a bulk create's set names a held record: not stored over it"
                 );
-                if super::owners::in_create_collection(rt, &plan.session, op, call, &held) {
+                if super::owners::in_create_collection(state, &plan.session, op, call, &held) {
                     *record = held.data;
                 }
                 unstored.push(at);

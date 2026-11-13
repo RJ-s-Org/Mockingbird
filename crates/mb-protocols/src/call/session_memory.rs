@@ -88,7 +88,7 @@ pub(super) const MAX_OWN_READS: usize = 4096;
 #[derive(Debug, Default)]
 pub(crate) struct OwnReads(pub(super) std::sync::Mutex<HashMap<OwnRead, u64>>);
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct OwnRead {
     pub(super) session: SessionKey,
     pub(super) resource_type: String,

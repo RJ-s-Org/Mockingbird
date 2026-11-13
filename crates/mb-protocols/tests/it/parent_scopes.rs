@@ -69,6 +69,43 @@ paths:
       operationId: getPull
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/PullRequest"}}}}
+  /repos/{owner}/{repo}/labels:
+    parameters:
+      - {name: owner, in: path, required: true, schema: {type: string}}
+      - {name: repo, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: listLabels
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Label"}}}}}
+    post:
+      operationId: createLabel
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [id, name], properties: {id: {type: string}, name: {type: string}, color: {type: string}}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Label"}}}}
+        "409": {description: A label of that name exists., content: {application/json: {schema: {type: object, properties: {message: {type: string}}}}}}
+  /repos/{owner}/{repo}/labels/{name}:
+    parameters:
+      - {name: owner, in: path, required: true, schema: {type: string}}
+      - {name: repo, in: path, required: true, schema: {type: string}}
+      - {name: name, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getLabel
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Label"}}}}
+        "404": {description: missing}
+    patch:
+      operationId: updateLabel
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {color: {type: string}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Label"}}}}
+    delete:
+      operationId: deleteLabel
+      responses:
+        "204": {description: gone}
   /v1/customers/{customer}/sources:
     parameters:
       - {name: customer, in: path, required: true, schema: {type: string}}
@@ -105,6 +142,13 @@ components:
         id: {type: integer}
         number: {type: integer}
         title: {type: string}
+    Label:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        color: {type: string}
     Source:
       type: object
       required: [id]
@@ -119,6 +163,7 @@ fn harness(script: Vec<Value>) -> support::DescribedHarness {
     let world = json!({"types": {
         "issues": {"identity": {"member": "id"}},
         "pulls": {"identity": {"member": "id"}},
+        "labels": {"identity": {"member": "id"}},
     }});
     support::harness(CONTRACT, script, &HarnessOptions::default(), |rt| {
         support::with_effective(rt, world, false)
@@ -341,6 +386,116 @@ async fn lists_show_their_repository_s_issue_when_two_share_an_id() {
             json!([{"id": 101, "number": if repo == "a" { 1 } else { 5 }, "title": title}])
         );
     }
+}
+
+/// Two repositories' labels sharing an `id`: deleting `b/x`'s leaves what the runtime
+/// noted of `a/x`'s, so `a/x`'s list still shows it from state and its name is still
+/// taken there.
+#[tokio::test]
+async fn a_delete_leaves_the_other_repository_s_record_of_the_id() {
+    let h = harness(Vec::new());
+    for (repo, name) in [("b", "other"), ("a", "bug")] {
+        let (status, _, body) = h
+            .send(
+                "POST",
+                &format!("/repos/{repo}/x/labels"),
+                Some(json!({"id": "L1", "name": name})),
+                &[],
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let (status, _, _) = h.send("DELETE", "/repos/b/x/labels/other", None, &[]).await;
+    assert!(status.is_success(), "{status}");
+    assert_eq!(keys(&h, "labels").await, ["a\u{1f}x\u{1f}L1"]);
+    let (status, headers, list) = h.send("GET", "/repos/a/x/labels", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let fallback = h.records().pop().map(|r| r.fallback_reason);
+    assert_eq!(source(&headers), "state", "{list} {fallback:?}");
+    let listed: Vec<(&Value, &Value)> = list
+        .as_array()
+        .unwrap_or_else(|| panic!("{list}"))
+        .iter()
+        .map(|l| (&l["id"], &l["name"]))
+        .collect();
+    assert_eq!(listed, [(&json!("L1"), &json!("bug"))], "{list}");
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/repos/a/x/labels",
+            Some(json!({"id": "L2", "name": "bug"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+}
+
+/// Two repositories' labels sharing an `id`: an update of `b/x`'s leaves what the
+/// runtime noted of `a/x`'s, so `a/x`'s name is still taken there.
+#[tokio::test]
+async fn an_update_leaves_the_other_repository_s_record_of_the_id() {
+    let h = harness(Vec::new());
+    for (repo, name) in [("b", "other"), ("a", "bug")] {
+        let (status, _, body) = h
+            .send(
+                "POST",
+                &format!("/repos/{repo}/x/labels"),
+                Some(json!({"id": "L1", "name": name})),
+                &[],
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let (status, headers, body) = h
+        .send(
+            "PATCH",
+            "/repos/b/x/labels/other",
+            Some(json!({"color": "red"})),
+            &[],
+        )
+        .await;
+    let fallback = h.records().pop().map(|r| r.fallback_reason);
+    assert_eq!(status, StatusCode::OK, "{body} {fallback:?}");
+    assert_eq!(source(&headers), "state", "{body} {fallback:?}");
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/repos/a/x/labels",
+            Some(json!({"id": "L2", "name": "bug"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+}
+
+/// A label's name is taken within its repository only, though two repositories' labels
+/// share an `id`: `bug` in `a/x` then `other` in `b/x` under the same id, then `bug`
+/// again in `a/x` under another is refused; `bug` in `b/x` is a new label.
+#[tokio::test]
+async fn a_create_s_repeat_check_stays_in_its_repository() {
+    let h = harness(Vec::new());
+    for (repo, id, name, status) in [
+        ("a", "L1", "bug", StatusCode::CREATED),
+        ("b", "L1", "other", StatusCode::CREATED),
+        ("a", "L2", "bug", StatusCode::CONFLICT),
+        ("b", "L2", "bug", StatusCode::CREATED),
+    ] {
+        let (got, headers, body) = h
+            .send(
+                "POST",
+                &format!("/repos/{repo}/x/labels"),
+                Some(json!({"id": id, "name": name})),
+                &[],
+            )
+            .await;
+        let fallback = h.records().pop().map(|r| r.fallback_reason);
+        assert_eq!(got, status, "{repo} {id} {name}: {body} {fallback:?}");
+        assert_eq!(source(&headers), "state", "{body} {fallback:?}");
+    }
+    assert_eq!(
+        keys(&h, "labels").await,
+        ["a\u{1f}x\u{1f}L1", "b\u{1f}x\u{1f}L1", "b\u{1f}x\u{1f}L2"]
+    );
 }
 
 /// An issue's `pull_request` member holds none of a pull request's keys: it marks the

@@ -1038,7 +1038,7 @@ pub(super) async fn same_values(
     if let Some(id) = mb_engine::guards::asked_identity(rt.bundle(), op, call)
         && !known(own, &id)
         && let Some(hit) = state.get(session, own, &id).await
-        && in_create_collection(rt, session, op, call, &hit)
+        && in_create_collection(state, session, op, call, &hit)
     {
         let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
         out.push((hit, field.to_string()));
@@ -1064,7 +1064,7 @@ pub(super) async fn same_values(
         return out;
     }
     let whole = listed.len() < MAX_SCAN;
-    let in_collection = |hit: &StoredResource| in_create_collection(rt, session, op, call, hit);
+    let in_collection = |hit: &StoredResource| in_create_collection(state, session, op, call, hit);
     for (name, text, kind) in asked {
         if out.len() >= MAX_SAME_VALUES {
             break;

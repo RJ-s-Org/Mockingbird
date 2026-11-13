@@ -1046,7 +1046,8 @@ pub(super) async fn commit(
                             id: new.clone(),
                             data: data.clone(),
                         };
-                        rt.collections().rename(session, gone, &renamed);
+                        rt.collections()
+                            .rename(&state.noted(session, gone), &state.noted(session, &renamed));
                         state.delete(session, t, &id).await;
                         state_lists::note_renamed(state, session, t, (&id, &new)).await;
                         if state.tracks_deleted {
@@ -1065,7 +1066,7 @@ pub(super) async fn commit(
             Write::Remove { id } => {
                 state.delete(session, t, &id).await;
                 if let Some(gone) = held {
-                    rt.collections().forget(session, gone);
+                    rt.collections().forget(&state.noted(session, gone));
                 }
                 // The executor removed it, so its own answer, whatever members the faker
                 // gave it, is no evidence it stayed: a GraphQL delete marks it as REST's does.

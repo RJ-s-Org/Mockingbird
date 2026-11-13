@@ -864,9 +864,9 @@ fn mentions(value: &Value, wanted: &str, depth: usize) -> bool {
 }
 
 /// Whether stored `r` shows it is in the collection `call`'s path names: as recorded
-/// there by this runtime, found by the call under the parent whose collection it is
-/// ([`StateAccess::placed_in`]), or, for each path parameter, by a member tied to it
-/// holding its value (as [`overlay_stored`] ties them), or an object holding it. The record
+/// there by this runtime (under the key the call's state access notes it by,
+/// [`StateAccess::noted`]), or, for each path parameter, by a member tied to it holding
+/// its value (as [`overlay_stored`] ties them), or an object holding it. The record
 /// [`Collections`] keeps is this process's own, so on a store several nodes share, a
 /// record another node wrote counts only by its members. A route with no path
 /// parameter is one collection; [`stored_rest`] reads one only when it is the type's
@@ -883,8 +883,7 @@ pub(super) fn in_collection(
         return true;
     }
     if let Some(collection) = collection_of(plan.op, call)
-        && (state.placed_in(r, &collection.path)
-            || rt.collections().get(&plan.session, r) == Some(collection))
+        && rt.collections().get(&state.noted(&plan.session, r)) == Some(collection)
     {
         return true;
     }
@@ -938,12 +937,13 @@ impl Shown<'_> {
     /// declared text members, holds it, ignoring case.
     fn holds(
         &self,
-        rt: &MockRuntime,
+        state: &StateAccess<'_>,
         session: &SessionKey,
         (r, item): (&StoredResource, &Value),
         texts: &[&str],
     ) -> bool {
-        let carried = rt.collections().carried(session, r, self.param);
+        let noted = state.noted(session, r);
+        let carried = state.rt.collections().carried(&noted, self.param);
         self.texts.iter().all(|value| match &carried {
             ScopeOf::Carried(values) => values.contains(value),
             ScopeOf::Noted => mentions(&r.data, value, 0),
@@ -1540,7 +1540,7 @@ async fn stored_records(
         }
         let failed: Vec<&str> = shown
             .iter()
-            .filter(|shown| !shown.holds(rt, &plan.session, (r, &item), &texts))
+            .filter(|shown| !shown.holds(state, &plan.session, (r, &item), &texts))
             .map(|shown| shown.param)
             .collect();
         if !failed.is_empty() {

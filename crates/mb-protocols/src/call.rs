@@ -393,7 +393,7 @@ pub(crate) async fn generate_pending(
             rt,
             plan,
             call,
-            held,
+            held: pending.state.noted(&plan.session, held),
             advancing: &pending.tokens.advancing,
         });
     // A client's retry of a write answering no body is shown nothing beyond its target,
@@ -1687,7 +1687,7 @@ pub(crate) async fn complete(
                     None => None,
                 };
                 let repeated = held.map(|held| {
-                    if owners::in_create_collection(rt, session, op, state_call, &held) {
+                    if owners::in_create_collection(&state, session, op, state_call, &held) {
                         Repeated::Here(held)
                     } else {
                         Repeated::Elsewhere(held.id)

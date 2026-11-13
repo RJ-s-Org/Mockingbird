@@ -1363,10 +1363,11 @@ async fn parent_of(
             let Some(t) = entity_type(rt.index(), None, name) else {
                 continue;
             };
-            let direct = state
-                .get(session, &t, &value)
-                .await
-                .filter(|hit| owner.as_ref().is_none_or(|o| key_fits(rt, session, hit, o)));
+            let direct = state.get(session, &t, &value).await.filter(|hit| {
+                owner
+                    .as_ref()
+                    .is_none_or(|o| key_fits(rt, &state.noted(session, hit), o))
+            });
             let found = match direct {
                 Some(hit) => Some(hit),
                 None if id_like(param) => None,
@@ -2326,7 +2327,10 @@ async fn store_merged(
         ..held.clone()
     };
     if state.upsert(session, resource.clone()).await {
-        rt.collections().carry(session, held, &resource);
+        rt.collections().carry(
+            &state.noted(session, held),
+            &state.noted(session, &resource),
+        );
     }
 }
 
@@ -2485,7 +2489,8 @@ pub(super) struct SettleGuard<'a> {
     pub(super) rt: &'a MockRuntime,
     pub(super) plan: &'a CallPlan<'a>,
     pub(super) call: &'a OperationCall,
-    pub(super) held: &'a StoredResource,
+    /// The target, under the key the call's state access notes it by.
+    pub(super) held: Noted<'a>,
     /// The concurrency tokens the update advances (see [`tokens`]).
     pub(super) advancing: &'a [String],
 }
@@ -2494,7 +2499,7 @@ impl std::fmt::Debug for SettleGuard<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SettleGuard")
             .field("operation", &self.plan.op.id)
-            .field("id", &self.held.id)
+            .field("id", &self.held.r.id)
             .finish_non_exhaustive()
     }
 }
@@ -2509,11 +2514,11 @@ impl mb_engine::UpdateGuard for SettleGuard<'_> {
     }
 
     fn keep_identity(&self, candidate: Value) -> Value {
-        keeping_identity(self.rt, self.held, &candidate)
+        keeping_identity(self.rt, self.held.r, &candidate)
     }
 
     fn keeps_owner(&self, candidate: &Value) -> bool {
-        keeps_owner(self.rt, self.plan, self.call, self.held, candidate)
+        keeps_owner(self.rt, self.plan, self.call, &self.held, candidate)
     }
 
     fn advances(&self, member: &str) -> bool {
@@ -2538,10 +2543,11 @@ pub(super) fn own_effect_members(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,
-    held: &StoredResource,
+    noted: &Noted<'_>,
     set: &Map<String, Value>,
     status: u16,
 ) -> OwnMembers {
+    let held = noted.r;
     let t = held.resource_type.as_str();
     let bundle = rt.bundle();
     let level = Level::of(bundle, read_schema(rt, t));
@@ -2600,7 +2606,7 @@ pub(super) fn own_effect_members(
                     None => return false,
                 };
             }
-            keeps_owner(rt, plan, call, held, &alone)
+            keeps_owner(rt, plan, call, noted, &alone)
         })
         .fold(OwnMembers::default(), |mut out, (key, value, whole)| {
             if whole {
@@ -2925,7 +2931,7 @@ pub(super) fn keeps_owner(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,
-    held: &StoredResource,
+    held: &Noted<'_>,
     answer: &Value,
 ) -> bool {
     let Some(owner) = guarded(rt, plan.op, call) else {
@@ -2933,10 +2939,10 @@ pub(super) fn keeps_owner(
     };
     let candidate = StoredResource {
         data: answer.clone(),
-        ..held.clone()
+        ..held.r.clone()
     };
-    key_fits(rt, &plan.session, &candidate, &owner)
-        && !known_foreign(rt, &plan.session, &candidate, &owner)
+    let candidate = held.with(&candidate);
+    key_fits(rt, &candidate, &owner) && !known_foreign(rt, &candidate, &owner)
 }
 
 /// Whether this read of `held` changes it only by its answer's effects (see
@@ -3033,7 +3039,9 @@ pub(super) async fn settle_read(
         return;
     };
     let answer = keeping_identity(rt, held, answer);
-    if !entity_fits(rt, t, &answer) || !keeps_owner(rt, plan, call, held, &answer) {
+    if !entity_fits(rt, t, &answer)
+        || !keeps_owner(rt, plan, call, &state.noted(&plan.session, held), &answer)
+    {
         failed_attempt(state, plan, earlier).await;
         if let Some(stored) = earlier.stored_answer.take() {
             *generated = GeneratedResponse {
@@ -3065,7 +3073,10 @@ pub(super) async fn settle_read(
         if !state.upsert(session, resource.clone()).await {
             return;
         }
-        rt.collections().carry(session, held, &resource);
+        rt.collections().carry(
+            &state.noted(session, held),
+            &state.noted(session, &resource),
+        );
     }
     generated.body = Some(answer);
     forget_shown(state, session, &key, &earlier.shown).await;

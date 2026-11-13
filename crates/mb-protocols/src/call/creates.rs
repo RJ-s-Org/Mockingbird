@@ -399,7 +399,7 @@ pub(super) async fn repeated_record(
         return None;
     }
     let held = state.get(session, resource_type, &id).await?;
-    Some(if in_create_collection(rt, session, op, call, &held) {
+    Some(if in_create_collection(state, session, op, call, &held) {
         Repeated::Here(held)
     } else {
         Repeated::Elsewhere(id)

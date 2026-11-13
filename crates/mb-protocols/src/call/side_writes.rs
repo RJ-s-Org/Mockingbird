@@ -258,7 +258,7 @@ async fn delete(
         return true;
     }
     state.delete(session, ty, &found.id).await;
-    rt.collections().forget(session, found);
+    rt.collections().forget(&state.noted(session, found));
     if state.tracks_deleted
         && let Some(read) = read
     {

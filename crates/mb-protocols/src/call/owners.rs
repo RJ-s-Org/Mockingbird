@@ -126,9 +126,8 @@ pub(super) fn guarded(rt: &MockRuntime, op: &Operation, call: &OperationCall) ->
 
 /// Whether `r`, a record this call's state access found, is `owner`'s by where it is
 /// stored: under the parent the call names, its key there (see
-/// [`StateAccess::found_placed`]), and showing no other owner itself. What a write
-/// put in a collection ([`Collections::fits`]) speaks for one id only, which two
-/// parents' records of a parent-scoped type may share.
+/// [`StateAccess::found_placed`]), and showing no other owner itself. Callers take a
+/// record that fails it by what this runtime noted of it ([`key_fits`], [`owner_fits`]).
 pub(super) fn placed_fits(state: &StateAccess<'_>, r: &StoredResource, owner: &Owner) -> bool {
     state.found_placed(r) && owner_evidence(state.rt, r, owner) != Some(false)
 }
@@ -178,14 +177,15 @@ pub(super) fn created_in_collections(bundle: &mb_mcm::Bundle, t: &str) -> bool {
 /// type under a parent path (see [`created_in_collections`]). A record of a parent path
 /// counts only under that parent: a label `bug` of one repository is no other's.
 pub(super) fn in_create_collection(
-    rt: &MockRuntime,
+    state: &StateAccess<'_>,
     session: &SessionKey,
     op: &Operation,
     call: &OperationCall,
     hit: &StoredResource,
 ) -> bool {
+    let rt = state.rt;
     let collection = collection_of(op, call);
-    match rt.collections().placement(session, hit) {
+    match rt.collections().placement(&state.noted(session, hit)) {
         Some(at) => at == collection,
         None => collection.is_none() && !created_in_collections(rt.bundle(), &hit.resource_type),
     }
@@ -431,13 +431,9 @@ pub(super) fn links_elsewhere(r: &StoredResource, owner: &Owner) -> bool {
 
 /// Whether `r` is known to be another's: by a record, by what it says, or, when
 /// it says nothing, by a link elsewhere.
-pub(super) fn known_foreign(
-    rt: &MockRuntime,
-    session: &SessionKey,
-    r: &StoredResource,
-    owner: &Owner,
-) -> bool {
-    rt.collections().fits(session, r, owner).map_or_else(
+pub(super) fn known_foreign(rt: &MockRuntime, noted: &Noted<'_>, owner: &Owner) -> bool {
+    let r = noted.r;
+    rt.collections().fits(noted, owner).map_or_else(
         || match owner_evidence(rt, r, owner) {
             Some(shown) => !shown,
             None => links_elsewhere(r, owner),
@@ -450,18 +446,13 @@ pub(super) fn known_foreign(
 /// write acts on what it cannot tell is another's, or it would leave it behind.
 /// A read needs a record or what `r` shows, as an answer can be generated. A
 /// number cannot show its owner, so it passes unless `r` links elsewhere.
-pub(super) fn owner_fits(
-    rt: &MockRuntime,
-    session: &SessionKey,
-    r: &StoredResource,
-    owner: &Owner,
-    field: &str,
-) -> bool {
+pub(super) fn owner_fits(rt: &MockRuntime, noted: &Noted<'_>, owner: &Owner, field: &str) -> bool {
+    let r = noted.r;
     if owner.writing {
-        return !known_foreign(rt, session, r, owner);
+        return !known_foreign(rt, noted, owner);
     }
     rt.collections()
-        .fits(session, r, owner)
+        .fits(noted, owner)
         .unwrap_or_else(|| match owner_evidence(rt, r, owner) {
             Some(shown) => shown,
             None => {
@@ -477,16 +468,12 @@ pub(super) fn owner_fits(
 /// own unless `r` says otherwise. A name (in one of [`NAME_FIELDS`], or the end of a relative path) must
 /// show its owner, or differ from `r`'s own `id`: only a write through the route
 /// keys it so, as a list or a mention keys by the `id`.
-pub(super) fn key_fits(
-    rt: &MockRuntime,
-    session: &SessionKey,
-    r: &StoredResource,
-    owner: &Owner,
-) -> bool {
+pub(super) fn key_fits(rt: &MockRuntime, noted: &Noted<'_>, owner: &Owner) -> bool {
+    let r = noted.r;
     if owner.writing {
-        return !known_foreign(rt, session, r, owner);
+        return !known_foreign(rt, noted, owner);
     }
-    if let Some(fits) = rt.collections().fits(session, r, owner) {
+    if let Some(fits) = rt.collections().fits(noted, owner) {
         return fits;
     }
     let Value::Object(members) = &r.data else {
