@@ -5,7 +5,12 @@
 //! when its `parent.path_param` is in the path), and acts on that item: a write changes
 //! or removes it in place and stores the parent ([`super::Write::Within`]), never a
 //! record of the child's type.
+//!
+//! Items a parent holds that have no read of their own (Checkout's `line_items`) are
+//! listed at the parent's route for them from the held parent ([`sub_list`]).
 
+use mb_engine::GeneratedResponse;
+use mb_mcm::{Binding, HttpMethod};
 use mb_state::StoredResource;
 use serde_json::Value;
 use tracing::Instrument;
@@ -13,7 +18,8 @@ use tracing::Instrument;
 use super::Held;
 use super::list::item_type;
 use crate::call::{
-    CallPlan, MAX_SCAN, OperationCall, StateAccess, id_string, records, state_span, write_memory,
+    CallPlan, MAX_SCAN, OperationCall, StateAccess, id_string, records, state_lists, state_span,
+    write_memory,
 };
 
 /// A record held in its parent's array member.
@@ -128,4 +134,80 @@ async fn find(
     });
     let found = holding.next()?;
     holding.next().is_none().then_some(found)
+}
+
+/// A list of the items a held parent holds in a member, served at a route one literal
+/// segment past the parent's read by id, named for the member
+/// (`GET /v1/checkout/sessions/{session}/line_items` beside the session's `line_items`,
+/// an array or a list object's `data`), when its items have no records of their own:
+/// the parent's items, each projected to the list's item, paged as a list from state
+/// is. `None` when the route is no such list, or the session holds no such parent or
+/// no such member in it.
+pub(super) async fn sub_list(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+) -> Option<GeneratedResponse> {
+    let rt = state.rt;
+    let op = plan.op;
+    let bundle = rt.bundle();
+    let Binding::Http {
+        method: HttpMethod::Get,
+        path,
+    } = &op.binding
+    else {
+        return None;
+    };
+    let (parent_path, member) = path.rsplit_once('/')?;
+    if member.is_empty() || member.contains('{') {
+        return None;
+    }
+    let param = parent_path
+        .rsplit('/')
+        .next()?
+        .strip_prefix('{')?
+        .strip_suffix('}')?;
+    let types: Vec<&String> = rt
+        .index()
+        .detail_reads
+        .iter()
+        .filter(|(_, at)| {
+            bundle.operations.get(**at).is_some_and(
+                |read| matches!(&read.binding, Binding::Http { path, .. } if path == parent_path),
+            )
+        })
+        .map(|(t, _)| t)
+        .collect();
+    let [t] = types.as_slice() else {
+        return None;
+    };
+    let id = call.path_params.get(param).and_then(id_string)?;
+    let parent = records::held_by_key(state, &plan.session, t, &id)
+        .instrument(state_span())
+        .await?;
+    let items = match parent.data.get(member)? {
+        Value::Array(items) => items,
+        Value::Object(list) => list.get("data")?.as_array()?,
+        _ => return None,
+    };
+    let shape = state_lists::Shape::of(rt, op)?;
+    let envelope = super::list::envelope(rt, plan, call, &shape)?;
+    let listed: Vec<(Value, Value)> = items
+        .iter()
+        .map(|item| {
+            let item = crate::call::lists::projected(bundle, Some(&shape.items), item, 0);
+            (item, Value::Null)
+        })
+        .collect();
+    let page = (&shape, &envelope);
+    state_lists::page(
+        state,
+        (plan, call),
+        (member, None),
+        page,
+        listed,
+        (None, true),
+    )
+    .await
+    .ok()
 }

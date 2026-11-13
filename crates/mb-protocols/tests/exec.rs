@@ -4737,16 +4737,13 @@ async fn a_version_a_write_carries_starts_at_one() {
 }
 
 #[tokio::test]
-async fn a_list_sent_for_a_member_the_reads_hold_as_an_object_is_dropped_not_refused() {
+async fn a_list_sent_for_a_member_the_reads_hold_as_a_list_object_is_its_data() {
     let (capture, _guard) = Capture::install();
-    // Fill's answer: the sent items carried over into the list object.
-    let filled = json!({"line_items": {"object": "list", "data": [{"price": "p1", "quantity": 2}]}, "tags": []});
-    let h = support::harness(
-        SERVER_SET,
-        vec![filled.clone()],
-        &HarnessOptions::default(),
-        |rt| rt,
-    );
+    // Fill's answer, were it asked: other items than the client sent.
+    let filled = json!({"line_items": {"object": "list", "data": [{"price": "p9", "quantity": 9}]}, "tags": []});
+    let h = support::harness(SERVER_SET, vec![filled], &HarnessOptions::default(), |rt| {
+        rt
+    });
     // Stripe's shape: the create takes a list of prices, the record holds a list object.
     let sent = json!({"currency": "EUR", "line_items": [{"price": "p1", "quantity": 2}]});
     let (status, _, body) = h.send("POST", "/carts", Some(sent), &[]).await;
@@ -4755,9 +4752,12 @@ async fn a_list_sent_for_a_member_the_reads_hold_as_an_object_is_dropped_not_ref
         capture.of("createCart"),
         vec![create_line("createCart", None)]
     );
-    // Optional and never null, but sent: fill asks the model for it, so the record
-    // keeps the client's items.
-    assert_eq!(body["line_items"], filled["line_items"], "{body}");
+    // The client's items are the list object's `data`, never the model's to write.
+    assert_eq!(
+        body["line_items"],
+        json!({"object": "list", "data": [{"price": "p1", "quantity": 2}]}),
+        "{body}"
+    );
     let requests = h.provider.requests();
     let asked = requests.iter().find_map(|r| match &r.response_format {
         mb_llm::ResponseFormat::JsonSchema { schema, .. } => {
@@ -4765,7 +4765,7 @@ async fn a_list_sent_for_a_member_the_reads_hold_as_an_object_is_dropped_not_ref
         }
         _ => None,
     });
-    assert!(asked.is_some(), "line_items was not asked: {requests:?}");
+    assert!(asked.is_none(), "line_items was asked: {asked:?}");
 }
 
 #[tokio::test]

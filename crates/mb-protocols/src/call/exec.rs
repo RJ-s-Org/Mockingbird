@@ -345,6 +345,14 @@ pub(super) async fn run(
             OpKind::Action => action::run(state, plan, call, held, response_schema).await,
         },
         Some(Err((kind, reason))) => {
+            // Items with no records of their own, listed under the parent holding them.
+            if kind == OpKind::List
+                && reason == Fallback::NoIdentity
+                && let Some(served) = embedded::sub_list(state, plan, call).await
+            {
+                answered(state.rt, plan, kind);
+                return Ran::Answered(Box::new(served));
+            }
             fell_back(state.rt, plan, kind, reason.as_str());
             unclassified(state, plan, call, held, response_schema).await
         }

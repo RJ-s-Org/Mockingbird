@@ -583,7 +583,7 @@ fn asks_nothing(
 /// The envelope of an empty page of `shape`: its other required members as the schema
 /// fixes them, else as the faker draws them for the call, a flag saying more pages
 /// follow (`has_more`) at `false` until the page says otherwise.
-fn envelope(
+pub(super) fn envelope(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,

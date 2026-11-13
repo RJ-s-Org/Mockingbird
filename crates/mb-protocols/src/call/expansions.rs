@@ -21,6 +21,11 @@
 //! the session holds always wins over one an answer generated. A dotted step, or a
 //! reference by name, to a record the session does not hold stays its id.
 //!
+//! A dotted path also goes through embedded parts and arrays: through a list embed's
+//! items (`line_items.data.price.product`, each item's price's product), and an array
+//! of references by schema (an invoice's `discounts`, each an id or the discount) has
+//! each id the session holds a record under expanded in its place.
+//!
 //! An **includable part** is a member the contract says is returned only when the read
 //! asks for it ([`includable_parts`]): its description says so ("This field is not
 //! included by default"), or the record's schema lists it among its `x-expandableFields`
@@ -47,15 +52,18 @@ const MAX_EXPAND_DEPTH: usize = 4;
 /// definitions are the object branches of a choice that also admits an id string. Empty
 /// when it is no such choice.
 fn schema_reference(rt: &MockRuntime, schema: &Value, member: &str) -> Vec<String> {
+    property_schema(rt.bundle(), schema, member).map_or_else(Vec::new, |p| choice_types(rt, &p))
+}
+
+/// The types `property` refers to: those whose definitions are the object branches of
+/// a choice that also admits an id string. Empty when it is no such choice.
+fn choice_types(rt: &MockRuntime, property: &Value) -> Vec<String> {
     let bundle = rt.bundle();
-    let Some(property) = property_schema(bundle, schema, member) else {
-        return Vec::new();
-    };
-    let (parts, defs) = schema_parts(bundle, Some(&property));
+    let (parts, defs) = schema_parts(bundle, Some(property));
     let choice = parts
         .iter()
         .any(|p| p.get("anyOf").or_else(|| p.get("oneOf")).is_some());
-    if !choice || !holds_a_string(bundle, &property) {
+    if !choice || !holds_a_string(bundle, property) {
         return Vec::new();
     }
     let index = rt.index();
@@ -107,6 +115,23 @@ fn answer_schema(op: &Operation) -> Option<&Value> {
 /// Whether `member` of the answer of `op` is a reference member (see the module docs).
 pub(super) fn is_reference(rt: &MockRuntime, op: &Operation, member: &str) -> bool {
     answer_schema(op).is_some_and(|schema| reference(rt, schema, member).is_some())
+}
+
+/// The item schema of `schema`, when it is an array.
+fn array_item(bundle: &mb_mcm::Bundle, schema: &Value) -> Option<Value> {
+    schema_parts(bundle, Some(schema))
+        .0
+        .iter()
+        .find_map(|p| p.get("items").cloned())
+}
+
+/// Whether `member` of the answer of `op` is an array of references by schema (an
+/// invoice's `discounts`: each an id or the discount).
+pub(super) fn is_reference_array(rt: &MockRuntime, op: &Operation, member: &str) -> bool {
+    answer_schema(op)
+        .and_then(|schema| property_schema(rt.bundle(), schema, member))
+        .and_then(|property| array_item(rt.bundle(), &property))
+        .is_some_and(|item| !choice_types(rt, &item).is_empty())
 }
 
 /// The member a record of type `t` is keyed by: its detail read's identity, else `id`.
@@ -428,46 +453,86 @@ pub(super) async fn expand(
         }
     }
     for path in &embeds.paths {
-        let mut schema = top.clone();
-        let mut pointer = String::new();
-        for step in path.iter().take(MAX_EXPAND_DEPTH) {
-            let Some((types, _)) = reference(rt, &schema, step) else {
-                break;
+        let steps: Vec<&String> = path.iter().take(MAX_EXPAND_DEPTH).collect();
+        // The places the path reached: a pointer into `body`, the schema of the object
+        // there, and the steps taken to it. A step through an array goes on in each of
+        // its items (a list embed's `data`).
+        let mut reached: Vec<(String, Value, usize)> = vec![(String::new(), top.clone(), 0)];
+        while let Some((at, schema, taken)) = reached.pop() {
+            let Some(step) = steps.get(taken) else {
+                continue;
             };
-            pointer.push('/');
-            pointer.push_str(&token(step));
-            let found = match body.pointer(&pointer) {
-                Some(Value::String(id)) => {
-                    let id = id.clone();
-                    held(state, session, &types, &id).await
-                }
-                // Expanded by an earlier path, or held so: followed by its type.
-                Some(Value::Object(_)) => None,
-                _ => break,
-            };
-            let t = match found {
-                Some(record) => {
-                    let t = record.resource_type.clone();
-                    let view = shaped(rt, &t, &record);
-                    if let Some(slot) = body.pointer_mut(&pointer) {
-                        *slot = view;
-                    }
-                    t
-                }
-                None if body.pointer(&pointer).is_some_and(Value::is_object) => {
-                    match types.first() {
-                        Some(t) => t.clone(),
-                        None => break,
+            let pointer = format!("{at}/{}", token(step));
+            let property = property_schema(rt.bundle(), &schema, step);
+            let next = taken + 1;
+            match body.pointer(&pointer) {
+                Some(Value::Array(items)) => {
+                    let count = items.len();
+                    let Some(item) = property.and_then(|p| array_item(rt.bundle(), &p)) else {
+                        continue;
+                    };
+                    let types = choice_types(rt, &item);
+                    for at in 0..count {
+                        let pointer = format!("{pointer}/{at}");
+                        if types.is_empty() {
+                            reached.push((pointer, item.clone(), next));
+                        } else if let Some(schema) =
+                            expand_at(state, session, body, &pointer, &types).await
+                        {
+                            reached.push((pointer, schema, next));
+                        }
                     }
                 }
-                None => break,
-            };
-            match record_schema(rt, &t) {
-                Some(next) => schema = next,
-                None => break,
+                Some(_) => match reference(rt, &schema, step) {
+                    Some((types, _)) => {
+                        if let Some(schema) =
+                            expand_at(state, session, body, &pointer, &types).await
+                        {
+                            reached.push((pointer, schema, next));
+                        }
+                    }
+                    // An embedded part (a list object, an item's object) is followed into.
+                    None => {
+                        if let Some(property) = property
+                            && body.pointer(&pointer).is_some_and(Value::is_object)
+                        {
+                            reached.push((pointer, property, next));
+                        }
+                    }
+                },
+                None => {}
             }
         }
     }
+}
+
+/// Expands the reference at `pointer` in `body`, of one of `types`: an id is the record
+/// the session holds under it, an object (expanded by an earlier path, or held so) is
+/// followed by its type. The schema of the record there, to follow on; `None` when the
+/// session holds no record under the id.
+async fn expand_at(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    body: &mut Value,
+    pointer: &str,
+    types: &[String],
+) -> Option<Value> {
+    let rt = state.rt;
+    let t = match body.pointer(pointer) {
+        Some(Value::String(id)) => {
+            let id = id.clone();
+            let record = held(state, session, types, &id).await?;
+            let t = record.resource_type.clone();
+            let view = shaped(rt, &t, &record);
+            if let Some(slot) = body.pointer_mut(pointer) {
+                *slot = view;
+            }
+            t
+        }
+        Some(Value::Object(_)) => types.first()?.clone(),
+        _ => return None,
+    };
+    record_schema(rt, &t)
 }
 
 #[cfg(test)]
