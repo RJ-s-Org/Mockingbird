@@ -482,3 +482,80 @@ async fn a_listed_connection_item_is_read_back_by_its_arguments() {
     let held = gql(&base, r#"{ product(id: "P_2") { id } }"#).await;
     assert_eq!(held["product"], json!({"id": "P_2"}));
 }
+
+const GISTS: &str = r"
+type Query {
+  user(login: String!): User
+  viewer: User!
+  repository(owner: String!, name: String!): Repository
+}
+type User { id: ID! login: String! name: String gist(name: String!): Gist repositories: [Repository!]! }
+type Gist { id: ID! name: String! owner: User }
+type Repository { id: ID! name: String! stargazerCount: Int! }
+";
+
+#[tokio::test]
+async fn a_generated_mention_of_a_held_record_keeps_its_held_members() {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let key = mb_state::SessionKey {
+        workspace: "default".into(),
+        mock: "gh".into(),
+        session: "s1".into(),
+    };
+    mb_state::StateStore::seed(
+        state.as_ref(),
+        &key,
+        vec![
+            mb_state::StoredResource {
+                resource_type: "user".into(),
+                id: "U_1".into(),
+                data: json!({"__typename": "User", "id": "U_1", "login": "octocat", "name": "The Octocat"}),
+            },
+            mb_state::StoredResource {
+                resource_type: "repository".into(),
+                id: "R_9".into(),
+                data: json!({"__typename": "Repository", "id": "R_9", "name": "next.js", "stargazerCount": 7}),
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    let base = serve_on(
+        GISTS,
+        vec![
+            // The model draws an id of its own for the seeded owner.
+            json!({"__typename": "User", "id": "U_me", "gist": {"__typename": "Gist", "id": "G_1", "name": "g",
+                "owner": {"__typename": "User", "id": "U_made_up", "login": "octocat", "name": "Made up"}}}),
+            // A repository list item named like a held repository of no owner.
+            json!({"__typename": "User", "id": "U_me", "repositories": [
+                {"__typename": "Repository", "id": "R_new", "name": "next.js", "stargazerCount": 99}]}),
+            // Should the lookup below generate, it would say so.
+            json!({"__typename": "User", "id": "U_x", "name": "Generated"}),
+        ],
+        state,
+    )
+    .await;
+    let gist = gql(
+        &base,
+        r#"{ viewer { gist(name: "g") { owner { id login name } } } }"#,
+    )
+    .await;
+    assert_eq!(gist["viewer"]["gist"]["owner"]["id"], "U_1", "{gist}");
+    assert_eq!(
+        gist["viewer"]["gist"]["owner"]["name"], "The Octocat",
+        "{gist}"
+    );
+    // A repository's name counts per owner: a list item is not the held one.
+    let repos = gql(
+        &base,
+        r#"{ viewer { repositories { id name stargazerCount } } }"#,
+    )
+    .await;
+    assert_eq!(
+        repos["viewer"]["repositories"][0]["stargazerCount"], 99,
+        "{repos}"
+    );
+    let user = gql(&base, r#"{ user(login: "octocat") { id name } }"#).await;
+    assert_eq!(user["user"]["id"], "U_1", "{user}");
+    assert_eq!(user["user"]["name"], "The Octocat", "{user}");
+}
