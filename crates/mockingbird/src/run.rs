@@ -92,7 +92,14 @@ impl Started {
 /// cannot be started is exit code 127, not an error.
 pub async fn run(args: RunArgs) -> anyhow::Result<ExitCode> {
     let session = open(&args).await?;
+    let window = crate::verify_run::world_review_before(&session.admin_url).await;
     let code = run_command(&args.command, &session.proxy).await;
+    // The called operations whose world is left open, as `verify --run` notes them.
+    if let Some(window) = window {
+        for note in crate::verify_run::world_review_after(&session.admin_url, &window).await {
+            eprintln!("mockingbird: {note}");
+        }
+    }
     session.close(args.keep).await;
     code
 }
