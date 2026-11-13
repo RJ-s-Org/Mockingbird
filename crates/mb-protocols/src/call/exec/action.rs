@@ -1,6 +1,7 @@
 //! Actions (step 5 of the plan): an action whose description sets members of its
 //! target (a `transition`, `changes`) sets them on the held target, stores it, and
-//! answers it, with no LLM call; one whose description gives it a `queue` puts messages
+//! answers it, with no LLM call; so does one whose verb names a state of its target's
+//! type ([`super::verbs`]) when no model answers it; one whose description gives it a `queue` puts messages
 //! on its target or takes them off ([`super::queue`]). Any other action generates, as does one on a target
 //! behind writes that write memory keeps for it.
 
@@ -37,13 +38,45 @@ pub(super) async fn run(
     if let Some(queue) = rt.described().op(&op.id).and_then(|d| d.queue.as_ref()) {
         return super::queue::run(state, plan, call, held, response_schema, queue).await;
     }
-    if !transitions::sets_members(rt, op) {
+    // An action the description sets nothing for moves its target's state as its verb
+    // says (`closeIssue` → `CLOSED`, [`super::verbs`]) when no model answers it; with
+    // one, the model's answer does.
+    let described = transitions::sets_members(rt, op);
+    let no_model = !plan.engine.has_provider() || plan.engine.provider_blocked().is_some();
+    if !described && !no_model {
         fell_back(rt, plan, kind, "undescribed");
         return Ran::Generate(None);
     }
     let (Some(stored), Some(id)) = (held.target, held.target_id) else {
-        fell_back(rt, plan, kind, Fallback::NotHeld.as_str());
+        let why = if described {
+            Fallback::NotHeld.as_str()
+        } else {
+            "undescribed"
+        };
+        fell_back(rt, plan, kind, why);
         return Ran::Generate(None);
+    };
+    // Of the record the action changes: its own type, whatever the operation names.
+    let verb_sets = if described {
+        None
+    } else {
+        match super::verbs::inferred(rt, op, &stored.resource_type) {
+            Some(set) => {
+                tracing::info!(
+                    mock = %rt.name,
+                    operation = %op.id,
+                    member = %set.0,
+                    value = %set.1,
+                    exec_inferred = "verb",
+                    "an action's verb set its target's state"
+                );
+                Some(set)
+            }
+            None => {
+                fell_back(rt, plan, kind, "undescribed");
+                return Ran::Generate(None);
+            }
+        }
     };
     // Writes the stored copy does not show yet (an acknowledged create, an action that
     // answered nothing, a create referring to the target) are remembered: the action
@@ -57,7 +90,16 @@ pub(super) async fn run(
         return Ran::Generate(Some(earlier));
     }
     let mut changed = stored.clone();
-    transitions::apply(state, (plan, call), Some(&stored.data), &mut changed.data).await;
+    match &verb_sets {
+        Some((member, value)) => {
+            if let Some(record) = changed.data.as_object_mut() {
+                record.insert(member.clone(), value.clone());
+            }
+        }
+        None => {
+            transitions::apply(state, (plan, call), Some(&stored.data), &mut changed.data).await;
+        }
+    }
     let derived = computed::filled(state, (plan, call), &changed)
         .instrument(state_span())
         .await;

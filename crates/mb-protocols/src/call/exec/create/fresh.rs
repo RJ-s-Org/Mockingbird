@@ -215,7 +215,7 @@ pub(super) fn start_states(
 
 /// Whether member `name` is named as a state: `state`, `status`, `phase`, `stage`, or
 /// ending in `_state`, `_status`, `State` or `Status`.
-fn state_named(name: &str) -> bool {
+pub(in crate::call::exec) fn state_named(name: &str) -> bool {
     ["state", "status", "phase", "stage"].contains(&name)
         || ["_state", "_status", "State", "Status"]
             .iter()
