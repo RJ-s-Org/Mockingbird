@@ -301,3 +301,53 @@ async fn the_states_a_description_lists_start_as_an_enum_does() {
     assert_eq!(ticket["status"], "open", "{ticket}");
     assert_eq!(ticket["closed"], false, "{ticket}");
 }
+
+const JOBS: &str = r##"
+openapi: 3.0.0
+info: {title: jobs, version: "1"}
+paths:
+  /jobs:
+    post:
+      operationId: createJob
+      requestBody: {content: {application/json: {schema: {type: object, properties: {status: {type: string}, created_at: {type: string, format: date-time}, updatedAt: {type: string, format: date-time}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Job"}}}}}
+  /jobs/{id}:
+    get:
+      operationId: getJob
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Job"}}}}}
+  /jobs/{id}/start:
+    post:
+      operationId: startJob
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Job"}}}}}
+components:
+  schemas:
+    Job:
+      type: object
+      required: [id, status]
+      properties:
+        id: {type: string}
+        status: {type: string, enum: [created, updated, started]}
+        created_at: {type: string, format: date-time, nullable: true}
+        updatedAt: {type: string, format: date-time, nullable: true}
+        started_at: {type: string, format: date-time, nullable: true}
+"##;
+
+/// A record's own creation and update times are not marks of states named `created` or
+/// `updated`: a job started out of `created` keeps the times it was created with, while
+/// `started_at`, a state's own, follows its state.
+#[tokio::test]
+async fn creation_and_update_times_are_not_state_members() {
+    let router = router_of(JOBS, json!({}), None);
+    let at = "2025-06-01T12:00:00Z";
+    let body = json!({"status": "created", "created_at": at, "updatedAt": at});
+    let (_, job) = call(&router, "POST", "/jobs", Some(body)).await;
+    assert_eq!(job["status"], "created", "{job}");
+    let id = job["id"].as_str().unwrap_or_default().to_owned();
+    let (_, started) = call(&router, "POST", &format!("/jobs/{id}/start"), None).await;
+    assert_eq!(started["status"], "started", "{started}");
+    assert!(started["started_at"].is_string(), "{started}");
+    assert_eq!(started["created_at"], at, "{started}");
+    assert_eq!(started["updatedAt"], at, "{started}");
+}
