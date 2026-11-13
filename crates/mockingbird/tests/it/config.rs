@@ -1561,7 +1561,7 @@ async fn invalid_config_applies_nothing() {
         // An unknown operation in a scenario; the other mock is valid.
         "mocks:\n  orders: {contract: orders.yaml}\n  billing:\n    contract: billing.yaml\n    scenarios:\n      s: {operations: [noSuchOp]}\n",
         // A scenario status its operation does not declare.
-        "mocks:\n  orders:\n    contract: orders.yaml\n    scenarios:\n      s: {status: 409, operations: [createOrder]}\n",
+        "mocks:\n  orders:\n    contract: orders.yaml\n    scenarios:\n      s: {status: 304, operations: [createOrder]}\n",
         // A missing profile.
         "mocks:\n  orders: {contract: orders.yaml, llm_profile: nope}\n",
         // A missing default profile and fallback.
