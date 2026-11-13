@@ -307,8 +307,9 @@ pub(super) struct Embeds {
     /// The asked members that are references ([`super::expansions`]): a record the
     /// session holds is expanded in their place; the record keeps the id.
     pub(super) references: Vec<String>,
-    /// The paths asked to be expanded that start at a reference, each step a member
-    /// (`latest_invoice.payment_intent` → `[latest_invoice, payment_intent]`).
+    /// The paths asked to be expanded that start at a reference, or go on past an
+    /// embedded part, each step a member (`latest_invoice.payment_intent` →
+    /// `[latest_invoice, payment_intent]`, `line_items.data.price`).
     pub(super) paths: Vec<Vec<String>>,
     /// Whether the read declares an embedding parameter at all.
     pub(super) embedding: bool,
@@ -446,19 +447,25 @@ pub(super) fn embeds(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> 
                 continue;
             };
             let reference = super::expansions::is_reference(rt, op, &member);
-            if !(reference || members.contains(&member) || includable.contains(&member)) {
+            let references = super::expansions::is_reference_array(rt, op, &member);
+            if !(reference
+                || references
+                || members.contains(&member)
+                || includable.contains(&member))
+            {
                 continue;
             }
             if !out.asked.contains(&member) {
                 out.asked.push(member.clone());
             }
-            if reference {
-                if !out.references.contains(&member) {
-                    out.references.push(member);
-                }
-                if !out.paths.contains(&path) {
-                    out.paths.push(path);
-                }
+            if reference && !out.references.contains(&member) {
+                out.references.push(member);
+            }
+            // A dotted path through an embedded part (`line_items.data.price`), and an
+            // array of references, expand the references they reach, as a path starting
+            // at a reference does.
+            if (reference || references || path.len() > 1) && !out.paths.contains(&path) {
+                out.paths.push(path);
             }
         }
     }

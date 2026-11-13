@@ -322,7 +322,7 @@ pub(super) async fn run(
     // A request member that does not fit the record's is never stored as sent: the
     // record it names, when the session holds it, else left for fill.
     if let Value::Object(known) = &mut data {
-        reshape(state, &plan.session, t, known, &owned)
+        reshape(state, (&plan.session, call), t, known, &owned)
             .instrument(state_span())
             .await;
     }
@@ -369,6 +369,8 @@ pub(super) async fn run(
         }
         key = named;
     }
+    // Child items bound to records of their own name the record in their link member.
+    link_children(rt, (t, field), &mut data);
     // A member the description computes below the top (`cost.totalAmount.amount`) is
     // written in the objects above it, opened as the schema declares them; what else
     // those hold is preset and filled as any member's, the computed one never.
@@ -2023,6 +2025,9 @@ fn lacking(
     let schema = non_null(bundle, schema);
     match value {
         Value::Object(held) => {
+            // An object where the schema is a choice (an id or the record: a reference
+            // array's item) is completed as the object branch it is.
+            let schema = object_branch(bundle, &schema, held).unwrap_or(schema);
             let required = required_members(bundle, &schema);
             // A create's every declared member, the required first: one it lacks is
             // taken below the top only (the create takes those of its top itself), and
@@ -2206,6 +2211,31 @@ fn enveloped(
         .flatten()
 }
 
+/// The branch of `schema`, a choice (`anyOf`, `oneOf`), that object `held` is: of those
+/// holding objects, the one declaring the most of its members (the first of a tie).
+/// `None` for no choice, or one with no object branch declaring any of them.
+fn object_branch(
+    bundle: &mb_mcm::Bundle,
+    schema: &Value,
+    held: &Map<String, Value>,
+) -> Option<Value> {
+    let derefed = crate::call::bundle_index::def_name(schema)
+        .and_then(|def| bundle.defs.get(def))
+        .unwrap_or(schema);
+    let branches = ["anyOf", "oneOf"]
+        .iter()
+        .find_map(|key| derefed.get(*key).and_then(Value::as_array))?;
+    let mut best: Option<(usize, &Value)> = None;
+    for branch in branches.iter().filter(|b| holds_object(bundle, b)) {
+        let declared = mb_engine::consistency::declared_members(bundle, branch).unwrap_or_default();
+        let shared = held.keys().filter(|k| declared.contains(*k)).count();
+        if shared > 0 && best.is_none_or(|(most, _)| shared > most) {
+            best = Some((shared, branch));
+        }
+    }
+    best.map(|(_, branch)| branch.clone())
+}
+
 /// `schema` without the `null` it admits: the one other branch of an `anyOf` or `oneOf`
 /// whose others are `null` (a GraphQL nullable object), else `schema` itself.
 pub(super) fn non_null(bundle: &mb_mcm::Bundle, schema: &Value) -> Value {
@@ -2378,10 +2408,11 @@ fn preset_from_request(
 /// session holds (a reference where the record holds the object: Buildkite's
 /// `pipeline` slug, Lob's `to` address id) becomes that record, projected to the
 /// member's schema, and so does each item of an array of them; any other is removed,
-/// for fill to write. A member whose every schema it fits is kept as sent.
+/// for fill to write. A member whose every schema it fits is kept as sent. Child items
+/// the request builds are the record's ([`child_items`]).
 async fn reshape(
     state: &mut StateAccess<'_>,
-    session: &mb_state::SessionKey,
+    (session, call): (&mb_state::SessionKey, &OperationCall),
     t: &str,
     record: &mut Map<String, Value>,
     owned: &[String],
@@ -2412,6 +2443,14 @@ async fn reshape(
         let Some((member, _)) = schemas.first() else {
             continue;
         };
+        // Child items the request builds (`line_items[0][price]=…`) are the record's,
+        // each as the read's item holds it, also where the read holds them in a list
+        // object's `data`.
+        let parent = (t, call);
+        if let Some(items) = child_items(state, (session, parent), (&name, member), &sent).await {
+            record.insert(name, items);
+            continue;
+        }
         // A reference where the read holds the record (a scalar for an object, an array
         // of scalars for an array of objects) is the record it names; a value of another
         // JSON type is converted with nothing lost (`"a,b"` for `["a", "b"]`), else left
@@ -2421,10 +2460,10 @@ async fn reshape(
             // With no conversion losing nothing, the value stays as sent and the gate
             // refuses the record: client data is never replaced by an invented value.
             // But a list sent where the reads hold an object, or an object where they
-            // hold a list, is not that member: a create parameter that shares its name
-            // (Stripe's `line_items`, a list of prices to charge, beside the session's
-            // `line_items` list object). It is left out, and fill writes the member
-            // with the request in view.
+            // hold a list, that is no child items ([`child_items`]) is not that member:
+            // a create parameter that shares its name (a list of scalars beside an
+            // object). It is left out, and fill writes the member with the request in
+            // view.
             if of_another_type(bundle, member, &sent) {
                 match converted(bundle, member, &sent).filter(|c| fits_all(c)) {
                     Some(value) => {
@@ -2521,6 +2560,152 @@ async fn embed(
         }
     }
     None
+}
+
+/// `sent`, a request's array of objects under `name`, as the record's member `schema`
+/// (an array of objects, or a list object of them in `data`) holds it: each item with
+/// the members the read's item declares (all of them when it declares none), a member
+/// of the read's shape kept as sent, converted with nothing lost, or, a reference where
+/// the item holds a record (`price: "price_1"`), the record the session holds under that
+/// id, else one holding just the id, which fill completes. Any other value stays as sent,
+/// for the gate. An item that is a record of another type than the parent's, `t` (a
+/// subscription's items), gets an id minted as that type's. A list object holds no more
+/// (`has_more` is `false`). What the items and the list lack is filled. `None` for any
+/// other value or member.
+async fn child_items(
+    state: &mut StateAccess<'_>,
+    (session, (t, call)): (&mb_state::SessionKey, (&str, &OperationCall)),
+    (name, schema): (&str, &Value),
+    sent: &Value,
+) -> Option<Value> {
+    let rt = state.rt;
+    let bundle = rt.bundle();
+    let Value::Array(items) = sent else {
+        return None;
+    };
+    if items.is_empty() || !items.iter().all(Value::is_object) {
+        return None;
+    }
+    let schema = non_null(bundle, schema);
+    let array_item = |s: &Value| {
+        whole_parts(bundle, s)
+            .iter()
+            .find_map(|p| p.get("items").cloned())
+    };
+    let (item, list) = match array_item(&schema) {
+        Some(item) => (item, false),
+        None if holds_object(bundle, &schema) => (
+            array_item(&property_schema(bundle, &schema, "data")?)?,
+            true,
+        ),
+        None => return None,
+    };
+    let item = non_null(bundle, &item);
+    if !holds_object(bundle, &item) {
+        return None;
+    }
+    let declared = mb_engine::consistency::declared_members(bundle, &item);
+    let mut out = Vec::with_capacity(items.len());
+    for sent in items {
+        let Value::Object(members) = sent else {
+            continue;
+        };
+        let mut kept = Map::new();
+        for (member, value) in members {
+            let Some(own) = property_schema(bundle, &item, member) else {
+                if declared.is_none() {
+                    kept.insert(member.clone(), value.clone());
+                }
+                continue;
+            };
+            let value = if shaped(rt, (&own, false), value) {
+                value.clone()
+            } else if references_object(bundle, &own, value) {
+                match embed(state, session, (member, &own), value).await {
+                    Some(held) => held,
+                    None => {
+                        let field = record_def(bundle, &own)
+                            .and_then(|def| rt.index().types_by_def.get(&def).cloned())
+                            .and_then(|t| rt.index().identity_fields(&t).first().cloned())
+                            .unwrap_or_else(|| "id".to_string());
+                        serde_json::json!({ field: value })
+                    }
+                }
+            } else {
+                converted(bundle, &own, value)
+                    .filter(|c| shaped(rt, (&own, false), c))
+                    .unwrap_or_else(|| value.clone())
+            };
+            kept.insert(member.clone(), value);
+        }
+        out.push(Value::Object(kept));
+    }
+    let child = record_def(bundle, &item)
+        .and_then(|def| rt.index().types_by_def.get(&def).cloned())
+        .filter(|child| child != t);
+    if let Some(child) = child {
+        let field = rt
+            .index()
+            .identity_fields(&child)
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "id".to_string());
+        let mut given = Vec::new();
+        for item in &mut out {
+            let Value::Object(members) = item else {
+                continue;
+            };
+            if !members.contains_key(&field)
+                && let Some(id) = records::mint_one(
+                    state,
+                    (session, call),
+                    (&child, &field),
+                    &std::collections::HashSet::new(),
+                    &mut given,
+                )
+                .await
+            {
+                members.insert(field.clone(), id);
+            }
+        }
+    }
+    tracing::debug!(member = %name, items = out.len(), list, "a create keeps the child items it sent");
+    if !list {
+        return Some(Value::Array(out));
+    }
+    // The list holds every item the request sent: no page follows.
+    let mut page = Map::new();
+    page.insert("data".into(), Value::Array(out));
+    if property_schema(bundle, &schema, "has_more").is_some() {
+        page.insert("has_more".into(), Value::Bool(false));
+    }
+    Some(Value::Object(page))
+}
+
+/// Sets, in each item of `data`'s (a record of type `t`, keyed by `field`) embeds that
+/// bind child records naming their parent in a member ([`crate::call::children`]), that
+/// member to the record's id, where the item does not hold it: a subscription's `items`
+/// created with it name it, and are stored under it.
+fn link_children(rt: &crate::MockRuntime, (t, field): (&str, &str), data: &mut Value) {
+    let Some(id) = mb_mcm::member_at(data, field).cloned() else {
+        return;
+    };
+    for embed in rt.index().child_embeds().of_parent(t) {
+        let crate::call::children::Link::Member(link) = &embed.link else {
+            continue;
+        };
+        let items = match data.get_mut(&embed.member) {
+            Some(Value::Array(items)) => items,
+            Some(Value::Object(list)) => match list.get_mut("data") {
+                Some(Value::Array(items)) => items,
+                _ => continue,
+            },
+            _ => continue,
+        };
+        for item in items.iter_mut().filter_map(Value::as_object_mut) {
+            item.entry(link.clone()).or_insert_with(|| id.clone());
+        }
+    }
 }
 
 /// Whether `value` is a reference where `schema` holds a record: a text or number where
