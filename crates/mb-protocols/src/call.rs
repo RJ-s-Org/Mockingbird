@@ -1734,9 +1734,19 @@ pub(crate) async fn complete(
             // later lists answer from what it seeds, as after a model's. One a retry
             // may get past (a `429`, a `5xx`, a timeout) leaves the next list to the
             // model.
+            // A GraphQL list the faker drew with no model seeds nothing either once the
+            // session holds records of its type: its items are invented, and would
+            // join every later list from state.
+            #[cfg(feature = "graphql")]
+            let invented = graphql_reads::invented_list(&mut state, session, op, &generated)
+                .instrument(state_span())
+                .await;
+            #[cfg(not(feature = "graphql"))]
+            let invented = false;
             let seeding = is_query
                 && rt.consistency
                 && target_id.is_none()
+                && !invented
                 && (!transient_fallback(&generated)
                     || lasting_fallback(&generated) && state_lists::marks_listed(rt, plan, call));
             // A single answer with an identity of its own is one record, not a list of

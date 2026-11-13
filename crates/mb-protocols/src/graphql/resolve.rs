@@ -487,8 +487,9 @@ async fn generate_in(
                         super::held_lists::answer(rt, &plan, &call, selection, narrowed.as_deref())
                             .await;
                     let route = match (held, batch.take()) {
-                        (Some(super::held_lists::Held::Served(answer)), b) => {
+                        (Some(super::held_lists::Held::Served(mut answer)), b) => {
                             *batch = b;
+                            call::seed_world_gaps(rt, op, &mut answer);
                             Route::Answered(answer)
                         }
                         (Some(super::held_lists::Held::Missing(failure)), b) => {
@@ -824,7 +825,12 @@ async fn store_answer(
         named = copy;
         &named
     };
-    let mut objects = super::state::objects(&rt.bundle, op, selection, body, args);
+    let placed = super::state::placed_objects(&rt.bundle, op, selection, body, args);
+    // An answer no model wrote seeds no invented list items (see `held_lists`).
+    let mut objects = match seeding {
+        true => super::held_lists::seedable(rt, &plan.session, generated, placed).await,
+        false => placed.into_iter().map(|(r, _)| r).collect(),
+    };
     if !seeding {
         super::nested::link_args(rt, &plan.session, &mut objects, args).await;
     }

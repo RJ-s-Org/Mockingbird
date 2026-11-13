@@ -446,10 +446,8 @@ async fn a_graphql_field_prepare_answers_in_a_batch_is_marked() {
     let h = support::described_with_gaps_and(
         THINGS_SDL,
         json!({}),
-        vec![
-            json!({"__typename": "Thing", "id": "t1", "name": "a"}),
-            json!({"things": [{"__typename": "Thing", "id": "t2", "name": "b"}]}),
-        ],
+        // Only `thing` is generated: `things` lists the record it stored, from state.
+        vec![json!({"__typename": "Thing", "id": "t1", "name": "a"})],
         with_gaps(&[
             ("Query.thing", &[GapCode::NoTarget]),
             ("Query.things", &[GapCode::NoRecord]),
@@ -476,8 +474,9 @@ async fn a_graphql_field_prepare_answers_in_a_batch_is_marked() {
         "{}",
         records[1].request
     );
-    // The batched `thing` was not generated again.
-    assert_eq!(h.provider.requests().len(), 2);
+    // The batched `thing` was not generated again, and `things` lists the record the
+    // session holds (`t1`) from state.
+    assert_eq!(h.provider.requests().len(), 1);
     // The same field alone again: a single root field is not batched, so the cache
     // answer comes from `prepare` through `generate_narrowed`, the only place that
     // seeds it on this path.
@@ -485,7 +484,7 @@ async fn a_graphql_field_prepare_answers_in_a_batch_is_marked() {
     let records = h.records();
     assert_eq!(records.len(), 3);
     assert_eq!(gaps_of(&records[2]), Some(&json!(["no_target"])));
-    assert_eq!(h.provider.requests().len(), 2);
+    assert_eq!(h.provider.requests().len(), 1);
 }
 
 #[cfg(feature = "soap")]

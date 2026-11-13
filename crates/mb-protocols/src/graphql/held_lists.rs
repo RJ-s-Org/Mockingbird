@@ -45,6 +45,12 @@
 //! state, `200` too; as for the connections and lookups below), `consistency` off, an operation the
 //! world describes as another kind than a list, and an answer that does not validate.
 //!
+//! **Plain lists.** A root field whose type is a plain list of one keyed object type
+//! (`[Product!]`) is answered the same way, with no cursors' `pageInfo`: every record
+//! kept, to [`MAX_RECORDS`], unless `first` or `limit` cuts them. A described `scope`
+//! with a `member` (`eq`) filters like a described `eq` filter, for a list or a
+//! connection.
+//!
 //! **Connections below a held record.** A connection member of a record the session
 //! holds (a collection's `products`, a product's `variants`), selected below a root
 //! field that answers it or below a node above, is answered from the items the record
@@ -127,6 +133,10 @@ pub(crate) async fn answer(
         let served = connection(rt, plan, sel, args, &node, narrowed?).await?;
         return Some(Held::Served(Box::new(served)));
     }
+    if let Some(node) = list_node(&rt.bundle, rt, schema) {
+        let served = plain_list(rt, plan, sel, args, &node, narrowed?).await?;
+        return Some(Held::Served(Box::new(served)));
+    }
     lookup(rt, &plan.session, op, args).await.map(Held::Missing)
 }
 
@@ -152,6 +162,17 @@ fn connection_node(bundle: &Bundle, rt: &MockRuntime, schema: &Value) -> Option<
         .and_then(|edge| edge.get("properties")?.get("node"))
         .and_then(def_ref);
     let node = by_edges.or_else(|| props.get("nodes").and_then(list_item).and_then(def_ref))?;
+    let node_def = bundle.defs.get(node)?;
+    let node_props = node_def.get("properties")?.as_object()?;
+    (node_def.get("oneOf").is_none()
+        && node_props.contains_key(&identity_member(rt, &node.to_lowercase())))
+    .then(|| node.to_string())
+}
+
+/// The concrete, keyed item type (its definition name) of the plain list `schema` is
+/// (`[Product!]`, nullable or not); `None` when it is no list of one.
+fn list_node(bundle: &Bundle, rt: &MockRuntime, schema: &Value) -> Option<String> {
+    let node = def_ref(list_item(schema)?)?;
     let node_def = bundle.defs.get(node)?;
     let node_props = node_def.get("properties")?.as_object()?;
     (node_def.get("oneOf").is_none()
@@ -296,6 +317,53 @@ async fn connection(
     node: &str,
     narrowed: &Value,
 ) -> Option<GeneratedResponse> {
+    let page = held_page(rt, plan, args, node, DEFAULT_PAGE).await?;
+    let mut below = BTreeSet::new();
+    for node_sel in node_selections(sel) {
+        connection_types(rt, node, node_sel, 1, &mut below);
+    }
+    let records = load(rt, &plan.session, below).await;
+    let body = render_connection(&records, node, &page, (sel, None), narrowed, 0);
+    plan.engine
+        .serve_stored(&rt.bundle, plan.op, &body, Some(narrowed))
+}
+
+/// A root plain list of item type `node` (`[Product!]`) answered from the session's
+/// records, as a connection is, all of them (to [`MAX_RECORDS`]) unless a `first` or
+/// `limit` argument cuts them.
+async fn plain_list(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    sel: &Selection,
+    args: &Map<String, Value>,
+    node: &str,
+    narrowed: &Value,
+) -> Option<GeneratedResponse> {
+    let page = held_page(rt, plan, args, node, MAX_RECORDS).await?;
+    let mut below = BTreeSet::new();
+    connection_types(rt, node, sel, 1, &mut below);
+    let records = load(rt, &plan.session, below).await;
+    let item_schema = items_of(narrowed);
+    let body = Value::Array(
+        page.items
+            .iter()
+            .map(|item| render_node(&records, node, item, (sel, None), item_schema, 0))
+            .collect(),
+    );
+    plan.engine
+        .serve_stored(&rt.bundle, plan.op, &body, Some(narrowed))
+}
+
+/// The page of the session's records of node type `node` a root list read with
+/// `args` answers, at most `page_size` with no count asked; `None` when it is
+/// generated instead (see the module's doc).
+async fn held_page(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    args: &Map<String, Value>,
+    node: &str,
+    page_size: usize,
+) -> Option<Page> {
     let op = plan.op;
     let desc = rt.described().op(&op.id);
     if desc
@@ -312,7 +380,10 @@ async fn connection(
     }
     // Most recently written first, as the store lists them: the written order is the reverse.
     records.reverse();
-    let ask = Ask::of(rt, desc, node, args)?;
+    let mut ask = Ask::of(rt, desc, node, args)?;
+    if ask.first.is_none() && ask.last.is_none() {
+        ask.first = Some(page_size);
+    }
     let items: Vec<Item> = records
         .into_iter()
         // A soft-deleted record is left out, as a REST list leaves it out.
@@ -323,15 +394,7 @@ async fn connection(
             as_answered: false,
         })
         .collect();
-    let page = ask.page(&rt.bundle, rt, node, items)?;
-    let mut below = BTreeSet::new();
-    for node_sel in node_selections(sel) {
-        connection_types(rt, node, node_sel, 1, &mut below);
-    }
-    let records = load(rt, &plan.session, below).await;
-    let body = render_connection(&records, node, &page, (sel, None), narrowed, 0);
-    plan.engine
-        .serve_stored(&rt.bundle, op, &body, Some(narrowed))
+    ask.page(&rt.bundle, rt, node, items)
 }
 
 /// Each connection selected below `body`, the root answer of `plan`'s query (keyed by
@@ -478,11 +541,11 @@ impl Ask {
         let mut ask = Ask::default();
         for (name, value) in args {
             match name.as_str() {
-                "first" if !value.is_null() => ask.first = Some(count(value)?),
+                "first" | "limit" if !value.is_null() => ask.first = Some(count(value)?),
                 "last" if !value.is_null() => ask.last = Some(count(value)?),
                 "after" if !value.is_null() => ask.after = Some(id_text(value)?),
                 "before" if !value.is_null() => ask.before = Some(id_text(value)?),
-                "first" | "last" | "after" | "before" => {}
+                "first" | "limit" | "last" | "after" | "before" => {}
                 "reverse" => ask.reverse = value.as_bool().unwrap_or(false),
                 "sortKey" | "sort_key" => {
                     if let Some(key) = value.as_str() {
@@ -577,6 +640,21 @@ fn filter(
         Value::Array(items) => items.clone(),
         other => vec![other.clone()],
     };
+    // A described scope by a member (`eq`) keeps the records whose member holds it; a
+    // `prefix` one, or one naming no member, is no test this reads.
+    if let Some(scope) = desc
+        .and_then(|d| d.scope.as_ref())
+        .filter(|scope| scope.param == name)
+    {
+        let member = scope
+            .member
+            .clone()
+            .filter(|_| scope.kind.is_none_or(|k| k == mb_mcm::world::ScopeKind::Eq))?;
+        return Some(Filter {
+            member: Some(member),
+            test: Test::Eq(values),
+        });
+    }
     let singular = name.strip_suffix('s').filter(|_| value.is_array());
     let member = [Some(name), singular]
         .into_iter()
@@ -1557,6 +1635,63 @@ pub(crate) async fn nested_missing(
         .into_iter()
         .map(|(path, failure)| (path.join("."), failure))
         .collect()
+}
+
+/// The objects of query `op`'s generated answer (`placed`, each with whether it sits
+/// inside a list) the session is seeded with. A model's answer seeds them all. The
+/// faker's (no model, [`call::graphql_reads::no_model`]) seeds the list items it drew
+/// (of a root list or connection, or below a lookup alike) only of a type the session
+/// holds no other record of: in an empty session a catalog list is seeded, so a read of
+/// what it showed agrees with it, while invented items never join records the session
+/// already lists from state. What the answer itself holds does not count as held, so
+/// the call's own earlier writes (the engine's seeding of the same answer) decide
+/// nothing. Objects outside lists are seeded as before.
+pub(crate) async fn seedable(
+    rt: &MockRuntime,
+    session: &SessionKey,
+    generated: &GeneratedResponse,
+    placed: Vec<(mb_state::StoredResource, bool)>,
+) -> Vec<mb_state::StoredResource> {
+    if !call::graphql_reads::no_model(generated) {
+        return placed.into_iter().map(|(r, _)| r).collect();
+    }
+    let mut own: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for (record, _) in &placed {
+        own.entry(record.resource_type.clone())
+            .or_default()
+            .insert(record.id.clone());
+    }
+    let mut holds: HashMap<String, bool> = HashMap::new();
+    let mut out = Vec::new();
+    for (record, listed) in placed {
+        if !listed {
+            out.push(record);
+            continue;
+        }
+        let t = record.resource_type.clone();
+        let held = match holds.get(&t) {
+            Some(held) => *held,
+            None => {
+                let ids = own.get(&t).map_or(0, BTreeSet::len);
+                let held = call::stored_of_type(rt, session, &t, ids + 1)
+                    .await
+                    .iter()
+                    .any(|r| !own.get(&t).is_some_and(|ids| ids.contains(&r.id)));
+                holds.insert(t, held);
+                held
+            }
+        };
+        if !held {
+            out.push(record);
+        }
+    }
+    out
+}
+
+/// The keyed item type (its definition name) of the list or connection `schema` is,
+/// when it is one of those a root field answers from state.
+pub(crate) fn listed_node(rt: &MockRuntime, schema: &Value) -> Option<String> {
+    connection_node(&rt.bundle, rt, schema).or_else(|| list_node(&rt.bundle, rt, schema))
 }
 
 #[cfg(test)]
