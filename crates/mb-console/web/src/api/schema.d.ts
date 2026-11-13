@@ -2464,7 +2464,7 @@ export interface components {
          * @description The OpenAPI schema of [`GapCode`] (which lives in `mb-protocols`).
          * @enum {string}
          */
-        WorldGapCode: "no_identity" | "no_target" | "no_record" | "skipped_route" | "refused" | "no_effect" | "undescribed_param" | "no_unique" | "no_soft_delete";
+        WorldGapCode: "no_identity" | "no_target" | "no_record" | "skipped_route" | "refused" | "no_effect" | "undescribed_param" | "no_unique" | "no_soft_delete" | "no_lifecycle";
         /**
          * @description Where a world write stands on this node's running mock when the write
          *     returns.

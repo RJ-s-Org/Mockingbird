@@ -45,7 +45,7 @@ The MCP tool is `get_world {mock, version?, operations?, types?, called?}`, and 
 | `warnings` | The `operation` and `type` filters naming nothing in the version, and with `called` a request log naming no operation of it; absent when there is none. |
 | `gaps_left_out` | With `called`, how many gaps it left out; absent without it. |
 
-Gaps. The first three codes also mark the recorded calls of each operation they concern (see [Gaps in the request log](#gaps-in-the-request-log)). The last four point at behaviour the contract signals and the description does not state yet. `undescribed_param` is something the executor cannot answer from the records; the three marked `advisory: true` are checks: read the docs for each, and write an entry only when they state the behaviour, otherwise leave the gap.
+Gaps. The first three codes also mark the recorded calls of each operation they concern (see [Gaps in the request log](#gaps-in-the-request-log)). The last five point at behaviour the contract signals and the description does not state yet. `undescribed_param` and `no_lifecycle` are something the executor cannot answer from the records; the three marked `advisory: true` are checks: read the docs for each, and write an entry only when they state the behaviour, otherwise leave the gap.
 
 | Code | Meaning |
 | --- | --- |
@@ -58,6 +58,7 @@ Gaps. The first three codes also mark the recorded calls of each operation they 
 | `no_effect` (advisory) | An operation of kind `action` with no `set`, `transition` or `queue`. An update whose route only looks like an action is merged as an update and is not one. With no model to answer it, such an action whose verb reads as a value of its target's state member done (`closeIssue` → `CLOSED`, `cancel` → `canceled`, `reopen` → `open`) sets that value; describe the effect where the docs say more. |
 | `no_unique` (advisory) | A type whose create can answer `409` and that has no `unique`. |
 | `no_soft_delete` (advisory) | A type a delete removes whose record has a member such as `deleted`, `is_trashed` or `deleted_at`, with no `lifecycle.soft_delete`. |
+| `no_lifecycle` | A type with no `lifecycle` whose record has a state member: a string whose values the contract lists (an `enum` of at least two, or a description listing at least two as code spans, such as ``Can be: `pending`, `approved` or `failed` ``; spans after `e.g.`, `for example` or `such as` are examples and do not count), that no create of the type sets (its body lacks it or marks it `readOnly`) and that the request body of an update, replace or action of the type sets, a body naming at most half of the record's members. Query parameters do not count. Reported once per type, at the operation that sets it; of several such members, the one only actions set. Without a lifecycle nothing says which state a created record starts in or which state each action moves it to, and a member the schema does not enumerate is free text. Write `lifecycle: {member, states, initial}` and a `transition` on each action that moves it. |
 
 ## Writing it
 

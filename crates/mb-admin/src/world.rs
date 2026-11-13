@@ -617,6 +617,8 @@ pub enum GapCodeSchema {
     NoUnique,
     /// A deleted type whose record has a deleted member, with no `lifecycle.soft_delete` (advisory).
     NoSoftDelete,
+    /// A type whose record has a state member (listed values a request sets), with no `lifecycle`.
+    NoLifecycle,
 }
 
 /// Keeps the schema in step with [`GapCode`].
@@ -632,6 +634,7 @@ impl From<GapCode> for GapCodeSchema {
             GapCode::UndescribedParam => Self::UndescribedParam,
             GapCode::NoUnique => Self::NoUnique,
             GapCode::NoSoftDelete => Self::NoSoftDelete,
+            GapCode::NoLifecycle => Self::NoLifecycle,
         }
     }
 }
@@ -857,9 +860,12 @@ impl WorldView {
 
     /// Narrows the view to what the app called: the operations of
     /// `called`, the types they touch, the gaps naming one of those
-    /// operations, naming no operation and one of those types, or skipping a
+    /// operations, naming no operation and one of those types, skipping a
     /// route of one of those types (a skipped route is never served, so the
-    /// log never names it), and the refused entries and authors about
+    /// log never names it), or naming a state member of one of those types
+    /// with no lifecycle (`no_lifecycle`: it is about the type, whose creates
+    /// and reads show the state, though it names the operation that sets it),
+    /// and the refused entries and authors about
     /// either. Gaps and refusals about the description as a whole are kept,
     /// as [`WorldView::narrow`] keeps them. The other gaps are dropped and
     /// counted in [`WorldView::gaps_left_out`]; with no called operation a
@@ -876,7 +882,7 @@ impl WorldView {
         self.gaps.retain(|g| match (&g.operation, &g.r#type) {
             (Some(op), ty) => {
                 operations.contains(op)
-                    || (g.code == GapCode::SkippedRoute
+                    || (matches!(g.code, GapCode::SkippedRoute | GapCode::NoLifecycle)
                         && ty.as_ref().is_some_and(|t| types.contains(t)))
             }
             (None, Some(t)) => types.contains(t),
