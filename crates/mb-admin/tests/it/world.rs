@@ -2730,3 +2730,67 @@ async fn get_world_called_lists_only_the_gaps_of_what_the_request_log_names() {
     assert_eq!(status, 400, "{body}");
     assert_eq!(ctype, "application/problem+json");
 }
+
+/// A type whose `state` only an update sets, for `called` narrowing.
+const STATE_SRC: &str = r##"
+openapi: 3.0.0
+info: {title: Jobs, version: "1"}
+paths:
+  /jobs:
+    post:
+      operationId: createJob
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses:
+        "201": {description: made, content: {application/json: {schema: {$ref: "#/components/schemas/Job"}}}}
+  /jobs/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getJob
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Job"}}}}
+    patch:
+      operationId: updateJob
+      requestBody: {content: {application/json: {schema: {type: object, properties: {state: {type: string}}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Job"}}}}
+components:
+  schemas:
+    Job:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        owner: {type: string}
+        state: {type: string, description: "Can be `queued`, `running` or `stopped`."}
+"##;
+
+#[tokio::test]
+async fn get_world_called_keeps_a_no_lifecycle_of_a_type_the_app_touched() {
+    let (st, app) = admin().await;
+    let uploaded = send(
+        &app,
+        Method::POST,
+        &format!("{BASE}/widgets/contracts"),
+        "application/yaml",
+        STATE_SRC.as_bytes().to_vec(),
+    )
+    .await;
+    let version = uploaded["version"].as_i64().unwrap();
+    let mock = st
+        .store
+        .get_mock(DEFAULT_WORKSPACE, "widgets")
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let uri = format!("{BASE}/widgets/contracts/{version}/world?called=true");
+    // The gap names the update that sets the state; the app only created and
+    // read a job, which is where the state shows.
+    log_call(&st, mock, "createJob", "s1").await;
+    log_call(&st, mock, "getJob", "s1").await;
+    let view = send(&app, Method::GET, &uri, "application/json", Vec::new()).await;
+    assert!(
+        gap_names(&view).contains(&"no_lifecycle updateJob".to_owned()),
+        "{view}"
+    );
+}

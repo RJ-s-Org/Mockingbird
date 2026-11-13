@@ -63,6 +63,9 @@ pub enum GapCode {
     /// A deleted type whose record has a deleted or archived member, with no
     /// `lifecycle.soft_delete`. Advisory.
     NoSoftDelete,
+    /// A type with no `lifecycle` whose record has a state member: its values
+    /// listed, set by an update's or action's body and not by the create.
+    NoLifecycle,
 }
 
 impl GapCode {
@@ -79,6 +82,7 @@ impl GapCode {
             Self::UndescribedParam => "undescribed_param",
             Self::NoUnique => "no_unique",
             Self::NoSoftDelete => "no_soft_delete",
+            Self::NoLifecycle => "no_lifecycle",
         }
     }
 
@@ -132,6 +136,13 @@ impl fmt::Display for GapCode {
 /// - [`GapCode::NoSoftDelete`] (advisory): a type a delete removes whose
 ///   record has a member such as `deleted`, `is_trashed` or `deleted_at`,
 ///   with no `lifecycle.soft_delete`; once per type.
+/// - [`GapCode::NoLifecycle`]: a type with no `lifecycle` whose record has a
+///   state member: a string member whose values the contract lists (an
+///   `enum`, or a description listing them as code spans), that no create of
+///   the type sets (its body lacks it, or marks it `readOnly`) and that the
+///   body of an update, replace or action of the type sets, a body naming at
+///   most half of the record's members; once per type, at the operation that
+///   sets it (an action's before an update's).
 #[must_use]
 pub fn gaps(bundle: &Bundle, world: &World, refused: &[Refusal]) -> Vec<Gap> {
     let mut out = structural_gaps(bundle, world, refused);
@@ -321,6 +332,29 @@ fn behaviour_gaps(bundle: &Bundle, world: &World, out: &mut Vec<Gap>) {
                 advisory: true,
             });
         }
+        if td.is_none_or(|td| td.lifecycle.is_none())
+            && seen.insert((GapCode::NoLifecycle.as_str(), t.clone()))
+            && let Some(state) = state_member(bundle, &t, &ty, &kind)
+        {
+            let listed: Vec<String> = state.values.iter().map(|v| format!("`{v}`")).collect();
+            let member = &state.member;
+            let now = if state.enumerated {
+                format!("a record's `{member}` is any of them, drawn at random")
+            } else {
+                format!("the schema does not enumerate them, so a record's `{member}` is free text")
+            };
+            out.push(Gap {
+                code: GapCode::NoLifecycle,
+                operation: Some(state.operation.clone()),
+                r#type: Some(t.clone()),
+                message: format!(
+                    "`{t}` records have `{member}`, a state: the contract lists its values ({}), `{}` sets it and creating a `{t}` does not. With no `lifecycle`, {now}, and nothing says which state a created record starts in or which state each operation moves it to. Write `{t}`'s `lifecycle` with `member: {member}`, its `states` and the `initial` state of a created record (the docs say which), and a `transition` on each action that moves it",
+                    listed.join(", "),
+                    state.operation
+                ),
+                advisory: false,
+            });
+        }
         if k == OpKind::Delete
             && td
                 .and_then(|td| td.lifecycle.as_ref())
@@ -345,15 +379,204 @@ fn behaviour_gaps(bundle: &Bundle, world: &World, out: &mut Vec<Gap>) {
     }
 }
 
-/// The members of a `t` record: the success answer of a read of `t`, else of
-/// a create (kinds as the description has them), or of the one object member
-/// of that answer named `data` or after the type when it wraps the record.
-fn record_members(
+/// A state member of a type ([`state_member`]).
+struct StateMember {
+    member: String,
+    /// Its values, as the contract lists them.
+    values: Vec<String>,
+    /// Whether they are the schema's `enum` (not only its description's).
+    enumerated: bool,
+    /// The operation that sets it: an action's when one does.
+    operation: String,
+}
+
+/// The state member of type `t`, if it has one: of the members of a `t`
+/// record ([`record_schemas`]), a top-level string whose values the contract
+/// lists ([`listed_values`]) that
+/// - no create of `t` sets: its body does not name it, or marks it `readOnly`;
+/// - the body of an update, replace or action of `t` names, a body naming at
+///   most half of the record's members (one that restates the record sets
+///   every member, which sets none apart as a state).
+///
+/// A query parameter sets nothing. Names compare ignoring case, `_`, `-` and
+/// one trailing `s`. Of several, the first in record order that only actions
+/// set, else the first; it is reported at the first operation setting it.
+fn state_member(
     b: &Bundle,
     t: &str,
     ty: &dyn Fn(&Operation) -> Option<String>,
     kind: &dyn Fn(&Operation) -> Option<OpKind>,
-) -> Vec<String> {
+) -> Option<StateMember> {
+    let record = record_schemas(b, t, ty, kind);
+    if record.is_empty() {
+        return None;
+    }
+    let in_record: BTreeSet<String> = record.iter().map(|(k, _)| normalize(k)).collect();
+    let body = |op: &Operation| -> Vec<(String, bool)> {
+        op.input
+            .body
+            .as_ref()
+            .map(|s| {
+                properties(b, s)
+                    .into_iter()
+                    .map(|(k, v)| (normalize(k), read_only(b, v)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut created: BTreeSet<String> = BTreeSet::new();
+    // Each setting operation's id, whether it is an action, and what it names.
+    let mut setters: Vec<(&str, bool, BTreeSet<String>)> = Vec::new();
+    for op in &b.operations {
+        if ty(op).as_deref() != Some(t) {
+            continue;
+        }
+        match kind(op) {
+            Some(OpKind::Create) => {
+                created.extend(body(op).into_iter().filter(|(_, ro)| !ro).map(|(k, _)| k));
+            }
+            Some(k @ (OpKind::Update | OpKind::Replace | OpKind::Action)) => {
+                let named: BTreeSet<String> = body(op).into_iter().map(|(k, _)| k).collect();
+                let overlap = named.intersection(&in_record).count();
+                if overlap > 0 && overlap * 2 <= record.len() {
+                    setters.push((op.id.as_str(), k == OpKind::Action, named));
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found: Vec<(StateMember, bool)> = Vec::new();
+    for (m, s) in &record {
+        let n = normalize(m);
+        if m.contains('.') || created.contains(&n) {
+            continue;
+        }
+        let by: Vec<&(&str, bool, BTreeSet<String>)> = setters
+            .iter()
+            .filter(|(_, _, named)| named.contains(&n))
+            .collect();
+        let Some(first) = by.iter().find(|(_, action, _)| *action).or(by.first()) else {
+            continue;
+        };
+        let Some((values, enumerated)) = listed_values(b, s) else {
+            continue;
+        };
+        let only_actions = by.iter().all(|(_, action, _)| *action);
+        found.push((
+            StateMember {
+                member: (*m).to_owned(),
+                values,
+                enumerated,
+                operation: first.0.to_owned(),
+            },
+            only_actions,
+        ));
+    }
+    let at = found.iter().position(|(_, only)| *only).unwrap_or(0);
+    (at < found.len()).then(|| found.swap_remove(at).0)
+}
+
+/// Whether a schema is `readOnly`.
+fn read_only(b: &Bundle, schema: &Value) -> bool {
+    schema.get("readOnly").and_then(Value::as_bool) == Some(true)
+        || b.resolve(schema).get("readOnly").and_then(Value::as_bool) == Some(true)
+}
+
+/// The values a string member's schema lists, and whether they are its `enum`:
+/// its `enum` of at least two strings, unless its description lists more of
+/// them ([`code_span_list`]) with all of the enum's among them; else its
+/// description's list of at least two.
+fn listed_values(b: &Bundle, schema: &Value) -> Option<(Vec<String>, bool)> {
+    let s = b.resolve(schema);
+    let string = match s.get("type") {
+        Some(Value::String(t)) => t == "string",
+        Some(Value::Array(ts)) => ts.iter().any(|t| t == "string"),
+        None => true,
+        Some(_) => false,
+    };
+    if !string {
+        return None;
+    }
+    let prose = s
+        .get("description")
+        .and_then(Value::as_str)
+        .map(code_span_list)
+        .unwrap_or_default();
+    if let Some(e) = s.get("enum").and_then(Value::as_array) {
+        let values: Vec<String> = e
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        if prose.len() > values.len() && values.iter().all(|v| prose.contains(v)) {
+            return Some((prose, false));
+        }
+        return (values.len() >= 2).then_some((values, true));
+    }
+    (prose.len() >= 2).then_some((prose, false))
+}
+
+/// The longest run of code spans in `text` joined only by commas, `or` and
+/// `and` (`` `a`, `b` or `c` ``), each a short token with no space. A run
+/// right after `e.g.`, `for example` or `such as` lists examples, not the
+/// values, and counts for none; a text with an unpaired backtick lists none.
+fn code_span_list(text: &str) -> Vec<String> {
+    let parts: Vec<&str> = text.split('`').collect();
+    if parts.len().is_multiple_of(2) {
+        return Vec::new();
+    }
+    let token = |v: &str| {
+        !v.is_empty()
+            && v.len() <= 64
+            && v.chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+    };
+    let joiner = |between: &str| {
+        between
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .all(|w| w.is_empty() || w.eq_ignore_ascii_case("or") || w.eq_ignore_ascii_case("and"))
+    };
+    let examples = |before: &str| {
+        let before = before.trim_end().to_ascii_lowercase();
+        let before = before.trim_end_matches([':', ',']).trim_end();
+        ["e.g.", "e.g", "eg.", "for example", "such as"]
+            .iter()
+            .any(|p| before.ends_with(p))
+    };
+    let mut best: Vec<String> = Vec::new();
+    let mut run: Vec<String> = Vec::new();
+    let mut skipping = false;
+    // Odd parts are inside backticks.
+    let mut i = 1;
+    while i + 1 < parts.len() {
+        let (before, span, after) = (parts[i - 1], parts[i], parts[i + 1]);
+        if run.is_empty() && !skipping {
+            skipping = examples(before);
+        }
+        if token(span) && !skipping {
+            run.push(span.to_owned());
+        } else {
+            run.clear();
+        }
+        if run.len() > best.len() {
+            best = run.clone();
+        }
+        if !joiner(after) {
+            run.clear();
+            skipping = false;
+        }
+        i += 2;
+    }
+    best
+}
+
+/// The members of a `t` record with their schemas ([`record_members`]).
+fn record_schemas<'a>(
+    b: &'a Bundle,
+    t: &str,
+    ty: &dyn Fn(&Operation) -> Option<String>,
+    kind: &dyn Fn(&Operation) -> Option<OpKind>,
+) -> Vec<(&'a str, &'a Value)> {
     for want in [OpKind::Read, OpKind::Create] {
         for op in &b.operations {
             if ty(op).as_deref() == Some(t)
@@ -370,12 +593,27 @@ fn record_members(
                     .next();
                 let props = wrapped.map_or(props, |s| properties(b, s));
                 if !props.is_empty() {
-                    return props.into_iter().map(|(k, _)| k.to_owned()).collect();
+                    return props;
                 }
             }
         }
     }
     Vec::new()
+}
+
+/// The members of a `t` record: the success answer of a read of `t`, else of
+/// a create (kinds as the description has them), or of the one object member
+/// of that answer named `data` or after the type when it wraps the record.
+fn record_members(
+    b: &Bundle,
+    t: &str,
+    ty: &dyn Fn(&Operation) -> Option<String>,
+    kind: &dyn Fn(&Operation) -> Option<OpKind>,
+) -> Vec<String> {
+    record_schemas(b, t, ty, kind)
+        .into_iter()
+        .map(|(k, _)| k.to_owned())
+        .collect()
 }
 
 /// Whether `op` declares the status `code`.

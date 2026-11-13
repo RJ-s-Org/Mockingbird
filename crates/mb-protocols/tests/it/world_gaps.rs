@@ -554,3 +554,416 @@ fn identified_needs_an_identity_member_for_a_list() {
         assert!(!identified(kind, false, None, false), "{kind:?}");
     }
 }
+
+/// A type whose `state` lists its values only in prose, set by an action's
+/// narrow request; and a type whose enum'd `kind` nothing but the record names.
+const STATES: &[u8] = br##"
+openapi: 3.0.0
+info: {title: States, version: "1"}
+paths:
+  /jobs:
+    post:
+      operationId: createJob
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: made, content: {application/json: {schema: {$ref: "#/components/schemas/Job"}}}}}
+  /jobs/{id}:
+    get:
+      operationId: getJob
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Job"}}}}}
+  /jobs/{id}/stop:
+    post:
+      operationId: stopJob
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {State: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Job"}}}}}
+  /notes:
+    post:
+      operationId: createNote
+      requestBody: {content: {application/json: {schema: {type: object, properties: {kind: {type: string}}}}}}
+      responses: {"201": {description: made, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}}
+  /notes/{id}:
+    get:
+      operationId: getNote
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}}
+    patch:
+      operationId: updateNote
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {text: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}}
+components:
+  schemas:
+    Job:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        owner: {type: string}
+        created: {type: string}
+        state: {type: string, nullable: true, description: "The job's state. Can be: `queued`, `running`, `stopped` or `failed`."}
+    Note:
+      type: object
+      properties:
+        id: {type: string}
+        text: {type: string}
+        kind: {type: string, enum: [plain, rich]}
+        created: {type: string}
+"##;
+
+fn state_gaps(overlay_doc: Option<serde_json::Value>) -> Vec<mb_protocols::world_gaps::Gap> {
+    let b = compile(STATES).unwrap();
+    let mut world = tier0(&b);
+    world.operations.entry("stopJob".into()).or_default().kind =
+        Some(mb_mcm::world::OpKind::Action);
+    if let Some(doc) = overlay_doc {
+        let parsed: World = serde_json::from_value(doc).unwrap();
+        world = overlay(&world, &parsed);
+    }
+    let v = validate(&world, &b);
+    assert!(v.refused.is_empty(), "{:?}", v.refused);
+    gaps(&b, &v.applied, &v.refused)
+}
+
+#[test]
+fn a_state_listed_in_prose_and_set_by_an_action_needs_a_lifecycle() {
+    let all = state_gaps(None);
+    let missing = codes(&all, GapCode::NoLifecycle);
+    assert_eq!(missing.len(), 1, "{all:?}");
+    let g = missing[0];
+    assert_eq!(g.operation.as_deref(), Some("stopJob"));
+    assert!(!g.advisory);
+    for part in [
+        "`state`",
+        "`queued`, `running`, `stopped`, `failed`",
+        "lifecycle",
+        "initial",
+        "transition",
+    ] {
+        assert!(g.message.contains(part), "{part}: {}", g.message);
+    }
+
+    // Declaring the lifecycle closes it.
+    let t = g.r#type.clone().unwrap();
+    let closed = state_gaps(Some(json!({
+        "types": {t: {"lifecycle": {
+            "member": "state",
+            "states": ["queued", "running", "stopped", "failed"],
+            "initial": "queued"
+        }}},
+        "operations": {"stopJob": {"kind": "action", "transition": {"state": "stopped"}}}
+    })));
+    assert!(
+        codes(&closed, GapCode::NoLifecycle).is_empty(),
+        "{closed:?}"
+    );
+}
+
+#[test]
+fn an_enum_member_no_request_sets_is_no_state() {
+    // `kind` lists its values, but only the create names it: nothing marks it a
+    // state, so the note type gets no `no_lifecycle`.
+    let b = compile(STATES).unwrap();
+    let note = b
+        .operation("getNote")
+        .and_then(|op| op.resource_type.clone())
+        .unwrap();
+    let all = state_gaps(None);
+    let missing = codes(&all, GapCode::NoLifecycle);
+    assert_eq!(missing.len(), 1, "{all:?}");
+    assert_ne!(missing[0].r#type.as_deref(), Some(note.as_str()), "{all:?}");
+    assert!(
+        !missing[0].message.contains("`kind`"),
+        "{}",
+        missing[0].message
+    );
+}
+
+#[test]
+fn a_request_restating_the_whole_record_marks_no_state() {
+    // `updateSettings` sends the whole project, `status` among every other
+    // member: that sets no member apart as a state.
+    let all = signal_gaps(None);
+    assert!(codes(&all, GapCode::NoLifecycle).is_empty(), "{all:?}");
+}
+
+#[test]
+fn a_verification_whose_status_values_are_prose_needs_a_lifecycle() {
+    // Trimmed from a real contract: the record's `status` is a nullable string
+    // whose values only its description lists, and the update sets `Status`.
+    let b = compile(include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/openapi/twilio-verify-v2-verifications.json"
+    )))
+    .unwrap();
+    let world = tier0(&b);
+    let v = validate(&world, &b);
+    let all = gaps(&b, &v.applied, &v.refused);
+    let missing = codes(&all, GapCode::NoLifecycle);
+    assert_eq!(missing.len(), 1, "{all:?}");
+    let g = missing[0];
+    assert!(g.message.contains("`status`"), "{}", g.message);
+    for state in [
+        "pending",
+        "approved",
+        "canceled",
+        "max_attempts_reached",
+        "deleted",
+        "failed",
+        "expired",
+    ] {
+        assert!(g.message.contains(&format!("`{state}`")), "{}", g.message);
+    }
+}
+
+/// A contract of one type `things`: its record's `members`, the create's body
+/// `create`, an update `updateThing` with body `update` (when given) and query
+/// `query` (when given), and an action `finishThing` with body `action` (when
+/// given). Each is a YAML flow mapping of properties. `extra` adds schemas.
+fn things(
+    members: &str,
+    create: &str,
+    update: Option<&str>,
+    query: Option<&str>,
+    action: Option<&str>,
+    extra: &str,
+) -> String {
+    let body = |props: &str| {
+        format!(
+            "requestBody: {{content: {{application/json: {{schema: {{type: object, properties: {props}}}}}}}}}"
+        )
+    };
+    let answer = r##"responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}}"##;
+    let id = "{name: id, in: path, required: true, schema: {type: string}}";
+    let mut src = format!(
+        "openapi: 3.1.0\ninfo: {{title: Things, version: \"1\"}}\npaths:\n  /things:\n    post:\n      operationId: createThing\n      {}\n      {answer}\n  /things/{{id}}:\n    get:\n      operationId: getThing\n      parameters: [{id}]\n      {answer}\n",
+        body(create)
+    );
+    if update.is_some() || query.is_some() {
+        let params = query.map_or(String::new(), |q| {
+            format!(", {{name: {q}, in: query, schema: {{type: string}}}}")
+        });
+        src.push_str(&format!(
+            "    patch:\n      operationId: updateThing\n      parameters: [{id}{params}]\n      {}\n      {answer}\n",
+            update.map_or(String::new(), body)
+        ));
+    }
+    if let Some(a) = action {
+        src.push_str(&format!(
+            "  /things/{{id}}/finish:\n    post:\n      operationId: finishThing\n      parameters: [{id}]\n      {}\n      {answer}\n",
+            body(a)
+        ));
+    }
+    src.push_str(&format!(
+        "components:\n  schemas:\n    Thing: {{type: object, properties: {members}}}\n{extra}"
+    ));
+    src
+}
+
+/// The `no_lifecycle` gaps of a [`things`] contract, `finishThing` an action.
+fn lifecycle_gaps(src: &str) -> Vec<mb_protocols::world_gaps::Gap> {
+    let b = compile(src.as_bytes()).unwrap_or_else(|e| panic!("{e}\n{src}"));
+    let mut world = tier0(&b);
+    if b.operation("finishThing").is_some() {
+        world
+            .operations
+            .entry("finishThing".into())
+            .or_default()
+            .kind = Some(mb_mcm::world::OpKind::Action);
+    }
+    let v = validate(&world, &b);
+    assert!(v.refused.is_empty(), "{:?}", v.refused);
+    gaps(&b, &v.applied, &v.refused)
+        .into_iter()
+        .filter(|g| g.code == GapCode::NoLifecycle)
+        .collect()
+}
+
+const PROSE_STATE: &str = r#"{type: string, description: "Can be: `open`, `held` or `closed`."}"#;
+
+#[test]
+fn a_query_parameter_sets_no_state() {
+    let members = format!(
+        "{{id: {{type: string}}, name: {{type: string}}, owner: {{type: string}}, state: {PROSE_STATE}}}"
+    );
+    let by_query = things(
+        &members,
+        "{name: {type: string}}",
+        None,
+        Some("state"),
+        None,
+        "",
+    );
+    assert!(lifecycle_gaps(&by_query).is_empty());
+    // The same member sent in the body is a state.
+    let by_body = things(
+        &members,
+        "{name: {type: string}}",
+        Some("{state: {type: string}}"),
+        None,
+        None,
+        "",
+    );
+    assert_eq!(lifecycle_gaps(&by_body).len(), 1);
+}
+
+#[test]
+fn request_names_match_ignoring_case_separators_and_a_plural() {
+    let members = format!(
+        "{{id: {{type: string}}, name: {{type: string}}, owner: {{type: string}}, life_state: {PROSE_STATE}}}"
+    );
+    let src = things(
+        &members,
+        "{name: {type: string}}",
+        Some("{Life-States: {type: string}}"),
+        None,
+        None,
+        "",
+    );
+    let found = lifecycle_gaps(&src);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].message.contains("`life_state`"),
+        "{}",
+        found[0].message
+    );
+}
+
+#[test]
+fn a_body_naming_more_than_half_the_record_sets_no_state() {
+    // Three members: a body naming one of them sets a state, one naming two
+    // restates the record. The create sets neither, so only the half rule
+    // tells them apart.
+    let members = format!("{{id: {{type: string}}, name: {{type: string}}, state: {PROSE_STATE}}}");
+    let narrow = things(
+        &members,
+        "{}",
+        Some("{state: {type: string}}"),
+        None,
+        None,
+        "",
+    );
+    assert_eq!(lifecycle_gaps(&narrow).len(), 1);
+    let restating = things(
+        &members,
+        "{}",
+        Some("{name: {type: string}, state: {type: string}}"),
+        None,
+        None,
+        "",
+    );
+    assert!(lifecycle_gaps(&restating).is_empty());
+}
+
+#[test]
+fn example_spans_and_unpaired_backticks_list_no_values() {
+    for description in [
+        "A label, e.g. `alpha`, `beta` or `gamma`.",
+        "A label such as `alpha` or `beta`.",
+        "Can be `alpha`, `beta` or `gamma.",
+    ] {
+        let members = format!(
+            "{{id: {{type: string}}, name: {{type: string}}, owner: {{type: string}}, label: {{type: string, description: {description:?}}}}}"
+        );
+        let src = things(
+            &members,
+            "{name: {type: string}}",
+            Some("{label: {type: string}}"),
+            None,
+            None,
+            "",
+        );
+        assert!(lifecycle_gaps(&src).is_empty(), "{description}");
+    }
+}
+
+#[test]
+fn a_nullable_type_list_and_a_referenced_enum_are_listed_values() {
+    let nullable = "{id: {type: string}, name: {type: string}, owner: {type: string}, state: {type: [string, \"null\"], description: \"One of `open`, `held`, `closed`.\"}}";
+    let src = things(
+        nullable,
+        "{name: {type: string}}",
+        Some("{state: {type: string}}"),
+        None,
+        None,
+        "",
+    );
+    let found = lifecycle_gaps(&src);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].message.contains("`held`"), "{}", found[0].message);
+
+    let referenced = "{id: {type: string}, name: {type: string}, owner: {type: string}, state: {$ref: \"#/components/schemas/State\"}}";
+    let src = things(
+        referenced,
+        "{name: {type: string}}",
+        Some("{state: {type: string}}"),
+        None,
+        None,
+        "    State: {type: string, enum: [open, held, closed]}\n",
+    );
+    let found = lifecycle_gaps(&src);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].message.contains("`closed`"),
+        "{}",
+        found[0].message
+    );
+}
+
+#[test]
+fn a_description_listing_more_than_the_enum_gives_the_values() {
+    let members = "{id: {type: string}, name: {type: string}, owner: {type: string}, state: {type: string, enum: [open, closed], description: \"Can be `open`, `held` or `closed`.\"}}";
+    let src = things(
+        members,
+        "{name: {type: string}}",
+        Some("{state: {type: string}}"),
+        None,
+        None,
+        "",
+    );
+    let found = lifecycle_gaps(&src);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].message.contains("`held`"), "{}", found[0].message);
+}
+
+#[test]
+fn of_two_named_members_the_one_only_actions_set_is_the_state() {
+    // `mode` comes first and an update sets it; `phase` only the action sets.
+    let members = "{id: {type: string}, name: {type: string}, owner: {type: string}, created: {type: string}, mode: {type: string, enum: [fast, slow]}, phase: {type: string, enum: [open, done]}}";
+    let src = things(
+        members,
+        "{name: {type: string}}",
+        Some("{mode: {type: string}}"),
+        None,
+        Some("{phase: {type: string}}"),
+        "",
+    );
+    let found = lifecycle_gaps(&src);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].operation.as_deref(), Some("finishThing"));
+    assert!(found[0].message.contains("`phase`"), "{}", found[0].message);
+}
+
+#[test]
+fn a_setting_the_create_sets_is_no_state() {
+    let members = "{id: {type: string}, name: {type: string}, owner: {type: string}, visibility: {type: string, enum: [public, private]}}";
+    let src = things(
+        members,
+        "{name: {type: string}, visibility: {type: string}}",
+        Some("{visibility: {type: string}}"),
+        None,
+        None,
+        "",
+    );
+    assert!(lifecycle_gaps(&src).is_empty());
+    // Marked read-only on the create, it is the API's to set.
+    let src = things(
+        members,
+        "{name: {type: string}, visibility: {type: string, readOnly: true}}",
+        Some("{visibility: {type: string}}"),
+        None,
+        None,
+        "",
+    );
+    assert_eq!(lifecycle_gaps(&src).len(), 1);
+}
