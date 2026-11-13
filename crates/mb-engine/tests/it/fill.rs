@@ -919,3 +919,155 @@ async fn a_state_no_model_wrote_starts_at_the_value_reading_as_a_start() {
     assert_eq!(filled.members["stage"], "done");
     assert_eq!(filled.members["kind"], "closed");
 }
+
+const REQUIRING: &str = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /intents:
+    post:
+      operationId: createIntent
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount: {type: integer}
+                payment_method: {type: string}
+                confirm: {type: boolean}
+                capture_method: {type: string}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Intent"}
+  /wrapped:
+    post:
+      operationId: createWrapped
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                input: {$ref: "#/components/schemas/IntentInput"}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Intent"}
+components:
+  schemas:
+    IntentInput:
+      allOf:
+        - type: object
+          properties:
+            payment_method: {type: string}
+        - type: object
+          properties:
+            confirm: {type: boolean}
+    Intent:
+      type: object
+      required: [status, review]
+      properties:
+        status:
+          type: string
+          enum: [canceled, processing, requires_action, requires_capture, requires_confirmation, requires_payment_method, succeeded]
+        review: {type: string, enum: [merged, opened, closed]}
+"##;
+
+/// Of several `requires_*` starts, a state no model wrote starts at the one naming a
+/// request member the create did not send, a missing value before a missing flag;
+/// `opened` reads as a start.
+#[tokio::test]
+async fn a_requiring_start_names_what_the_create_did_not_send() {
+    let bundle = compile(REQUIRING.as_bytes()).unwrap();
+    let op = bundle.operation("createIntent").unwrap();
+    let schema = op.success_output().unwrap().schema.clone().unwrap();
+    let states: Vec<String> = ["status", "review"].map(String::from).to_vec();
+    let missing = states.clone();
+    let mut started = Vec::new();
+    for body in [
+        json!({"amount": 5}),
+        json!({"amount": 5, "payment_method": "pm_1"}),
+        // A flag sent `false` is not sent.
+        json!({"amount": 5, "payment_method": "pm_1", "confirm": false}),
+    ] {
+        let (_provider, engine) = scripted(vec![Err(LlmError::Transport("down".into()))]);
+        let call = OperationCall {
+            credentials: Default::default(),
+            operation_id: op.id.clone(),
+            path_params: Map::new(),
+            query: Map::new(),
+            headers: Map::new(),
+            body: Some(body),
+        };
+        let filled = engine
+            .fill(
+                &bundle,
+                &schema,
+                &Map::new(),
+                &missing,
+                FillContext {
+                    op,
+                    call: &call,
+                    sent: None,
+                    caller: &[],
+                    states: &states,
+                },
+            )
+            .await;
+        assert_eq!(filled.members["review"], "opened", "{:?}", filled.members);
+        started.push(filled.members["status"].clone());
+    }
+    assert_eq!(
+        started,
+        [
+            json!("requires_payment_method"),
+            json!("requires_confirmation"),
+            json!("requires_confirmation")
+        ]
+    );
+
+    // A request wrapping the record (a GraphQL `input`), its schema an `allOf`.
+    let op = bundle.operation("createWrapped").unwrap();
+    let mut started = Vec::new();
+    for input in [json!({}), json!({"payment_method": "pm_1"})] {
+        let (_provider, engine) = scripted(vec![Err(LlmError::Transport("down".into()))]);
+        let call = OperationCall {
+            credentials: Default::default(),
+            operation_id: op.id.clone(),
+            path_params: Map::new(),
+            query: Map::new(),
+            headers: Map::new(),
+            body: Some(json!({"input": input})),
+        };
+        let sent = input.as_object().cloned().unwrap_or_default();
+        let filled = engine
+            .fill(
+                &bundle,
+                &schema,
+                &Map::new(),
+                &missing,
+                FillContext {
+                    op,
+                    call: &call,
+                    sent: Some(&sent),
+                    caller: &[],
+                    states: &states,
+                },
+            )
+            .await;
+        started.push(filled.members["status"].clone());
+    }
+    assert_eq!(
+        started,
+        [
+            json!("requires_payment_method"),
+            json!("requires_confirmation")
+        ]
+    );
+}

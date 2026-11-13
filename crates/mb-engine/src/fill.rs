@@ -254,7 +254,7 @@ impl Engine {
         // its first value.
         for (name, schema) in &enums {
             let fallback = match states.iter().any(|s| s == name) {
-                true => state_fallback(bundle, schema),
+                true => state_fallback(bundle, schema, (op.input.body.as_ref(), sent)),
                 false => enum_fallback(bundle, schema),
             };
             if !filled.members.contains_key(*name)
@@ -1026,8 +1026,8 @@ fn enum_fallback(bundle: &Bundle, schema: &Value) -> Option<Value> {
 
 /// Enum values that read as the state a record starts in, compared with case, `_`,
 /// `-` and spaces ignored; [`INITIAL_PREFIXES`] begin one.
-const INITIAL_STATES: [&str; 7] = [
-    "open", "active", "pending", "new", "draft", "queued", "created",
+const INITIAL_STATES: [&str; 8] = [
+    "open", "opened", "active", "pending", "new", "draft", "queued", "created",
 ];
 
 /// Prefixes of a start state's value (`requires_payment_method`).
@@ -1035,8 +1035,18 @@ const INITIAL_PREFIXES: [&str; 1] = ["requires"];
 
 /// The start of a state member (`schema`, through one `$ref`) nothing gave one, when no
 /// model wrote it: its `default` where that is one of its values, else its first value
-/// that reads as a start ([`initial_state`]), else its first value.
-fn state_fallback(bundle: &Bundle, schema: &Value) -> Option<Value> {
+/// that reads as a start ([`initial_state`]), else its first value. When that first
+/// start is one of several values that each require something (`requires_*`), it is the
+/// one whose rest names a member of the create's request (`request`, its body schema,
+/// at its top or one object below) that `sent` holds no value for (absent, `null` or
+/// `false`), a missing value before a missing flag (`requires_payment_method` when
+/// neither a payment method nor `confirm` was sent, `requires_confirmation` once the
+/// payment method was), else the first.
+fn state_fallback(
+    bundle: &Bundle,
+    schema: &Value,
+    (request, sent): (Option<&Value>, Option<&Map<String, Value>>),
+) -> Option<Value> {
     let s = bundle.resolve(schema);
     let default = s.get("default");
     let values: Vec<&Value> = s
@@ -1045,11 +1055,81 @@ fn state_fallback(bundle: &Bundle, schema: &Value) -> Option<Value> {
         .iter()
         .filter(|v| !v.is_null())
         .collect();
+    let requiring: Vec<&Value> = values
+        .iter()
+        .copied()
+        .filter(|v| {
+            v.as_str()
+                .map(squeeze)
+                .is_some_and(|t| t.starts_with(INITIAL_PREFIXES[0]))
+        })
+        .collect();
+    // The request's members, at the body's top and one level into each object it
+    // declares (a GraphQL `input`, a resource-named wrapper), with their schemas.
+    let mut members: Vec<(String, Value)> = Vec::new();
+    if let Some(request) = request {
+        for name in consistency::declared_members(bundle, request).unwrap_or_default() {
+            let Some(member) = consistency::property_schema(bundle, request, &name) else {
+                continue;
+            };
+            for inner in consistency::declared_members(bundle, &member).unwrap_or_default() {
+                if let Some(below) = consistency::property_schema(bundle, &member, &inner) {
+                    members.push((inner, below));
+                }
+            }
+            members.push((name, member));
+        }
+    }
+    // A member is sent when the request holds a value for it: not `null`, not `false`.
+    let was_sent = |name: &str| {
+        sent.and_then(|sent| sent.get(name))
+            .is_some_and(|v| !v.is_null() && *v != Value::Bool(false))
+    };
+    let unsent = |v: &&Value| -> Option<bool> {
+        let rest = squeeze(v.as_str()?);
+        let rest = rest.strip_prefix(INITIAL_PREFIXES[0])?;
+        // The longest member the rest begins with (`payment_method` over `payment`).
+        let (name, member) = members
+            .iter()
+            .filter(|(name, _)| {
+                let name = squeeze(name);
+                name.len() >= MIN_REQUIRED_NAME && rest.starts_with(&name)
+            })
+            .max_by_key(|(name, _)| name.len())?;
+        if was_sent(name) {
+            return None;
+        }
+        let flag = bundle.resolve(member).get("type").and_then(Value::as_str) == Some("boolean");
+        Some(!flag)
+    };
+    let first_start = values.iter().copied().find(|v| initial_state(v));
+    let required_start =
+        match requiring.len() > 1 && first_start.is_some_and(|f| requiring.contains(&f)) {
+            true => requiring
+                .iter()
+                .filter_map(|v| Some((*v, unsent(v)?)))
+                // A missing value before a missing flag, in enum order otherwise.
+                .min_by_key(|(_, value)| !*value)
+                .map(|(v, _)| v),
+            false => None,
+        };
     default
         .filter(|d| values.contains(d))
-        .or_else(|| values.iter().copied().find(|v| initial_state(v)))
+        .or(required_start)
+        .or(first_start)
         .or_else(|| values.first().copied())
         .cloned()
+}
+
+/// The shortest request member a `requires_*` value is read as naming.
+const MIN_REQUIRED_NAME: usize = 4;
+
+/// `text` lower-cased with only its ASCII letters and digits.
+fn squeeze(text: &str) -> String {
+    text.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 /// Whether enum value `value` reads as the state a record starts in (see
@@ -1058,11 +1138,7 @@ fn initial_state(value: &Value) -> bool {
     let Some(text) = value.as_str() else {
         return false;
     };
-    let squeezed: String = text
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .collect::<String>()
-        .to_ascii_lowercase();
+    let squeezed = squeeze(text);
     INITIAL_STATES.contains(&squeezed.as_str())
         || INITIAL_PREFIXES.iter().any(|p| squeezed.starts_with(p))
 }
