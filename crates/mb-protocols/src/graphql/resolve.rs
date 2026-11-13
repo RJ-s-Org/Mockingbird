@@ -408,7 +408,8 @@ async fn generate_in(
             }
             Err(Failure::plan(error, &rt.name))
         }
-        Ok(plan) => {
+        Ok(mut plan) => {
+            plan.renames = selection.aliased();
             report.tenancy = Some(plan.tenancy.clone());
             report.session = plan.session.session.clone();
             delay = plan.delay;

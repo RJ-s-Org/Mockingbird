@@ -140,6 +140,10 @@ pub(crate) struct CallPlan<'a> {
     /// What the call's world expressions decided and what the executor noted of it
     /// (see [`super::CallExprs`]).
     pub exprs: super::CallExprs,
+    /// A GraphQL selection that renames a field (an alias, a key another fragment
+    /// reads by another field's name) or copies another key's value: the answer's keys
+    /// are then not the record's members, so a held record is not completed for it.
+    pub renames: bool,
 }
 
 impl CallPlan<'_> {
@@ -436,6 +440,7 @@ pub(crate) async fn plan<'a>(
         bearer: minted::bearer_hash(headers),
         page_url: None,
         exprs: super::CallExprs::default(),
+        renames: false,
     })
 }
 

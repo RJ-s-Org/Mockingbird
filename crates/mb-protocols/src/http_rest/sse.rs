@@ -161,6 +161,7 @@ fn generated(
             bearer: None,
             page_url: None,
             exprs: crate::call::CallExprs::default(),
+            renames: false,
         };
         match call::open_stream(&rt, &plan, call, Vec::new()).await {
             Ok(items) => items.map(Piece::Item).boxed(),
