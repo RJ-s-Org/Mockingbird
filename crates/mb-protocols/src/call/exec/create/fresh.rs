@@ -15,8 +15,9 @@
 //!   else in the model's pick ([`mb_engine::FillContext::states`]); not in its first
 //!   listed value, which fill gives an enum nothing speaks of. When no model answers,
 //!   it starts in its `default`, else its first value that reads as a start (`open`,
-//!   `active`, `pending`, `new`, `draft`, `queued`, `created`, `requires_*`), else its
-//!   first value.
+//!   `opened`, `active`, `pending`, `new`, `draft`, `queued`, `created`, `requires_*`;
+//!   of several `requires_*`, the one naming a request member the create did not send),
+//!   else its first value.
 //! - A member named as an id (`id`, `*_id`, `*Id`, `*ID`, `uuid`) or formatted as a
 //!   `uuid`, a string or integer that may not be null, gets an id: when it names a
 //!   reference (`<x>Id`, `<x>_id`) the request does not declare, the id of a record of
